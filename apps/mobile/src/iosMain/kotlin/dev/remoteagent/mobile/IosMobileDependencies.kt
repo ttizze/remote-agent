@@ -26,14 +26,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import cnames.structs.MobileClientHandle
 import mobile_client.mobile_client_close
@@ -77,7 +72,6 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 private const val DeviceKeyService = "dev.remoteagent.mobile.pkcs8"
 private const val DefaultMaxFrameBytes = 64 * 1024
 private const val DefaultRequestTimeoutMs = 30_000L
-private const val MaxCachedThreads = 64
 
 private val iosJson = Json {
     ignoreUnknownKeys = true
@@ -117,10 +111,10 @@ object IosBonjourBridge {
  */
 @OptIn(ExperimentalForeignApi::class, ExperimentalEncodingApi::class)
 internal class IosHostGateway : HostGateway {
+    private val codexClient = CommonCodexClient(this)
     private val handleMutex = Mutex()
     private var handle: NativeHandle? = null
     private var lastConnectedProfile: HostProfile? = null
-    private val threadWorkingDirectories = mutableMapOf<Pair<String, String>, String>()
     private val subscriptions = mutableSetOf<Job>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -172,89 +166,20 @@ internal class IosHostGateway : HostGateway {
         request(method, params).mapGateway { response -> iosJson.parseToJsonElement(response) }
     }
 
-    override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> {
-        val threads = mutableListOf<ThreadSummary>()
-        val seen = mutableSetOf<String>()
-        val seenCursors = mutableSetOf<String>()
-        var cursor: String? = null
-        var pagesRead = 0
+    override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> =
+        codexClient.listThreads(profile, cwd)
 
-        while (threads.size < MaxCachedThreads && pagesRead < MaxCachedThreads) {
-            val remaining = MaxCachedThreads - threads.size
-            val page = rawRequest(profile, "thread/list", buildJsonObject {
-                put("limit", remaining)
-                if (cwd.isNotBlank()) put("cwd", cwd)
-                cursor?.let { put("cursor", it) }
-            }).decode { value ->
-                val root = value.jsonObject
-                root["data"]?.jsonArray.orEmpty().map(::codexThreadSummary) to root["nextCursor"]?.stringOrNull()
-            }
-            val (pageThreads, nextCursor) = when (page) {
-                is GatewayResult.Success -> page.value
-                is GatewayResult.Failure -> return page
-            }
-            pagesRead += 1
-            pageThreads.forEach { thread ->
-                if (threads.size >= MaxCachedThreads) return@forEach
-                val key = "${thread.id}\u0000${thread.workingDirectory.path}"
-                if (seen.add(key)) threads += thread
-            }
-            val next = nextCursor?.takeIf(String::isNotBlank)
-            if (next == null || !seenCursors.add(next)) break
-            cursor = next
-        }
-        rememberWorkingDirectories(profile, threads)
-        return GatewayResult.Success(threads)
-    }
+    override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> =
+        codexClient.readThread(profile, threadId)
 
-    override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> {
-        val result = rawRequest(profile, "thread/read", buildJsonObject {
-            put("threadId", threadId)
-            put("includeTurns", true)
-        }).decode { value -> ThreadReadResult(codexThreadFromResponse(value), emptyList()) }
-        if (result is GatewayResult.Success) rememberWorkingDirectories(profile, listOf(result.value.thread.summary))
-        return result
-    }
+    override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> =
+        codexClient.startThread(profile, cwd)
 
-    override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> {
-        val result = rawRequest(profile, "thread/start", buildJsonObject { put("cwd", cwd) })
-            .decode(::codexThreadFromResponse)
-        if (result is GatewayResult.Success) rememberWorkingDirectories(profile, listOf(result.value.summary))
-        return result
-    }
-
-    override suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> {
-        val cwd = handleMutex.withLock {
-            threadWorkingDirectories[profile.hostIdentity to threadId]
-        }?.takeIf(String::isNotBlank)
-            ?: return GatewayResult.Failure("タスクの作業ディレクトリが不明です。タスク一覧を更新してください")
-
-        val resumed = rawRequest(profile, "thread/resume", buildJsonObject {
-            put("threadId", threadId)
-            put("cwd", cwd)
-        })
-        if (resumed is GatewayResult.Failure) return resumed
-
-        return rawRequest(profile, "turn/start", buildJsonObject {
-            put("threadId", threadId)
-            put("input", buildJsonArray {
-                add(buildJsonObject {
-                    put("type", "text")
-                    put("text", text)
-                })
-            })
-        }).decode { value ->
-            val root = value.jsonObject
-            root.string("turnId") ?: root.childObject("turn")?.string("id")
-                ?: error("Codex turn/start response did not contain an id")
-        }
-    }
+    override suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> =
+        codexClient.startTurn(profile, threadId, text)
 
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
-        rawRequest(profile, "turn/interrupt", buildJsonObject {
-            put("threadId", threadId)
-            put("turnId", turnId)
-        }).mapGateway { Unit }
+        codexClient.interrupt(profile, threadId, turnId)
 
     override suspend fun respondResult(
         profile: HostProfile,
@@ -413,16 +338,6 @@ internal class IosHostGateway : HostGateway {
         var retired: Boolean = false,
     )
 
-    private suspend fun rememberWorkingDirectories(profile: HostProfile, threads: List<ThreadSummary>) {
-        if (threads.isEmpty()) return
-        handleMutex.withLock {
-            threads.forEach { thread ->
-                val cwd = thread.workingDirectory.path
-                if (cwd.isNotBlank()) threadWorkingDirectories[profile.hostIdentity to thread.id] = cwd
-            }
-        }
-    }
-
     private fun generatedPkcs8(): ByteArray = memScoped {
         val error = alloc<CPointerVar<ByteVar>>()
         error.value = null
@@ -441,15 +356,6 @@ internal class IosHostGateway : HostGateway {
 
     private fun takeString(value: CPointer<ByteVar>): String = value.toKString().also { mobile_client_string_free(value) }
     private fun takeError(value: CPointer<ByteVar>?): String = value?.let(::takeString) ?: "mobile-client call failed"
-}
-
-private fun <T> GatewayResult<JsonElement>.decode(transform: (JsonElement) -> T): GatewayResult<T> = try {
-    when (this) {
-        is GatewayResult.Success -> GatewayResult.Success(transform(value))
-        is GatewayResult.Failure -> this
-    }
-} catch (error: Throwable) {
-    GatewayResult.Failure("Host応答を解釈できませんでした: ${error.message}")
 }
 
 /** Keychain owns opaque Rust PKCS#8 bytes, never a Swift CryptoKit key. */
@@ -559,87 +465,17 @@ internal class IosMobileRepository : MobileRepository {
         NSFileManager.defaultManager.createDirectoryAtPath(
             "${NSHomeDirectory()}/Library/Application Support/Bex", true, null, null,
         )
-        val json = iosJson.encodeToString(StoredState.serializer(), StoredState.from(state))
-        check(json.encodeToByteArray().toNSData().writeToFile(path, atomically = true))
+        val bytes = MobileStateCodec.encode(state)
+        check(bytes.toNSData().writeToFile(path, atomically = true))
     }
 
     private fun loadState(): AppState = try {
         val bytes = NSData.Companion.dataWithContentsOfFile(path)?.toByteArray() ?: return AppState()
-        iosJson.decodeFromString(StoredState.serializer(), bytes.decodeToString()).toAppState()
+        when (val result = MobileStateCodec.decode(bytes)) {
+            is MobileStateDecodeResult.Success -> result.value
+            is MobileStateDecodeResult.Failure -> AppState()
+        }
     } catch (_: Throwable) {
         AppState()
     }
 }
-
-@Serializable
-private data class StoredState(
-    val profiles: List<StoredHostProfile>,
-    val selectedProfileId: String?,
-    val cache: Map<String, StoredProfileCache>,
-    /** View-only state needed to restore the selected filter/task. */
-    val views: Map<String, StoredProfileView> = emptyMap(),
-) {
-    private val restoredProfiles: List<HostProfile>
-        get() = profiles.map(StoredHostProfile::toHostProfile)
-
-    fun toAppState(): AppState = AppState(
-        profiles = restoredProfiles,
-        selectedProfileId = selectedProfileId?.takeIf { id -> restoredProfiles.any { it.hostIdentity == id } },
-        profileViews = restoredProfiles.associate { profile ->
-            val view = views[profile.hostIdentity]
-            profile.hostIdentity to ProfileViewState(
-                workingDirectoryPath = view?.workingDirectoryPath.orEmpty(),
-                selectedThreadId = view?.selectedThreadId,
-            )
-        },
-        cache = MobileCache(restoredProfiles.associate { profile ->
-            profile.hostIdentity to (cache[profile.hostIdentity]?.let {
-                ProfileMobileCache(it.threadList, it.snapshots, it.unknownEvents)
-            } ?: ProfileMobileCache())
-        }),
-    )
-
-    companion object {
-        fun from(state: AppState) = StoredState(
-            profiles = state.profiles.map(StoredHostProfile::from),
-            selectedProfileId = state.selectedProfileId,
-            cache = state.cache.profiles.mapValues {
-                StoredProfileCache(it.value.threadList, it.value.snapshots, it.value.unknownEvents)
-            },
-            views = state.profileViews.mapValues { (_, view) ->
-                StoredProfileView(view.workingDirectoryPath, view.selectedThreadId)
-            },
-        )
-    }
-}
-
-@Serializable
-private data class StoredHostProfile(
-    val hostIdentity: String,
-    val name: String,
-    val addresses: List<String>,
-    val deviceIdentityReference: String,
-) {
-    fun toHostProfile() = HostProfile(hostIdentity, name, addresses, deviceIdentityReference)
-
-    companion object {
-        fun from(profile: HostProfile) = StoredHostProfile(
-            profile.hostIdentity,
-            profile.name,
-            profile.addresses,
-            profile.deviceIdentityReference,
-        )
-    }
-}
-
-@Serializable
-private data class StoredProfileView(
-    val workingDirectoryPath: String = "",
-    val selectedThreadId: String? = null,
-)
-
-@Serializable private data class StoredProfileCache(
-    val threadList: List<ThreadSummary>,
-    val snapshots: Map<String, ThreadSnapshot>,
-    val unknownEvents: List<ThreadEvent.Unknown> = emptyList(),
-)
