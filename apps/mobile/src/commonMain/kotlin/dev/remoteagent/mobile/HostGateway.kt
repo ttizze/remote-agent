@@ -7,6 +7,7 @@ interface HostGateway : RawCodexGateway {
     suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile>
     suspend fun discover(profile: HostProfile): GatewayResult<List<String>>
     suspend fun connect(profile: HostProfile): GatewayResult<Unit>
+    suspend fun disconnect(profile: HostProfile): GatewayResult<Unit>
     suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>>
     suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult>
     suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot>
@@ -75,6 +76,7 @@ object UnavailableHostGateway : HostGateway {
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = unavailable()
     override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = unavailable()
     override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = unavailable()
+    override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = unavailable()
     override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> = unavailable()
     override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> = unavailable()
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> = unavailable()

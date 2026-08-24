@@ -8,7 +8,9 @@ import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.coroutines.resume
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.encodeToJsonElement
@@ -84,6 +86,18 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         }
     }
 
+    override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = invoke {
+        val (poller, handle) = synchronized(stateLock) {
+            val currentHandle = handles.remove(profile.hostIdentity)
+            subscriptions.remove(profile.hostIdentity)
+            pollers.remove(profile.hostIdentity) to currentHandle
+        }
+        poller?.interrupt()
+        withWriteLock {
+            handle?.let(::closeLocked)
+        }
+    }
+
     override suspend fun rawRequest(
         profile: HostProfile,
         method: String,
@@ -135,8 +149,8 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
      * subscribers. No notification is decoded into a lossy allow-list here.
      */
     override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
-        val handle = synchronized(stateLock) { handles[profile.hostIdentity] } ?: return HostEventSubscription {}
-        synchronized(stateLock) {
+        val subscribed = synchronized(stateLock) {
+            val handle = handles[profile.hostIdentity] ?: return@synchronized false
             subscriptions.getOrPut(profile.hostIdentity) { linkedSetOf() }.add(onMessage)
             if (pollers[profile.hostIdentity] == null) {
                 pollers[profile.hostIdentity] = Thread {
@@ -146,7 +160,9 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
                     start()
                 }
             }
+            true
         }
+        if (!subscribed) return HostEventSubscription {}
         return HostEventSubscription {
             synchronized(stateLock) {
                 subscriptions[profile.hostIdentity]?.remove(onMessage)
@@ -235,11 +251,13 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         append('}')
     }
 
-    private fun <T> invoke(block: () -> T): GatewayResult<T> = try {
-        GatewayResult.Success(block())
-    } catch (failure: Throwable) {
-        val raw = runCatching { json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
-        GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
+    private suspend fun <T> invoke(block: () -> T): GatewayResult<T> = withContext(Dispatchers.IO) {
+        try {
+            GatewayResult.Success(block())
+        } catch (failure: Throwable) {
+            val raw = runCatching { json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
+            GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
+        }
     }
 
     private fun finishDiscovery(

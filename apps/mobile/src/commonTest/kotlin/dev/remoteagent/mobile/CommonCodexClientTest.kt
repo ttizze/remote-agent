@@ -238,14 +238,14 @@ class CommonCodexClientTest {
     }
 
     private fun <T> runSuspend(block: suspend () -> T): T {
-        var result: Result<T>? = null
+        var completion: Result<T>? = null
         block.startCoroutine(object : Continuation<T> {
             override val context = EmptyCoroutineContext
 
-            override fun resumeWith(value: Result<T>) {
-                result = value
+            override fun resumeWith(result: Result<T>) {
+                completion = result
             }
         })
-        return requireNotNull(result).getOrThrow()
+        return requireNotNull(completion).getOrThrow()
     }
 }

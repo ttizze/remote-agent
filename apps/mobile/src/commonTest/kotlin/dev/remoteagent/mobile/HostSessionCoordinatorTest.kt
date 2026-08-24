@@ -140,13 +140,13 @@ class HostSessionCoordinatorTest {
     }
 
     private fun runSuspend(block: suspend () -> Unit) {
-        var result: Result<Unit>? = null
+        var completion: Result<Unit>? = null
         block.startCoroutine(object : Continuation<Unit> {
             override val context = EmptyCoroutineContext
-            override fun resumeWith(value: Result<Unit>) {
-                result = value
+            override fun resumeWith(result: Result<Unit>) {
+                completion = result
             }
         })
-        (result ?: error("test coroutine suspended unexpectedly")).getOrThrow()
+        (completion ?: error("test coroutine suspended unexpectedly")).getOrThrow()
     }
 }

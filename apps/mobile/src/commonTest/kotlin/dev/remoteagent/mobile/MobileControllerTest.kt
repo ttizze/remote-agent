@@ -148,6 +148,7 @@ class MobileControllerTest {
         assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
         assertTrue(gateway.callback == null)
         assertTrue(gateway.listCwds.isEmpty())
+        assertEquals(1, gateway.disconnectCalls)
 
         gateway.connectHook = null
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
@@ -243,6 +244,22 @@ class MobileControllerTest {
         assertNull(gateway.callback)
     }
 
+    @Test
+    fun explicit_disconnect_retires_subscription_closes_gateway_and_ignores_close_failure() {
+        val gateway = FakeHostGateway().apply {
+            disconnectResult = GatewayResult.Failure("close failed")
+        }
+        val controller = controller(gateway)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        runSuspend { controller.disconnect(profile) }
+
+        assertEquals(1, gateway.disconnectCalls)
+        assertTrue(gateway.subscriptionWasRetiredAtDisconnect)
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertNull(controller.state.selectedView.notice)
+    }
+
     private fun controller(
         gateway: FakeHostGateway,
         selectedThreadId: String? = null,
@@ -305,6 +322,7 @@ class MobileControllerTest {
         var startResult: GatewayResult<ThreadSnapshot> = GatewayResult.Failure("not configured")
         var turnResult: GatewayResult<String> = GatewayResult.Success("turn-1")
         var interruptResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
+        var disconnectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var readHook: (() -> Unit)? = null
         var callback: ((RawCodexMessage) -> Unit)? = null
         var listCwds = mutableListOf<String>()
@@ -317,12 +335,19 @@ class MobileControllerTest {
         var turnHook: (() -> Unit)? = null
         var interruptHook: (() -> Unit)? = null
         var subscriptionCancelCount = 0
+        var disconnectCalls = 0
+        var subscriptionWasRetiredAtDisconnect = false
 
         override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = GatewayResult.Failure("unused")
         override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = GatewayResult.Success(profile.addresses)
         override suspend fun connect(profile: HostProfile): GatewayResult<Unit> {
             connectHook?.invoke()
             return connectResult
+        }
+        override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> {
+            disconnectCalls += 1
+            subscriptionWasRetiredAtDisconnect = callback == null
+            return disconnectResult
         }
         override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> {
             listCwds += cwd
@@ -377,13 +402,13 @@ class MobileControllerTest {
     )
 
     private fun runSuspend(block: suspend () -> Unit) {
-        var result: Result<Unit>? = null
+        var completion: Result<Unit>? = null
         block.startCoroutine(object : Continuation<Unit> {
             override val context = EmptyCoroutineContext
-            override fun resumeWith(value: Result<Unit>) {
-                result = value
+            override fun resumeWith(result: Result<Unit>) {
+                completion = result
             }
         })
-        (result ?: error("test coroutine suspended unexpectedly")).getOrThrow()
+        (completion ?: error("test coroutine suspended unexpectedly")).getOrThrow()
     }
 }

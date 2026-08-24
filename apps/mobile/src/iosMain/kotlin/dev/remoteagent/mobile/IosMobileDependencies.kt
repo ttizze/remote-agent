@@ -17,10 +17,14 @@ import kotlinx.cinterop.toKString
 import kotlinx.cinterop.toCValues
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -113,9 +117,9 @@ object IosBonjourBridge {
 internal class IosHostGateway : HostGateway {
     private val codexClient = CommonCodexClient(this)
     private val handleMutex = Mutex()
-    private var handle: NativeHandle? = null
-    private var lastConnectedProfile: HostProfile? = null
-    private val subscriptions = mutableSetOf<Job>()
+    private val handles = mutableMapOf<String, NativeHandle>()
+    private val subscriptionLock = SynchronizedObject()
+    private val subscriptions = mutableMapOf<String, MutableSet<Job>>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = withContext(Dispatchers.Default) {
@@ -163,7 +167,23 @@ internal class IosHostGateway : HostGateway {
         method: String,
         params: JsonElement,
     ): GatewayResult<JsonElement> = withContext(Dispatchers.Default) {
-        request(method, params).mapGateway { response -> iosJson.parseToJsonElement(response) }
+        request(profile.hostIdentity, method, params).mapGateway { response -> iosJson.parseToJsonElement(response) }
+    }
+
+    override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = withContext(Dispatchers.Default) {
+        val hostIdentity = profile.hostIdentity
+        val retired = handleMutex.withLock {
+            handles.remove(hostIdentity)?.also { it.retired = true }?.let { handle ->
+                handle.pointer.takeIf { handle.borrowers == 0 }
+            }
+        }
+        retired?.let { mobile_client_close(it) }
+
+        val jobs = synchronized(subscriptionLock) {
+            subscriptions.remove(hostIdentity)?.toList().orEmpty()
+        }
+        jobs.forEach(Job::cancel)
+        GatewayResult.Success(Unit)
     }
 
     override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> =
@@ -194,14 +214,25 @@ internal class IosHostGateway : HostGateway {
     ): GatewayResult<Unit> = respond(profile, requestId, error, isError = true)
 
     override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
-        val job = scope.launch {
-            while (true) {
-                nextRawMessage()?.let(onMessage)
-                delay(50)
+        val hostIdentity = profile.hostIdentity
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            try {
+                while (true) {
+                    nextRawMessage(hostIdentity)?.let(onMessage)
+                    delay(50)
+                }
+            } finally {
+                currentCoroutineContext()[Job]?.let { removeSubscription(hostIdentity, it) }
             }
         }
-        subscriptions += job
-        return HostEventSubscription { subscriptions.remove(job); job.cancel() }
+        synchronized(subscriptionLock) {
+            subscriptions.getOrPut(hostIdentity) { mutableSetOf() }.add(job)
+        }
+        job.start()
+        return HostEventSubscription {
+            removeSubscription(hostIdentity, job)
+            job.cancel()
+        }
     }
 
     private suspend fun connect(
@@ -224,15 +255,9 @@ internal class IosHostGateway : HostGateway {
             when (val result = callConnect(config, key)) {
                 is GatewayResult.Success -> {
                     val retired = handleMutex.withLock {
-                        val previous = handle
+                        val previous = handles[hostIdentity]
                         previous?.retired = true
-                        handle = NativeHandle(result.value)
-                        lastConnectedProfile = HostProfile(
-                            hostIdentity = hostIdentity,
-                            name = hostIdentity.take(12),
-                            addresses = addresses,
-                            deviceIdentityReference = hostIdentity,
-                        )
+                        handles[hostIdentity] = NativeHandle(result.value)
                         previous?.pointer?.takeIf { previous.borrowers == 0 }
                     }
                     retired?.let { mobile_client_close(it) }
@@ -244,8 +269,8 @@ internal class IosHostGateway : HostGateway {
         return GatewayResult.Failure(lastFailure)
     }
 
-    private suspend fun request(method: String, params: JsonElement): GatewayResult<String> {
-        return withHandle { current -> memScoped {
+    private suspend fun request(hostIdentity: String, method: String, params: JsonElement): GatewayResult<String> {
+        return withHandle(hostIdentity) { current -> memScoped {
             val error = alloc<CPointerVar<ByteVar>>()
             error.value = null
             val result = mobile_client_request(
@@ -264,7 +289,7 @@ internal class IosHostGateway : HostGateway {
         payload: JsonElement,
         isError: Boolean,
     ): GatewayResult<Unit> {
-        return withHandle { current -> memScoped {
+        return withHandle(profile.hostIdentity) { current -> memScoped {
             val error = alloc<CPointerVar<ByteVar>>()
             error.value = null
             val success = if (isError) {
@@ -301,7 +326,7 @@ internal class IosHostGateway : HostGateway {
         takeString(value)
     }
 
-    private suspend fun nextRawMessage(): RawCodexMessage? = withHandle { current ->
+    private suspend fun nextRawMessage(hostIdentity: String): RawCodexMessage? = withHandle(hostIdentity) { current ->
         val raw = nextNotification(current) ?: nextServerRequest(current) ?: return@withHandle null
         parseRawCodexMessage(raw)
     }
@@ -317,9 +342,12 @@ internal class IosHostGateway : HostGateway {
         takeString(value)
     }
 
-    private suspend fun <T> withHandle(block: (CPointer<MobileClientHandle>) -> T): T? {
+    private suspend fun <T> withHandle(
+        hostIdentity: String,
+        block: (CPointer<MobileClientHandle>) -> T,
+    ): T? {
         val lease = handleMutex.withLock {
-            handle?.also { it.borrowers += 1 }
+            handles[hostIdentity]?.also { it.borrowers += 1 }
         } ?: return null
         return try {
             block(lease.pointer)
@@ -329,6 +357,15 @@ internal class IosHostGateway : HostGateway {
                 lease.pointer.takeIf { lease.retired && lease.borrowers == 0 }
             }
             retired?.let { mobile_client_close(it) }
+        }
+    }
+
+    private fun removeSubscription(hostIdentity: String, job: Job) {
+        synchronized(subscriptionLock) {
+            subscriptions[hostIdentity]?.let { jobs ->
+                jobs.remove(job)
+                if (jobs.isEmpty()) subscriptions.remove(hostIdentity)
+            }
         }
     }
 

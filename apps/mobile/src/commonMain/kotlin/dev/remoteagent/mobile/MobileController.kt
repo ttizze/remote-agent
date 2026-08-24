@@ -2,9 +2,12 @@ package dev.remoteagent.mobile
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Shared application module used by the Android Compose and iOS SwiftUI
@@ -31,6 +34,10 @@ internal class MobileController(
 
     fun dispatch(action: AppAction) {
         if (action is AppAction.Disconnected) sessions.retireHost(action.hostIdentity)
+        publish(action)
+    }
+
+    private fun publish(action: AppAction) {
         state = reduce(state, action, cacheLimits)
         repository.save(state)
         observers.toList().forEach { it(state) }
@@ -60,6 +67,11 @@ internal class MobileController(
         }
     }
 
+    suspend fun disconnect(profile: HostProfile) {
+        val generation = sessions.currentGeneration(profile.hostIdentity) ?: return
+        disconnect(profile, generation)
+    }
+
     /** Connect, subscribe, and reconcile the visible Host state before returning. */
     suspend fun connect(profile: HostProfile, scope: CoroutineScope) {
         sessions.withHostConnection(profile.hostIdentity) {
@@ -68,66 +80,81 @@ internal class MobileController(
             // deliver callbacks for the new generation.
             val generation = sessions.beginConnection(profile.hostIdentity)
             dispatch(AppAction.ConnectStarted(profile.hostIdentity))
-            when (val result = gateway.connect(profile)) {
-                is GatewayResult.Failure -> ifCurrent(profile.hostIdentity, generation) {
-                    sessions.retireHost(profile.hostIdentity)
-                    dispatch(AppAction.ConnectFailed(profile.hostIdentity, result.message))
-                }
+            try {
+                when (val result = gateway.connect(profile)) {
+                    is GatewayResult.Failure -> ifCurrent(profile.hostIdentity, generation) {
+                        sessions.retireHost(profile.hostIdentity)
+                        gateway.disconnect(profile)
+                        dispatch(AppAction.ConnectFailed(profile.hostIdentity, result.message))
+                    }
 
-                is GatewayResult.Success -> {
-                    if (!sessions.isCurrent(profile.hostIdentity, generation)) return@withHostConnection
-                    dispatch(AppAction.ConnectSucceeded(profile.hostIdentity))
-                    val subscription = try {
-                        gateway.subscribeRaw(profile) { message ->
-                            val event = (message as? RawCodexMessage.Notification)?.let {
-                                codexThreadEvent(it.method, it.params, it.extensions)
-                            }
-                            // Capture the generation and read barrier before
-                            // yielding. Native transports may invoke this
-                            // callback synchronously while a read is in flight.
-                            val current = sessions.isCurrent(profile.hostIdentity, generation)
-                            val buffered = if (current) {
-                                event?.let {
-                                    sessions.bufferEvent(profile.hostIdentity, it).isHeld
-                                } == true
-                            } else {
-                                false
-                            }
-                            scope.launch(start = CoroutineStart.UNDISPATCHED) {
-                                eventMutex.withLock {
-                                    if (sessions.isCurrent(profile.hostIdentity, generation)) {
-                                        // Keep raw and typed projections in one
-                                        // serialized transition. This preserves
-                                        // wire arrival order for live output.
-                                        dispatch(AppAction.RawMessageReceived(profile.hostIdentity, message))
-                                        if (event != null && !buffered) {
-                                            dispatch(AppAction.LiveEventReceived(profile.hostIdentity, event))
+                    is GatewayResult.Success -> {
+                        if (!sessions.isCurrent(profile.hostIdentity, generation)) {
+                            gateway.disconnect(profile)
+                            return@withHostConnection
+                        }
+                        dispatch(AppAction.ConnectSucceeded(profile.hostIdentity))
+                        val subscription = try {
+                            gateway.subscribeRaw(profile) { message ->
+                                val event = (message as? RawCodexMessage.Notification)?.let {
+                                    codexThreadEvent(it.method, it.params, it.extensions)
+                                }
+                                // Capture the generation and read barrier before
+                                // yielding. Native transports may invoke this
+                                // callback synchronously while a read is in flight.
+                                val current = sessions.isCurrent(profile.hostIdentity, generation)
+                                val buffered = if (current) {
+                                    event?.let {
+                                        sessions.bufferEvent(profile.hostIdentity, it).isHeld
+                                    } == true
+                                } else {
+                                    false
+                                }
+                                scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                    eventMutex.withLock {
+                                        if (sessions.isCurrent(profile.hostIdentity, generation)) {
+                                            // Keep raw and typed projections in one
+                                            // serialized transition. This preserves
+                                            // wire arrival order for live output.
+                                            dispatch(AppAction.RawMessageReceived(profile.hostIdentity, message))
+                                            if (event != null && !buffered) {
+                                                dispatch(AppAction.LiveEventReceived(profile.hostIdentity, event))
+                                            }
                                         }
                                     }
                                 }
                             }
+                        } catch (_: Throwable) {
+                            disconnect(profile, generation)
+                            return@withHostConnection
                         }
-                    } catch (_: Throwable) {
-                        disconnect(profile.hostIdentity, generation)
-                        return@withHostConnection
-                    }
-                    if (!sessions.installSubscription(profile.hostIdentity, generation, subscription)) {
-                        return@withHostConnection
-                    }
+                        if (!sessions.installSubscription(profile.hostIdentity, generation, subscription)) {
+                            gateway.disconnect(profile)
+                            return@withHostConnection
+                        }
 
-                    // A reconnect must never leave the user looking at an old
-                    // list. Loading the list first also restores the list screen
-                    // for a profile that had no selected thread.
-                    val selectedThreadId = state.profileViews[profile.hostIdentity]?.selectedThreadId
-                    listThreads(profile, generation)
-                    if (
-                        sessions.isCurrent(profile.hostIdentity, generation) &&
-                            state.profileViews[profile.hostIdentity]?.threadList == LoadPhase.Ready &&
-                            selectedThreadId != null
-                    ) {
-                        readThread(profile, selectedThreadId, generation)
+                        // A reconnect must never leave the user looking at an old
+                        // list. Loading the list first also restores the list screen
+                        // for a profile that had no selected thread.
+                        val selectedThreadId = state.profileViews[profile.hostIdentity]?.selectedThreadId
+                        listThreads(profile, generation)
+                        if (
+                            sessions.isCurrent(profile.hostIdentity, generation) &&
+                                state.profileViews[profile.hostIdentity]?.threadList == LoadPhase.Ready &&
+                                selectedThreadId != null
+                        ) {
+                            readThread(profile, selectedThreadId, generation)
+                        }
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                // A blocking platform connect may install its handle just as
+                // the caller is cancelled. Close it before the per-Host
+                // connection mutex admits a reconnect.
+                sessions.retireHost(profile.hostIdentity)
+                withContext(NonCancellable) { gateway.disconnect(profile) }
+                publish(AppAction.Disconnected(profile.hostIdentity))
+                throw cancelled
             }
         }
     }
@@ -314,6 +341,13 @@ internal class MobileController(
         // Retire first: retireHost cancels the subscription before the
         // Disconnected action can reduce UI state or notify observers.
         dispatch(AppAction.Disconnected(hostIdentity))
+    }
+
+    private suspend fun disconnect(profile: HostProfile, generation: Long) {
+        if (!sessions.isCurrent(profile.hostIdentity, generation)) return
+        sessions.retireHost(profile.hostIdentity)
+        gateway.disconnect(profile)
+        publish(AppAction.Disconnected(profile.hostIdentity))
     }
 }
 
