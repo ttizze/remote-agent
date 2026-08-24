@@ -6,6 +6,7 @@ import kotlin.coroutines.startCoroutine
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -136,6 +137,112 @@ class MobileControllerTest {
         assertEquals("タスクの作業ディレクトリが不明です。タスク一覧を更新してください", controller.state.selectedView.notice)
     }
 
+    @Test
+    fun connect_completion_after_disconnect_is_ignored_and_reconnect_starts_a_new_generation() {
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway, selectedThreadId = null)
+        gateway.connectHook = { controller.disconnect(profile.hostIdentity) }
+
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertTrue(gateway.callback == null)
+        assertTrue(gateway.listCwds.isEmpty())
+
+        gateway.connectHook = null
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        assertIs<ConnectionPhase.Connected>(controller.state.selectedView.connection)
+        assertEquals(1, gateway.listCwds.size)
+    }
+
+    @Test
+    fun list_completion_after_disconnect_does_not_replace_the_newly_disconnected_view() {
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway, selectedThreadId = null)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        gateway.listResult = GatewayResult.Success(listOf(summary("stale-thread", "/stale")))
+        gateway.listHook = { controller.disconnect(profile.hostIdentity) }
+
+        runSuspend { controller.listThreads(profile) }
+
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertIs<LoadPhase.Idle>(controller.state.selectedView.threadList)
+        assertNull(controller.state.cache.profile(profile.hostIdentity).threadList.firstOrNull())
+
+        gateway.listHook = null
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        assertIs<ConnectionPhase.Connected>(controller.state.selectedView.connection)
+    }
+
+    @Test
+    fun read_completion_after_disconnect_does_not_apply_snapshot_or_notice() {
+        val gateway = FakeHostGateway().apply {
+            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
+        }
+        val controller = controller(gateway, selectedThreadId = null, cachedThread = null)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        gateway.readHook = { controller.disconnect(profile.hostIdentity) }
+
+        runSuspend { controller.readThread(profile, "thread-1") }
+
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertIs<LoadPhase.Idle>(controller.state.selectedView.threadDetail)
+        assertNull(controller.state.cache.snapshot(profile.hostIdentity, "thread-1"))
+        assertNull(controller.state.selectedView.notice)
+    }
+
+    @Test
+    fun turn_completion_after_disconnect_does_not_publish_a_stale_failure() {
+        val gateway = FakeHostGateway().apply {
+            listResult = GatewayResult.Success(listOf(summary("thread-1", "/workspace")))
+            turnResult = GatewayResult.Failure("stale turn failure")
+        }
+        val controller = controller(gateway, selectedThreadId = null, cachedThread = null)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        gateway.turnHook = { controller.disconnect(profile.hostIdentity) }
+
+        runSuspend { controller.startTurn(profile, "thread-1", "hello") }
+
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertNull(controller.state.selectedView.notice)
+    }
+
+    @Test
+    fun interrupt_completion_after_disconnect_does_not_clear_or_publish_stale_state() {
+        val gateway = FakeHostGateway().apply {
+            interruptResult = GatewayResult.Failure("stale interrupt failure")
+        }
+        val controller = controller(gateway, selectedThreadId = null)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        gateway.interruptHook = { controller.disconnect(profile.hostIdentity) }
+
+        runSuspend { controller.interrupt(profile, "thread-1", "turn-1") }
+
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertNull(controller.state.selectedView.interruptingTurnId)
+        assertNull(controller.state.selectedView.notice)
+    }
+
+    @Test
+    fun disconnect_cancels_the_subscription_before_reducing_disconnected() {
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        var cancelledBeforeObserver = false
+        controller.observe {
+            if (it.profileViews[profile.hostIdentity]?.connection == ConnectionPhase.Disconnected) {
+                cancelledBeforeObserver = gateway.subscriptionCancelCount > 0
+            }
+        }
+
+        controller.disconnect(profile.hostIdentity)
+
+        assertTrue(cancelledBeforeObserver)
+        assertEquals(1, gateway.subscriptionCancelCount)
+        assertNull(gateway.callback)
+    }
+
     private fun controller(
         gateway: FakeHostGateway,
         selectedThreadId: String? = null,
@@ -205,12 +312,21 @@ class MobileControllerTest {
         var startCalls = 0
         var turnCwds = mutableListOf<String>()
         var turnTexts = mutableListOf<String>()
+        var connectHook: (() -> Unit)? = null
+        var listHook: (() -> Unit)? = null
+        var turnHook: (() -> Unit)? = null
+        var interruptHook: (() -> Unit)? = null
+        var subscriptionCancelCount = 0
 
         override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = GatewayResult.Failure("unused")
         override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = GatewayResult.Success(profile.addresses)
-        override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = connectResult
+        override suspend fun connect(profile: HostProfile): GatewayResult<Unit> {
+            connectHook?.invoke()
+            return connectResult
+        }
         override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> {
             listCwds += cwd
+            listHook?.invoke()
             return listResult
         }
         override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> {
@@ -225,14 +341,21 @@ class MobileControllerTest {
         override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> {
             turnCwds += cwd
             turnTexts += text
+            turnHook?.invoke()
             return turnResult
         }
-        override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> = interruptResult
+        override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> {
+            interruptHook?.invoke()
+            return interruptResult
+        }
         override suspend fun rawRequest(profile: HostProfile, method: String, params: JsonElement): GatewayResult<JsonElement> =
             GatewayResult.Success(JsonObject(emptyMap()))
         override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
             callback = onMessage
-            return HostEventSubscription { if (callback === onMessage) callback = null }
+            return HostEventSubscription {
+                subscriptionCancelCount += 1
+                if (callback === onMessage) callback = null
+            }
         }
         override suspend fun respondResult(profile: HostProfile, requestId: JsonElement, result: JsonElement): GatewayResult<Unit> =
             GatewayResult.Success(Unit)

@@ -73,6 +73,10 @@ internal class HostSessionCoordinator(
         hosts[hostIdentity]?.let { it.active && it.generation == generation } == true
     }
 
+    fun currentGeneration(hostIdentity: String): Long? = synchronized(coordinationLock) {
+        hosts[hostIdentity]?.takeIf(HostState::active)?.generation
+    }
+
     /** Installs a subscription if [generation] is still current. */
     fun installSubscription(
         hostIdentity: String,
