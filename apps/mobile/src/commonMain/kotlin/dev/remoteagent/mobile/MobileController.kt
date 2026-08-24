@@ -21,6 +21,9 @@ internal class MobileController(
 ) {
     var state = repository.load().restoreDisconnected()
         private set
+    /** Sanitized diagnostic only; persistence failures never become UI notices. */
+    var lastPersistenceFailureType: String? = null
+        private set
 
     private val eventMutex = Mutex()
     private val sessions = HostSessionCoordinator(cacheLimits)
@@ -39,7 +42,12 @@ internal class MobileController(
 
     private fun publish(action: AppAction) {
         state = reduce(state, action, cacheLimits)
-        repository.save(state)
+        lastPersistenceFailureType = try {
+            repository.save(state)
+            null
+        } catch (failure: Exception) {
+            failure::class.simpleName ?: "PersistenceFailure"
+        }
         observers.toList().forEach { it(state) }
     }
 
@@ -68,8 +76,18 @@ internal class MobileController(
     }
 
     suspend fun disconnect(profile: HostProfile) {
-        val generation = sessions.currentGeneration(profile.hostIdentity) ?: return
-        disconnect(profile, generation)
+        val hostIdentity = profile.hostIdentity
+        sessions.currentGeneration(hostIdentity) ?: return
+        // Invalidate callbacks immediately, then serialize the native close
+        // behind any connection attempt already in flight for this Host.
+        sessions.retireHost(hostIdentity)
+        sessions.withHostConnection(hostIdentity) {
+            // A reconnect requested after this disconnect is the newer user
+            // intent. Its active generation owns the newly installed handle.
+            if (sessions.currentGeneration(hostIdentity) != null) return@withHostConnection
+            gateway.disconnect(profile)
+            publish(AppAction.Disconnected(hostIdentity))
+        }
     }
 
     /** Connect, subscribe, and reconcile the visible Host state before returning. */
@@ -124,6 +142,8 @@ internal class MobileController(
                                     }
                                 }
                             }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
                         } catch (_: Throwable) {
                             disconnect(profile, generation)
                             return@withHostConnection

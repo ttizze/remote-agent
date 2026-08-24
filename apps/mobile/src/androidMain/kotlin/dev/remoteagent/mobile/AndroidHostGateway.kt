@@ -20,13 +20,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     private val json = Json { ignoreUnknownKeys = false; isLenient = false }
     /** Guards ownership of the handle map and subscription state. */
     private val stateLock = Any()
-    /**
-     * Keeps a native handle alive while a blocking RPC is in flight. Read
-     * holders are concurrent, so a request can be answered by the poller;
-     * reconnect/close takes the write lock and waits for all borrowers.
-     */
-    private val nativeLifetime = ReentrantReadWriteLock(true)
-    private val handles = mutableMapOf<String, Long>()
+    private val handles = mutableMapOf<String, NativeHandle>()
     private val subscriptions = mutableMapOf<String, MutableSet<(RawCodexMessage) -> Unit>>()
     private val pollers = mutableMapOf<String, Thread>()
     private val discovery = AndroidMdnsDiscovery(context)
@@ -38,10 +32,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
             decodeKey(NativeHostTransport.generateDeviceKey())
         }
         try {
-            withWriteLock {
-                val handle = openFirstLocked(payload.addresses, payload.hostIdentity, payload.ticket, key)
-                closeLocked(handle)
-            }
+            closeNativeHandle(NativeHandle(openFirst(payload.addresses, payload.hostIdentity, payload.ticket, key)))
         } finally {
             key.fill(0)
         }
@@ -76,11 +67,9 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
                 pollers.remove(profile.hostIdentity) to oldHandle
             }
             old.first?.interrupt()
-            withWriteLock {
-                old.second?.let(::closeLocked)
-                val handle = openFirstLocked(profile.addresses, profile.hostIdentity, null, key)
-                synchronized(stateLock) { handles[profile.hostIdentity] = handle }
-            }
+            old.second?.let(::closeNativeHandle)
+            val handle = NativeHandle(openFirst(profile.addresses, profile.hostIdentity, null, key))
+            synchronized(stateLock) { handles[profile.hostIdentity] = handle }
         } finally {
             key.fill(0)
         }
@@ -93,9 +82,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
             pollers.remove(profile.hostIdentity) to currentHandle
         }
         poller?.interrupt()
-        withWriteLock {
-            handle?.let(::closeLocked)
-        }
+        handle?.let(::closeNativeHandle)
     }
 
     override suspend fun rawRequest(
@@ -174,17 +161,28 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         }
     }
 
-    private fun pollLoop(hostIdentity: String, handle: Long) {
+    private fun pollLoop(hostIdentity: String, handle: NativeHandle) {
         while (!Thread.currentThread().isInterrupted) {
             val currentHandle = synchronized(stateLock) { handles[hostIdentity] }
-            if (currentHandle != handle) return
-            val current = withReadLock {
-                NativeHostTransport.nextNotification(handle)
-                    ?: NativeHostTransport.nextServerRequest(handle)
+            if (currentHandle !== handle) return
+            val readLock = handle.lifetime.readLock()
+            readLock.lock()
+            val current = try {
+                if (synchronized(stateLock) { handles[hostIdentity] } !== handle || handle.closed) return
+                NativeHostTransport.nextNotification(handle.pointer)
+                    ?: NativeHostTransport.nextServerRequest(handle.pointer)
+            } finally {
+                readLock.unlock()
             }
             if (current != null) {
                 parseRawCodexMessage(current)?.let { message ->
-                    val listeners = synchronized(stateLock) { subscriptions[hostIdentity]?.toList().orEmpty() }
+                    val listeners = synchronized(stateLock) {
+                        if (handles[hostIdentity] === handle) {
+                            subscriptions[hostIdentity]?.toList().orEmpty()
+                        } else {
+                            emptyList()
+                        }
+                    }
                     listeners.forEach { listener -> runCatching { listener(message) } }
                 }
             } else {
@@ -198,7 +196,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     }
 
     /** Rust validates the pinned Host identity during every connect attempt. */
-    private fun openFirstLocked(addresses: List<String>, identity: String, ticket: String?, key: ByteArray): Long {
+    private fun openFirst(addresses: List<String>, identity: String, ticket: String?, key: ByteArray): Long {
         var lastFailure: Throwable? = null
         val keyBase64 = encodeKey(key)
         for (address in addresses.asSequence().map(String::trim).filter(String::isNotEmpty).distinct()) {
@@ -213,35 +211,39 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         throw (lastFailure ?: IllegalStateException("No discovered host address"))
     }
 
-    private fun closeLocked(handle: Long) {
-        if (handle != 0L) runCatching { NativeHostTransport.close(handle) }
+    private fun closeNativeHandle(handle: NativeHandle) {
+        val writeLock = handle.lifetime.writeLock()
+        writeLock.lock()
+        try {
+            if (!handle.closed) {
+                handle.closed = true
+                if (handle.pointer != 0L) runCatching { NativeHostTransport.close(handle.pointer) }
+            }
+        } finally {
+            writeLock.unlock()
+        }
     }
 
-    private fun <T> withNativeHandle(profile: HostProfile, block: (Long) -> T): T = withReadLock {
+    private fun <T> withNativeHandle(profile: HostProfile, block: (Long) -> T): T {
         val handle = synchronized(stateLock) { handles[profile.hostIdentity] }
             ?: error("Host is not connected")
-        block(handle)
-    }
-
-    private fun <T> withReadLock(block: () -> T): T {
-        val lock = nativeLifetime.readLock()
-        lock.lock()
+        val readLock = handle.lifetime.readLock()
+        readLock.lock()
         return try {
-            block()
+            check(synchronized(stateLock) { handles[profile.hostIdentity] } === handle && !handle.closed) {
+                "Host is not connected"
+            }
+            block(handle.pointer)
         } finally {
-            lock.unlock()
+            readLock.unlock()
         }
     }
 
-    private fun <T> withWriteLock(block: () -> T): T {
-        val lock = nativeLifetime.writeLock()
-        lock.lock()
-        return try {
-            block()
-        } finally {
-            lock.unlock()
-        }
-    }
+    private class NativeHandle(
+        val pointer: Long,
+        val lifetime: ReentrantReadWriteLock = ReentrantReadWriteLock(true),
+        var closed: Boolean = false,
+    )
 
     private fun config(address: String, identity: String, ticket: String?): String = buildString {
         append("{\"address\":").append(quote(address)).append(",\"serverName\":\"remote-agent\",\"hostIdentity\":")

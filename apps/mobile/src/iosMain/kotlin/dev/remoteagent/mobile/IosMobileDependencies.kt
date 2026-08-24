@@ -27,8 +27,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -116,7 +114,7 @@ object IosBonjourBridge {
 @OptIn(ExperimentalForeignApi::class, ExperimentalEncodingApi::class)
 internal class IosHostGateway : HostGateway {
     private val codexClient = CommonCodexClient(this)
-    private val handleMutex = Mutex()
+    private val handleLock = SynchronizedObject()
     private val handles = mutableMapOf<String, NativeHandle>()
     private val subscriptionLock = SynchronizedObject()
     private val subscriptions = mutableMapOf<String, MutableSet<Job>>()
@@ -172,17 +170,13 @@ internal class IosHostGateway : HostGateway {
 
     override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = withContext(Dispatchers.Default) {
         val hostIdentity = profile.hostIdentity
-        val retired = handleMutex.withLock {
+        cancelSubscriptions(hostIdentity)
+        val retired = synchronized(handleLock) {
             handles.remove(hostIdentity)?.also { it.retired = true }?.let { handle ->
                 handle.pointer.takeIf { handle.borrowers == 0 }
             }
         }
         retired?.let { mobile_client_close(it) }
-
-        val jobs = synchronized(subscriptionLock) {
-            subscriptions.remove(hostIdentity)?.toList().orEmpty()
-        }
-        jobs.forEach(Job::cancel)
         GatewayResult.Success(Unit)
     }
 
@@ -215,10 +209,15 @@ internal class IosHostGateway : HostGateway {
 
     override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
         val hostIdentity = profile.hostIdentity
+        val subscribedHandle = synchronized(handleLock) { handles[hostIdentity] }
+            ?: return HostEventSubscription {}
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 while (true) {
-                    nextRawMessage(hostIdentity)?.let(onMessage)
+                    val message = nextRawMessage(hostIdentity, subscribedHandle)
+                    if (message != null && isCurrentHandle(hostIdentity, subscribedHandle)) {
+                        onMessage(message)
+                    }
                     delay(50)
                 }
             } finally {
@@ -254,7 +253,10 @@ internal class IosHostGateway : HostGateway {
             }.toString()
             when (val result = callConnect(config, key)) {
                 is GatewayResult.Success -> {
-                    val retired = handleMutex.withLock {
+                    // Stop every reader of the old handle before publishing
+                    // the replacement into the per-Host handle map.
+                    cancelSubscriptions(hostIdentity)
+                    val retired = synchronized(handleLock) {
                         val previous = handles[hostIdentity]
                         previous?.retired = true
                         handles[hostIdentity] = NativeHandle(result.value)
@@ -326,7 +328,10 @@ internal class IosHostGateway : HostGateway {
         takeString(value)
     }
 
-    private suspend fun nextRawMessage(hostIdentity: String): RawCodexMessage? = withHandle(hostIdentity) { current ->
+    private fun nextRawMessage(
+        hostIdentity: String,
+        expectedHandle: NativeHandle,
+    ): RawCodexMessage? = withHandle(hostIdentity, expectedHandle) { current ->
         val raw = nextNotification(current) ?: nextServerRequest(current) ?: return@withHandle null
         parseRawCodexMessage(raw)
     }
@@ -342,23 +347,29 @@ internal class IosHostGateway : HostGateway {
         takeString(value)
     }
 
-    private suspend fun <T> withHandle(
+    private fun <T> withHandle(
         hostIdentity: String,
+        expectedHandle: NativeHandle? = null,
         block: (CPointer<MobileClientHandle>) -> T,
     ): T? {
-        val lease = handleMutex.withLock {
-            handles[hostIdentity]?.also { it.borrowers += 1 }
+        val lease = synchronized(handleLock) {
+            handles[hostIdentity]
+                ?.takeIf { expectedHandle == null || it === expectedHandle }
+                ?.also { it.borrowers += 1 }
         } ?: return null
         return try {
             block(lease.pointer)
         } finally {
-            val retired = handleMutex.withLock {
+            val retired = synchronized(handleLock) {
                 lease.borrowers -= 1
                 lease.pointer.takeIf { lease.retired && lease.borrowers == 0 }
             }
             retired?.let { mobile_client_close(it) }
         }
     }
+
+    private fun isCurrentHandle(hostIdentity: String, expectedHandle: NativeHandle): Boolean =
+        synchronized(handleLock) { handles[hostIdentity] === expectedHandle }
 
     private fun removeSubscription(hostIdentity: String, job: Job) {
         synchronized(subscriptionLock) {
@@ -367,6 +378,13 @@ internal class IosHostGateway : HostGateway {
                 if (jobs.isEmpty()) subscriptions.remove(hostIdentity)
             }
         }
+    }
+
+    private fun cancelSubscriptions(hostIdentity: String) {
+        val jobs = synchronized(subscriptionLock) {
+            subscriptions.remove(hostIdentity)?.toList().orEmpty()
+        }
+        jobs.forEach(Job::cancel)
     }
 
     private class NativeHandle(

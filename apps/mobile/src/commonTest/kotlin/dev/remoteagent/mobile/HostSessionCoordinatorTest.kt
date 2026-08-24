@@ -11,6 +11,11 @@ import kotlin.test.assertNotSame
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class HostSessionCoordinatorTest {
     @Test
@@ -137,6 +142,29 @@ class HostSessionCoordinatorTest {
         }
         assertEquals(1, firstResult)
         assertEquals(2, secondResult)
+    }
+
+    @Test
+    fun same_host_lifecycle_waits_while_another_host_progresses() = runBlocking {
+        val coordinator = HostSessionCoordinator()
+        val releaseFirstHost = CompletableDeferred<Unit>()
+        val sameHostEntered = CompletableDeferred<Unit>()
+        val otherHostEntered = CompletableDeferred<Unit>()
+        val first = launch(start = CoroutineStart.UNDISPATCHED) {
+            coordinator.withHostConnection("host-1") { releaseFirstHost.await() }
+        }
+        val sameHost = launch {
+            coordinator.withHostConnection("host-1") { sameHostEntered.complete(Unit) }
+        }
+        val otherHost = launch {
+            coordinator.withHostConnection("host-2") { otherHostEntered.complete(Unit) }
+        }
+
+        otherHostEntered.await()
+        assertFalse(sameHostEntered.isCompleted)
+        releaseFirstHost.complete(Unit)
+        joinAll(first, sameHost, otherHost)
+        assertTrue(sameHostEntered.isCompleted)
     }
 
     private fun runSuspend(block: suspend () -> Unit) {

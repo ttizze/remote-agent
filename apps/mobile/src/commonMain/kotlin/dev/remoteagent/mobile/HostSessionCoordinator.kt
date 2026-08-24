@@ -3,6 +3,7 @@ package dev.remoteagent.mobile
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Coordinates the short-lived state associated with one mobile/Host session.
@@ -113,7 +114,7 @@ internal class HostSessionCoordinator(
     suspend fun <T> withHostConnection(
         hostIdentity: String,
         block: suspend () -> T,
-    ): T = hostConnectionMutex(hostIdentity).withSuspendingLock(block)
+    ): T = hostConnectionMutex(hostIdentity).withLock { block() }
 
     /**
      * Starts a read barrier for the current Host generation. A second read of
@@ -213,15 +214,6 @@ internal class HostSessionCoordinator(
         } else {
             previous + 1L
         }
-
-    private suspend fun <T> Mutex.withSuspendingLock(block: suspend () -> T): T {
-        lock()
-        return try {
-            block()
-        } finally {
-            unlock()
-        }
-    }
 
     private class HostState(
         val connectionMutex: Mutex = Mutex(),

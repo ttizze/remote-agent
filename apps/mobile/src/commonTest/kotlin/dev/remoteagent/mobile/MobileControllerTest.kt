@@ -5,11 +5,19 @@ import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -260,6 +268,81 @@ class MobileControllerTest {
         assertNull(controller.state.selectedView.notice)
     }
 
+    @Test
+    fun cancelled_connect_retires_generation_closes_transport_and_shows_no_failure() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val gateway = FakeHostGateway().apply {
+            connectBlock = {
+                started.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        val controller = controller(gateway)
+        val connection = launch {
+            controller.connect(profile, CoroutineScope(Dispatchers.Unconfined))
+        }
+        started.await()
+
+        connection.cancelAndJoin()
+
+        assertEquals(1, gateway.disconnectCalls)
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertNull(controller.state.selectedView.notice)
+    }
+
+    @Test
+    fun disconnect_invalidates_inflight_connect_then_closes_only_after_connect_returns() = runBlocking {
+        val connectStarted = CompletableDeferred<Unit>()
+        val releaseConnect = CompletableDeferred<Unit>()
+        val gateway = FakeHostGateway().apply {
+            connectBlock = {
+                connectInFlight = true
+                connectStarted.complete(Unit)
+                releaseConnect.await()
+                connectInFlight = false
+                GatewayResult.Success(Unit)
+            }
+        }
+        val controller = controller(gateway)
+        val connecting = launch(start = CoroutineStart.UNDISPATCHED) {
+            controller.connect(profile, CoroutineScope(Dispatchers.Unconfined))
+        }
+        connectStarted.await()
+        val disconnecting = launch(start = CoroutineStart.UNDISPATCHED) {
+            controller.disconnect(profile)
+        }
+
+        releaseConnect.complete(Unit)
+        joinAll(connecting, disconnecting)
+
+        assertTrue(gateway.disconnectCalls >= 1)
+        assertFalse(gateway.disconnectObservedConnectInFlight)
+        assertTrue(gateway.listCwds.isEmpty())
+        assertNull(gateway.callback)
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        Unit
+    }
+
+    @Test
+    fun persistence_failure_keeps_memory_and_observers_current_then_retries_on_next_transition() {
+        val repository = FailingOnceMobileRepository(AppState(profiles = listOf(profile)))
+        val controller = MobileController(FakeHostGateway(), repository)
+        var observed: AppState? = null
+        controller.observe { observed = it }
+
+        controller.dispatch(AppAction.PairingOpened)
+
+        assertTrue(controller.state.showingPairing)
+        assertTrue(requireNotNull(observed).showingPairing)
+        assertEquals("IllegalStateException", controller.lastPersistenceFailureType)
+
+        controller.dispatch(AppAction.PairingDismissed)
+
+        assertEquals(2, repository.saveCalls)
+        assertNull(controller.lastPersistenceFailureType)
+        assertEquals(controller.state, repository.savedState)
+    }
+
     private fun controller(
         gateway: FakeHostGateway,
         selectedThreadId: String? = null,
@@ -317,6 +400,7 @@ class MobileControllerTest {
 
     private class FakeHostGateway : HostGateway {
         var connectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
+        var connectBlock: (suspend () -> GatewayResult<Unit>)? = null
         var listResult: GatewayResult<List<ThreadSummary>> = GatewayResult.Success(emptyList())
         var readResult: GatewayResult<ThreadReadResult> = GatewayResult.Failure("not configured")
         var startResult: GatewayResult<ThreadSnapshot> = GatewayResult.Failure("not configured")
@@ -337,15 +421,18 @@ class MobileControllerTest {
         var subscriptionCancelCount = 0
         var disconnectCalls = 0
         var subscriptionWasRetiredAtDisconnect = false
+        var connectInFlight = false
+        var disconnectObservedConnectInFlight = false
 
         override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = GatewayResult.Failure("unused")
         override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = GatewayResult.Success(profile.addresses)
         override suspend fun connect(profile: HostProfile): GatewayResult<Unit> {
             connectHook?.invoke()
-            return connectResult
+            return connectBlock?.invoke() ?: connectResult
         }
         override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> {
             disconnectCalls += 1
+            disconnectObservedConnectInFlight = disconnectObservedConnectInFlight || connectInFlight
             subscriptionWasRetiredAtDisconnect = callback == null
             return disconnectResult
         }
@@ -389,6 +476,21 @@ class MobileControllerTest {
 
         fun emit(message: RawCodexMessage) {
             callback?.invoke(message)
+        }
+    }
+
+    private class FailingOnceMobileRepository(
+        private val initialState: AppState,
+    ) : MobileRepository {
+        var saveCalls = 0
+        var savedState: AppState? = null
+
+        override fun load(): AppState = initialState
+
+        override fun save(state: AppState) {
+            saveCalls += 1
+            if (saveCalls == 1) error("sanitized test failure")
+            savedState = state
         }
     }
 
