@@ -13,6 +13,10 @@
           function (import nixpkgs {
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
+            config = {
+              allowUnfree = true;
+              android_sdk.accept_license = true;
+            };
           }));
     in
     {
@@ -27,6 +31,13 @@
               "x86_64-linux-android"
             ];
           };
+          androidSdk = (pkgs.androidenv.composeAndroidPackages {
+            platformVersions = [ "36" ];
+            buildToolsVersions = [ "35.0.0" "36.0.0" ];
+            includeNDK = true;
+            includeEmulator = false;
+            includeSystemImages = false;
+          }).androidsdk;
         in
         {
           default = pkgs.mkShell {
@@ -34,9 +45,13 @@
               gradle
               jdk21
               rustToolchain
+              cargo-ndk
+              androidSdk
             ];
 
             JAVA_HOME = pkgs.jdk21.home;
+            ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
+            ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
 
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               export MOBILE_CARGO="${rustToolchain}/bin/cargo"
@@ -44,6 +59,9 @@
               if [ -d /Applications/Xcode.app/Contents/Developer ]; then
                 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
                 unset SDKROOT
+                # Xcode expects to drive clang itself. Nix's LD override makes
+                # xcodebuild invoke ld directly with clang-only -Xlinker flags.
+                unset LD
               fi
             '';
           };
