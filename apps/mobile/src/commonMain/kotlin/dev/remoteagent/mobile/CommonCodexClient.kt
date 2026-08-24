@@ -65,18 +65,7 @@ class CommonCodexClient(
         var cursor: String? = null
         var pagesRead = 0
 
-        while (threads.size < limits.maxThreadItems) {
-            if (pagesRead >= limits.maxThreadPages) {
-                return GatewayResult.Failure(
-                    "Codex thread/list exceeded the page limit of ${limits.maxThreadPages}.",
-                )
-            }
-
-            /* A repeated cursor is a protocol error, not an empty page. */
-            if (cursor != null && !seenCursors.add(cursor)) {
-                return GatewayResult.Failure("Codex thread/list returned a non-progressing cursor.")
-            }
-
+        while (threads.size < limits.maxThreadItems && pagesRead < limits.maxThreadPages) {
             val remaining = limits.maxThreadItems - threads.size
             val params = buildJsonObject {
                 put("limit", remaining)
@@ -100,10 +89,7 @@ class CommonCodexClient(
             }
 
             val nextCursor = pageValue.nextCursor?.takeIf(String::isNotBlank)
-            if (nextCursor == null) break
-            if (nextCursor == cursor || nextCursor in seenCursors) {
-                return GatewayResult.Failure("Codex thread/list returned a non-progressing cursor.")
-            }
+            if (nextCursor == null || threads.size >= limits.maxThreadItems || !seenCursors.add(nextCursor)) break
             cursor = nextCursor
         }
 

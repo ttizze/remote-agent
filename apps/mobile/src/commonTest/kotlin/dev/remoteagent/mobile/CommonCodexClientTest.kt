@@ -53,7 +53,7 @@ class CommonCodexClientTest {
     }
 
     @Test
-    fun list_threads_rejects_a_repeated_cursor() {
+    fun list_threads_stops_at_a_repeated_cursor_and_keeps_the_completed_pages() {
         val gateway = FakeRawGateway()
         gateway.enqueue(
             "thread/list",
@@ -65,14 +65,13 @@ class CommonCodexClientTest {
             CommonCodexClient(gateway).listThreads(profile, "")
         }
 
-        val failure = assertIs<GatewayResult.Failure>(result)
-        assertTrue(failure.message.contains("non-progressing cursor"))
+        assertEquals(emptyList(), assertIs<GatewayResult.Success<List<ThreadSummary>>>(result).value)
         assertEquals(2, gateway.calls.size)
         assertEquals(json.parseToJsonElement("""{"limit":64}"""), gateway.calls[0].params)
     }
 
     @Test
-    fun list_threads_fails_when_the_page_budget_would_be_exceeded() {
+    fun list_threads_stops_at_the_page_budget_and_keeps_the_completed_pages() {
         val gateway = FakeRawGateway()
         gateway.enqueue(
             "thread/list",
@@ -84,8 +83,7 @@ class CommonCodexClientTest {
                 .listThreads(profile, "/workspace")
         }
 
-        val failure = assertIs<GatewayResult.Failure>(result)
-        assertTrue(failure.message.contains("page limit"))
+        assertEquals(emptyList(), assertIs<GatewayResult.Success<List<ThreadSummary>>>(result).value)
         assertEquals(1, gateway.calls.size)
     }
 
