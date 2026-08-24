@@ -476,6 +476,14 @@ private data class PersistedProfileMobileCache(
     val threadList: List<ThreadSummary> = emptyList(),
     val snapshots: Map<String, ThreadSnapshot> = emptyMap(),
     val unknownEvents: List<ThreadEvent.Unknown> = emptyList(),
+    val rawNotifications: List<PersistedRawNotification> = emptyList(),
+)
+
+@Serializable
+private data class PersistedRawNotification(
+    val method: String,
+    val params: JsonElement,
+    val extensions: JsonObject = JsonObject(emptyMap()),
 )
 
 private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
@@ -540,6 +548,9 @@ private fun MobileCache.toPersisted(): PersistedMobileCache = PersistedMobileCac
             threadList = profile.threadList,
             snapshots = profile.snapshots,
             unknownEvents = profile.unknownEvents,
+            rawNotifications = profile.rawMessages
+                .filterIsInstance<RawCodexMessage.Notification>()
+                .map { PersistedRawNotification(it.method, it.params, it.extensions) },
         )
     },
 )
@@ -551,6 +562,9 @@ private fun PersistedMobileCache.toMobileCache(cacheLimits: MobileCacheLimits): 
                 threadList = profile.threadList,
                 snapshots = profile.snapshots,
                 unknownEvents = profile.unknownEvents,
+                rawMessages = profile.rawNotifications.map {
+                    RawCodexMessage.Notification(it.method, it.params, it.extensions)
+                },
             )
         },
     )

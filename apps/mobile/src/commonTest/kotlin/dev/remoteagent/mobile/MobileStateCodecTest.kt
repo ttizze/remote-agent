@@ -48,13 +48,18 @@ class MobileStateCodecTest {
             params = buildJsonObject { put("prompt", JsonPrimitive("Allow?")) },
             extensions = buildJsonObject { put("vendorField", JsonPrimitive("kept")) },
         )
+        val rawNotification = RawCodexMessage.Notification(
+            method = "future/notification",
+            params = buildJsonObject { put("futurePayload", JsonPrimitive(true)) },
+            extensions = buildJsonObject { put("notificationExtension", JsonPrimitive("kept")) },
+        )
         val cache = MobileCache(
             profiles = mapOf(
                 profile.hostIdentity to ProfileMobileCache(
                     threadList = listOf(summary),
                     snapshots = mapOf(summary.id to snapshot),
                     unknownEvents = listOf(unknownEvent),
-                    rawMessages = listOf(rawMessage),
+                    rawMessages = listOf(rawMessage, rawNotification),
                 ),
             ),
         )
@@ -94,26 +99,25 @@ class MobileStateCodecTest {
         assertEquals(false, restored.showingPairing)
         assertNull(restored.pairingError)
         assertEquals(unknownEvent, restored.cache.profile(profile.hostIdentity).unknownEvents.single())
-        // Raw notifications/requests belong to the transport lifetime and
-        // are intentionally not written to durable state.
-        assertEquals(emptyList(), restored.cache.profile(profile.hostIdentity).rawMessages)
+        // Notifications are durable for forward compatibility, while an old
+        // server request must never be actionable after process restart.
+        assertEquals(listOf(rawNotification), restored.cache.profile(profile.hostIdentity).rawMessages)
         assertEquals(snapshot, restored.cache.snapshot(profile.hostIdentity, summary.id))
     }
 
     @Test
-    fun cache_codec_round_trip_applies_limits_and_drops_ephemeral_raw_messages() {
+    fun cache_codec_round_trip_applies_limits_and_keeps_raw_notifications() {
         val summaries = (1..3).map { summary("thread-$it", updatedAtMs = it.toLong()) }
+        val notification = RawCodexMessage.Notification(
+            method = "future/notification",
+            params = JsonPrimitive("payload"),
+        )
         val cache = MobileCache(
             profiles = mapOf(
                 "host-1" to ProfileMobileCache(
                     threadList = summaries,
                     snapshots = summaries.associate { it.id to ThreadSnapshot(it) },
-                    rawMessages = listOf(
-                        RawCodexMessage.Notification(
-                            method = "future/notification",
-                            params = JsonPrimitive("payload"),
-                        ),
-                    ),
+                    rawMessages = listOf(notification),
                 ),
             ),
         )
@@ -127,7 +131,7 @@ class MobileStateCodecTest {
 
         assertEquals(listOf("thread-3"), restored.profile("host-1").threadList.map { it.id })
         assertEquals(setOf("thread-3"), restored.profile("host-1").snapshots.keys)
-        assertEquals(emptyList(), restored.profile("host-1").rawMessages)
+        assertEquals(listOf(notification), restored.profile("host-1").rawMessages)
     }
 
     @Test

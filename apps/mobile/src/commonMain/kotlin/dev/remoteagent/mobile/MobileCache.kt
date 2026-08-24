@@ -21,7 +21,7 @@ data class ProfileMobileCache(
     val threadList: List<ThreadSummary> = emptyList(),
     val snapshots: Map<String, ThreadSnapshot> = emptyMap(),
     val unknownEvents: List<ThreadEvent.Unknown> = emptyList(),
-    /** Ephemeral raw notifications/requests retained for feature handlers. */
+    /** Bounded raw messages; durable codec excludes actionable server requests. */
     val rawMessages: List<RawCodexMessage> = emptyList(),
 )
 
