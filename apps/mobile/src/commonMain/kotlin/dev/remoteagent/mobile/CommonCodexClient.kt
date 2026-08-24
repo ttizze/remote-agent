@@ -1,8 +1,6 @@
 package dev.remoteagent.mobile
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -45,16 +43,6 @@ class CommonCodexClient(
     private val rawGateway: RawCodexGateway,
     private val limits: CommonCodexClientLimits = CommonCodexClientLimits(),
 ) {
-    /*
-     * The current HostGateway API does not carry cwd in startTurn.  Remember
-     * it from successful thread operations so that callers using that API can
-     * still issue the native resume + turn/start sequence.  The explicit cwd
-     * overload is preferred by new callers and is useful when no prior read or
-     * list has been performed.
-     */
-    private val workingDirectories = Mutex()
-    private val threadWorkingDirectories = mutableMapOf<ThreadKey, String>()
-
     suspend fun listThreads(
         profile: HostProfile,
         cwd: String,
@@ -93,7 +81,6 @@ class CommonCodexClient(
             cursor = nextCursor
         }
 
-        rememberWorkingDirectories(profile, threads)
         return GatewayResult.Success(threads)
     }
 
@@ -108,9 +95,6 @@ class CommonCodexClient(
         val result = request(profile, "thread/read", params).decode("thread/read") { value ->
             parseThreadReadResult(value, threadId)
         }
-        if (result is GatewayResult.Success) {
-            rememberWorkingDirectories(profile, listOf(result.value.thread.summary))
-        }
         return result
     }
 
@@ -121,9 +105,6 @@ class CommonCodexClient(
         val params = buildJsonObject { put("cwd", cwd) }
         val result = request(profile, "thread/start", params).decode("thread/start") {
             parseThreadSnapshot(it)
-        }
-        if (result is GatewayResult.Success) {
-            rememberWorkingDirectories(profile, listOf(result.value.summary))
         }
         return result
     }
@@ -164,22 +145,6 @@ class CommonCodexClient(
         ).decode("turn/start") { value -> parseTurnId(value) }
     }
 
-    /**
-     * Compatibility overload for the existing HostGateway shape.  Its cwd is
-     * learned from a successful list/read/start operation in this client.
-     */
-    suspend fun startTurn(
-        profile: HostProfile,
-        threadId: String,
-        text: String,
-    ): GatewayResult<String> {
-        val cwd = workingDirectories.withLock {
-            threadWorkingDirectories[ThreadKey(profile.hostIdentity, threadId)]
-        }?.takeIf(String::isNotBlank)
-            ?: return GatewayResult.Failure("タスクの作業ディレクトリが不明です。タスク一覧を更新してください")
-        return startTurn(profile, threadId, cwd, text)
-    }
-
     suspend fun interrupt(
         profile: HostProfile,
         threadId: String,
@@ -205,22 +170,6 @@ class CommonCodexClient(
         GatewayResult.Failure(failure.message ?: "Codex request failed.")
     }
 
-    private suspend fun rememberWorkingDirectories(
-        profile: HostProfile,
-        threads: List<ThreadSummary>,
-    ) {
-        if (threads.isEmpty()) return
-        workingDirectories.withLock {
-            threads.forEach { thread ->
-                val cwd = thread.workingDirectory.path
-                if (thread.id.isNotBlank() && cwd.isNotBlank()) {
-                    threadWorkingDirectories[ThreadKey(profile.hostIdentity, thread.id)] = cwd
-                }
-            }
-        }
-    }
-
-    private data class ThreadKey(val hostIdentity: String, val threadId: String)
 }
 
 private data class ThreadListIdentity(val id: String, val workingDirectory: String)

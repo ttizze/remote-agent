@@ -105,9 +105,7 @@ class CommonCodexClientTest {
 
         val read = runSuspend { client.readThread(profile, "thread-1") }
         val started = runSuspend { client.startThread(profile, "/workspace") }
-        // This overload proves that a read/start/list result supplies the cwd
-        // required by the existing HostGateway.startTurn signature.
-        val turn = runSuspend { client.startTurn(profile, "thread-1", "hello") }
+        val turn = runSuspend { client.startTurn(profile, "thread-1", "/workspace", "hello") }
         val interrupted = runSuspend { client.interrupt(profile, "thread-1", "turn-1") }
 
         assertEquals("thread-1", assertIs<GatewayResult.Success<ThreadReadResult>>(read).value.thread.summary.id)
@@ -154,6 +152,29 @@ class CommonCodexClientTest {
 
         assertEquals(remoteFailure, result)
         assertEquals(listOf("thread/resume"), gateway.calls.map(RequestCall::method))
+    }
+
+    @Test
+    fun start_turn_uses_the_explicit_cwd_without_relying_on_previous_thread_operations() {
+        val gateway = FakeRawGateway()
+        gateway.enqueue("thread/read", success("""{"thread":{"id":"thread-1","cwd":"/old","turns":[]}}"""))
+        gateway.enqueue("thread/resume", success("{}"), success("{}"))
+        gateway.enqueue("turn/start", success("""{"turn":{"id":"turn-1"}}"""), success("""{"turn":{"id":"turn-2"}}"""))
+        val client = CommonCodexClient(gateway)
+
+        runSuspend { client.readThread(profile, "thread-1") }
+        val first = runSuspend { client.startTurn(profile, "thread-1", "/first", "one") }
+        val second = runSuspend { client.startTurn(profile, "thread-1", "/second", "two") }
+
+        assertEquals("turn-1", assertIs<GatewayResult.Success<String>>(first).value)
+        assertEquals("turn-2", assertIs<GatewayResult.Success<String>>(second).value)
+        assertEquals(
+            listOf(
+                json.parseToJsonElement("""{"threadId":"thread-1","cwd":"/first"}"""),
+                json.parseToJsonElement("""{"threadId":"thread-1","cwd":"/second"}"""),
+            ),
+            gateway.calls.filter { it.method == "thread/resume" }.map(RequestCall::params),
+        )
     }
 
     @Test

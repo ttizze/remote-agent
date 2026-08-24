@@ -104,8 +104,8 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> =
         commonCodexClient.startThread(profile, cwd)
 
-    override suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> =
-        commonCodexClient.startTurn(profile, threadId, text)
+    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> =
+        commonCodexClient.startTurn(profile, threadId, cwd, text)
 
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
         commonCodexClient.interrupt(profile, threadId, turnId)

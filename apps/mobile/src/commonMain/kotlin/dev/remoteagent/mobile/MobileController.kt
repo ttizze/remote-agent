@@ -180,7 +180,12 @@ internal class MobileController(
 
     suspend fun startTurn(profile: HostProfile, threadId: String, text: String) {
         if (!isConnected(profile.hostIdentity)) return
-        gateway.startTurn(profile, threadId, text).fold(
+        val cwd = cachedWorkingDirectory(profile.hostIdentity, threadId)
+        if (cwd == null) {
+            dispatch(AppAction.TurnFailed(profile.hostIdentity, MissingThreadWorkingDirectoryMessage))
+            return
+        }
+        gateway.startTurn(profile, threadId, cwd, text).fold(
             success = { dispatch(AppAction.TurnStartAcknowledged(profile.hostIdentity, threadId, it)) },
             failure = { dispatch(AppAction.TurnFailed(profile.hostIdentity, it)) },
         )
@@ -200,6 +205,16 @@ internal class MobileController(
 
     private fun isConnected(hostIdentity: String): Boolean =
         state.profileViews[hostIdentity]?.connection == ConnectionPhase.Connected
+
+    private fun cachedWorkingDirectory(hostIdentity: String, threadId: String): String? {
+        val cache = state.cache.profile(hostIdentity)
+        val snapshotCwd = cache.snapshots[threadId]?.summary?.workingDirectory?.path
+        if (!snapshotCwd.isNullOrBlank()) return snapshotCwd
+        return cache.threadList.firstOrNull { it.id == threadId }
+            ?.workingDirectory
+            ?.path
+            ?.takeIf(String::isNotBlank)
+    }
 
     private fun replaceSubscription(hostIdentity: String, subscription: HostEventSubscription?): Long =
         synchronized(coordinationLock) {
@@ -273,6 +288,7 @@ internal class MobileController(
     )
 
     private companion object {
+        const val MissingThreadWorkingDirectoryMessage = "タスクの作業ディレクトリが不明です。タスク一覧を更新してください"
         const val MaxReadBufferedEvents = 256
         const val MaxReadBufferedBytes = 256 * 1024
     }

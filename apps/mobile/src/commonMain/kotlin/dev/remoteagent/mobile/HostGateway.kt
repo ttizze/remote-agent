@@ -10,7 +10,7 @@ interface HostGateway : RawCodexGateway {
     suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>>
     suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult>
     suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot>
-    suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String>
+    suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String>
     suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit>
 
     /**
@@ -78,7 +78,7 @@ object UnavailableHostGateway : HostGateway {
     override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> = unavailable()
     override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> = unavailable()
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> = unavailable()
-    override suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> = unavailable()
+    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> = unavailable()
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> = unavailable()
     override suspend fun rawRequest(profile: HostProfile, method: String, params: JsonElement): GatewayResult<JsonElement> = unavailable()
     override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription = HostEventSubscription {}

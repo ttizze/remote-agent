@@ -108,18 +108,49 @@ class MobileControllerTest {
         assertEquals(0, gateway.startCalls)
     }
 
+    @Test
+    fun starting_turn_passes_the_cached_snapshot_working_directory() {
+        val gateway = FakeHostGateway().apply {
+            listResult = GatewayResult.Success(listOf(summary("thread-1", "/cached/workspace")))
+        }
+        val controller = controller(gateway, selectedThreadId = null)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        runSuspend { controller.startTurn(profile, "thread-1", "hello") }
+
+        assertEquals(listOf("/workspace"), gateway.turnCwds)
+        assertEquals(listOf("hello"), gateway.turnTexts)
+    }
+
+    @Test
+    fun starting_turn_without_a_cached_working_directory_sends_no_request_and_asks_for_retry() {
+        val gateway = FakeHostGateway().apply {
+            listResult = GatewayResult.Success(listOf(summary("thread-1", "")))
+        }
+        val controller = controller(gateway, selectedThreadId = null, cachedThread = null)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        runSuspend { controller.startTurn(profile, "thread-1", "hello") }
+
+        assertTrue(gateway.turnCwds.isEmpty())
+        assertEquals("タスクの作業ディレクトリが不明です。タスク一覧を更新してください", controller.state.selectedView.notice)
+    }
+
     private fun controller(
         gateway: FakeHostGateway,
         selectedThreadId: String? = null,
         workingDirectory: String = "/workspace",
+        cachedThread: ThreadSnapshot? = thread,
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
     ): MobileController {
-        val initialCache = reconcileThreadRead(
-            MobileCache(),
-            profile.hostIdentity,
-            ThreadReadResult(thread, emptyList()),
-            cacheLimits,
-        )
+        val initialCache = cachedThread?.let {
+            reconcileThreadRead(
+                MobileCache(),
+                profile.hostIdentity,
+                ThreadReadResult(it, emptyList()),
+                cacheLimits,
+            )
+        } ?: MobileCache()
         return MobileController(
             gateway = gateway,
             repository = InMemoryMobileRepository(
@@ -172,6 +203,8 @@ class MobileControllerTest {
         var listCwds = mutableListOf<String>()
         var readIds = mutableListOf<String>()
         var startCalls = 0
+        var turnCwds = mutableListOf<String>()
+        var turnTexts = mutableListOf<String>()
 
         override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = GatewayResult.Failure("unused")
         override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = GatewayResult.Success(profile.addresses)
@@ -189,7 +222,11 @@ class MobileControllerTest {
             startCalls += 1
             return startResult
         }
-        override suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> = turnResult
+        override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> {
+            turnCwds += cwd
+            turnTexts += text
+            return turnResult
+        }
         override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> = interruptResult
         override suspend fun rawRequest(profile: HostProfile, method: String, params: JsonElement): GatewayResult<JsonElement> =
             GatewayResult.Success(JsonObject(emptyMap()))
@@ -207,10 +244,10 @@ class MobileControllerTest {
         }
     }
 
-    private fun summary(id: String) = ThreadSummary(
+    private fun summary(id: String, cwd: String = "/workspace") = ThreadSummary(
         id = id,
         preview = "preview",
-        workingDirectory = WorkingDirectory("/workspace"),
+        workingDirectory = WorkingDirectory(cwd),
         createdAtMs = 1,
         updatedAtMs = 1,
         status = ThreadStatus.Idle,
