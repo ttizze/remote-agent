@@ -11,12 +11,7 @@ import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.put
 
 /** Android adapter over the native raw Codex JSON-RPC client. */
 class AndroidHostGateway(private val context: Context) : HostGateway {
@@ -32,8 +27,8 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     private val handles = mutableMapOf<String, Long>()
     private val subscriptions = mutableMapOf<String, MutableSet<(RawCodexMessage) -> Unit>>()
     private val pollers = mutableMapOf<String, Thread>()
-    private val threadWorkingDirectories = mutableMapOf<Pair<String, String>, String>()
     private val discovery = AndroidMdnsDiscovery(context)
+    private val commonCodexClient = CommonCodexClient(this)
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = invoke {
         val keyStore = AndroidDeviceIdentityStore(context, payload.hostIdentity)
@@ -100,95 +95,20 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         json.parseToJsonElement(raw)
     }
 
-    override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> {
-        val threads = mutableListOf<ThreadSummary>()
-        val seen = mutableSetOf<String>()
-        val seenCursors = mutableSetOf<String>()
-        var cursor: String? = null
-        var pagesRead = 0
+    override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> =
+        commonCodexClient.listThreads(profile, cwd)
 
-        while (threads.size < ThreadListLimit && pagesRead < ThreadListLimit) {
-            val remaining = ThreadListLimit - threads.size
-            val page = rawRequest(profile, "thread/list", buildJsonObject {
-                put("limit", remaining)
-                if (cwd.isNotBlank()) put("cwd", cwd)
-                cursor?.let { put("cursor", it) }
-            }).decode { value ->
-                val root = value.jsonObject
-                ThreadListPage(
-                    threads = root["data"]?.jsonArray.orEmpty().map(::codexThreadSummary),
-                    nextCursor = root["nextCursor"]?.stringOrNull(),
-                )
-            }
-            val pageValue = when (page) {
-                is GatewayResult.Success -> page.value
-                is GatewayResult.Failure -> return page
-            }
-            pagesRead += 1
-            pageValue.threads.forEach { thread ->
-                if (threads.size >= ThreadListLimit) return@forEach
-                val key = "${thread.id}\u0000${thread.workingDirectory.path}"
-                if (seen.add(key)) threads += thread
-            }
+    override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> =
+        commonCodexClient.readThread(profile, threadId)
 
-            val nextCursor = pageValue.nextCursor?.takeIf(String::isNotBlank)
-            if (nextCursor == null || threads.size >= ThreadListLimit || !seenCursors.add(nextCursor)) break
-            cursor = nextCursor
-        }
-        rememberWorkingDirectories(profile, threads)
-        return GatewayResult.Success(threads)
-    }
+    override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> =
+        commonCodexClient.startThread(profile, cwd)
 
-    override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> {
-        val result = rawRequest(profile, "thread/read", buildJsonObject {
-            put("threadId", threadId)
-            put("includeTurns", true)
-        }).decode { value ->
-            ThreadReadResult(codexThreadFromResponse(value), emptyList())
-        }
-        if (result is GatewayResult.Success) rememberWorkingDirectories(profile, listOf(result.value.thread.summary))
-        return result
-    }
-
-    override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> {
-        val result = rawRequest(profile, "thread/start", buildJsonObject { put("cwd", cwd) })
-            .decode(::codexThreadFromResponse)
-        if (result is GatewayResult.Success) rememberWorkingDirectories(profile, listOf(result.value.summary))
-        return result
-    }
-
-    override suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> {
-        val cwd = synchronized(stateLock) {
-            threadWorkingDirectories[profile.hostIdentity to threadId]
-        }?.takeIf(String::isNotBlank)
-            ?: return GatewayResult.Failure("タスクの作業ディレクトリが不明です。タスク一覧を更新してください")
-
-        val resumed = rawRequest(profile, "thread/resume", buildJsonObject {
-            put("threadId", threadId)
-            put("cwd", cwd)
-        })
-        if (resumed is GatewayResult.Failure) return resumed
-
-        return rawRequest(profile, "turn/start", buildJsonObject {
-            put("threadId", threadId)
-            put("input", buildJsonArray {
-                add(buildJsonObject {
-                    put("type", "text")
-                    put("text", text)
-                })
-            })
-        }).decode { value ->
-            val root = value.jsonObject
-            root.string("turnId") ?: root.childObject("turn")?.string("id")
-                ?: error("Codex turn/start response did not contain an id")
-        }
-    }
+    override suspend fun startTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> =
+        commonCodexClient.startTurn(profile, threadId, text)
 
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
-        rawRequest(profile, "turn/interrupt", buildJsonObject {
-            put("threadId", threadId)
-            put("turnId", turnId)
-        }).map { Unit }
+        commonCodexClient.interrupt(profile, threadId, turnId)
 
     override suspend fun respondResult(
         profile: HostProfile,
@@ -338,39 +258,8 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     private fun decodeKey(value: String) = Base64.getUrlDecoder().decode(value)
     private fun encodeKey(value: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(value)
 
-    private fun rememberWorkingDirectories(profile: HostProfile, threads: List<ThreadSummary>) {
-        synchronized(stateLock) {
-            threads.forEach { thread ->
-                val cwd = thread.workingDirectory.path
-                if (cwd.isNotBlank()) threadWorkingDirectories[profile.hostIdentity to thread.id] = cwd
-            }
-        }
-    }
-
     private companion object {
         const val DiscoveryTimeoutMs = 1_500L
         const val PollIntervalMs = 50L
-        const val ThreadListLimit = 64
     }
-}
-
-private data class ThreadListPage(
-    val threads: List<ThreadSummary>,
-    val nextCursor: String?,
-)
-
-private fun <T> GatewayResult<JsonElement>.decode(transform: (JsonElement) -> T): GatewayResult<T> = try {
-    when (this) {
-        is GatewayResult.Success -> GatewayResult.Success(transform(value))
-        is GatewayResult.Failure -> this
-    }
-} catch (failure: Throwable) {
-    GatewayResult.Failure("Host response could not be interpreted: ${failure.message}", failure.message?.let {
-        runCatching { Json.parseToJsonElement(it) }.getOrNull()
-    })
-}
-
-private fun <T, R> GatewayResult<T>.map(transform: (T) -> R): GatewayResult<R> = when (this) {
-    is GatewayResult.Success -> GatewayResult.Success(transform(value))
-    is GatewayResult.Failure -> this
 }
