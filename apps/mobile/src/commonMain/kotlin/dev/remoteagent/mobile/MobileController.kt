@@ -1,7 +1,6 @@
 package dev.remoteagent.mobile
 
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
@@ -76,17 +75,19 @@ internal class MobileController(
     }
 
     suspend fun disconnect(profile: HostProfile) {
-        val hostIdentity = profile.hostIdentity
-        sessions.currentGeneration(hostIdentity) ?: return
-        // Invalidate callbacks immediately, then serialize the native close
-        // behind any connection attempt already in flight for this Host.
-        sessions.retireHost(hostIdentity)
-        sessions.withHostConnection(hostIdentity) {
-            // A reconnect requested after this disconnect is the newer user
-            // intent. Its active generation owns the newly installed handle.
-            if (sessions.currentGeneration(hostIdentity) != null) return@withHostConnection
-            gateway.disconnect(profile)
-            publish(AppAction.Disconnected(hostIdentity))
+        withContext(NonCancellable) {
+            val hostIdentity = profile.hostIdentity
+            sessions.currentGeneration(hostIdentity) ?: return@withContext
+            // Invalidate callbacks immediately, then serialize the native
+            // close behind any connection attempt already in flight.
+            sessions.retireHost(hostIdentity)
+            sessions.withHostConnection(hostIdentity) {
+                // A reconnect requested after this disconnect is the newer
+                // user intent and owns the newly installed handle.
+                if (sessions.currentGeneration(hostIdentity) != null) return@withHostConnection
+                gateway.disconnect(profile)
+                eventMutex.withLock { publish(AppAction.Disconnected(hostIdentity)) }
+            }
         }
     }
 
@@ -96,8 +97,11 @@ internal class MobileController(
             // Start the generation before touching the transport. A previous
             // subscription is retired by the coordinator before connect can
             // deliver callbacks for the new generation.
-            val generation = sessions.beginConnection(profile.hostIdentity)
-            dispatch(AppAction.ConnectStarted(profile.hostIdentity))
+            val generation = eventMutex.withLock {
+                sessions.beginConnection(profile.hostIdentity).also {
+                    publish(AppAction.ConnectStarted(profile.hostIdentity))
+                }
+            }
             try {
                 when (val result = gateway.connect(profile)) {
                     is GatewayResult.Failure -> ifCurrent(profile.hostIdentity, generation) {
@@ -128,7 +132,10 @@ internal class MobileController(
                                 } else {
                                     false
                                 }
-                                scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                                // Platform controllers provide their serialized
+                                // application/UI scope. Never reduce state
+                                // inline on a native poller thread.
+                                scope.launch {
                                     eventMutex.withLock {
                                         if (sessions.isCurrent(profile.hostIdentity, generation)) {
                                             // Keep raw and typed projections in one
@@ -171,9 +178,11 @@ internal class MobileController(
                 // A blocking platform connect may install its handle just as
                 // the caller is cancelled. Close it before the per-Host
                 // connection mutex admits a reconnect.
-                sessions.retireHost(profile.hostIdentity)
-                withContext(NonCancellable) { gateway.disconnect(profile) }
-                publish(AppAction.Disconnected(profile.hostIdentity))
+                withContext(NonCancellable) {
+                    sessions.retireHost(profile.hostIdentity)
+                    gateway.disconnect(profile)
+                    eventMutex.withLock { publish(AppAction.Disconnected(profile.hostIdentity)) }
+                }
                 throw cancelled
             }
         }
@@ -367,7 +376,7 @@ internal class MobileController(
         if (!sessions.isCurrent(profile.hostIdentity, generation)) return
         sessions.retireHost(profile.hostIdentity)
         gateway.disconnect(profile)
-        publish(AppAction.Disconnected(profile.hostIdentity))
+        eventMutex.withLock { publish(AppAction.Disconnected(profile.hostIdentity)) }
     }
 }
 

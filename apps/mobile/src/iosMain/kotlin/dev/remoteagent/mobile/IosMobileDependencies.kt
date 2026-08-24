@@ -114,9 +114,9 @@ object IosBonjourBridge {
 @OptIn(ExperimentalForeignApi::class, ExperimentalEncodingApi::class)
 internal class IosHostGateway : HostGateway {
     private val codexClient = CommonCodexClient(this)
+    /** Owns both handles and subscriptions so registration cannot cross a replacement. */
     private val handleLock = SynchronizedObject()
     private val handles = mutableMapOf<String, NativeHandle>()
-    private val subscriptionLock = SynchronizedObject()
     private val subscriptions = mutableMapOf<String, MutableSet<Job>>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -170,12 +170,14 @@ internal class IosHostGateway : HostGateway {
 
     override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = withContext(Dispatchers.Default) {
         val hostIdentity = profile.hostIdentity
-        cancelSubscriptions(hostIdentity)
-        val retired = synchronized(handleLock) {
-            handles.remove(hostIdentity)?.also { it.retired = true }?.let { handle ->
+        val (jobs, retired) = synchronized(handleLock) {
+            val jobs = subscriptions.remove(hostIdentity)?.toList().orEmpty()
+            val pointer = handles.remove(hostIdentity)?.also { it.retired = true }?.let { handle ->
                 handle.pointer.takeIf { handle.borrowers == 0 }
             }
+            jobs to pointer
         }
+        jobs.forEach(Job::cancel)
         retired?.let { mobile_client_close(it) }
         GatewayResult.Success(Unit)
     }
@@ -209,24 +211,26 @@ internal class IosHostGateway : HostGateway {
 
     override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
         val hostIdentity = profile.hostIdentity
-        val subscribedHandle = synchronized(handleLock) { handles[hostIdentity] }
-            ?: return HostEventSubscription {}
-        val job = scope.launch(start = CoroutineStart.LAZY) {
-            try {
-                while (true) {
-                    val message = nextRawMessage(hostIdentity, subscribedHandle)
-                    if (message != null && isCurrentHandle(hostIdentity, subscribedHandle)) {
-                        onMessage(message)
+        lateinit var job: Job
+        val registered = synchronized(handleLock) {
+            val subscribedHandle = handles[hostIdentity] ?: return@synchronized false
+            job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    while (true) {
+                        val message = nextRawMessage(hostIdentity, subscribedHandle)
+                        if (message != null && isCurrentHandle(hostIdentity, subscribedHandle)) {
+                            onMessage(message)
+                        }
+                        delay(50)
                     }
-                    delay(50)
+                } finally {
+                    currentCoroutineContext()[Job]?.let { removeSubscription(hostIdentity, it) }
                 }
-            } finally {
-                currentCoroutineContext()[Job]?.let { removeSubscription(hostIdentity, it) }
             }
-        }
-        synchronized(subscriptionLock) {
             subscriptions.getOrPut(hostIdentity) { mutableSetOf() }.add(job)
+            true
         }
+        if (!registered) return HostEventSubscription {}
         job.start()
         return HostEventSubscription {
             removeSubscription(hostIdentity, job)
@@ -253,15 +257,14 @@ internal class IosHostGateway : HostGateway {
             }.toString()
             when (val result = callConnect(config, key)) {
                 is GatewayResult.Success -> {
-                    // Stop every reader of the old handle before publishing
-                    // the replacement into the per-Host handle map.
-                    cancelSubscriptions(hostIdentity)
-                    val retired = synchronized(handleLock) {
+                    val (jobs, retired) = synchronized(handleLock) {
+                        val jobs = subscriptions.remove(hostIdentity)?.toList().orEmpty()
                         val previous = handles[hostIdentity]
                         previous?.retired = true
                         handles[hostIdentity] = NativeHandle(result.value)
-                        previous?.pointer?.takeIf { previous.borrowers == 0 }
+                        jobs to previous?.pointer?.takeIf { previous.borrowers == 0 }
                     }
+                    jobs.forEach(Job::cancel)
                     retired?.let { mobile_client_close(it) }
                     return GatewayResult.Success(Unit)
                 }
@@ -372,19 +375,12 @@ internal class IosHostGateway : HostGateway {
         synchronized(handleLock) { handles[hostIdentity] === expectedHandle }
 
     private fun removeSubscription(hostIdentity: String, job: Job) {
-        synchronized(subscriptionLock) {
+        synchronized(handleLock) {
             subscriptions[hostIdentity]?.let { jobs ->
                 jobs.remove(job)
                 if (jobs.isEmpty()) subscriptions.remove(hostIdentity)
             }
         }
-    }
-
-    private fun cancelSubscriptions(hostIdentity: String) {
-        val jobs = synchronized(subscriptionLock) {
-            subscriptions.remove(hostIdentity)?.toList().orEmpty()
-        }
-        jobs.forEach(Job::cancel)
     }
 
     private class NativeHandle(

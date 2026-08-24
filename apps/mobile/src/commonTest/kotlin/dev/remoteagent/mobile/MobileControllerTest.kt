@@ -1,6 +1,7 @@
 package dev.remoteagent.mobile
 
 import kotlin.coroutines.Continuation
+import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 import kotlin.test.Test
@@ -10,9 +11,11 @@ import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Runnable
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.joinAll
@@ -324,6 +327,50 @@ class MobileControllerTest {
     }
 
     @Test
+    fun cancelled_explicit_disconnect_still_closes_transport_and_publishes_disconnected() = runBlocking {
+        val disconnectStarted = CompletableDeferred<Unit>()
+        val releaseDisconnect = CompletableDeferred<Unit>()
+        val gateway = FakeHostGateway().apply {
+            disconnectBlock = {
+                disconnectStarted.complete(Unit)
+                releaseDisconnect.await()
+                GatewayResult.Success(Unit)
+            }
+        }
+        val controller = controller(gateway)
+        controller.connect(profile, CoroutineScope(Dispatchers.Unconfined))
+        val disconnecting = launch { controller.disconnect(profile) }
+        disconnectStarted.await()
+
+        disconnecting.cancel()
+        assertFalse(disconnecting.isCompleted)
+        releaseDisconnect.complete(Unit)
+        disconnecting.join()
+
+        assertEquals(1, gateway.disconnectCalls)
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        Unit
+    }
+
+    @Test
+    fun native_callback_is_dispatched_to_application_scope_and_dropped_after_disconnect() = runBlocking {
+        val dispatcher = QueuedDispatcher()
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway)
+        controller.connect(profile, CoroutineScope(dispatcher))
+
+        gateway.emit(notification("future/notification", "{\"value\":true}"))
+        assertEquals(emptyList(), controller.state.cache.profile(profile.hostIdentity).rawMessages)
+
+        controller.disconnect(profile)
+        dispatcher.runAll()
+
+        assertEquals(emptyList(), controller.state.cache.profile(profile.hostIdentity).rawMessages)
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        Unit
+    }
+
+    @Test
     fun persistence_failure_keeps_memory_and_observers_current_then_retries_on_next_transition() {
         val repository = FailingOnceMobileRepository(AppState(profiles = listOf(profile)))
         val controller = MobileController(FakeHostGateway(), repository)
@@ -407,6 +454,7 @@ class MobileControllerTest {
         var turnResult: GatewayResult<String> = GatewayResult.Success("turn-1")
         var interruptResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
+        var disconnectBlock: (suspend () -> GatewayResult<Unit>)? = null
         var readHook: (() -> Unit)? = null
         var callback: ((RawCodexMessage) -> Unit)? = null
         var listCwds = mutableListOf<String>()
@@ -434,7 +482,7 @@ class MobileControllerTest {
             disconnectCalls += 1
             disconnectObservedConnectInFlight = disconnectObservedConnectInFlight || connectInFlight
             subscriptionWasRetiredAtDisconnect = callback == null
-            return disconnectResult
+            return disconnectBlock?.invoke() ?: disconnectResult
         }
         override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> {
             listCwds += cwd
@@ -491,6 +539,18 @@ class MobileControllerTest {
             saveCalls += 1
             if (saveCalls == 1) error("sanitized test failure")
             savedState = state
+        }
+    }
+
+    private class QueuedDispatcher : CoroutineDispatcher() {
+        private val queued = ArrayDeque<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            queued.addLast(block)
+        }
+
+        fun runAll() {
+            while (queued.isNotEmpty()) queued.removeFirst().run()
         }
     }
 
