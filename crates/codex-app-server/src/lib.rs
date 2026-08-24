@@ -132,7 +132,8 @@ pub struct CodexAppServer {
 impl CodexAppServer {
     pub async fn spawn(config: AppServerConfig) -> Result<Self, Error> {
         let executable = executable::resolve(&config.program)?;
-        let supported_methods = schema::generate_and_validate(&executable).await?;
+        let supported_methods =
+            schema::generate_and_validate(&executable, config.request_timeout).await?;
         let mut child = Command::new(&executable)
             .arg("app-server")
             .arg("--listen")

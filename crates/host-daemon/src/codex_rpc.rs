@@ -7,6 +7,8 @@
 //! queues, proxy ids for Codex-originated requests, and response arbitration
 //! when more than one authenticated session is connected.
 
+mod routing;
 mod service;
 
-pub use service::{CodexRpcService, CodexSession, DispatchError, ResponseDisposition, SessionId};
+pub use routing::{CodexSession, ResponseDisposition, SessionId};
+pub use service::{CodexRpcService, DispatchError};

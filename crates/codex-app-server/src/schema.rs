@@ -1,13 +1,17 @@
 use std::{
     collections::HashSet,
-    env, fs, io,
+    env, fs,
+    future::Future,
+    io,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
+    time::Duration,
 };
 
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::Error;
 
@@ -15,9 +19,13 @@ pub(crate) const MAX_SCHEMA_BYTES: u64 = 4 * 1024 * 1024;
 const REQUIRED_BASELINE_METHODS: &[&str] =
     &["initialize", "thread/list", "thread/start", "thread/read"];
 
-pub(crate) async fn generate_and_validate(executable: &Path) -> Result<HashSet<String>, Error> {
+pub(crate) async fn generate_and_validate(
+    executable: &Path,
+    request_timeout: Duration,
+) -> Result<HashSet<String>, Error> {
     let directory = PrivateSchemaDirectory::create()?;
-    let status = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("app-server")
         .arg("generate-json-schema")
         .arg("--out")
@@ -25,7 +33,8 @@ pub(crate) async fn generate_and_validate(executable: &Path) -> Result<HashSet<S
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .status()
+        .kill_on_drop(true);
+    let status = status_with_deadline(command.status(), request_timeout)
         .await
         .map_err(Error::SchemaGenerator)?;
     if !status.success() {
@@ -46,6 +55,19 @@ pub(crate) async fn generate_and_validate(executable: &Path) -> Result<HashSet<S
         }
     }
     Ok(supported_methods)
+}
+
+async fn status_with_deadline<F>(status: F, deadline: Duration) -> io::Result<ExitStatus>
+where
+    F: Future<Output = io::Result<ExitStatus>>,
+{
+    match timeout(deadline, status).await {
+        Ok(result) => result,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Codex schema generator timed out",
+        )),
+    }
 }
 
 fn collect_request_methods(schema: &Value) -> HashSet<String> {
@@ -138,6 +160,17 @@ impl Drop for PrivateSchemaDirectory {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn pending_schema_generator_status_maps_deadline_to_timeout_error() {
+        let pending = std::future::pending::<io::Result<ExitStatus>>();
+
+        let error = status_with_deadline(pending, Duration::ZERO)
+            .await
+            .expect_err("pending status should hit the deadline");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn extracts_only_request_methods_from_generated_schema_shape() {

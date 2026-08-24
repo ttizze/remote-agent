@@ -119,7 +119,12 @@ impl RpcPeer {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let events = EventSource::new();
 
-        tokio::spawn(write_loop(writer, outbound_rx, pending.clone()));
+        tokio::spawn(write_loop(
+            writer,
+            outbound_rx,
+            pending.clone(),
+            events.clone(),
+        ));
         tokio::spawn(read_loop(reader, pending.clone(), events.clone()));
 
         Self {
@@ -251,23 +256,25 @@ async fn write_loop<W>(
     mut writer: W,
     mut outbound: mpsc::Receiver<String>,
     pending: Arc<Mutex<HashMap<u64, PendingRequest>>>,
+    events: EventSource,
 ) where
     W: AsyncWrite + Unpin,
 {
-    while let Some(message) = outbound.recv().await {
+    let reason = loop {
+        let Some(message) = outbound.recv().await else {
+            break "outbound queue closed".to_owned();
+        };
         if let Err(error) = writer.write_all(message.as_bytes()).await {
-            fail_pending(&pending, format!("write failed: {error}"));
-            return;
+            break format!("write failed: {error}");
         }
         if let Err(error) = writer.write_all(b"\n").await {
-            fail_pending(&pending, format!("write failed: {error}"));
-            return;
+            break format!("write failed: {error}");
         }
         if let Err(error) = writer.flush().await {
-            fail_pending(&pending, format!("flush failed: {error}"));
-            return;
+            break format!("flush failed: {error}");
         }
-    }
+    };
+    terminate_peer(&pending, &events, reason);
 }
 
 async fn read_loop<R>(
@@ -357,13 +364,14 @@ async fn read_loop<R>(
             continue;
         }
 
-        let _ = pending_request.response.send(Err(Error::ConnectionClosed(
-            "response had neither result nor error".to_owned(),
-        )));
+        let reason = "response had neither result nor error".to_owned();
+        let _ = pending_request
+            .response
+            .send(Err(Error::ConnectionClosed(reason.clone())));
+        break reason;
     };
 
-    fail_pending(&pending, reason);
-    events.close();
+    terminate_peer(&pending, &events, reason);
 }
 
 fn response_extensions(message: &Value) -> Map<String, Value> {
@@ -413,11 +421,48 @@ fn fail_pending(pending: &Arc<Mutex<HashMap<u64, PendingRequest>>>, reason: Stri
     }
 }
 
+fn terminate_peer(
+    pending: &Arc<Mutex<HashMap<u64, PendingRequest>>>,
+    events: &EventSource,
+    reason: String,
+) {
+    fail_pending(pending, reason);
+    events.close();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::{
+        io,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll},
+    };
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
+
+    struct FailingWriter;
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected write failure",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn correlates_out_of_order_responses() {
@@ -542,6 +587,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preserves_top_level_extensions_on_raw_success_response() {
+        let (client_io, server_io) = duplex(8 * 1024);
+        let (client_reader, client_writer) = tokio::io::split(client_io);
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let peer = RpcPeer::open(client_reader, client_writer, Duration::from_secs(1));
+        let request = tokio::spawn(async move {
+            peer.request_json_with_extensions("future/method", json!({"input": true}), Map::new())
+                .await
+        });
+
+        let mut lines = BufReader::new(server_reader).lines();
+        let sent: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let id = sent["id"].as_u64().unwrap();
+        server_writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({
+                        "id": id,
+                        "result": {"accepted": true},
+                        "jsonrpc": "2.0",
+                        "responseFuture": {"kept": true},
+                    })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+        let response = request.await.unwrap().unwrap();
+        assert_eq!(response.result, json!({"accepted": true}));
+        assert_eq!(
+            response.extensions,
+            Map::from_iter([
+                (String::from("jsonrpc"), json!("2.0")),
+                (String::from("responseFuture"), json!({"kept": true})),
+            ])
+        );
+    }
+
+    #[tokio::test]
     async fn preserves_numeric_remote_error_code_and_unknown_fields() {
         let (client_io, server_io) = duplex(8 * 1024);
         let (client_reader, client_writer) = tokio::io::split(client_io);
@@ -567,6 +653,8 @@ mod tests {
                             "data": {"retryable": true},
                             "futureField": [1, 2, 3],
                         },
+                        "jsonrpc": "2.0",
+                        "responseFuture": {"kept": true},
                     })
                 )
                 .as_bytes(),
@@ -584,6 +672,13 @@ mod tests {
                 assert_eq!(
                     detail.additional_fields.get("futureField"),
                     Some(&json!([1, 2, 3]))
+                );
+                assert_eq!(
+                    detail.response_extensions,
+                    Map::from_iter([
+                        (String::from("jsonrpc"), json!("2.0")),
+                        (String::from("responseFuture"), json!({"kept": true})),
+                    ])
                 );
                 let display = Error::Remote {
                     method: "future/method".to_owned(),
@@ -774,6 +869,63 @@ mod tests {
                 .expect("pending request mutex poisoned")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn writer_failure_closes_event_source() {
+        let (reader, _server_writer) = duplex(1024);
+        let peer = RpcPeer::open(reader, FailingWriter, Duration::from_secs(1));
+        let mut events = peer.subscribe();
+
+        peer.notify_json("test/notification", json!({}), Map::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("writer failure must terminate the event source"),
+            Err(broadcast::error::RecvError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_response_shape_terminates_every_pending_request() {
+        let (client_io, server_io) = duplex(8 * 1024);
+        let (client_reader, client_writer) = tokio::io::split(client_io);
+        let (server_reader, mut server_writer) = tokio::io::split(server_io);
+        let peer = Arc::new(RpcPeer::open(
+            client_reader,
+            client_writer,
+            Duration::from_secs(1),
+        ));
+        let mut events = peer.subscribe();
+        let mut requests = tokio::task::JoinSet::new();
+        for method in ["first", "second"] {
+            let peer = peer.clone();
+            requests.spawn(async move { peer.request::<_, Value>(method, json!({})).await });
+        }
+
+        let mut lines = BufReader::new(server_reader).lines();
+        let first_request: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        lines.next_line().await.unwrap().unwrap();
+        server_writer
+            .write_all(format!("{}\n", json!({ "id": first_request["id"] })).as_bytes())
+            .await
+            .unwrap();
+
+        while let Some(request) = requests.join_next().await {
+            assert!(matches!(
+                request.unwrap(),
+                Err(Error::ConnectionClosed(ref reason))
+                    if reason.contains("neither result nor error")
+            ));
+        }
+        assert!(matches!(
+            events.recv().await,
+            Err(broadcast::error::RecvError::Closed)
+        ));
     }
 
     #[tokio::test]
