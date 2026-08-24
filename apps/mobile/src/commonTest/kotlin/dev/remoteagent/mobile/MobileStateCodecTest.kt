@@ -2,6 +2,7 @@ package dev.remoteagent.mobile
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlinx.serialization.json.Json
@@ -158,6 +159,18 @@ class MobileStateCodecTest {
         val failure = assertIs<MobileStateDecodeResult.Failure>(MobileStateCodec.decode(oversized))
 
         assertEquals(MobileStateDecodeReason.Oversize, failure.reason)
+    }
+
+    @Test
+    fun encoded_state_cannot_exceed_the_decode_limit() {
+        val profile = HostProfile("host-1", "Host", emptyList(), "device-ref")
+        val oversized = AppState(
+            profiles = listOf(profile),
+            selectedProfileId = profile.hostIdentity,
+            profileViews = mapOf(profile.hostIdentity to ProfileViewState(workingDirectoryPath = "x".repeat(MobileStateCodec.MaxInputBytes))),
+        )
+
+        assertFailsWith<IllegalArgumentException> { MobileStateCodec.encode(oversized) }
     }
 
     @Test

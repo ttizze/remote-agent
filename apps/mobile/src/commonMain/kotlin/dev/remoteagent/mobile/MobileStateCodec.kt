@@ -153,14 +153,18 @@ object MobileStateCodec {
         return MobileStateDecodeResult.Success(envelope)
     }
 
-    private fun encodeEnvelope(kind: String, payload: JsonElement): ByteArray = codecJson.encodeToString(
-        PersistedEnvelope(
-            format = Format,
-            version = CurrentVersion,
-            kind = kind,
-            payload = payload as? JsonObject ?: error("State payload must be an object"),
-        ),
-    ).encodeToByteArray()
+    private fun encodeEnvelope(kind: String, payload: JsonElement): ByteArray {
+        val bytes = codecJson.encodeToString(
+            PersistedEnvelope(
+                format = Format,
+                version = CurrentVersion,
+                kind = kind,
+                payload = payload as? JsonObject ?: error("State payload must be an object"),
+            ),
+        ).encodeToByteArray()
+        require(bytes.size <= MaxInputBytes) { "Mobile state exceeds the $MaxInputBytes-byte storage limit" }
+        return bytes
+    }
 
     private const val Format = "remote-agent-mobile-state"
     private const val VersionField = "version"
@@ -250,11 +254,12 @@ private fun parseRootForLegacy(bytes: ByteArray): JsonObject? {
 private fun parseLegacyHostProfile(value: JsonElement): HostProfile? {
     val raw = value.asObjectOrNull() ?: return null
     val hostIdentity = raw.string("hostIdentity")?.takeIf { it.isNotBlank() } ?: return null
+    val deviceIdentityReference = raw.string("deviceIdentityReference")?.takeIf { it.isNotBlank() } ?: return null
     return HostProfile(
         hostIdentity = hostIdentity,
         name = raw.string("name") ?: hostIdentity,
-        addresses = raw.array("addresses").orEmpty().mapNotNull(JsonElement::stringOrNull),
-        deviceIdentityReference = raw.string("deviceIdentityReference").orEmpty(),
+        addresses = raw.array("addresses").orEmpty().mapNotNull(JsonElement::stringOrNull).filter(String::isNotBlank).distinct(),
+        deviceIdentityReference = deviceIdentityReference,
     )
 }
 
@@ -493,20 +498,25 @@ private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
 )
 
 private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppState {
-    val restoredProfiles = profiles.map { profile ->
-        HostProfile(
-            hostIdentity = profile.hostIdentity,
-            name = profile.name,
-            addresses = profile.addresses,
-            deviceIdentityReference = profile.deviceIdentityReference,
-        )
-    }
+    val restoredProfiles = profiles.asSequence()
+        .filter { it.hostIdentity.isNotBlank() && it.deviceIdentityReference.isNotBlank() }
+        .map { profile ->
+            HostProfile(
+                hostIdentity = profile.hostIdentity,
+                name = profile.name.ifBlank { profile.hostIdentity },
+                addresses = profile.addresses.filter(String::isNotBlank).distinct(),
+                deviceIdentityReference = profile.deviceIdentityReference,
+            )
+        }
+        .distinctBy { it.hostIdentity }
+        .toList()
     val restoredProfileIds = restoredProfiles.mapTo(mutableSetOf()) { it.hostIdentity }
     return AppState(
         profiles = restoredProfiles,
         selectedProfileId = selectedProfileId?.takeIf { it in restoredProfileIds },
-        profileViews = profileViews.mapValues { (_, view) ->
-            ProfileViewState(
+        profileViews = restoredProfiles.associate { profile ->
+            val view = profileViews[profile.hostIdentity] ?: PersistedProfileViewState()
+            profile.hostIdentity to ProfileViewState(
                 connection = ConnectionPhase.Disconnected,
                 workingDirectoryPath = view.workingDirectoryPath,
                 threadList = LoadPhase.Idle,
@@ -516,7 +526,9 @@ private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppSta
                 notice = null,
             )
         },
-        cache = cache.toMobileCache(cacheLimits),
+        cache = cache.toMobileCache(cacheLimits).let { decoded ->
+            MobileCache(decoded.profiles.filterKeys { it in restoredProfileIds })
+        },
         showingPairing = false,
         pairingError = null,
     )
