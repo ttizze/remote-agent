@@ -5,6 +5,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 
 /**
  * Shared application module used by the Android Compose and iOS SwiftUI
@@ -20,7 +22,7 @@ internal class MobileController(
         private set
 
     private val eventMutex = Mutex()
-    private val coordinationLock = Any()
+    private val coordinationLock = SynchronizedObject()
     private val eventSubscriptions = mutableMapOf<String, HostEventSubscription>()
     private val subscriptionGenerations = mutableMapOf<String, Long>()
     private val readBuffers = mutableMapOf<String, ReadBuffer>()
