@@ -1,0 +1,3 @@
+# Adapt to the installed Codex schema
+
+The Host Daemon will generate and inspect the installed Codex App Server schema at startup instead of accepting only a version allowlist. Schema generation is compatibility preflight, not proof of runtime or semantic compatibility: Remote Agent keeps a stable Mobile RPC, validates the Codex boundary against the generated artifacts, refuses readiness when baseline operations are absent, and reports optional operations as unavailable when their methods or shapes are missing. This permits compatible Codex releases without a Remote Agent update while keeping Codex protocol variation inside the Host Daemon.

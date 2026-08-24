@@ -1,0 +1,9 @@
+/target/
+/.gradle/
+/.idea/
+**/build/
+apps/mobile/src/androidMain/jniLibs/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+local.properties

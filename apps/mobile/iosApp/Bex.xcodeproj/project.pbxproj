@@ -1,0 +1,323 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* BexIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* BexIOSApp.swift */; };
+		A10000000000000000000002 /* PlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* PlatformServices.swift */; };
+		A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* QRCodeCaptureViewController.swift */; };
+		A10000000000000000000004 /* BonjourHostDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* BonjourHostDiscovery.swift */; };
+		A10000000000000000000005 /* RemoteAgentMobile.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* RemoteAgentMobile.framework */; };
+		A10000000000000000000006 /* SwiftUIRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* SwiftUIRoot.swift */; };
+		B20000000000000000000001 /* BexLaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* BexLaunchUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000010 /* Bex.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bex.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000011 /* BexIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexIOSApp.swift; sourceTree = "<group>"; };
+		A10000000000000000000012 /* PlatformServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformServices.swift; sourceTree = "<group>"; };
+		A10000000000000000000013 /* QRCodeCaptureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeCaptureViewController.swift; sourceTree = "<group>"; };
+		A10000000000000000000014 /* BonjourHostDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourHostDiscovery.swift; sourceTree = "<group>"; };
+		A10000000000000000000015 /* RemoteAgentMobile.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = RemoteAgentMobile.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000017 /* SwiftUIRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIRoot.swift; sourceTree = "<group>"; };
+		B20000000000000000000010 /* BexUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BexUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B20000000000000000000011 /* BexLaunchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexLaunchUITests.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000021 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (A10000000000000000000005 /* RemoteAgentMobile.framework in Frameworks */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B20000000000000000000021 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000030 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000031 /* Bex */,
+				B20000000000000000000031 /* BexUITests */,
+				A10000000000000000000032 /* Frameworks */,
+				A10000000000000000000033 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B20000000000000000000031 /* BexUITests */ = {
+			isa = PBXGroup;
+			children = (B20000000000000000000011 /* BexLaunchUITests.swift */,);
+			path = BexUITests;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000031 /* Bex */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000011 /* BexIOSApp.swift */,
+				A10000000000000000000012 /* PlatformServices.swift */,
+				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
+				A10000000000000000000014 /* BonjourHostDiscovery.swift */,
+				A10000000000000000000017 /* SwiftUIRoot.swift */,
+				A10000000000000000000016 /* Info.plist */,
+			);
+			path = Bex;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000032 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (A10000000000000000000015 /* RemoteAgentMobile.framework */,);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000033 /* Products */ = {
+			isa = PBXGroup;
+			children = (A10000000000000000000010 /* Bex.app */, B20000000000000000000010 /* BexUITests.xctest */,);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000000040 /* Bex */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000041 /* Build configuration list for PBXNativeTarget "Bex" */;
+			buildPhases = (
+				A10000000000000000000020 /* Sources */,
+				A10000000000000000000021 /* Frameworks */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = Bex;
+			productName = Bex;
+			productReference = A10000000000000000000010 /* Bex.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B20000000000000000000040 /* BexUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B20000000000000000000041 /* Build configuration list for PBXNativeTarget "BexUITests" */;
+			buildPhases = (
+				B20000000000000000000020 /* Sources */,
+				B20000000000000000000021 /* Frameworks */,
+				B20000000000000000000022 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = (B20000000000000000000050 /* PBXTargetDependency */,);
+			name = BexUITests;
+			productName = BexUITests;
+			productReference = B20000000000000000000010 /* BexUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000050 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					A10000000000000000000040 = { CreatedOnToolsVersion = 26.0; };
+					B20000000000000000000040 = { CreatedOnToolsVersion = 26.0; TestTargetID = A10000000000000000000040; };
+				};
+			};
+			buildConfigurationList = A10000000000000000000051 /* Build configuration list for PBXProject "Bex" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = A10000000000000000000030;
+			productRefGroup = A10000000000000000000033 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A10000000000000000000040 /* Bex */, B20000000000000000000040 /* BexUITests */,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXContainerItemProxy section */
+		B20000000000000000000051 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000050 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000040;
+			remoteInfo = Bex;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		B20000000000000000000050 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A10000000000000000000040 /* Bex */;
+			targetProxy = B20000000000000000000051 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B20000000000000000000022 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000020 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* BexIOSApp.swift in Sources */,
+				A10000000000000000000002 /* PlatformServices.swift in Sources */,
+				A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */,
+				A10000000000000000000004 /* BonjourHostDiscovery.swift in Sources */,
+				A10000000000000000000006 /* SwiftUIRoot.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B20000000000000000000020 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (B20000000000000000000001 /* BexLaunchUITests.swift in Sources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10000000000000000000060 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		A10000000000000000000061 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+		A10000000000000000000062 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/debugFramework";
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/debugFramework";
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Bex/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libmobile_client.a";
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libmobile_client.a";
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
+				PRODUCT_NAME = Bex;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A10000000000000000000063 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/releaseFramework";
+				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/releaseFramework";
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Bex/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.0;
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libmobile_client.a";
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libmobile_client.a";
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
+				PRODUCT_NAME = Bex;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		B20000000000000000000062 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Bex;
+			};
+			name = Debug;
+		};
+		B20000000000000000000063 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Bex;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000000041 /* Build configuration list for PBXNativeTarget "Bex" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A10000000000000000000062 /* Debug */, A10000000000000000000063 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A10000000000000000000051 /* Build configuration list for PBXProject "Bex" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (A10000000000000000000060 /* Debug */, A10000000000000000000061 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		B20000000000000000000041 /* Build configuration list for PBXNativeTarget "BexUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (B20000000000000000000062 /* Debug */, B20000000000000000000063 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000000050 /* Project object */;
+}

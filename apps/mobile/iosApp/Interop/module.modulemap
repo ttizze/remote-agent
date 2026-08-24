@@ -1,0 +1,4 @@
+module mobile_client {
+  header "../../../../crates/mobile-client/include/mobile_client.h"
+  export *
+}

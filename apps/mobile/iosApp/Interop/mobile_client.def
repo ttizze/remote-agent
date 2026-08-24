@@ -1,0 +1,4 @@
+headers = mobile_client.h
+headerFilter = mobile_client.h
+package = mobile_client
+compilerOpts = -I../../../../crates/mobile-client/include
