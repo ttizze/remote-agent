@@ -20,7 +20,7 @@ class MobileControllerTest {
     @Test
     fun connect_subscribes_lists_and_refreshes_the_selected_thread() {
         val gateway = FakeHostGateway().apply {
-            readResult = ThreadReadResult(thread, emptyList())
+            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
         }
         val controller = controller(gateway, selectedThreadId = "thread-1")
 
@@ -36,7 +36,7 @@ class MobileControllerTest {
     @Test
     fun events_during_read_are_applied_after_snapshot_and_other_threads_do_not_mix() {
         val gateway = FakeHostGateway().apply {
-            readResult = ThreadReadResult(thread, emptyList())
+            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
             listResult = GatewayResult.Success(listOf(thread.summary))
         }
         val controller = controller(gateway)
@@ -75,7 +75,7 @@ class MobileControllerTest {
     @Test
     fun read_buffer_overflow_surfaces_a_retryable_failure() {
         val gateway = FakeHostGateway().apply {
-            readResult = ThreadReadResult(thread, emptyList())
+            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
         }
         val controller = controller(
             gateway,
@@ -163,9 +163,7 @@ class MobileControllerTest {
     private class FakeHostGateway : HostGateway {
         var connectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var listResult: GatewayResult<List<ThreadSummary>> = GatewayResult.Success(emptyList())
-        var readResult: GatewayResult<ThreadReadResult> = GatewayResult.Success(
-            ThreadReadResult(ThreadSnapshot(summary("default")), emptyList()),
-        )
+        var readResult: GatewayResult<ThreadReadResult> = GatewayResult.Failure("not configured")
         var startResult: GatewayResult<ThreadSnapshot> = GatewayResult.Failure("not configured")
         var turnResult: GatewayResult<String> = GatewayResult.Success("turn-1")
         var interruptResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
