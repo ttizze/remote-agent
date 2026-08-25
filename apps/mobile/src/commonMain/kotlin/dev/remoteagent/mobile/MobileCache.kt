@@ -2,7 +2,7 @@ package dev.remoteagent.mobile
 
 /** Limits are local-device bounds, never a statement about Codex history retention. */
 data class MobileCacheLimits(
-    val maxThreads: Int = 5,
+    val maxThreads: Int = 20,
     val maxTurnsPerThread: Int = 10,
     val maxApproximateBytes: Int = 512 * 1024,
 ) {
@@ -116,11 +116,16 @@ private fun MobileCache.bounded(limits: MobileCacheLimits): MobileCache {
 
 private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobileCache {
     val projects = projects.distinctBy { it.id }.sortedBy { it.position }
-    val list = threadList.asReversed().distinctBy { it.id }.take(limits.maxThreads).asReversed()
-    val allowed = list.mapTo(mutableSetOf()) { it.id }
-    val snapshots = snapshots.filterKeys { it in allowed }.values
-        .sortedByDescending { it.summary.updatedAtMs }
+    val list = threadList
+        .groupBy { it.id }
+        .values
+        .map { summaries -> summaries.maxBy { it.updatedAtMs } }
+        .sortedByDescending { it.updatedAtMs }
         .take(limits.maxThreads)
+    val allowed = list.mapTo(mutableSetOf()) { it.id }
+    val snapshots = snapshots
+        .filterKeys { it in allowed }
+        .values
         .associate { it.summary.id to it.bounded(limits) }
     return ProfileMobileCache(
         projects = projects,

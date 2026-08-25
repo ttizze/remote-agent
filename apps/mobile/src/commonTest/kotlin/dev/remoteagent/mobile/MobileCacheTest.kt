@@ -51,15 +51,32 @@ class MobileCacheTest {
     }
 
     @Test
-    fun default_limits_keep_the_latest_five_threads() {
-        val summaries = (1..6).map { summary("thread-$it", updatedAtMs = it.toLong()) }
+    fun default_limits_keep_the_latest_twenty_threads_in_newest_first_order() {
+        val summaries = (1..21).map { summary("thread-$it", updatedAtMs = it.toLong()) }
 
         val cache = reconcileThreadList(MobileCache(), "host-1", summaries, MobileCacheLimits())
 
         assertEquals(
-            listOf("thread-2", "thread-3", "thread-4", "thread-5", "thread-6"),
+            (21 downTo 2).map { "thread-$it" },
             cache.profile("host-1").threadList.map { it.id },
         )
+    }
+
+    @Test
+    fun thread_list_is_sorted_by_updated_at_and_duplicate_ids_keep_the_newest_summary() {
+        val stale = summary("thread-1", updatedAtMs = 1).copy(preview = "stale")
+        val newest = summary("thread-1", updatedAtMs = 5).copy(preview = "newest")
+        val summaries = listOf(
+            summary("thread-3", updatedAtMs = 3),
+            stale,
+            summary("thread-2", updatedAtMs = 2),
+            newest,
+        )
+
+        val cache = reconcileThreadList(MobileCache(), "host-1", summaries, MobileCacheLimits(maxThreads = 3))
+
+        assertEquals(listOf("thread-1", "thread-3", "thread-2"), cache.profile("host-1").threadList.map { it.id })
+        assertEquals("newest", cache.profile("host-1").threadList.first().preview)
     }
 
     @Test
@@ -130,7 +147,7 @@ class MobileCacheTest {
         cache = reconcileThreadRead(cache, "host-b", ThreadReadResult(ThreadSnapshot(summary("other"), emptyList()), emptyList()), limits)
 
         val hostA = cache.profile("host-a")
-        assertEquals(listOf("two", "three"), hostA.threadList.map { it.id })
+        assertEquals(listOf("three", "two"), hostA.threadList.map { it.id })
         assertFalse("one" in hostA.snapshots)
         assertEquals(listOf("other"), cache.profile("host-b").threadList.map { it.id })
         assertEquals(setOf("other"), cache.profile("host-b").snapshots.keys)
