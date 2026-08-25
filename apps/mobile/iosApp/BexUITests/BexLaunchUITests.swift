@@ -62,18 +62,50 @@ final class BexLaunchUITests: XCTestCase {
         let taskList = app.descendants(matching: .any)["tasks.list"]
         XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Task list did not appear after connecting")
 
-        let taskOutcome = app
-            .descendants(matching: .any)
-            .matching(NSPredicate(
-                format: "identifier == %@ OR identifier BEGINSWITH %@",
-                "tasks.empty",
-                "tasks.row.",
-            ))
-            .firstMatch
         let notice = app.staticTexts["notice"]
+        let firstTask = app
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row."))
+            .firstMatch
         XCTAssertTrue(
-            taskOutcome.waitForExistence(timeout: 30),
-            "Neither an existing task row nor the empty state appeared; notice: \(notice.exists ? notice.label : "(none)")",
+            firstTask.waitForExistence(timeout: 30),
+            "No task row appeared in the task list; notice: \(notice.exists ? notice.label : "(none)")",
+        )
+        firstTask.tap()
+
+        let taskDetail = app.descendants(matching: .any)["task.detail"]
+        XCTAssertTrue(
+            taskDetail.waitForExistence(timeout: 30),
+            "Task detail content did not appear; notice: \(notice.exists ? notice.label : "(none)")",
+        )
+
+        let loadingText = app.staticTexts["タスクを読み込み中…"]
+        let loadingFinished = expectation(
+            for: NSPredicate(format: "exists == false"),
+            evaluatedWith: loadingText,
+        )
+        let loadingResult = XCTWaiter.wait(for: [loadingFinished], timeout: 30)
+        XCTAssertTrue(loadingResult == .completed, "Task detail remained on the loading screen")
+
+        let detailMetrics = taskDetail.value as? String ?? "(unavailable)"
+        let firstItem = app
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "item."))
+            .firstMatch
+        XCTAssertTrue(
+            firstItem.waitForExistence(timeout: 30),
+            "No rendered task item appeared; detail=\(detailMetrics)",
+        )
+
+        let backButton = app.buttons["task.back"]
+        let composer = app.descendants(matching: .any)["task.message"]
+        XCTAssertTrue(
+            composer.exists && composer.isHittable,
+            "Task composer was not visible and hittable after task detail loaded; detail=\(detailMetrics)",
+        )
+        XCTAssertTrue(
+            backButton.exists && backButton.isHittable,
+            "Task back button was not visible and hittable after task detail loaded; detail=\(detailMetrics)",
         )
     }
 
@@ -110,6 +142,12 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(firstTask.waitForExistence(timeout: 30), "No task row appeared in the task list")
         firstTask.tap()
 
+        let taskDetail = app.descendants(matching: .any)["task.detail"]
+        XCTAssertTrue(
+            taskDetail.waitForExistence(timeout: 30),
+            "Task detail content did not appear; notice: \(connectionNotice.exists ? connectionNotice.label : "(none)")",
+        )
+
         let loadingText = app.staticTexts["タスクを読み込み中…"]
         let loadingFinished = expectation(
             for: NSPredicate(format: "exists == false"),
@@ -122,7 +160,25 @@ final class BexLaunchUITests: XCTestCase {
             "Task detail remained on the loading screen",
         )
 
-        XCTAssertTrue(backButton.waitForExistence(timeout: 30), "Task back button did not appear")
+        let detailMetrics = taskDetail.value as? String ?? "(unavailable)"
+        let firstItem = app
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "item."))
+            .firstMatch
+        XCTAssertTrue(
+            firstItem.waitForExistence(timeout: 30),
+            "No rendered task item appeared; detail=\(detailMetrics)",
+        )
+
+        let composer = app.descendants(matching: .any)["task.message"]
+        XCTAssertTrue(
+            composer.exists && composer.isHittable,
+            "Task composer was not visible and hittable after task detail loaded; detail=\(detailMetrics)",
+        )
+        XCTAssertTrue(
+            backButton.exists && backButton.isHittable,
+            "Task back button was not visible and hittable after task detail loaded; detail=\(detailMetrics)",
+        )
         backButton.tap()
 
         XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Task list did not reappear after returning")

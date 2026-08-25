@@ -549,8 +549,17 @@ private struct ThreadScreen: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(thread.turns, id: \.id) { turn in
-                                TurnCard(turn: turn, interruptingTurnId: state.interruptingTurnId, interrupt: model.interrupt)
+                            ForEach(detailRows) { row in
+                                switch row {
+                                case let .turnHeader(_, turn):
+                                    ThreadTurnHeader(
+                                        turn: turn,
+                                        interruptingTurnId: state.interruptingTurnId,
+                                        interrupt: model.interrupt
+                                    )
+                                case let .item(_, _, item):
+                                    ThreadItemRow(item: item)
+                                }
                             }
                             Color.clear
                                 .frame(height: 1)
@@ -585,6 +594,10 @@ private struct ThreadScreen: View {
                             proxy.scrollTo(latestMarker, anchor: .bottom)
                         }
                     }
+                    .accessibilityIdentifier("task.detail")
+                    .accessibilityValue(
+                        "turns=\(thread.turns.count);items=\(thread.turns.reduce(0) { $0 + $1.items.count })"
+                    )
                 }
             } else {
                 ProgressView("タスクを読み込み中…")
@@ -616,6 +629,19 @@ private struct ThreadScreen: View {
             }
         }
     }
+
+    private var detailRows: [ThreadDetailRow] {
+        guard let thread = state.selectedThread else { return [] }
+
+        var rows: [ThreadDetailRow] = []
+        for (turnIndex, turn) in thread.turns.enumerated() {
+            rows.append(.turnHeader(turnIndex: turnIndex, turn: turn))
+            for (itemIndex, item) in turn.items.enumerated() {
+                rows.append(.item(turnIndex: turnIndex, itemIndex: itemIndex, item: item))
+            }
+        }
+        return rows
+    }
 }
 
 private struct ScrollViewportPreferenceKey: PreferenceKey {
@@ -628,38 +654,55 @@ private struct LatestMarkerPreferenceKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-private struct TurnCard: View {
+private enum ThreadDetailRow: Identifiable {
+    case turnHeader(turnIndex: Int, turn: IosTurnView)
+    case item(turnIndex: Int, itemIndex: Int, item: IosItemView)
+
+    var id: String {
+        switch self {
+        case let .turnHeader(turnIndex, _):
+            return "turn-\(turnIndex)-header"
+        case let .item(turnIndex, itemIndex, _):
+            return "turn-\(turnIndex)-item-\(itemIndex)"
+        }
+    }
+}
+
+private struct ThreadTurnHeader: View {
     let turn: IosTurnView
     let interruptingTurnId: String?
     let interrupt: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(turn.status).font(.caption).foregroundColor(.secondary)
-                Spacer()
-                if turn.isInProgress {
-                    Button(interruptingTurnId == turn.id ? "停止中…" : "停止") { interrupt(turn.id) }
-                        .disabled(interruptingTurnId == turn.id)
-                        .accessibilityIdentifier("turn.interrupt.\(turn.id)")
-                }
-            }
-            ForEach(turn.items, id: \.id) { item in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.title).font(.subheadline.weight(.semibold))
-                    Text(item.body).font(.body).textSelection(.enabled)
-                }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(item.kind == "user" ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.10))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .accessibilityIdentifier("item.\(item.id)")
+        HStack {
+            Text(turn.status).font(.caption).foregroundColor(.secondary)
+            Spacer()
+            if turn.isInProgress {
+                Button(interruptingTurnId == turn.id ? "停止中…" : "停止") { interrupt(turn.id) }
+                    .disabled(interruptingTurnId == turn.id)
+                    .accessibilityIdentifier("turn.interrupt.\(turn.id)")
             }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(UIColor.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct ThreadItemRow: View {
+    let item: IosItemView
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(item.title).font(.subheadline.weight(.semibold))
+            Text(item.body).font(.body).textSelection(.enabled)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(item.kind == "user" ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("item.\(item.id)")
     }
 }
 
