@@ -173,19 +173,11 @@ internal class MobileController(
                             return@withHostConnection
                         }
 
-                        // A reconnect must never leave the user looking at an old
-                        // list. Loading the list first also restores the list screen
-                        // for a profile that had no selected thread.
-                        val selectedThreadId = state.profileViews[profile.hostIdentity]?.selectedThreadId
+                        // A reconnect always opens the task list. ConnectSucceeded
+                        // clears any durable detail selection before these fresh
+                        // list reads; a thread is read only after an explicit tap.
                         listProjects(profile, generation)
                         listThreads(profile, generation)
-                        if (
-                            sessions.isCurrent(profile.hostIdentity, generation) &&
-                                state.profileViews[profile.hostIdentity]?.threadList == LoadPhase.Ready &&
-                                selectedThreadId != null
-                        ) {
-                            readThread(profile, selectedThreadId, generation)
-                        }
                     }
                 }
             } catch (cancelled: CancellationException) {

@@ -133,6 +133,7 @@ fun reduce(
             connection = ConnectionPhase.Connected,
             projectList = LoadPhase.Idle,
             threadList = LoadPhase.Idle,
+            selectedThreadId = null,
             threadDetail = LoadPhase.Idle,
             notice = null,
         )

@@ -148,9 +148,9 @@ The Mobile Client presents Manual Edit and AI Edit as distinct actions. A Manual
 
 ## Reconnection
 
-For a selected thread, the Mobile Client consumes the raw notification stream and uses `host/thread/read` with `includeTurns` to obtain the latest 10 App Server Turns plus current Desktop Project membership without loading a writer. The Host trims only this Mobile read projection; live `turn/*` and `item/*` events continue to stream without translation. Immediately before starting a later Turn, it calls native `thread/resume` with that thread's working directory, followed by `turn/start`. It projects returned Codex objects into its UI cache while retaining unknown notifications and Item kinds as raw JSON. The Host Daemon does not synthesize a durable Snapshot.
+On every connection, the Mobile Client loads the Project and Thread lists and opens the task list; it does not restore a durable detail selection automatically. Opening a thread uses `host/thread/read` with `includeTurns` to obtain the latest 10 App Server Turns plus current Desktop Project membership without loading a writer. The Host trims only this Mobile read projection; live `turn/*` and `item/*` events continue to stream without translation. Immediately before starting a later Turn, it calls native `thread/resume` with that thread's working directory, followed by `turn/start`. It projects returned Codex objects into its UI cache while retaining unknown notifications and Item kinds as raw JSON. The Host Daemon does not synthesize a durable Snapshot.
 
-No event cursor is persisted. A new transport connection always performs synchronization from Codex.
+No event cursor is persisted. A new transport connection always performs Project and Thread list synchronization from Codex; a detail Snapshot is fetched only after the user opens a Thread.
 
 ## Milestones and acceptance criteria
 

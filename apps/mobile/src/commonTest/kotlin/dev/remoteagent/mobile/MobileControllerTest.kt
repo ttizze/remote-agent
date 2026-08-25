@@ -30,20 +30,18 @@ class MobileControllerTest {
     private val thread = snapshot("thread-1")
 
     @Test
-    fun connect_subscribes_lists_and_refreshes_the_selected_thread() {
-        val gateway = FakeHostGateway().apply {
-            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
-        }
+    fun connect_loads_lists_and_returns_to_task_list_when_selection_was_persisted() {
+        val gateway = FakeHostGateway()
         val controller = controller(gateway, selectedThreadId = "thread-1")
 
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
 
         assertEquals(1, gateway.projectListCalls)
         assertEquals(listOf(""), gateway.listCwds)
-        assertEquals(listOf("thread-1"), gateway.readIds)
+        assertEquals(emptyList(), gateway.readIds)
         assertIs<LoadPhase.Ready>(controller.state.selectedView.threadList)
-        assertIs<LoadPhase.Ready>(controller.state.selectedView.threadDetail)
-        assertEquals(thread, controller.state.cache.snapshot(profile.hostIdentity, "thread-1"))
+        assertNull(controller.state.selectedView.selectedThreadId)
+        assertIs<LoadPhase.Idle>(controller.state.selectedView.threadDetail)
     }
 
     @Test
@@ -93,6 +91,7 @@ class MobileControllerTest {
         }
         val controller = controller(gateway, selectedThreadId = "thread-1", cachedThread = initial)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        runSuspend { controller.readThread(profile, "thread-1") }
 
         gateway.emit(notification("turn/started", """
             {"threadId":"thread-1","turn":{"id":"turn-external","status":"inProgress"}}
@@ -233,6 +232,7 @@ class MobileControllerTest {
         }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        runSuspend { controller.readThread(profile, "thread-1") }
         gateway.readResult = GatewayResult.Success(ThreadReadResult(refreshed, emptyList()))
         gateway.readIds.clear()
 
@@ -257,6 +257,7 @@ class MobileControllerTest {
         }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        runSuspend { controller.readThread(profile, "thread-1") }
         gateway.readIds.clear()
         gateway.turnHook = {
             controller.dispatch(AppAction.ThreadListOpened(profile.hostIdentity))

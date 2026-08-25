@@ -107,6 +107,30 @@ final class BexLaunchUITests: XCTestCase {
             backButton.exists && backButton.isHittable,
             "Task back button was not visible and hittable after task detail loaded; detail=\(detailMetrics)",
         )
+
+        app.terminate()
+        app.launch()
+
+        let reconnectButton = app.buttons["connect.start"]
+        let reconnectTaskList = app.descendants(matching: .any)["tasks.list"]
+        let reconnectTaskDetail = app.descendants(matching: .any)["task.detail"]
+        let reconnectReady = expectation(
+            for: NSPredicate { _, _ in reconnectTaskList.exists || reconnectButton.exists },
+            evaluatedWith: app,
+        )
+        let reconnectResult = XCTWaiter.wait(for: [reconnectReady], timeout: 30)
+        XCTAssertTrue(
+            reconnectResult == .completed,
+            "Neither task list nor connect button appeared after relaunch; task.detail.exists=\(reconnectTaskDetail.exists); notice: \(notice.exists ? notice.label : "(none)")",
+        )
+        if !reconnectTaskList.exists {
+            reconnectButton.tap()
+        }
+        XCTAssertTrue(
+            reconnectTaskList.waitForExistence(timeout: 30),
+            "Task list did not appear after reconnect; task.detail.exists=\(reconnectTaskDetail.exists); notice: \(notice.exists ? notice.label : "(none)")",
+        )
+        XCTAssertFalse(reconnectTaskDetail.exists, "Reconnect restored task detail instead of the task list")
     }
 
     func testOpeningTaskAndReturningShowsTaskList() {
@@ -115,25 +139,26 @@ final class BexLaunchUITests: XCTestCase {
         app.launch()
 
         let connectButton = app.buttons["connect.start"]
-        let connectReady = connectButton.waitForExistence(timeout: 30)
-        let connectionNotice = app.staticTexts["notice"]
-        let connectionFailure = connectionNotice.exists ? connectionNotice.label : "(none)"
-        XCTAssertTrue(
-            connectReady,
-            "Connect button did not appear; notice: \(connectionFailure)",
-        )
-        connectButton.tap()
-
         let taskList = app.descendants(matching: .any)["tasks.list"]
-        let backButton = app.buttons["task.back"]
-        if !taskList.waitForExistence(timeout: 3) {
-            XCTAssertTrue(
-                backButton.waitForExistence(timeout: 30),
-                "Neither the task list nor the persisted task detail appeared after connecting; notice: \(connectionNotice.exists ? connectionNotice.label : "(none)")",
-            )
-            backButton.tap()
+        let taskDetail = app.descendants(matching: .any)["task.detail"]
+        let connectionNotice = app.staticTexts["notice"]
+        let connectionReady = expectation(
+            for: NSPredicate { _, _ in taskList.exists || connectButton.exists },
+            evaluatedWith: app,
+        )
+        let connectionResult = XCTWaiter.wait(for: [connectionReady], timeout: 30)
+        XCTAssertTrue(
+            connectionResult == .completed,
+            "Neither task list nor connect button appeared after launch; task.detail.exists=\(taskDetail.exists); notice: \(connectionNotice.exists ? connectionNotice.label : "(none)")",
+        )
+        if !taskList.exists {
+            connectButton.tap()
         }
-        XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Task list did not appear after connecting")
+        XCTAssertTrue(
+            taskList.waitForExistence(timeout: 30),
+            "Task list did not appear after launch/connect; task.detail.exists=\(taskDetail.exists); notice: \(connectionNotice.exists ? connectionNotice.label : "(none)")",
+        )
+        XCTAssertFalse(taskDetail.exists, "Launch/connect restored task detail instead of the task list")
 
         let firstTask = app
             .descendants(matching: .any)
@@ -142,7 +167,6 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(firstTask.waitForExistence(timeout: 30), "No task row appeared in the task list")
         firstTask.tap()
 
-        let taskDetail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(
             taskDetail.waitForExistence(timeout: 30),
             "Task detail content did not appear; notice: \(connectionNotice.exists ? connectionNotice.label : "(none)")",
@@ -170,6 +194,7 @@ final class BexLaunchUITests: XCTestCase {
             "No rendered task item appeared; detail=\(detailMetrics)",
         )
 
+        let backButton = app.buttons["task.back"]
         let composer = app.descendants(matching: .any)["task.message"]
         XCTAssertTrue(
             composer.exists && composer.isHittable,
