@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -25,9 +26,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -426,7 +429,28 @@ private fun ThreadDetailScreen(
     modifier: Modifier,
 ) {
     var composer by remember(profile.hostIdentity, view.selectedThreadId) { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    var followingLatest by remember(profile.hostIdentity, view.selectedThreadId) { mutableStateOf(true) }
+    val contentVersion = snapshot?.turns?.joinToString("|") { turn ->
+        val items = turn.items.joinToString(",") { "${it.id}:${it.displayText().length}" }
+        "${turn.id}:${turn.status}:$items"
+    }.orEmpty()
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val layout = listState.layoutInfo
+            listState.isScrollInProgress to
+                (layout.visibleItemsInfo.lastOrNull()?.index == layout.totalItemsCount - 1)
+        }.collect { (isScrolling, isAtBottom) ->
+            if (isScrolling) followingLatest = isAtBottom
+        }
+    }
+    LaunchedEffect(contentVersion) {
+        if (followingLatest) {
+            listState.scrollToItem((snapshot?.turns?.size ?: 0) + 1)
+        }
+    }
     LazyColumn(
+        state = listState,
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),

@@ -54,16 +54,6 @@ impl PairingToken {
             })?;
         Ok(Self(bytes))
     }
-
-    /// Alias for callers that prefer an explicit encoding verb.
-    pub fn encode_base64url(&self) -> String {
-        self.to_base64url()
-    }
-
-    /// Alias for callers that prefer an explicit decoding verb.
-    pub fn decode_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
-        Self::from_base64url(encoded)
-    }
 }
 
 impl fmt::Debug for PairingToken {
@@ -122,16 +112,6 @@ impl Ed25519PublicKey {
                 actual,
             })?;
         Ok(Self(bytes))
-    }
-
-    /// Alias for callers that prefer an explicit encoding verb.
-    pub fn encode_base64url(&self) -> String {
-        self.to_base64url()
-    }
-
-    /// Alias for callers that prefer an explicit decoding verb.
-    pub fn decode_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
-        Self::from_base64url(encoded)
     }
 }
 

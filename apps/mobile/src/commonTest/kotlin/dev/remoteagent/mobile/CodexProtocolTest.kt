@@ -54,9 +54,9 @@ class CodexProtocolTest {
     }
 
     @Test
-    fun thread_status_accepts_string_and_completed_status_prefers_nested_turn_status() {
+    fun thread_status_uses_the_current_status_object_and_completed_status_uses_nested_turn_status() {
         val summary = codexThreadSummary(json.parseToJsonElement("""
-            {"id":"thread-1","status":"active","cwd":"/workspace","projectId":"project-1"}
+            {"id":"thread-1","status":{"type":"active","activeFlags":[]},"cwd":"/workspace","projectId":"project-1"}
         """))
         assertIs<ThreadStatus.Active>(summary.status)
         assertEquals("project-1", summary.projectId)
@@ -64,11 +64,35 @@ class CodexProtocolTest {
         val event = codexThreadEvent(
             "turn/completed",
             json.parseToJsonElement("""
-                {"threadId":"thread-1","turnId":"turn-1","status":"completed",
-                 "turn":{"status":"interrupted"}}
+                {"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}
             """),
         )
         assertEquals(TurnStatus.Interrupted, assertIs<ThreadEvent.TurnCompleted>(event).status)
+    }
+
+    @Test
+    fun current_wrappers_fields_and_file_change_kind_are_projected() {
+        val snapshot = codexThreadFromResponse(json.parseToJsonElement("""
+            {"thread":{"id":"thread-1","cwd":"/workspace","createdAt":11,"updatedAt":13,
+             "turns":[{"id":"turn-1","status":"inProgress","items":[
+                 {"type":"commandExecution","id":"command-1","aggregatedOutput":"build output","status":"declined"},
+                 {"type":"fileChange","id":"file-1","status":"completed","changes":[
+                     {"path":"Main.swift","kind":{"type":"delete","move_path":null},"diff":"-old"}
+                 ]}
+             ]}]}}
+        """))
+
+        assertEquals("/workspace", snapshot.summary.workingDirectory.path)
+        assertEquals(11, snapshot.summary.createdAtMs)
+        assertEquals(13, snapshot.summary.updatedAtMs)
+        assertEquals("turn-1", snapshot.turns.single().id)
+        assertEquals(TurnStatus.InProgress, snapshot.turns.single().status)
+        val command = assertIs<CodexItem.CommandExecution>(snapshot.turns.single().items[0])
+        assertEquals("build output", command.output)
+        assertEquals(CommandExecutionStatus.Declined, command.status)
+        val file = assertIs<CodexItem.FileChange>(snapshot.turns.single().items[1])
+        assertEquals(FileUpdateKind.Delete, file.changes.single().kind)
+        assertEquals("-old", file.changes.single().diff)
     }
 
     @Test
@@ -92,6 +116,10 @@ class CodexProtocolTest {
                 {"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"summary"}
             """),
         )
-        assertIs<ThreadEvent.ReasoningSummaryDelta>(event)
+        val summary = assertIs<ThreadEvent.ReasoningSummaryDelta>(event)
+        assertEquals("thread-1", summary.threadId)
+        assertEquals("turn-1", summary.turnId)
+        assertEquals("item-1", summary.itemId)
+        assertEquals("summary", summary.delta)
     }
 }

@@ -147,7 +147,7 @@ impl CodexRpcService {
         }
         self.inner
             .app_server
-            .notify_raw(&line)
+            .send_raw(&line)
             .await
             .map_err(|error| DispatchError::Upstream(Box::new(error)))
     }
@@ -176,7 +176,7 @@ impl CodexRpcService {
             .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
         self.inner
             .app_server
-            .respond_raw(&upstream_line)
+            .send_raw(&upstream_line)
             .await
             .map_err(|error| DispatchError::Upstream(Box::new(error)))?;
         Ok(ResponseDisposition::Accepted)

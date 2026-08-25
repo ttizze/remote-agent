@@ -4,7 +4,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -73,11 +72,7 @@ object MobileStateCodec {
         bytes: ByteArray,
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
     ): MobileStateDecodeResult<AppState> = when (val envelope = readEnvelope(bytes, AppStateKind)) {
-        is MobileStateDecodeResult.Failure -> if (envelope.reason == MobileStateDecodeReason.Corrupt) {
-            decodeLegacyAppState(bytes, cacheLimits)
-        } else {
-            envelope
-        }
+        is MobileStateDecodeResult.Failure -> envelope
         is MobileStateDecodeResult.Success -> decodePayload<PersistedAppState, AppState>(envelope.value.payload) {
             it.toAppState(cacheLimits)
         }
@@ -88,11 +83,7 @@ object MobileStateCodec {
         bytes: ByteArray,
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
     ): MobileStateDecodeResult<MobileCache> = when (val envelope = readEnvelope(bytes, CacheKind)) {
-        is MobileStateDecodeResult.Failure -> if (envelope.reason == MobileStateDecodeReason.Corrupt) {
-            decodeLegacyCache(bytes, cacheLimits)
-        } else {
-            envelope
-        }
+        is MobileStateDecodeResult.Failure -> envelope
         is MobileStateDecodeResult.Success -> decodePayload<PersistedMobileCache, MobileCache>(envelope.value.payload) {
             it.toMobileCache(cacheLimits)
         }
@@ -172,269 +163,7 @@ object MobileStateCodec {
     private const val CacheKind = "mobileCache"
 }
 
-/*
- * Legacy migration
- * ----------------
- *
- * Before the common codec existed Android wrote a hand-shaped JSON object
- * (`version = 1`) while iOS wrote the Kotlin serialization shape (no version
- * field).  The two forms deliberately share the same top-level concepts, so
- * migration stays here instead of leaking platform-specific parsers back into
- * the repositories.
- */
-
-private fun decodeLegacyAppState(
-    bytes: ByteArray,
-    cacheLimits: MobileCacheLimits,
-): MobileStateDecodeResult<AppState> {
-    val root = parseRootForLegacy(bytes)
-        ?: return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    if (root["profiles"] !is JsonArray) {
-        return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    }
-
-    return try {
-        val profiles = (root["profiles"] as JsonArray)
-            .mapNotNull(::parseLegacyHostProfile)
-            .distinctBy { it.hostIdentity }
-        val profileIds = profiles.mapTo(mutableSetOf()) { it.hostIdentity }
-        val views = profiles.associate { profile ->
-            val view = root.childObject("views")?.childObject(profile.hostIdentity)
-            profile.hostIdentity to ProfileViewState(
-                connection = ConnectionPhase.Disconnected,
-                workingDirectoryPath = view?.string("workingDirectoryPath").orEmpty(),
-                threadList = LoadPhase.Idle,
-                selectedThreadId = view?.string("selectedThreadId")?.takeIf { it.isNotBlank() },
-                threadDetail = LoadPhase.Idle,
-            )
-        }
-        AppState(
-            profiles = profiles,
-            selectedProfileId = root.string("selectedProfileId")?.takeIf { it in profileIds },
-            profileViews = views,
-            cache = parseLegacyCache(root.childObject("cache"), cacheLimits),
-            showingPairing = false,
-            pairingError = null,
-        ).let { MobileStateDecodeResult.Success(it) }
-    } catch (_: IllegalArgumentException) {
-        MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    } catch (_: IllegalStateException) {
-        MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    }
-}
-
-private fun decodeLegacyCache(
-    bytes: ByteArray,
-    cacheLimits: MobileCacheLimits,
-): MobileStateDecodeResult<MobileCache> {
-    val root = parseRootForLegacy(bytes)
-        ?: return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    val cache = root.childObject("cache")
-        ?: return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    return try {
-        MobileStateDecodeResult.Success(parseLegacyCache(cache, cacheLimits))
-    } catch (_: IllegalArgumentException) {
-        MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    } catch (_: IllegalStateException) {
-        MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    }
-}
-
-private fun parseRootForLegacy(bytes: ByteArray): JsonObject? {
-    if (bytes.size > MobileStateCodec.MaxInputBytes) return null
-    return try {
-        codecJson.parseToJsonElement(bytes.decodeToString()) as? JsonObject
-    } catch (_: SerializationException) {
-        null
-    } catch (_: IllegalArgumentException) {
-        null
-    }
-}
-
-private fun parseLegacyHostProfile(value: JsonElement): HostProfile? {
-    val raw = value.asObjectOrNull() ?: return null
-    val hostIdentity = raw.string("hostIdentity")?.takeIf { it.isNotBlank() } ?: return null
-    val deviceIdentityReference = raw.string("deviceIdentityReference")?.takeIf { it.isNotBlank() } ?: return null
-    return HostProfile(
-        hostIdentity = hostIdentity,
-        name = raw.string("name") ?: hostIdentity,
-        addresses = raw.array("addresses").orEmpty().mapNotNull(JsonElement::stringOrNull).filter(String::isNotBlank).distinct(),
-        deviceIdentityReference = deviceIdentityReference,
-    )
-}
-
-private fun parseLegacyCache(
-    cache: JsonObject?,
-    limits: MobileCacheLimits,
-): MobileCache {
-    if (cache == null) return MobileCache()
-    val decoded = MobileCache(
-        profiles = cache.mapValues { (_, value) -> parseLegacyProfileCache(value) },
-    )
-    return decoded.applyCacheLimits(limits)
-}
-
-private fun parseLegacyProfileCache(value: JsonElement): ProfileMobileCache {
-    val raw = value.asObjectOrNull() ?: return ProfileMobileCache()
-    val threadList = raw.array("threadList").orEmpty().mapNotNull(::parseLegacyThreadSummary)
-    val snapshots = raw["snapshots"].legacyValues()
-        .mapNotNull(::parseLegacyThreadSnapshot)
-        .associateBy { it.summary.id }
-    val unknownEvents = raw.array("unknownEvents").orEmpty().mapNotNull(::parseLegacyUnknownEvent)
-    return ProfileMobileCache(
-        threadList = threadList,
-        snapshots = snapshots,
-        unknownEvents = unknownEvents,
-        // Raw messages are transport-lifetime data and were never part of the
-        // durable Android/iOS contracts.
-        rawMessages = emptyList(),
-    )
-}
-
-private fun JsonElement?.legacyValues(): List<JsonElement> = when (this) {
-    is JsonArray -> this
-    is JsonObject -> values.toList()
-    else -> emptyList()
-}
-
-private fun parseLegacyThreadSummary(value: JsonElement): ThreadSummary? {
-    val raw = value.asObjectOrNull() ?: return null
-    val id = raw.string("id")?.takeIf { it.isNotBlank() } ?: return null
-    val workingDirectory = when (val value = raw["workingDirectory"]) {
-        is JsonObject -> value.string("path").orEmpty()
-        null -> ""
-        else -> value.stringOrNull().orEmpty()
-    }
-    return ThreadSummary(
-        id = id,
-        name = raw.string("name"),
-        preview = raw.string("preview").orEmpty(),
-        workingDirectory = WorkingDirectory(workingDirectory),
-        createdAtMs = raw.long("createdAtMs") ?: raw.long("createdAt") ?: 0L,
-        updatedAtMs = raw.long("updatedAtMs") ?: raw.long("updatedAt") ?: 0L,
-        status = parseLegacyThreadStatus(raw["status"]),
-        raw = raw.childObject("raw"),
-    )
-}
-
-private fun parseLegacyThreadSnapshot(value: JsonElement): ThreadSnapshot? {
-    val raw = value.asObjectOrNull() ?: return null
-    val summary = raw.childObject("summary")?.let(::parseLegacyThreadSummary) ?: return null
-    return ThreadSnapshot(
-        summary = summary,
-        turns = raw.array("turns").orEmpty().mapNotNull(::parseLegacyTurn),
-        raw = raw.childObject("raw"),
-    )
-}
-
-private fun parseLegacyTurn(value: JsonElement): CodexTurn? {
-    val raw = value.asObjectOrNull() ?: return null
-    val id = raw.string("id")?.takeIf { it.isNotBlank() } ?: return null
-    return CodexTurn(
-        id = id,
-        status = parseLegacyTurnStatus(raw["status"]),
-        items = raw.array("items").orEmpty().mapNotNull(::parseLegacyItem),
-        raw = raw.childObject("raw"),
-    )
-}
-
-private fun parseLegacyItem(value: JsonElement): CodexItem? {
-    val raw = value.asObjectOrNull() ?: return null
-    val id = raw.string("id").orEmpty()
-    return when (raw.string("type").legacyType()) {
-        "usermessage" -> CodexItem.UserMessage(id, raw.textLike())
-        "agentmessage" -> CodexItem.AgentMessage(id, raw.textLike())
-        "reasoning" -> CodexItem.Reasoning(id, raw.textLike())
-        "commandexecution" -> CodexItem.CommandExecution(
-            id = id,
-            command = raw.string("command").orEmpty(),
-            cwd = raw.string("cwd"),
-            output = raw.string("output").orEmpty(),
-            status = parseLegacyCommandStatus(raw["status"]),
-            exitCode = raw.long("exitCode")?.toInt(),
-        )
-        "filechange" -> CodexItem.FileChange(
-            id = id,
-            changes = raw.array("changes").orEmpty().mapNotNull(::parseLegacyFileChange),
-            status = parseLegacyFileChangeStatus(raw["status"]),
-        )
-        "unknown" -> CodexItem.Unknown(
-            id = id,
-            codexType = raw.string("codexType") ?: raw.string("type") ?: "unknown",
-            raw = raw.childObject("raw") ?: raw,
-        )
-        else -> CodexItem.Unknown(
-            id = id,
-            codexType = raw.string("type") ?: "unknown",
-            raw = raw,
-        )
-    }
-}
-
-private fun parseLegacyFileChange(value: JsonElement): FileUpdateChange? {
-    val raw = value.asObjectOrNull() ?: return null
-    return FileUpdateChange(
-        path = raw.string("path").orEmpty(),
-        kind = parseLegacyFileUpdateKind(raw["kind"] ?: raw["type"]),
-        diff = raw.string("diff") ?: raw.string("patch").orEmpty(),
-    )
-}
-
-private fun parseLegacyUnknownEvent(value: JsonElement): ThreadEvent.Unknown? {
-    val raw = value.asObjectOrNull() ?: return null
-    return ThreadEvent.Unknown(
-        threadId = raw.string("threadId").orEmpty(),
-        turnId = raw.string("turnId").orEmpty(),
-        method = raw.string("method") ?: "unknown",
-        raw = raw.childObject("raw") ?: raw,
-        extensions = raw.childObject("extensions") ?: JsonObject(emptyMap()),
-    )
-}
-
-private fun parseLegacyThreadStatus(value: JsonElement?): ThreadStatus {
-    val raw = value?.asObjectOrNull()
-    return when ((raw?.string("type") ?: value?.stringOrNull()).legacyType()) {
-        "active", "inprogress", "running" -> ThreadStatus.Active(
-            raw?.array("activeFlags").orEmpty().mapNotNull(JsonElement::stringOrNull),
-        )
-        "notloaded" -> ThreadStatus.NotLoaded
-        "systemerror", "error" -> ThreadStatus.SystemError
-        else -> ThreadStatus.Idle
-    }
-}
-
-private fun parseLegacyTurnStatus(value: JsonElement?): TurnStatus = when (value.legacyType()) {
-    "inprogress", "started", "active", "running" -> TurnStatus.InProgress
-    "interrupted", "cancelled", "canceled" -> TurnStatus.Interrupted
-    "failed", "error" -> TurnStatus.Failed
-    else -> TurnStatus.Completed
-}
-
-private fun parseLegacyCommandStatus(value: JsonElement?): CommandExecutionStatus = when (value.legacyType()) {
-    "inprogress", "started", "active", "running" -> CommandExecutionStatus.InProgress
-    "failed", "error" -> CommandExecutionStatus.Failed
-    "declined", "rejected" -> CommandExecutionStatus.Declined
-    else -> CommandExecutionStatus.Completed
-}
-
-private fun parseLegacyFileChangeStatus(value: JsonElement?): FileChangeStatus = when (value.legacyType()) {
-    "inprogress", "started", "active", "running" -> FileChangeStatus.InProgress
-    "failed", "error" -> FileChangeStatus.Failed
-    "declined", "rejected" -> FileChangeStatus.Declined
-    else -> FileChangeStatus.Completed
-}
-
-private fun parseLegacyFileUpdateKind(value: JsonElement?): FileUpdateKind = when (value.legacyType()) {
-    "add", "create" -> FileUpdateKind.Add
-    "delete", "remove" -> FileUpdateKind.Delete
-    else -> FileUpdateKind.Update
-}
-
-private fun String?.legacyType(): String? = this?.lowercase()
-
-private fun JsonElement?.legacyType(): String? = this?.stringOrNull().legacyType()
-
-/** A small explicit envelope keeps storage migration independent of model DTOs. */
+/** A small explicit envelope keeps the persisted schema independent of model DTOs. */
 @Serializable
 private data class PersistedEnvelope(
     val format: String,

@@ -146,11 +146,9 @@ mod tests {
     fn config(ticket: Option<PairingToken>) -> MobileClientConfig {
         MobileClientConfig {
             address: "127.0.0.1:22".parse().unwrap(),
-            server_name: "host.local".to_owned(),
             host_identity: Ed25519PublicKey::from_bytes([7; 32]),
             device_name: "test phone".to_owned(),
             pairing_ticket: ticket,
-            max_frame_bytes: 4096,
             request_timeout: Duration::from_secs(1),
         }
     }

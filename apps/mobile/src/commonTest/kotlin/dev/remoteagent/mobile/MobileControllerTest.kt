@@ -61,7 +61,7 @@ class MobileControllerTest {
                 {"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":" new"}
             """))
             gateway.emit(notification("turn/completed", """
-                {"threadId":"thread-1","turnId":"turn-1","status":"completed"}
+                {"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}
             """))
             gateway.emit(notification("item/agentMessage/delta", """
                 {"threadId":"thread-2","turnId":"turn-2","itemId":"item-2","delta":"wrong"}
@@ -83,6 +83,46 @@ class MobileControllerTest {
                 CodexItem.AgentMessage("item-1", "old new")
         }
         assertTrue(rawIndex >= 0 && snapshotIndex > rawIndex)
+    }
+
+    @Test
+    fun notifications_from_another_client_update_the_open_thread_immediately() {
+        val initial = thread.copy(turns = emptyList())
+        val gateway = FakeHostGateway().apply {
+            readResult = GatewayResult.Success(ThreadReadResult(initial, emptyList()))
+        }
+        val controller = controller(gateway, selectedThreadId = "thread-1", cachedThread = initial)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        gateway.emit(notification("turn/started", """
+            {"threadId":"thread-1","turn":{"id":"turn-external","status":"inProgress"}}
+        """))
+        gateway.emit(notification("item/started", """
+            {"threadId":"thread-1","turnId":"turn-external",
+             "item":{"id":"user-external","type":"userMessage","content":[{"type":"text","text":"from another phone"}]}}
+        """))
+        gateway.emit(notification("item/started", """
+            {"threadId":"thread-1","turnId":"turn-external",
+             "item":{"id":"agent-external","type":"agentMessage","text":""}}
+        """))
+        gateway.emit(notification("item/agentMessage/delta", """
+            {"threadId":"thread-1","turnId":"turn-external",
+             "itemId":"agent-external","delta":"live reply"}
+        """))
+        gateway.emit(notification("turn/completed", """
+            {"threadId":"thread-1","turn":{"id":"turn-external","status":"completed"}}
+        """))
+
+        val externalTurn = controller.state.cache.snapshot(profile.hostIdentity, "thread-1")!!.turns.single()
+        assertEquals(TurnStatus.Completed, externalTurn.status)
+        assertEquals(
+            listOf(
+                CodexItem.UserMessage("user-external", "from another phone"),
+                CodexItem.AgentMessage("agent-external", "live reply"),
+            ),
+            externalTurn.items,
+        )
+        assertEquals(listOf("thread-1"), gateway.readIds)
     }
 
     @Test
@@ -176,6 +216,56 @@ class MobileControllerTest {
 
         assertEquals(listOf("/workspace"), gateway.turnCwds)
         assertEquals(listOf("hello"), gateway.turnTexts)
+    }
+
+    @Test
+    fun successful_turn_start_refreshes_the_detail_so_the_sent_message_is_visible() {
+        val refreshed = thread.copy(
+            turns = thread.turns + CodexTurn(
+                id = "turn-2",
+                status = TurnStatus.InProgress,
+                items = listOf(CodexItem.UserMessage("user-2", "hello from task detail")),
+            ),
+        )
+        val gateway = FakeHostGateway().apply {
+            turnResult = GatewayResult.Success("turn-2")
+            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
+        }
+        val controller = controller(gateway, selectedThreadId = "thread-1")
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        gateway.readResult = GatewayResult.Success(ThreadReadResult(refreshed, emptyList()))
+        gateway.readIds.clear()
+
+        runSuspend { controller.startTurn(profile, "thread-1", "hello from task detail") }
+
+        assertEquals(listOf("thread-1"), gateway.readIds)
+        assertEquals(
+            CodexItem.UserMessage("user-2", "hello from task detail"),
+            controller.state.cache.snapshot(profile.hostIdentity, "thread-1")
+                ?.turns
+                ?.last()
+                ?.items
+                ?.single(),
+        )
+    }
+
+    @Test
+    fun successful_turn_start_does_not_reopen_detail_after_the_user_returns_to_the_list() {
+        val gateway = FakeHostGateway().apply {
+            turnResult = GatewayResult.Success("turn-2")
+            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
+        }
+        val controller = controller(gateway, selectedThreadId = "thread-1")
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        gateway.readIds.clear()
+        gateway.turnHook = {
+            controller.dispatch(AppAction.ThreadListOpened(profile.hostIdentity))
+        }
+
+        runSuspend { controller.startTurn(profile, "thread-1", "hello") }
+
+        assertNull(controller.state.selectedView.selectedThreadId)
+        assertTrue(gateway.readIds.isEmpty())
     }
 
     @Test

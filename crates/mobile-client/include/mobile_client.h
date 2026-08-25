@@ -22,8 +22,8 @@ char *mobile_client_generate_device_key(char **error_out);
 
 /*
  * config_json uses camelCase fields:
- * address, serverName, hostIdentity, deviceName, pairingTicket (optional),
- * maxFrameBytes, requestTimeoutMs. hostIdentity and pairingTicket are the
+ * address, hostIdentity, deviceName, pairingTicket (optional),
+ * requestTimeoutMs. hostIdentity and pairingTicket are the
  * host-protocol base64url values. device_pkcs8 is secure-storage output.
  */
 MobileClientHandle *mobile_client_connect(

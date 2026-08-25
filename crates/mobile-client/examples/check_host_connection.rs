@@ -27,11 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "failed to generate the temporary device key")?;
     let base_config = MobileClientConfig {
         address,
-        server_name: "bex-host".to_owned(),
         host_identity: payload.host_identity,
         device_name: "Bex headless smoke".to_owned(),
         pairing_ticket: None,
-        max_frame_bytes: host_protocol::DEFAULT_MAX_MESSAGE_BYTES as u32,
         request_timeout: Duration::from_secs(10),
     };
 

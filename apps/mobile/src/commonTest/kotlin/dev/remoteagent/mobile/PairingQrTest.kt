@@ -7,7 +7,7 @@ import kotlin.test.assertIs
 class PairingQrTest {
     private val fixed32Bytes = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
-    private val hostGeneratedV2Payload = """
+    private val hostGeneratedPayload = """
         {
           "protocolVersion": 3,
           "hostIdentity": "$fixed32Bytes",
@@ -26,8 +26,8 @@ class PairingQrTest {
     }
 
     @Test
-    fun accepts_host_generated_v2_payload() {
-        val result = parsePairingQr(hostGeneratedV2Payload, nowMs = 100)
+    fun accepts_host_generated_payload() {
+        val result = parsePairingQr(hostGeneratedPayload, nowMs = 100)
 
         assertIs<PairingQrResult.Valid>(result)
     }

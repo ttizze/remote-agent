@@ -23,12 +23,10 @@ use crate::{MobileClient, MobileClientConfig, MobileClientError, Notification, S
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CConfig {
     address: SocketAddr,
-    server_name: String,
     host_identity: Ed25519PublicKey,
     device_name: String,
     #[serde(default)]
     pairing_ticket: Option<PairingToken>,
-    max_frame_bytes: u32,
     request_timeout_ms: u64,
 }
 
@@ -38,11 +36,9 @@ impl TryFrom<CConfig> for MobileClientConfig {
     fn try_from(value: CConfig) -> Result<Self, Self::Error> {
         Ok(Self {
             address: value.address,
-            server_name: value.server_name,
             host_identity: value.host_identity,
             device_name: value.device_name,
             pairing_ticket: value.pairing_ticket,
-            max_frame_bytes: value.max_frame_bytes,
             request_timeout: Duration::from_millis(value.request_timeout_ms),
         })
     }

@@ -69,11 +69,6 @@ where
             LinesCodecError::Io(error) => JsonlError::Io(error),
         })
     }
-
-    /// Short alias for callers that treat the reader as a line stream.
-    pub async fn read(&mut self) -> Result<Option<String>, JsonlError> {
-        self.read_line().await
-    }
 }
 
 /// Writes newline-delimited source JSON to any asynchronous byte stream.
@@ -159,11 +154,6 @@ where
                 },
                 LinesCodecError::Io(error) => JsonlError::Io(error),
             })
-    }
-
-    /// Short alias for callers that treat the writer as a line sink.
-    pub async fn write(&mut self, line: &str) -> Result<(), JsonlError> {
-        self.write_line(line).await
     }
 }
 

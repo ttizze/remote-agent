@@ -74,14 +74,6 @@ internal fun JsonElement.messageOrString(): String = when (this) {
     else -> stringOrNull() ?: toString()
 }
 
-internal fun JsonObject.nestedString(vararg path: String): String? {
-    var value: JsonElement = this
-    for (name in path) {
-        value = (value as? JsonObject)?.get(name) ?: return null
-    }
-    return value.stringOrNull()
-}
-
 internal fun JsonObject.textLike(): String {
     string("text")?.let { return it }
     string("summary")?.let { return it }
@@ -123,10 +115,10 @@ internal fun codexThreadSummary(value: JsonElement): ThreadSummary {
         id = id,
         name = raw.string("name"),
         preview = raw.string("preview").orEmpty(),
-        workingDirectory = WorkingDirectory(raw.string("cwd") ?: raw.nestedString("workingDirectory", "path").orEmpty()),
+        workingDirectory = WorkingDirectory(raw.string("cwd").orEmpty()),
         projectId = raw.string("projectId"),
-        createdAtMs = raw.long("createdAt") ?: raw.long("createdAtMs") ?: 0L,
-        updatedAtMs = raw.long("updatedAt") ?: raw.long("updatedAtMs") ?: 0L,
+        createdAtMs = raw.long("createdAt") ?: 0L,
+        updatedAtMs = raw.long("updatedAt") ?: 0L,
         status = codexThreadStatus(raw["status"]),
         raw = raw,
     )
@@ -154,14 +146,13 @@ internal fun codexThreadSnapshot(value: JsonElement): ThreadSnapshot {
 }
 
 internal fun codexThreadFromResponse(value: JsonElement): ThreadSnapshot =
-    codexThreadSnapshot(value.asObjectOrNull()?.get("thread") ?: value)
+    codexThreadSnapshot(value.asObjectOrNull()?.get("thread") ?: JsonNull)
 
 internal fun codexTurn(value: JsonElement): CodexTurn {
     val raw = value.asObjectOrNull() ?: emptyJsonObject()
-    val statusName = raw.string("status") ?: raw.childObject("status")?.string("type")
     return CodexTurn(
-        id = raw.string("id") ?: raw.string("turnId").orEmpty(),
-        status = codexTurnStatus(statusName),
+        id = raw.string("id").orEmpty(),
+        status = codexTurnStatus(raw.string("status")),
         items = raw.array("items").orEmpty().map(::codexItem),
         raw = raw,
     )
@@ -178,14 +169,14 @@ internal fun codexItem(value: JsonElement): CodexItem {
             id = id,
             command = raw.string("command").orEmpty(),
             cwd = raw.string("cwd"),
-            output = raw.string("aggregatedOutput") ?: raw.string("output").orEmpty(),
-            status = codexCommandStatus(raw.string("status") ?: raw.childObject("status")?.string("type")),
+            output = raw.string("aggregatedOutput").orEmpty(),
+            status = codexCommandStatus(raw.string("status")),
             exitCode = raw.int("exitCode"),
         )
         "fileChange" -> CodexItem.FileChange(
             id = id,
             changes = raw.array("changes").orEmpty().mapNotNull(::codexFileChange),
-            status = codexFileChangeStatus(raw.string("status") ?: raw.childObject("status")?.string("type")),
+            status = codexFileChangeStatus(raw.string("status")),
         )
         else -> CodexItem.Unknown(
             id = id,
@@ -197,12 +188,12 @@ internal fun codexItem(value: JsonElement): CodexItem {
 
 private fun codexFileChange(value: JsonElement): FileUpdateChange? {
     val raw = value.asObjectOrNull() ?: return null
-    val kind = when (raw.string("kind") ?: raw.string("type")) {
-        "add", "create" -> FileUpdateKind.Add
-        "delete", "remove" -> FileUpdateKind.Delete
+    val kind = when (raw.childObject("kind")?.string("type")) {
+        "add" -> FileUpdateKind.Add
+        "delete" -> FileUpdateKind.Delete
         else -> FileUpdateKind.Update
     }
-    return FileUpdateChange(raw.string("path").orEmpty(), kind, raw.string("diff") ?: raw.string("patch").orEmpty())
+    return FileUpdateChange(raw.string("path").orEmpty(), kind, raw.string("diff").orEmpty())
 }
 
 internal fun codexThreadEvent(
@@ -211,65 +202,88 @@ internal fun codexThreadEvent(
     extensions: JsonObject = emptyJsonObject(),
 ): ThreadEvent {
     val raw = params.asObjectOrNull() ?: JsonObject(mapOf("value" to params))
-    val threadId = raw.string("threadId") ?: raw.nestedString("thread", "id").orEmpty()
-    val turnId = raw.string("turnId") ?: raw.nestedString("turn", "id").orEmpty()
+    val threadId = raw.string("threadId").orEmpty()
     return when (method) {
-        "turn/started" -> ThreadEvent.TurnStarted(threadId, turnId, TurnStatus.InProgress)
+        "turn/started" -> ThreadEvent.TurnStarted(
+            threadId,
+            raw.childObject("turn")?.string("id").orEmpty(),
+            TurnStatus.InProgress,
+        )
         "turn/completed" -> ThreadEvent.TurnCompleted(
             threadId,
-            turnId,
-            codexTurnStatus(statusName(raw.childObject("turn")?.get("status") ?: raw["status"])),
+            raw.childObject("turn")?.string("id").orEmpty(),
+            codexTurnStatus(raw.childObject("turn")?.string("status")),
         )
-        "item/started" -> ThreadEvent.ItemStarted(threadId, turnId, codexItem(raw["item"] ?: emptyJsonObject()))
-        "item/completed" -> ThreadEvent.ItemCompleted(threadId, turnId, codexItem(raw["item"] ?: emptyJsonObject()))
-        "item/agentMessage/delta" -> ThreadEvent.AgentMessageDelta(threadId, turnId, eventItemId(raw), eventDelta(raw))
-        "item/reasoning/textDelta" -> ThreadEvent.ReasoningDelta(threadId, turnId, eventItemId(raw), eventDelta(raw))
-        "item/reasoning/summaryDelta", "item/reasoning/summaryTextDelta" ->
-            ThreadEvent.ReasoningSummaryDelta(threadId, turnId, eventItemId(raw), eventDelta(raw))
-        "item/commandExecution/outputDelta" -> ThreadEvent.CommandOutputDelta(threadId, turnId, eventItemId(raw), eventDelta(raw))
-        "item/fileChange/outputDelta", "item/fileChange/patchUpdated" ->
-            ThreadEvent.FileChangeOutputDelta(threadId, turnId, eventItemId(raw), eventDelta(raw))
-        else -> ThreadEvent.Unknown(threadId, turnId, method, raw, extensions)
+        "item/started" -> ThreadEvent.ItemStarted(
+            threadId,
+            raw.string("turnId").orEmpty(),
+            codexItem(raw["item"] ?: emptyJsonObject()),
+        )
+        "item/completed" -> ThreadEvent.ItemCompleted(
+            threadId,
+            raw.string("turnId").orEmpty(),
+            codexItem(raw["item"] ?: emptyJsonObject()),
+        )
+        "item/agentMessage/delta" -> ThreadEvent.AgentMessageDelta(
+            threadId,
+            raw.string("turnId").orEmpty(),
+            eventItemId(raw),
+            eventDelta(raw),
+        )
+        "item/reasoning/textDelta" -> ThreadEvent.ReasoningDelta(
+            threadId,
+            raw.string("turnId").orEmpty(),
+            eventItemId(raw),
+            eventDelta(raw),
+        )
+        "item/reasoning/summaryTextDelta" ->
+            ThreadEvent.ReasoningSummaryDelta(
+                threadId,
+                raw.string("turnId").orEmpty(),
+                eventItemId(raw),
+                eventDelta(raw),
+            )
+        "item/commandExecution/outputDelta" -> ThreadEvent.CommandOutputDelta(
+            threadId,
+            raw.string("turnId").orEmpty(),
+            eventItemId(raw),
+            eventDelta(raw),
+        )
+        else -> ThreadEvent.Unknown(threadId, raw.string("turnId").orEmpty(), method, raw, extensions)
     }
 }
 
-private fun eventItemId(raw: JsonObject): String = raw.string("itemId") ?: raw.nestedString("item", "id").orEmpty()
+private fun eventItemId(raw: JsonObject): String = raw.string("itemId").orEmpty()
 
-private fun eventDelta(raw: JsonObject): String = raw.string("delta") ?: raw.string("text") ?: raw.string("output").orEmpty()
+private fun eventDelta(raw: JsonObject): String = raw.string("delta").orEmpty()
 
 private fun codexThreadStatus(value: JsonElement?): ThreadStatus {
     val raw = value?.asObjectOrNull()
-    return when (statusName(value)) {
-        "active", "inProgress", "running" -> ThreadStatus.Active(raw?.array("activeFlags").orEmpty().mapNotNull(JsonElement::stringOrNull))
-        "systemError", "error" -> ThreadStatus.SystemError
+    return when (raw?.string("type")) {
+        "active" -> ThreadStatus.Active(raw.array("activeFlags").orEmpty().mapNotNull(JsonElement::stringOrNull))
+        "systemError" -> ThreadStatus.SystemError
         "notLoaded" -> ThreadStatus.NotLoaded
         else -> ThreadStatus.Idle
     }
 }
 
-private fun statusName(value: JsonElement?): String? = when (value) {
-    is JsonPrimitive -> value.contentOrNull
-    is JsonObject -> value.string("type") ?: value.string("status")
-    else -> null
-}
-
 private fun codexTurnStatus(status: String?): TurnStatus = when (status) {
-    "inProgress", "started", "active", "running" -> TurnStatus.InProgress
-    "interrupted", "cancelled", "canceled" -> TurnStatus.Interrupted
-    "failed", "error" -> TurnStatus.Failed
+    "inProgress" -> TurnStatus.InProgress
+    "interrupted" -> TurnStatus.Interrupted
+    "failed" -> TurnStatus.Failed
     else -> TurnStatus.Completed
 }
 
 private fun codexCommandStatus(status: String?): CommandExecutionStatus = when (status) {
-    "inProgress", "started", "active", "running" -> CommandExecutionStatus.InProgress
-    "failed", "error" -> CommandExecutionStatus.Failed
-    "declined", "rejected" -> CommandExecutionStatus.Declined
+    "inProgress" -> CommandExecutionStatus.InProgress
+    "failed" -> CommandExecutionStatus.Failed
+    "declined" -> CommandExecutionStatus.Declined
     else -> CommandExecutionStatus.Completed
 }
 
 private fun codexFileChangeStatus(status: String?): FileChangeStatus = when (status) {
-    "inProgress", "started", "active", "running" -> FileChangeStatus.InProgress
-    "failed", "error" -> FileChangeStatus.Failed
-    "declined", "rejected" -> FileChangeStatus.Declined
+    "inProgress" -> FileChangeStatus.InProgress
+    "failed" -> FileChangeStatus.Failed
+    "declined" -> FileChangeStatus.Declined
     else -> FileChangeStatus.Completed
 }

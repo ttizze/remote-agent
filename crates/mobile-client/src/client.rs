@@ -9,40 +9,19 @@ use tokio::time::timeout;
 use crate::{rpc::RpcPeer, transport};
 
 /// Connection parameters obtained from a trusted pairing payload.
-///
-/// `server_name` remains in the configuration for mobile-config compatibility
-/// with earlier releases. SSH authenticates the peer with the pinned
-/// `host_identity`; the value is not used as a TLS/SNI name.
 #[derive(Debug, Clone)]
 pub struct MobileClientConfig {
     pub address: SocketAddr,
-    pub server_name: String,
     pub host_identity: Ed25519PublicKey,
     pub device_name: String,
     pub pairing_ticket: Option<PairingToken>,
-    /// Compatibility name retained for the mobile ABI. It is the maximum
-    /// JSONL message size on the SSH subsystem stream.
-    pub max_frame_bytes: u32,
     pub request_timeout: Duration,
 }
 
 impl MobileClientConfig {
     pub fn validate(&self) -> Result<(), MobileClientError> {
-        if self.server_name.is_empty() {
-            return Err(MobileClientError::InvalidConfig("server_name is empty"));
-        }
         if self.device_name.is_empty() {
             return Err(MobileClientError::InvalidConfig("device_name is empty"));
-        }
-        if self.max_frame_bytes == 0 {
-            return Err(MobileClientError::InvalidConfig(
-                "max_frame_bytes must be positive",
-            ));
-        }
-        if usize::try_from(self.max_frame_bytes).unwrap_or(usize::MAX) > DEFAULT_MAX_MESSAGE_BYTES {
-            return Err(MobileClientError::InvalidConfig(
-                "max_frame_bytes exceeds data-frame maximum",
-            ));
         }
         if self.request_timeout.is_zero() {
             return Err(MobileClientError::InvalidConfig(
@@ -55,10 +34,6 @@ impl MobileClientConfig {
             ));
         }
         Ok(())
-    }
-
-    pub(crate) const fn max_message_bytes(&self) -> usize {
-        self.max_frame_bytes as usize
     }
 }
 
@@ -102,7 +77,7 @@ impl MobileClient {
         )
         .await
         .map_err(|_| MobileClientError::ConnectionTimeout)??;
-        let peer = RpcPeer::open(stream, config.max_message_bytes(), config.request_timeout)?;
+        let peer = RpcPeer::open(stream, DEFAULT_MAX_MESSAGE_BYTES, config.request_timeout)?;
         Ok(Self {
             session: StdMutex::new(Some(session)),
             peer,

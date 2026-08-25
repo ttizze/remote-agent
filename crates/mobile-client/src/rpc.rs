@@ -56,7 +56,7 @@ impl RpcPeer {
     ) -> Result<Self, MobileClientError> {
         if max_message_bytes == 0 {
             return Err(MobileClientError::InvalidConfig(
-                "max_frame_bytes must be positive",
+                "max_message_bytes must be positive",
             ));
         }
 

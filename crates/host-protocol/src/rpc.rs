@@ -40,11 +40,6 @@ impl RpcMessage {
         self.raw_id.as_deref()
     }
 
-    /// Alias for callers that use the JSON-RPC field name.
-    pub fn id(&self) -> Option<&str> {
-        self.raw_id()
-    }
-
     pub fn method(&self) -> Option<&str> {
         self.method.as_deref()
     }

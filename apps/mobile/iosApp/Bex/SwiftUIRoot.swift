@@ -526,18 +526,65 @@ private struct ThreadScreen: View {
     let state: IosAppViewState
     @ObservedObject var model: BexAppViewModel
     @State private var draft = ""
+    @State private var scrollViewportHeight: CGFloat = 0
+    @State private var latestMarkerY: CGFloat = 0
+
+    private let latestMarker = "thread-latest"
+
+    private var contentVersion: String {
+        state.selectedThread?.turns.map { turn in
+            let items = turn.items.map { "\($0.id):\($0.body.count)" }.joined(separator: ",")
+            return "\(turn.id):\(turn.status):\(items)"
+        }.joined(separator: "|") ?? ""
+    }
+
+    private var isFollowingLatest: Bool {
+        latestMarkerY == 0 || latestMarkerY <= scrollViewportHeight + 80
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             if let notice = state.notice { BexNotice(text: notice).padding(.horizontal).padding(.top, 8) }
             if let thread = state.selectedThread {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(thread.turns, id: \.id) { turn in
-                            TurnCard(turn: turn, interruptingTurnId: state.interruptingTurnId, interrupt: model.interrupt)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(thread.turns, id: \.id) { turn in
+                                TurnCard(turn: turn, interruptingTurnId: state.interruptingTurnId, interrupt: model.interrupt)
+                            }
+                            Color.clear
+                                .frame(height: 1)
+                                .id(latestMarker)
+                                .background(
+                                    GeometryReader { geometry in
+                                        Color.clear.preference(
+                                            key: LatestMarkerPreferenceKey.self,
+                                            value: geometry.frame(in: .named("thread-scroll")).maxY
+                                        )
+                                    }
+                                )
+                        }
+                        .padding()
+                    }
+                    .coordinateSpace(name: "thread-scroll")
+                    .background(
+                        GeometryReader { geometry in
+                            Color.clear.preference(key: ScrollViewportPreferenceKey.self, value: geometry.size.height)
+                        }
+                    )
+                    .onPreferenceChange(ScrollViewportPreferenceKey.self) { scrollViewportHeight = $0 }
+                    .onPreferenceChange(LatestMarkerPreferenceKey.self) { latestMarkerY = $0 }
+                    .onAppear {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(latestMarker, anchor: .bottom)
                         }
                     }
-                    .padding()
+                    .onChange(of: contentVersion) { _ in
+                        guard isFollowingLatest else { return }
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(latestMarker, anchor: .bottom)
+                        }
+                    }
                 }
             } else {
                 ProgressView("タスクを読み込み中…")
@@ -553,7 +600,10 @@ private struct ThreadScreen: View {
                     draft = ""
                     model.send(text)
                 }
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    state.selectedThread == nil ||
+                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
                 .accessibilityIdentifier("task.send")
             }
             .padding()
@@ -566,6 +616,16 @@ private struct ThreadScreen: View {
             }
         }
     }
+}
+
+private struct ScrollViewportPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct LatestMarkerPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 private struct TurnCard: View {

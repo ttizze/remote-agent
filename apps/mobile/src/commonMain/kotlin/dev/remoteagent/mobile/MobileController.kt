@@ -307,6 +307,14 @@ internal class MobileController(
                 dispatchIfCurrent(profile.hostIdentity, generation) {
                     AppAction.TurnStartAcknowledged(profile.hostIdentity, threadId, turnId)
                 }
+                // A successful turn/start must become visible even when the
+                // corresponding live notifications are delayed or use a
+                // shape this Mobile Client does not yet project. Reconcile a
+                // fresh Snapshot through the existing read barrier so events
+                // arriving during the read are still applied in wire order.
+                if (state.profileViews[profile.hostIdentity]?.selectedThreadId == threadId) {
+                    readThread(profile, threadId, generation)
+                }
             },
             failure = { message ->
                 dispatchIfCurrent(profile.hostIdentity, generation) {

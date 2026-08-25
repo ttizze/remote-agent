@@ -99,8 +99,8 @@ class MobileStateCodecTest {
         assertEquals(false, restored.showingPairing)
         assertNull(restored.pairingError)
         assertEquals(unknownEvent, restored.cache.profile(profile.hostIdentity).unknownEvents.single())
-        // Notifications are durable for forward compatibility, while an old
-        // server request must never be actionable after process restart.
+        // Notifications remain durable, while server requests must never be
+        // actionable after process restart.
         assertEquals(listOf(rawNotification), restored.cache.profile(profile.hostIdentity).rawMessages)
         assertEquals(snapshot, restored.cache.snapshot(profile.hostIdentity, summary.id))
     }
@@ -176,69 +176,6 @@ class MobileStateCodecTest {
 
         assertFailsWith<IllegalArgumentException> { MobileStateCodec.encode(oversized) }
     }
-
-    @Test
-    fun legacy_android_state_is_migrated_with_array_snapshots_and_kotlin_enum_names() {
-        val restored = success(MobileStateCodec.decode(legacyAndroidState.encodeToByteArray()))
-        val profile = restored.profiles.single()
-        val cached = restored.cache.profile(profile.hostIdentity)
-
-        assertEquals("Android host", profile.name)
-        assertEquals("device-ref-android", profile.deviceIdentityReference)
-        assertEquals("/android/worktree", restored.selectedView.workingDirectoryPath)
-        assertEquals(listOf("thread-android"), cached.threadList.map { it.id })
-        assertEquals(TurnStatus.Completed, restored.cache.snapshot(profile.hostIdentity, "thread-android")!!.turns.single().status)
-        assertEquals(
-            "future/item",
-            (restored.cache.snapshot(profile.hostIdentity, "thread-android")!!.turns.single().items.single() as CodexItem.Unknown).codexType,
-        )
-        assertEquals("vendor", cached.unknownEvents.single().extensions.keys.singleOrNull())
-        assertEquals(emptyList(), cached.rawMessages)
-    }
-
-    @Test
-    fun legacy_ios_state_is_migrated_with_map_snapshots_and_serial_names() {
-        val restored = success(MobileStateCodec.decode(legacyIosState.encodeToByteArray()))
-        val profile = restored.profiles.single()
-        val cached = restored.cache.profile(profile.hostIdentity)
-        val unknown = cached.unknownEvents.single()
-
-        assertEquals("iOS host", profile.name)
-        assertEquals("device-ref-ios", profile.deviceIdentityReference)
-        assertEquals("/ios/worktree", restored.selectedView.workingDirectoryPath)
-        assertEquals(listOf("thread-ios"), cached.threadList.map { it.id })
-        assertEquals("future/event", unknown.method)
-        assertEquals("kept", unknown.extensions["vendor"]?.toString()?.trim('"'))
-        assertEquals("future/item", (restored.cache.snapshot(profile.hostIdentity, "thread-ios")!!.turns.single().items.single() as CodexItem.Unknown).codexType)
-    }
-
-    private val legacyAndroidState = """
-        {
-          "version": 1,
-          "selectedProfileId": "host-android",
-          "profiles": [
-            {"hostIdentity":"host-android","name":"Android host","addresses":["192.0.2.10:1"],"deviceIdentityReference":"device-ref-android"},
-            {"hostIdentity":"host-android","name":"duplicate","addresses":[],"deviceIdentityReference":"other-ref"}
-          ],
-          "views": {"host-android":{"workingDirectoryPath":"/android/worktree","selectedThreadId":"thread-android"}},
-          "cache": {
-            "host-android": {
-              "threadList": [{"id":"thread-android","name":"Android","preview":"preview","workingDirectory":"/android/worktree","createdAtMs":1,"updatedAtMs":2,"status":{"type":"Idle"}}],
-              "snapshots": [{"summary":{"id":"thread-android","name":"Android","preview":"preview","workingDirectory":"/android/worktree","createdAtMs":1,"updatedAtMs":2,"status":{"type":"Idle"}},"turns":[{"id":"turn-android","status":"Completed","items":[{"type":"future/item","id":"item-android","vendorField":true}]}]}],
-              "unknownEvents": [{"threadId":"thread-android","turnId":"turn-android","method":"future/event","raw":{"payload":true},"extensions":{"vendor":"legacy"}}]
-            }
-          }
-        }
-    """.trimIndent()
-
-    private val legacyIosState = """
-        {
-          "profiles": [{"hostIdentity":"host-ios","name":"iOS host","addresses":["192.0.2.11:1"],"deviceIdentityReference":"device-ref-ios"}],
-          "selectedProfileId":"host-ios",
-          "views":{"host-ios":{"workingDirectoryPath":"/ios/worktree","selectedThreadId":"thread-ios"}},
-          "cache":{"host-ios":{"threadList":[{"id":"thread-ios","name":"iOS","preview":"preview","workingDirectory":{"path":"/ios/worktree"},"createdAtMs":1,"updatedAtMs":2,"status":{"type":"idle"}}],"snapshots":{"thread-ios":{"summary":{"id":"thread-ios","name":"iOS","preview":"preview","workingDirectory":{"path":"/ios/worktree"},"createdAtMs":1,"updatedAtMs":2,"status":{"type":"idle"}},"turns":[{"id":"turn-ios","status":"completed","items":[{"type":"unknown","id":"item-ios","codexType":"future/item","raw":{"kind":"future/item","newField":true}}]}]}},"unknownEvents":[{"type":"unknown","threadId":"thread-ios","turnId":"turn-ios","method":"future/event","raw":{"payload":true},"extensions":{"vendor":"kept"}}]}}
-        }
-    """.trimIndent()
 
     private fun summary(id: String, updatedAtMs: Long = 1L) = ThreadSummary(
         id = id,

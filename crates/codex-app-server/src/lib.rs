@@ -190,26 +190,12 @@ impl CodexAppServer {
         self.peer.request_raw(line).await
     }
 
-    /// Alias for callers that treat the App Server as a raw JSONL request
-    /// peer rather than a typed RPC client.
-    pub async fn request(&self, line: &str) -> Result<String, Error> {
-        self.request_raw(line).await
-    }
-
     /// Sends a raw Codex notification or response exactly as supplied after
     /// validating its JSON-RPC envelope. Raw requests must use
     /// [`Self::request_raw`] so their ids can be correlated.
     pub async fn send_raw(&self, line: &str) -> Result<(), Error> {
         ensure_public_send_method(line)?;
         self.peer.send_raw(line).await
-    }
-
-    pub async fn notify_raw(&self, line: &str) -> Result<(), Error> {
-        self.send_raw(line).await
-    }
-
-    pub async fn respond_raw(&self, line: &str) -> Result<(), Error> {
-        self.send_raw(line).await
     }
 
     pub async fn shutdown(mut self) -> Result<(), Error> {

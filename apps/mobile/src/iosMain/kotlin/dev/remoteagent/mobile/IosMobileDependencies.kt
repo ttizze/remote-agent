@@ -74,7 +74,6 @@ import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 private const val DeviceKeyService = "dev.remoteagent.mobile.pkcs8"
-private const val DefaultMaxFrameBytes = 256 * 1024 * 1024
 private const val DefaultRequestTimeoutMs = 30_000L
 
 private val iosJson = Json {
@@ -273,11 +272,9 @@ internal class IosHostGateway : HostGateway {
         for (address in addresses.filter(String::isNotBlank).distinct()) {
             val config = buildJsonObject {
                 put("address", address)
-                put("serverName", "bex-host")
                 put("hostIdentity", hostIdentity)
                 put("deviceName", "Bex iOS")
                 pairingTicket?.let { put("pairingTicket", it) }
-                put("maxFrameBytes", DefaultMaxFrameBytes)
                 put("requestTimeoutMs", DefaultRequestTimeoutMs)
             }.toString()
             when (val result = callConnect(config, key)) {
