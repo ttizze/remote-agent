@@ -33,8 +33,8 @@ final class BexAppViewModel: ObservableObject {
     func discover() { controller.discover() }
     func connect() { controller.connect() }
     func refreshTaskList() { controller.refreshTaskList() }
-    func startTask(projectId: String?, cwd: String, prompt: String) {
-        controller.startTask(projectId: projectId, cwd: cwd, firstPrompt: prompt)
+    func startTask(cwd: String, prompt: String) {
+        controller.startTask(cwd: cwd, firstPrompt: prompt)
     }
     func openThread(_ id: String) { controller.openThread(threadId: id) }
     func showThreadList() { controller.showThreadList() }
@@ -507,7 +507,6 @@ private struct NewTaskSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("開始") {
                         model.startTask(
-                            projectId: context.project?.id,
                             cwd: workingDirectory,
                             prompt: prompt
                         )
@@ -528,13 +527,19 @@ private struct ThreadScreen: View {
     @State private var draft = ""
     @State private var scrollViewportHeight: CGFloat = 0
     @State private var latestMarkerY: CGFloat = 0
+    @State private var expandedItemIds = Set<String>()
+    @State private var activityExpansionOverrides = [String: Bool]()
 
     private let latestMarker = "thread-latest"
 
     private var contentVersion: String {
         state.selectedThread?.turns.map { turn in
-            let items = turn.items.map { "\($0.id):\($0.body.count)" }.joined(separator: ",")
-            return "\(turn.id):\(turn.status):\(items)"
+            let items = (turn.userMessages + turn.activityItems + turn.responses)
+                .map { "\($0.id):\($0.contentVersion)" }
+                .joined(separator: ",")
+            let requests = turn.pendingRequests.map { "\($0.id):\($0.title):\($0.body)" }.joined(separator: ",")
+            let error = turn.error.map { "\($0.title):\($0.message):\($0.details ?? "")" } ?? ""
+            return "\(turn.id):\(turn.status):\(turn.activitySummary ?? ""):\(error):\(requests):\(items)"
         }.joined(separator: "|") ?? ""
     }
 
@@ -549,17 +554,21 @@ private struct ThreadScreen: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(detailRows) { row in
-                                switch row {
-                                case let .turnHeader(_, turn):
-                                    ThreadTurnHeader(
-                                        turn: turn,
-                                        interruptingTurnId: state.interruptingTurnId,
-                                        interrupt: model.interrupt
-                                    )
-                                case let .item(_, _, item):
-                                    ThreadItemRow(item: item)
-                                }
+                            ForEach(thread.turns, id: \.id) { turn in
+                                ThreadTurnConversation(
+                                    turn: turn,
+                                    activityExpanded: activityExpansionOverrides[turn.id]
+                                        ?? turn.activityInitiallyExpanded,
+                                    expandedItemIds: $expandedItemIds,
+                                    interruptingTurnId: state.interruptingTurnId,
+                                    toggleActivity: {
+                                        guard turn.activityCanCollapse else { return }
+                                        let current = activityExpansionOverrides[turn.id]
+                                            ?? turn.activityInitiallyExpanded
+                                        activityExpansionOverrides[turn.id] = !current
+                                    },
+                                    interrupt: model.interrupt
+                                )
                             }
                             Color.clear
                                 .frame(height: 1)
@@ -594,10 +603,12 @@ private struct ThreadScreen: View {
                             proxy.scrollTo(latestMarker, anchor: .bottom)
                         }
                     }
+                    .onChange(of: thread.id) { _ in
+                        expandedItemIds.removeAll()
+                        activityExpansionOverrides.removeAll()
+                    }
                     .accessibilityIdentifier("task.detail")
-                    .accessibilityValue(
-                        "turns=\(thread.turns.count);items=\(thread.turns.reduce(0) { $0 + $1.items.count })"
-                    )
+                    .accessibilityValue(threadAccessibilityValue(thread))
                 }
             } else {
                 ProgressView("タスクを読み込み中…")
@@ -630,18 +641,14 @@ private struct ThreadScreen: View {
         }
     }
 
-    private var detailRows: [ThreadDetailRow] {
-        guard let thread = state.selectedThread else { return [] }
-
-        var rows: [ThreadDetailRow] = []
-        for (turnIndex, turn) in thread.turns.enumerated() {
-            rows.append(.turnHeader(turnIndex: turnIndex, turn: turn))
-            for (itemIndex, item) in turn.items.enumerated() {
-                rows.append(.item(turnIndex: turnIndex, itemIndex: itemIndex, item: item))
-            }
+    private func threadAccessibilityValue(_ thread: IosThreadView) -> String {
+        let itemCount = thread.turns.reduce(0) { total, turn in
+            total + turn.userMessages.count + turn.activityItems.count + turn.responses.count
+                + turn.pendingRequests.count + (turn.error == nil ? 0 : 1)
         }
-        return rows
+        return "turns=\(thread.turns.count);items=\(itemCount)"
     }
+
 }
 
 private struct ScrollViewportPreferenceKey: PreferenceKey {
@@ -654,49 +661,184 @@ private struct LatestMarkerPreferenceKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-private enum ThreadDetailRow: Identifiable {
-    case turnHeader(turnIndex: Int, turn: IosTurnView)
-    case item(turnIndex: Int, itemIndex: Int, item: IosItemView)
+private struct ThreadTurnConversation: View {
+    let turn: IosTurnView
+    let activityExpanded: Bool
+    @Binding var expandedItemIds: Set<String>
+    let interruptingTurnId: String?
+    let toggleActivity: () -> Void
+    let interrupt: (String) -> Void
 
-    var id: String {
-        switch self {
-        case let .turnHeader(turnIndex, _):
-            return "turn-\(turnIndex)-header"
-        case let .item(turnIndex, itemIndex, _):
-            return "turn-\(turnIndex)-item-\(itemIndex)"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(turn.userMessages, id: \.id) { item in
+                ThreadMessageRow(item: item, isUser: true)
+            }
+            if let summary = turn.activitySummary {
+                VStack(alignment: .leading, spacing: 8) {
+                    Group {
+                        if turn.activityCanCollapse {
+                            Button(action: toggleActivity) {
+                                activityHeader(summary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("turn.activity.\(turn.id)")
+                        } else {
+                            activityHeader(summary)
+                                .accessibilityIdentifier("turn.activity.\(turn.id)")
+                        }
+                    }
+                    Divider()
+                    if activityExpanded {
+                        ForEach(turn.activityItems, id: \.id) { item in
+                            ThreadItemRow(
+                                item: item,
+                                isExpanded: expandedItemIds.contains(item.id),
+                                toggleExpanded: { toggleItem(item.id) }
+                            )
+                        }
+                        if turn.isInProgress {
+                            Button(interruptingTurnId == turn.id ? "停止中…" : "停止") {
+                                interrupt(turn.id)
+                            }
+                            .disabled(interruptingTurnId == turn.id)
+                            .accessibilityIdentifier("turn.interrupt.\(turn.id)")
+                        }
+                    }
+                }
+            }
+            ForEach(turn.pendingRequests, id: \.id) { request in
+                ThreadRequestRow(request: request)
+            }
+            if let error = turn.error {
+                ThreadErrorRow(error: error)
+            }
+            ForEach(turn.responses, id: \.id) { item in
+                ThreadMessageRow(item: item, isUser: false)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func activityHeader(_ summary: String) -> some View {
+        HStack(spacing: 5) {
+            Text(summary)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if turn.activityCanCollapse {
+                Image(systemName: activityExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func toggleItem(_ id: String) {
+        if expandedItemIds.contains(id) {
+            expandedItemIds.remove(id)
+        } else {
+            expandedItemIds.insert(id)
         }
     }
 }
 
-private struct ThreadTurnHeader: View {
-    let turn: IosTurnView
-    let interruptingTurnId: String?
-    let interrupt: (String) -> Void
+private struct ThreadRequestRow: View {
+    let request: IosTurnRequestView
 
     var body: some View {
-        HStack {
-            Text(turn.status).font(.caption).foregroundColor(.secondary)
-            Spacer()
-            if turn.isInProgress {
-                Button(interruptingTurnId == turn.id ? "停止中…" : "停止") { interrupt(turn.id) }
-                    .disabled(interruptingTurnId == turn.id)
-                    .accessibilityIdentifier("turn.interrupt.\(turn.id)")
+        VStack(alignment: .leading, spacing: 4) {
+            Text(request.title).font(.subheadline.weight(.semibold))
+            Text(request.body).font(.body).textSelection(.enabled)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.14))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("request.\(request.id)")
+    }
+}
+
+private struct ThreadErrorRow: View {
+    let error: IosTurnErrorView
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if error.isReconnecting { ProgressView().controlSize(.small) }
+                Text(error.title).font(.subheadline.weight(.semibold))
+            }
+            Text(error.message).textSelection(.enabled)
+            if let details = error.details, !details.isEmpty {
+                Text(details).font(.caption).foregroundColor(.secondary).textSelection(.enabled)
             }
         }
-        .padding()
+        .foregroundColor(error.isReconnecting ? .primary : .red)
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(UIColor.secondarySystemBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(Color.red.opacity(error.isReconnecting ? 0.06 : 0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("turn.error")
+    }
+}
+
+private struct ThreadMessageRow: View {
+    let item: IosItemView
+    let isUser: Bool
+
+    var body: some View {
+        Text(item.collapsedBody)
+            .font(.body)
+            .textSelection(.enabled)
+            .padding(isUser ? 10 : 0)
+            .background(isUser ? Color.secondary.opacity(0.16) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+            .accessibilityIdentifier("item.\(item.id)")
     }
 }
 
 private struct ThreadItemRow: View {
     let item: IosItemView
+    let isExpanded: Bool
+    let toggleExpanded: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(item.title).font(.subheadline.weight(.semibold))
-            Text(item.body).font(.body).textSelection(.enabled)
+            if item.isCollapsible {
+                Button(action: toggleExpanded) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.caption.weight(.semibold))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                            if !isExpanded && !item.collapsedBody.isEmpty {
+                                Text(item.collapsedBody)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("item.toggle.\(item.id)")
+                if isExpanded {
+                    let expandedBody = item.expandedBody()
+                    if !expandedBody.isEmpty {
+                        Text(expandedBody).font(.body).textSelection(.enabled)
+                    }
+                }
+            } else {
+                Text(item.title).font(.subheadline.weight(.semibold))
+                Text(item.collapsedBody).font(.body).textSelection(.enabled)
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)

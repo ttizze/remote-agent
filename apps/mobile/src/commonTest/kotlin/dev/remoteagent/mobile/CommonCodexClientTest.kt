@@ -31,7 +31,7 @@ class CommonCodexClientTest {
     }
 
     @Test
-    fun project_task_start_forwards_assignment_and_sends_the_first_prompt() {
+    fun task_start_sends_only_the_working_directory_then_the_first_prompt() {
         val gateway = FakeRawGateway()
         gateway.enqueue(
             "host/thread/start",
@@ -40,14 +40,14 @@ class CommonCodexClientTest {
         gateway.enqueue("turn/start", success("""{"turn":{"id":"turn-new"}}"""))
 
         val result = runSuspend {
-            CommonCodexClient(gateway).startThread(profile, "/workspace", "project-1", "Build it")
+            CommonCodexClient(gateway).startThread(profile, "/workspace", "Build it")
         }
 
         val started = assertIs<GatewayResult.Success<ThreadStartResult>>(result).value
         assertEquals("thread-new", started.thread.summary.id)
         assertEquals("turn-new", started.turnId)
         assertEquals(
-            json.parseToJsonElement("""{"cwd":"/workspace","projectId":"project-1"}"""),
+            json.parseToJsonElement("""{"cwd":"/workspace"}"""),
             gateway.calls[0].params,
         )
         assertEquals(
@@ -217,6 +217,81 @@ class CommonCodexClientTest {
             ),
             gateway.calls.filter { it.method == "thread/resume" }.map(RequestCall::params),
         )
+    }
+
+    @Test
+    fun steer_turn_forwards_the_expected_turn_and_text_input() {
+        val gateway = FakeRawGateway()
+        gateway.enqueue("turn/steer", success("{}"))
+
+        val result = runSuspend {
+            CommonCodexClient(gateway).steerTurn(profile, "thread-1", "turn-1", "keep going")
+        }
+
+        assertIs<GatewayResult.Success<Unit>>(result)
+        assertEquals(listOf("turn/steer"), gateway.calls.map(RequestCall::method))
+        assertEquals(
+            json.parseToJsonElement(
+                """{"threadId":"thread-1","expectedTurnId":"turn-1","input":[{"type":"text","text":"keep going"}]}""",
+            ),
+            gateway.calls.single().params,
+        )
+    }
+
+    @Test
+    fun queue_turn_forwards_a_fresh_client_message_id_and_decodes_the_server_submission() {
+        val gateway = FakeRawGateway()
+        gateway.enqueue(
+            "thread/queue/add",
+            success("""
+                {"queuedSubmission":{"id":"queued-1","clientUserMessageId":"client-1",
+                "input":[{"type":"text","text":"hello"}]}}
+            """),
+            success("""
+                {"queuedSubmission":{"id":"queued-2","clientUserMessageId":"client-2",
+                "input":[{"type":"text","text":"again"}]}}
+            """),
+        )
+        var nextId = 0
+        val client = CommonCodexClient(
+            gateway,
+            clientUserMessageIdGenerator = { "client-${++nextId}" },
+        )
+
+        val first = runSuspend { client.queueTurn(profile, "thread-1", "hello") }
+        val second = runSuspend { client.queueTurn(profile, "thread-1", "again") }
+
+        assertEquals("queued-1", assertIs<GatewayResult.Success<String>>(first).value)
+        assertEquals("queued-2", assertIs<GatewayResult.Success<String>>(second).value)
+        assertEquals(listOf("thread/queue/add", "thread/queue/add"), gateway.calls.map(RequestCall::method))
+        assertEquals(
+            json.parseToJsonElement(
+                """{"threadId":"thread-1","clientUserMessageId":"client-1","input":[{"type":"text","text":"hello"}]}""",
+            ),
+            gateway.calls[0].params,
+        )
+        assertEquals(
+            json.parseToJsonElement(
+                """{"threadId":"thread-1","clientUserMessageId":"client-2","input":[{"type":"text","text":"again"}]}""",
+            ),
+            gateway.calls[1].params,
+        )
+    }
+
+    @Test
+    fun malformed_queue_submission_response_is_a_failure_with_the_raw_payload() {
+        val gateway = FakeRawGateway()
+        val malformed = json.parseToJsonElement("""{"queuedSubmission":{"clientUserMessageId":"client-1","input":[]}}""")
+        gateway.enqueue("thread/queue/add", GatewayResult.Success(malformed))
+
+        val result = runSuspend {
+            CommonCodexClient(gateway, clientUserMessageIdGenerator = { "client-1" })
+                .queueTurn(profile, "thread-1", "hello")
+        }
+
+        val failure = assertIs<GatewayResult.Failure>(result)
+        assertTrue(failure.message.contains("Invalid thread/queue/add response"))
+        assertEquals(malformed, failure.rawError)
     }
 
     @Test

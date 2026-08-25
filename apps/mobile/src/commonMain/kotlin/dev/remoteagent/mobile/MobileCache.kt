@@ -42,6 +42,32 @@ fun reconcileProjectList(
 ): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(projects = projects)).bounded(limits)
 
 /**
+ * Records the turn id returned by a successful turn/start or turn/steer when
+ * the corresponding turn/started notification was missed. An already-applied
+ * terminal event remains authoritative when notifications are reordered.
+ */
+fun acknowledgeTurnStart(
+    cache: MobileCache,
+    hostIdentity: String,
+    threadId: String,
+    turnId: String,
+    limits: MobileCacheLimits,
+): MobileCache {
+    val profile = cache.profile(hostIdentity)
+    val snapshot = profile.snapshots[threadId] ?: return cache
+    val acknowledgedTurn = snapshot.turns.firstOrNull { it.id == turnId }
+        ?: CodexTurn(turnId, TurnStatus.InProgress)
+    val updated = snapshot.upsertTurn(acknowledgedTurn)
+    return cache.replaceProfile(
+        hostIdentity,
+        profile.copy(
+            threadList = profile.threadList.replaceById(updated.summary.id, updated.summary),
+            snapshots = profile.snapshots + (threadId to updated),
+        ),
+    ).bounded(limits)
+}
+
+/**
  * A ThreadReadResult is one atomic UI reconciliation transition: replace the
  * native Codex Thread projection first, then apply any locally buffered events.
  */
@@ -89,17 +115,50 @@ private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
     if (event is ThreadEvent.Unknown) {
         return copy(unknownEvents = (unknownEvents + event).takeLast(128))
     }
+    if (event is ThreadEvent.ThreadStatusChanged) {
+        val updatedList = threadList.map { summary ->
+            if (summary.id == event.threadId) summary.copy(status = event.status) else summary
+        }
+        val snapshot = snapshots[event.threadId]
+        val updatedSnapshots = if (snapshot == null) snapshots else snapshots + (
+            event.threadId to snapshot.copy(summary = snapshot.summary.copy(status = event.status))
+        )
+        return copy(threadList = updatedList, snapshots = updatedSnapshots)
+    }
     val existing = snapshots[event.threadId] ?: return this
     val updated = when (event) {
-        is ThreadEvent.TurnStarted -> existing.upsertTurn(CodexTurn(event.turnId, event.status))
-        is ThreadEvent.TurnCompleted -> existing.changeTurnStatus(event.turnId, event.status)
+        is ThreadEvent.TurnStarted -> existing.mergeTurnLifecycle(
+            CodexTurn(event.turnId, event.status, startedAtMs = event.startedAtMs),
+        )
+        is ThreadEvent.TurnCompleted -> existing.mergeTurnLifecycle(
+            CodexTurn(
+                id = event.turnId,
+                status = event.status,
+                startedAtMs = event.startedAtMs,
+                completedAtMs = event.completedAtMs,
+                durationMs = event.durationMs,
+                error = event.error,
+            ),
+        )
         is ThreadEvent.ItemStarted -> existing.upsertItem(event.turnId, event.item)
         is ThreadEvent.AgentMessageDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.AgentMessage)
         is ThreadEvent.ReasoningDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.Reasoning)
         is ThreadEvent.ReasoningSummaryDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.Reasoning)
         is ThreadEvent.CommandOutputDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.CommandOutput)
         is ThreadEvent.FileChangeOutputDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.FileChangeOutput)
+        is ThreadEvent.Error -> existing.updateTurnError(event.turnId, event.error)
+        is ThreadEvent.RequestStarted -> existing.addPendingRequest(event.turnId, event.request)
+        is ThreadEvent.RequestResolved -> existing.removePendingRequest(event.requestId)
+        is ThreadEvent.GuardianReviewChanged -> if (event.status == "approved") {
+            existing.removeItem(event.turnId, event.reviewId)
+        } else {
+            existing.upsertItem(
+                event.turnId,
+                CodexItem.Unknown(event.reviewId, "automaticApprovalReview", event.raw),
+            )
+        }
         is ThreadEvent.ItemCompleted -> existing.upsertItem(event.turnId, event.item)
+        is ThreadEvent.ThreadStatusChanged -> existing
         is ThreadEvent.Unknown -> existing
     }
     return copy(

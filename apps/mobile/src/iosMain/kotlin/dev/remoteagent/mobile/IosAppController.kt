@@ -39,18 +39,45 @@ data class IosProjectView(
     val roots: List<String>,
 )
 
-data class IosItemView(
+class IosItemView internal constructor(
     val id: String,
     val kind: String,
     val title: String,
-    val body: String,
-)
+    val collapsedBody: String,
+    val isCollapsible: Boolean,
+    val contentVersion: String,
+    private val expandedBodyProvider: () -> String,
+) {
+    fun expandedBody(): String = expandedBodyProvider()
+}
 
 data class IosTurnView(
     val id: String,
     val status: String,
     val isInProgress: Boolean,
-    val items: List<IosItemView>,
+    val userMessages: List<IosItemView>,
+    val activitySummary: String?,
+    val activityItems: List<IosItemView>,
+    val responses: List<IosItemView>,
+    val activityInitiallyExpanded: Boolean,
+    val activityCanCollapse: Boolean,
+    val error: IosTurnErrorView?,
+    val pendingRequests: List<IosTurnRequestView>,
+)
+
+data class IosTurnErrorView(
+    val title: String,
+    val message: String,
+    val details: String?,
+    val isReconnecting: Boolean,
+    val isRetryable: Boolean,
+)
+
+data class IosTurnRequestView(
+    val id: String,
+    val kind: String,
+    val title: String,
+    val body: String,
 )
 
 data class IosThreadView(
@@ -136,8 +163,8 @@ class IosAppController {
         controller.listThreads(profile)
     }
 
-    fun startTask(projectId: String?, cwd: String, firstPrompt: String) = withSelectedProfile { profile ->
-        controller.startThread(profile, projectId, cwd, firstPrompt)
+    fun startTask(cwd: String, firstPrompt: String) = withSelectedProfile { profile ->
+        controller.startThread(profile, cwd, firstPrompt)
     }
 
     fun openThread(threadId: String) = withSelectedProfile { profile -> controller.readThread(profile, threadId) }
@@ -221,35 +248,41 @@ private fun ThreadSnapshot.toIosThreadView(): IosThreadView = IosThreadView(
     id = summary.id,
     title = summary.name ?: summary.preview.ifBlank { "タスク" },
     turns = turns.map { turn ->
+        val presentation = turn.toThreadTurnPresentation()
         IosTurnView(
             id = turn.id,
             status = turn.status.name,
             isInProgress = turn.status == TurnStatus.InProgress,
-            items = turn.items.map(CodexItem::toIosItemView),
+            userMessages = presentation.userMessages.map(CodexItem::toIosItemView),
+            activitySummary = presentation.activitySummary,
+            activityItems = presentation.activityItems.map(CodexItem::toIosItemView),
+            responses = presentation.responses.map(CodexItem::toIosItemView),
+            activityInitiallyExpanded = presentation.activityInitiallyExpanded,
+            activityCanCollapse = presentation.activityCanCollapse,
+            error = presentation.error?.let { error ->
+                IosTurnErrorView(
+                    error.title,
+                    error.message,
+                    error.details,
+                    error.isReconnecting,
+                    error.isRetryable,
+                )
+            },
+            pendingRequests = presentation.pendingRequests.map { request ->
+                IosTurnRequestView(request.id, request.kind, request.title, request.body)
+            },
         )
     },
 )
 
-private fun CodexItem.toIosItemView(): IosItemView = when (this) {
-    is CodexItem.UserMessage -> IosItemView(id, "user", "You", text)
-    is CodexItem.AgentMessage -> IosItemView(id, "agent", "Codex", text)
-    is CodexItem.Reasoning -> IosItemView(id, "reasoning", "Reasoning", summary)
-    is CodexItem.CommandExecution -> IosItemView(
-        id = id,
-        kind = "command",
-        title = command,
-        body = output,
-    )
-    is CodexItem.FileChange -> IosItemView(
-        id = id,
-        kind = "fileChange",
-        title = "Files changed",
-        body = changes.joinToString("\n") { "${it.kind.name}: ${it.path}\n${it.diff}" }.trim(),
-    )
-    is CodexItem.Unknown -> IosItemView(
-        id = id,
-        kind = "unknown",
-        title = codexType,
-        body = raw.toString(),
+private fun CodexItem.toIosItemView(): IosItemView = toThreadItemPresentation().let { presentation ->
+    IosItemView(
+        id = presentation.id,
+        kind = presentation.kind,
+        title = presentation.title,
+        collapsedBody = presentation.collapsedBody,
+        isCollapsible = presentation.isCollapsible,
+        contentVersion = threadItemContentVersion(),
+        expandedBodyProvider = { expandedThreadItemBody() },
     )
 }

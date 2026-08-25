@@ -5,6 +5,7 @@ use std::{
 };
 
 use host_protocol::{RpcMessageKind, classify_message, rewrite_top_level_id};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 /// An identifier allocated by the daemon for one authenticated mobile
@@ -200,7 +201,14 @@ impl SessionRouter {
         };
         let mut state = lock_state(&self.state);
         match message.kind() {
-            RpcMessageKind::Notification => broadcast_line_locked(&mut state, line),
+            RpcMessageKind::Notification => {
+                let resolved = resolved_server_request_id(line).is_some_and(|upstream_id| {
+                    fanout_resolved_request_locked(&mut state, &upstream_id, line)
+                });
+                if !resolved {
+                    broadcast_line_locked(&mut state, line);
+                }
+            }
             RpcMessageKind::Request => {
                 fanout_request_locked(&mut state, message.raw_id().unwrap_or_default(), line)
             }
@@ -287,6 +295,62 @@ fn broadcast_line_locked(state: &mut State, line: &str) {
     for session in failed {
         remove_session_locked(state, session);
     }
+}
+
+fn resolved_server_request_id(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    if value.get("method")?.as_str()? != "serverRequest/resolved" {
+        return None;
+    }
+    serde_json::to_string(value.get("params")?.get("requestId")?).ok()
+}
+
+/// Codex identifies a resolved request with its upstream id. Each phone only
+/// knows its session-local proxy id, so fan out one correlated notification
+/// per session and retire the replayable pending request atomically.
+fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &str) -> bool {
+    let Some(pending) = state.pending.remove(upstream_id) else {
+        return false;
+    };
+    let Ok(base) = serde_json::from_str::<Value>(line) else {
+        state.pending.insert(upstream_id.to_owned(), pending);
+        return false;
+    };
+    let mut failed = Vec::new();
+    for (session, proxy_id) in pending.proxies {
+        state.proxy_to_upstream.remove(&ProxyKey {
+            session,
+            id: proxy_id.clone(),
+        });
+        let Some(sender) = state.sessions.get(&session).cloned() else {
+            continue;
+        };
+        let Ok(proxy_value) = serde_json::from_str::<Value>(&proxy_id) else {
+            failed.push(session);
+            continue;
+        };
+        let mut notification = base.clone();
+        let Some(request_id) = notification
+            .get_mut("params")
+            .and_then(Value::as_object_mut)
+            .and_then(|params| params.get_mut("requestId"))
+        else {
+            failed.push(session);
+            continue;
+        };
+        *request_id = proxy_value;
+        let Ok(proxy_line) = serde_json::to_string(&notification) else {
+            failed.push(session);
+            continue;
+        };
+        if sender.try_send(proxy_line).is_err() {
+            failed.push(session);
+        }
+    }
+    for session in failed {
+        remove_session_locked(state, session);
+    }
+    true
 }
 
 fn allocate_session_id(state: &mut State) -> SessionId {
@@ -382,6 +446,54 @@ mod tests {
         router.handle_server_line(line);
         assert_eq!(first.recv().await.unwrap(), line);
         assert_eq!(second.recv().await.unwrap(), line);
+    }
+
+    #[tokio::test]
+    async fn resolved_requests_use_each_phone_proxy_id_and_are_not_replayed() {
+        let router = SessionRouter::new();
+        let mut first = router.open_session(4);
+        let mut second = router.open_session(4);
+        router.handle_server_line(
+            r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}"#,
+        );
+        let first_request = first.recv().await.unwrap();
+        let second_request = second.recv().await.unwrap();
+        let first_id = classify_message(&first_request)
+            .unwrap()
+            .raw_id()
+            .unwrap()
+            .to_owned();
+        let second_id = classify_message(&second_request)
+            .unwrap()
+            .raw_id()
+            .unwrap()
+            .to_owned();
+
+        router.handle_server_line(
+            r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#,
+        );
+
+        let first_resolved: Value = serde_json::from_str(&first.recv().await.unwrap()).unwrap();
+        let second_resolved: Value = serde_json::from_str(&second.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            first_resolved["params"]["requestId"],
+            serde_json::from_str::<Value>(&first_id).unwrap(),
+        );
+        assert_eq!(
+            second_resolved["params"]["requestId"],
+            serde_json::from_str::<Value>(&second_id).unwrap(),
+        );
+        assert_eq!(
+            router.resolve_response(1, &first_id),
+            ResponseRoute::Unknown
+        );
+
+        let mut later = router.open_session(4);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), later.recv())
+                .await
+                .is_err(),
+        );
     }
 
     #[tokio::test]

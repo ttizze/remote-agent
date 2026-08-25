@@ -28,6 +28,14 @@ class MobileStateCodecTest {
                     status = TurnStatus.InProgress,
                     items = listOf(CodexItem.AgentMessage("item-1", "hello")),
                     raw = buildJsonObject { put("turnExtension", JsonPrimitive("kept")) },
+                    error = CodexTurnError("reconnecting", willRetry = true),
+                    pendingRequests = listOf(
+                        CodexServerRequest(
+                            id = "request-1",
+                            method = "item/tool/requestUserInput",
+                            params = buildJsonObject { put("question", JsonPrimitive("Continue?")) },
+                        ),
+                    ),
                 ),
             ),
             raw = buildJsonObject { put("snapshotExtension", JsonPrimitive(true)) },
@@ -102,7 +110,12 @@ class MobileStateCodecTest {
         // Notifications remain durable, while server requests must never be
         // actionable after process restart.
         assertEquals(listOf(rawNotification), restored.cache.profile(profile.hostIdentity).rawMessages)
-        assertEquals(snapshot, restored.cache.snapshot(profile.hostIdentity, summary.id))
+        assertEquals(
+            snapshot.copy(
+                turns = snapshot.turns.map { it.copy(error = null, pendingRequests = emptyList()) },
+            ),
+            restored.cache.snapshot(profile.hostIdentity, summary.id),
+        )
     }
 
     @Test

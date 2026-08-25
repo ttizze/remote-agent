@@ -55,6 +55,8 @@ data class AppState(
     val workingDirectoryPath: String get() = selectedView.workingDirectoryPath
 }
 
+internal const val QueuedTurnDeliveryNotice = "現在の処理が完了した後にメッセージを送信します。"
+
 sealed interface AppAction {
     data object PairingOpened : AppAction
     data object PairingDismissed : AppAction
@@ -80,6 +82,7 @@ sealed interface AppAction {
     data class ThreadReadFailed(val hostIdentity: String, val message: String) : AppAction
     data class ThreadStartFailed(val hostIdentity: String, val message: String) : AppAction
     data class TurnStartAcknowledged(val hostIdentity: String, val threadId: String, val turnId: String) : AppAction
+    data class TurnQueued(val hostIdentity: String, val threadId: String, val queueId: String) : AppAction
     data class TurnFailed(val hostIdentity: String, val message: String) : AppAction
     data class InterruptStarted(val hostIdentity: String, val turnId: String) : AppAction
     data class InterruptFinished(val hostIdentity: String) : AppAction
@@ -212,8 +215,20 @@ fun reduce(
     }
 
     is AppAction.TurnStartAcknowledged -> if (state.isConnected(action.hostIdentity)) {
-        state.updateView(action.hostIdentity) { it.copy(notice = null) }
+        state.copy(
+            cache = acknowledgeTurnStart(
+                state.cache,
+                action.hostIdentity,
+                action.threadId,
+                action.turnId,
+                cacheLimits,
+            ),
+        ).updateView(action.hostIdentity) { it.copy(notice = null) }
     } else state
+
+    is AppAction.TurnQueued -> state.updateViewIfConnected(action.hostIdentity) {
+        it.copy(notice = QueuedTurnDeliveryNotice)
+    }
 
     is AppAction.TurnFailed -> state.updateViewIfConnected(action.hostIdentity) {
         it.copy(notice = action.message)

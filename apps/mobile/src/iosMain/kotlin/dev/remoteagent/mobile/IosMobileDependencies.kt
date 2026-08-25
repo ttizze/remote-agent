@@ -106,6 +106,18 @@ object IosBonjourBridge {
     }
 
     fun candidates(): List<String> = addresses.value
+
+    suspend fun awaitCandidates(timeoutMs: Long = BonjourDiscoveryTimeoutMs): List<String> {
+        candidates().takeIf(List<String>::isNotEmpty)?.let { return it }
+        repeat((timeoutMs / BonjourDiscoveryPollMs).toInt()) {
+            delay(BonjourDiscoveryPollMs)
+            candidates().takeIf(List<String>::isNotEmpty)?.let { return it }
+        }
+        return emptyList()
+    }
+
+    private const val BonjourDiscoveryTimeoutMs = 1_500L
+    private const val BonjourDiscoveryPollMs = 50L
 }
 
 /**
@@ -144,8 +156,10 @@ internal class IosHostGateway : HostGateway {
         }
     }
 
-    override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> =
-        GatewayResult.Success(connectionCandidates(profile.addresses))
+    override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = withContext(Dispatchers.Default) {
+        val discovered = IosBonjourBridge.awaitCandidates()
+        GatewayResult.Success((discovered + profile.addresses).filter(String::isNotBlank).distinct())
+    }
 
     override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = withContext(Dispatchers.Default) {
         val key = try {
@@ -198,12 +212,17 @@ internal class IosHostGateway : HostGateway {
     override suspend fun startThread(
         profile: HostProfile,
         cwd: String,
-        projectId: String?,
         firstPrompt: String,
-    ): GatewayResult<ThreadStartResult> = codexClient.startThread(profile, cwd, projectId, firstPrompt)
+    ): GatewayResult<ThreadStartResult> = codexClient.startThread(profile, cwd, firstPrompt)
 
     override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> =
         codexClient.startTurn(profile, threadId, cwd, text)
+
+    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit> =
+        codexClient.steerTurn(profile, threadId, turnId, text)
+
+    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> =
+        codexClient.queueTurn(profile, threadId, text)
 
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
         codexClient.interrupt(profile, threadId, turnId)

@@ -3,6 +3,7 @@ package dev.remoteagent.mobile
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
 
 /** UI projections of Codex data. Raw Codex values remain available on every projection. */
 @Serializable
@@ -34,6 +35,12 @@ enum class TurnStatus {
     @SerialName("interrupted") Interrupted,
     @SerialName("failed") Failed,
     @SerialName("inProgress") InProgress,
+}
+
+@Serializable
+enum class AgentMessagePhase {
+    @SerialName("commentary") Commentary,
+    @SerialName("final_answer") FinalAnswer,
 }
 
 @Serializable
@@ -94,6 +101,26 @@ data class CodexTurn(
     val status: TurnStatus,
     val items: List<CodexItem> = emptyList(),
     val raw: JsonObject? = null,
+    val startedAtMs: Long? = null,
+    val completedAtMs: Long? = null,
+    val durationMs: Long? = null,
+    val error: CodexTurnError? = null,
+    val pendingRequests: List<CodexServerRequest> = emptyList(),
+)
+
+@Serializable
+data class CodexTurnError(
+    val message: String,
+    val additionalDetails: String? = null,
+    val codexErrorInfo: JsonElement? = null,
+    val willRetry: Boolean = false,
+)
+
+@Serializable
+data class CodexServerRequest(
+    val id: String,
+    val method: String,
+    val params: JsonObject,
 )
 
 /** A typed, user-visible Codex item. */
@@ -105,7 +132,11 @@ sealed interface CodexItem {
     data class UserMessage(override val id: String, val text: String) : CodexItem
 
     @Serializable @SerialName("agentMessage")
-    data class AgentMessage(override val id: String, val text: String) : CodexItem
+    data class AgentMessage(
+        override val id: String,
+        val text: String,
+        val phase: AgentMessagePhase? = null,
+    ) : CodexItem
 
     @Serializable @SerialName("reasoning")
     data class Reasoning(override val id: String, val summary: String) : CodexItem
@@ -142,10 +173,23 @@ sealed interface ThreadEvent {
     val turnId: String
 
     @Serializable @SerialName("turnStarted")
-    data class TurnStarted(override val threadId: String, override val turnId: String, val status: TurnStatus) : ThreadEvent
+    data class TurnStarted(
+        override val threadId: String,
+        override val turnId: String,
+        val status: TurnStatus,
+        val startedAtMs: Long? = null,
+    ) : ThreadEvent
 
     @Serializable @SerialName("turnCompleted")
-    data class TurnCompleted(override val threadId: String, override val turnId: String, val status: TurnStatus) : ThreadEvent
+    data class TurnCompleted(
+        override val threadId: String,
+        override val turnId: String,
+        val status: TurnStatus,
+        val startedAtMs: Long? = null,
+        val completedAtMs: Long? = null,
+        val durationMs: Long? = null,
+        val error: CodexTurnError? = null,
+    ) : ThreadEvent
 
     @Serializable @SerialName("itemStarted")
     data class ItemStarted(override val threadId: String, override val turnId: String, val item: CodexItem) : ThreadEvent
@@ -164,6 +208,44 @@ sealed interface ThreadEvent {
 
     @Serializable @SerialName("fileChangeOutputDelta")
     data class FileChangeOutputDelta(override val threadId: String, override val turnId: String, val itemId: String, val delta: String) : ThreadEvent
+
+    @Serializable @SerialName("error")
+    data class Error(
+        override val threadId: String,
+        override val turnId: String,
+        val error: CodexTurnError,
+        val willRetry: Boolean,
+    ) : ThreadEvent
+
+    @Serializable @SerialName("requestStarted")
+    data class RequestStarted(
+        override val threadId: String,
+        override val turnId: String,
+        val request: CodexServerRequest,
+    ) : ThreadEvent
+
+    @Serializable @SerialName("requestResolved")
+    data class RequestResolved(
+        override val threadId: String,
+        override val turnId: String = "",
+        val requestId: String,
+    ) : ThreadEvent
+
+    @Serializable @SerialName("threadStatusChanged")
+    data class ThreadStatusChanged(
+        override val threadId: String,
+        override val turnId: String = "",
+        val status: ThreadStatus,
+    ) : ThreadEvent
+
+    @Serializable @SerialName("guardianReviewChanged")
+    data class GuardianReviewChanged(
+        override val threadId: String,
+        override val turnId: String,
+        val reviewId: String,
+        val status: String,
+        val raw: JsonObject,
+    ) : ThreadEvent
 
     @Serializable @SerialName("itemCompleted")
     data class ItemCompleted(override val threadId: String, override val turnId: String, val item: CodexItem) : ThreadEvent
@@ -189,8 +271,59 @@ internal fun ThreadSnapshot.upsertItem(turnId: String, item: CodexItem): ThreadS
     },
 )
 
-internal fun ThreadSnapshot.changeTurnStatus(turnId: String, status: TurnStatus): ThreadSnapshot = copy(
-    turns = turns.map { turn -> if (turn.id == turnId) turn.copy(status = status) else turn },
+internal fun ThreadSnapshot.mergeTurnLifecycle(incoming: CodexTurn): ThreadSnapshot {
+    val current = turns.firstOrNull { it.id == incoming.id }
+    val merged = if (current == null) {
+        incoming
+    } else {
+        current.copy(
+            status = if (current.status != TurnStatus.InProgress && incoming.status == TurnStatus.InProgress) {
+                current.status
+            } else {
+                incoming.status
+            },
+            startedAtMs = incoming.startedAtMs ?: current.startedAtMs,
+            completedAtMs = incoming.completedAtMs ?: current.completedAtMs,
+            durationMs = incoming.durationMs ?: current.durationMs,
+            error = when {
+                incoming.error != null -> incoming.error
+                incoming.status == TurnStatus.Completed -> null
+                incoming.status != TurnStatus.InProgress && current.error?.willRetry == true -> null
+                else -> current.error
+            },
+            pendingRequests = if (incoming.pendingRequests.isEmpty()) current.pendingRequests else incoming.pendingRequests,
+            raw = incoming.raw ?: current.raw,
+        )
+    }
+    return upsertTurn(merged)
+}
+
+internal fun ThreadSnapshot.updateTurnError(turnId: String, error: CodexTurnError): ThreadSnapshot = copy(
+    turns = turns.map { turn ->
+        if (turn.id != turnId || error.willRetry && turn.status != TurnStatus.InProgress) {
+            turn
+        } else {
+            turn.copy(error = error)
+        }
+    },
+)
+
+internal fun ThreadSnapshot.addPendingRequest(turnId: String, request: CodexServerRequest): ThreadSnapshot = copy(
+    turns = turns.map { turn ->
+        if (turn.id == turnId) turn.copy(
+            pendingRequests = turn.pendingRequests.replaceById(request.id, request) { it.id },
+        ) else turn
+    },
+)
+
+internal fun ThreadSnapshot.removePendingRequest(requestId: String): ThreadSnapshot = copy(
+    turns = turns.map { turn -> turn.copy(pendingRequests = turn.pendingRequests.filterNot { it.id == requestId }) },
+)
+
+internal fun ThreadSnapshot.removeItem(turnId: String, itemId: String): ThreadSnapshot = copy(
+    turns = turns.map { turn ->
+        if (turn.id == turnId) turn.copy(items = turn.items.filterNot { it.id == itemId }) else turn
+    },
 )
 
 internal fun ThreadSnapshot.appendDelta(turnId: String, itemId: String, delta: String, kind: DeltaKind): ThreadSnapshot = copy(

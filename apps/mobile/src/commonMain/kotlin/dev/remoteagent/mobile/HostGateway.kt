@@ -16,10 +16,11 @@ interface HostGateway : RawCodexGateway {
     suspend fun startThread(
         profile: HostProfile,
         cwd: String,
-        projectId: String?,
         firstPrompt: String,
-    ): GatewayResult<ThreadStartResult> = GatewayResult.Failure("Project task creation is unavailable on this Host.")
+    ): GatewayResult<ThreadStartResult> = GatewayResult.Failure("Task creation is unavailable on this Host.")
     suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String>
+    suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit>
+    suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String>
     suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit>
 
     /**
@@ -28,7 +29,7 @@ interface HostGateway : RawCodexGateway {
      */
     fun subscribe(profile: HostProfile, onEvent: (ThreadEvent) -> Unit): HostEventSubscription =
         subscribeRaw(profile) { message ->
-            message.toThreadEventOrNull()?.let(onEvent)
+            onEvent(message.toThreadEvent())
         }
 }
 
@@ -66,10 +67,7 @@ interface RawCodexGateway {
     ): GatewayResult<Unit>
 }
 
-private fun RawCodexMessage.toThreadEventOrNull(): ThreadEvent? = when (this) {
-    is RawCodexMessage.Notification -> codexThreadEvent(method, params)
-    is RawCodexMessage.ServerRequest -> null
-}
+private fun RawCodexMessage.toThreadEvent(): ThreadEvent = codexThreadEvent(this)
 
 fun interface HostEventSubscription {
     fun cancel()
@@ -96,6 +94,8 @@ object UnavailableHostGateway : HostGateway {
     override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> = unavailable()
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> = unavailable()
     override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> = unavailable()
+    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit> = unavailable()
+    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> = unavailable()
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> = unavailable()
     override suspend fun rawRequest(profile: HostProfile, method: String, params: JsonElement): GatewayResult<JsonElement> = unavailable()
     override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription = HostEventSubscription {}

@@ -112,12 +112,17 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     override suspend fun startThread(
         profile: HostProfile,
         cwd: String,
-        projectId: String?,
         firstPrompt: String,
-    ): GatewayResult<ThreadStartResult> = commonCodexClient.startThread(profile, cwd, projectId, firstPrompt)
+    ): GatewayResult<ThreadStartResult> = commonCodexClient.startThread(profile, cwd, firstPrompt)
 
     override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> =
         commonCodexClient.startTurn(profile, threadId, cwd, text)
+
+    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit> =
+        commonCodexClient.steerTurn(profile, threadId, turnId, text)
+
+    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> =
+        commonCodexClient.queueTurn(profile, threadId, text)
 
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
         commonCodexClient.interrupt(profile, threadId, turnId)
@@ -291,7 +296,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     ) {
         if (finished.compareAndSet(false, true)) {
             discovery.stop()
-            if (continuation.isActive) continuation.resume(GatewayResult.Success((profile.addresses + discovered).distinct()))
+            if (continuation.isActive) continuation.resume(GatewayResult.Success((discovered + profile.addresses).distinct()))
         }
     }
 

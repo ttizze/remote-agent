@@ -219,8 +219,8 @@ private fun HostFlowScreen(
                             controller.listThreads(profile)
                         }
                     },
-                    onStart = { projectId, cwd, prompt ->
-                        scope.launch { controller.startThread(profile, projectId, cwd, prompt) }
+                    onStart = { cwd, prompt ->
+                        scope.launch { controller.startThread(profile, cwd, prompt) }
                     },
                     onSelect = { threadId -> scope.launch { controller.readThread(profile, threadId) } },
                     modifier = modifier,
@@ -269,7 +269,7 @@ private fun ThreadListScreen(
     projects: List<CodexProject>,
     threads: List<ThreadSummary>,
     onRefresh: () -> Unit,
-    onStart: (String?, String, String) -> Unit,
+    onStart: (String, String) -> Unit,
     onSelect: (String) -> Unit,
     modifier: Modifier,
 ) {
@@ -338,7 +338,7 @@ private fun ThreadListScreen(
             onDismiss = { newTaskTarget = null },
             onStart = { cwd, prompt ->
                 newTaskTarget = null
-                onStart(target.project?.id, cwd, prompt)
+                onStart(cwd, prompt)
             },
         )
     }
@@ -431,10 +431,27 @@ private fun ThreadDetailScreen(
     var composer by remember(profile.hostIdentity, view.selectedThreadId) { mutableStateOf("") }
     val listState = rememberLazyListState()
     var followingLatest by remember(profile.hostIdentity, view.selectedThreadId) { mutableStateOf(true) }
+    var expandedItemIds by remember(profile.hostIdentity, view.selectedThreadId) {
+        mutableStateOf(emptySet<String>())
+    }
+    var activityExpansionOverrides by remember(profile.hostIdentity, view.selectedThreadId) {
+        mutableStateOf(emptyMap<String, Boolean>())
+    }
+    val turnPresentations = snapshot?.turns?.map(CodexTurn::toThreadTurnPresentation).orEmpty()
     val contentVersion = snapshot?.turns?.joinToString("|") { turn ->
-        val items = turn.items.joinToString(",") { "${it.id}:${it.displayText().length}" }
-        "${turn.id}:${turn.status}:$items"
+        val items = turn.items.joinToString(",") { "${it.id}:${it.threadItemContentVersion()}" }
+        val requests = turn.pendingRequests.joinToString(",") { "${it.id}:${it.method}:${it.params.hashCode()}" }
+        "${turn.id}:${turn.status}:${turn.error?.hashCode()}:$requests:$items"
     }.orEmpty()
+    val detailRowCount = turnPresentations.sumOf { turn ->
+        val activityExpanded = activityExpansionOverrides[turn.id] ?: turn.activityInitiallyExpanded
+        turn.userMessages.size +
+            (if (turn.activitySummary == null) 0 else 1) +
+            (if (activityExpanded) turn.activityItems.size + if (turn.status == TurnStatus.InProgress) 1 else 0 else 0) +
+            turn.pendingRequests.size +
+            (if (turn.error == null) 0 else 1) +
+            turn.responses.size
+    }
     LaunchedEffect(listState) {
         snapshotFlow {
             val layout = listState.layoutInfo
@@ -446,7 +463,7 @@ private fun ThreadDetailScreen(
     }
     LaunchedEffect(contentVersion) {
         if (followingLatest) {
-            listState.scrollToItem((snapshot?.turns?.size ?: 0) + 1)
+            listState.scrollToItem(detailRowCount + 1)
         }
     }
     LazyColumn(
@@ -463,18 +480,99 @@ private fun ThreadDetailScreen(
                 Button(onClick = onRetry) { Text("再試行") }
             }
         }
-        snapshot?.turns?.forEach { turn ->
-            item(key = turn.id) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(turn.status.name, style = MaterialTheme.typography.labelMedium)
-                    turn.items.forEach { item -> Text(item.displayText()) }
-                    if (turn.status == TurnStatus.InProgress) {
+        turnPresentations.forEach { turn ->
+            items(turn.userMessages, key = { item -> "${turn.id}:user:${item.id}" }) { item ->
+                ThreadMessageCard(item = item, isUser = true)
+            }
+            val activityExpanded = activityExpansionOverrides[turn.id] ?: turn.activityInitiallyExpanded
+            turn.activitySummary?.let { summary ->
+                item(key = "${turn.id}:activity") {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val activityModifier = if (turn.activityCanCollapse) {
+                            Modifier.fillMaxWidth().clickable {
+                                activityExpansionOverrides = activityExpansionOverrides +
+                                    (turn.id to !activityExpanded)
+                            }
+                        } else {
+                            Modifier.fillMaxWidth()
+                        }
+                        Row(
+                            modifier = activityModifier.padding(vertical = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(summary, style = MaterialTheme.typography.labelMedium)
+                            if (turn.activityCanCollapse) Text(if (activityExpanded) "⌄" else "›")
+                        }
+                        androidx.compose.material3.HorizontalDivider()
+                    }
+                }
+            }
+            if (activityExpanded) {
+                items(turn.activityItems, key = { item -> "${turn.id}:activity:${item.id}" }) { item ->
+                    val expansionKey = "${turn.id}:${item.id}"
+                    ThreadActivityCard(
+                        item = item,
+                        isExpanded = expansionKey in expandedItemIds,
+                        toggleExpanded = {
+                            expandedItemIds = if (expansionKey in expandedItemIds) {
+                                expandedItemIds - expansionKey
+                            } else {
+                                expandedItemIds + expansionKey
+                            }
+                        },
+                    )
+                }
+                if (turn.status == TurnStatus.InProgress) {
+                    item(key = "${turn.id}:stop") {
                         Button(
                             onClick = { onStop(turn.id) },
                             enabled = view.interruptingTurnId != turn.id,
                         ) { Text(if (view.interruptingTurnId == turn.id) "停止中…" else "停止") }
                     }
                 }
+            }
+            items(turn.pendingRequests, key = { request -> "${turn.id}:request:${request.id}" }) { request ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(request.title, style = MaterialTheme.typography.labelLarge)
+                        Text(request.body)
+                    }
+                }
+            }
+            turn.error?.let { error ->
+                item(key = "${turn.id}:error") {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (error.isReconnecting) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                }
+                                Text(
+                                    error.title,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (error.isReconnecting) {
+                                        MaterialTheme.colorScheme.onSurface
+                                    } else {
+                                        MaterialTheme.colorScheme.error
+                                    },
+                                )
+                            }
+                            Text(error.message)
+                            error.details?.takeIf(String::isNotBlank)?.let { details ->
+                                Text(details, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
+            items(turn.responses, key = { item -> "${turn.id}:response:${item.id}" }) { item ->
+                ThreadMessageCard(item = item, isUser = false)
             }
         }
         item {
@@ -495,15 +593,49 @@ private fun ThreadDetailScreen(
 }
 
 @Composable
-private fun LoadingScreen(text: String, modifier: Modifier) {
-    Column(modifier = modifier.fillMaxSize().padding(24.dp)) { Text(text) }
+private fun ThreadMessageCard(item: CodexItem, isUser: Boolean) {
+    val message = item.toThreadItemPresentation().collapsedBody
+    if (isUser) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Card { Text(message, modifier = Modifier.padding(12.dp)) }
+        }
+    } else {
+        Text(message, modifier = Modifier.fillMaxWidth())
+    }
 }
 
-private fun CodexItem.displayText(): String = when (this) {
-    is CodexItem.UserMessage -> "You: $text"
-    is CodexItem.AgentMessage -> "Codex: $text"
-    is CodexItem.Reasoning -> "Reasoning: $summary"
-    is CodexItem.CommandExecution -> "$ $command\n$output"
-    is CodexItem.FileChange -> changes.joinToString("\n") { "${it.kind}: ${it.path}" }
-    is CodexItem.Unknown -> "Codex item ($codexType): ${raw}"
+@Composable
+private fun ThreadActivityCard(
+    item: CodexItem,
+    isExpanded: Boolean,
+    toggleExpanded: () -> Unit,
+) {
+    val presentation = item.toThreadItemPresentation()
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (presentation.isCollapsible) Modifier.clickable(onClick = toggleExpanded) else Modifier),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (presentation.isCollapsible) Text(if (isExpanded) "⌄" else "›")
+                Text(presentation.title, style = MaterialTheme.typography.labelLarge, maxLines = 1)
+            }
+            val body = if (isExpanded) item.expandedThreadItemBody() else presentation.collapsedBody
+            if (body.isNotEmpty()) {
+                Text(
+                    text = body,
+                    maxLines = if (presentation.isCollapsible && !isExpanded) 1 else Int.MAX_VALUE,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoadingScreen(text: String, modifier: Modifier) {
+    Column(modifier = modifier.fillMaxSize().padding(24.dp)) { Text(text) }
 }

@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlin.random.Random
 
 private const val MaxThreadItems = 64
 private const val MaxThreadPages = 64
@@ -41,6 +42,7 @@ data class CommonCodexClientLimits(
 class CommonCodexClient(
     private val rawGateway: RawCodexGateway,
     private val limits: CommonCodexClientLimits = CommonCodexClientLimits(),
+    private val clientUserMessageIdGenerator: () -> String = ::defaultClientUserMessageId,
 ) {
     suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> {
         val projects = mutableListOf<CodexProject>()
@@ -142,7 +144,6 @@ class CommonCodexClient(
     suspend fun startThread(
         profile: HostProfile,
         cwd: String,
-        projectId: String?,
         firstPrompt: String,
     ): GatewayResult<ThreadStartResult> {
         val started = request(
@@ -150,7 +151,6 @@ class CommonCodexClient(
             "host/thread/start",
             buildJsonObject {
                 put("cwd", cwd)
-                projectId?.let { put("projectId", it) }
             },
         ).decode("host/thread/start", ::parseThreadSnapshot)
         val thread = when (started) {
@@ -207,6 +207,49 @@ class CommonCodexClient(
                 })
             },
         ).decode("turn/start") { value -> parseTurnId(value) }
+    }
+
+    suspend fun steerTurn(
+        profile: HostProfile,
+        threadId: String,
+        turnId: String,
+        text: String,
+    ): GatewayResult<Unit> = request(
+        profile,
+        "turn/steer",
+        buildJsonObject {
+            put("threadId", threadId)
+            put("expectedTurnId", turnId)
+            put("input", buildJsonArray {
+                add(buildJsonObject {
+                    put("type", "text")
+                    put("text", text)
+                })
+            })
+        },
+    ).mapGateway { Unit }
+
+    suspend fun queueTurn(
+        profile: HostProfile,
+        threadId: String,
+        text: String,
+    ): GatewayResult<String> {
+        val clientUserMessageId = clientUserMessageIdGenerator().takeIf(String::isNotBlank)
+            ?: return GatewayResult.Failure("Client user message id must not be blank.")
+        return request(
+            profile,
+            "thread/queue/add",
+            buildJsonObject {
+                put("threadId", threadId)
+                put("clientUserMessageId", clientUserMessageId)
+                put("input", buildJsonArray {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", text)
+                    })
+                })
+            },
+        ).decode("thread/queue/add", ::parseQueuedSubmissionId)
     }
 
     suspend fun interrupt(
@@ -320,6 +363,17 @@ private fun parseTurnId(value: JsonElement): String {
     val id = root.string("turnId") ?: root.childObject("turn")?.string("id")
     return id?.takeIf(String::isNotBlank) ?: invalid("turn/start response is missing turn id")
 }
+
+private fun parseQueuedSubmissionId(value: JsonElement): String {
+    val root = value as? JsonObject ?: invalid("expected an object")
+    val queuedSubmission = root["queuedSubmission"] as? JsonObject
+        ?: invalid("queuedSubmission must be an object")
+    return queuedSubmission.string("id")?.takeIf(String::isNotBlank)
+        ?: invalid("thread/queue/add response is missing queued submission id")
+}
+
+private fun defaultClientUserMessageId(): String =
+    "${Random.Default.nextLong()}-${Random.Default.nextLong()}"
 
 private fun invalid(message: String): Nothing = throw IllegalArgumentException(message)
 

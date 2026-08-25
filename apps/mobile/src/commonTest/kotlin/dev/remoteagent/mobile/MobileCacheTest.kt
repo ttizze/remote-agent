@@ -171,6 +171,215 @@ class MobileCacheTest {
     }
 
     @Test
+    fun completed_turn_timing_survives_a_late_started_notification() {
+        val snapshot = ThreadSnapshot(summary("thread-1"), emptyList())
+        var cache = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(snapshot, emptyList()),
+            limits,
+        )
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.TurnCompleted(
+                threadId = "thread-1",
+                turnId = "turn-1",
+                status = TurnStatus.Completed,
+                startedAtMs = 1_000,
+                completedAtMs = 6_000,
+                durationMs = 5_000,
+            ),
+            limits,
+        )
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.TurnStarted("thread-1", "turn-1", TurnStatus.InProgress, startedAtMs = 1_000),
+            limits,
+        )
+
+        val turn = cache.snapshot("host-1", "thread-1")!!.turns.single()
+        assertEquals(TurnStatus.Completed, turn.status)
+        assertEquals(1_000, turn.startedAtMs)
+        assertEquals(6_000, turn.completedAtMs)
+        assertEquals(5_000, turn.durationMs)
+    }
+
+    @Test
+    fun pending_server_requests_are_added_and_resolved_idempotently() {
+        val snapshot = ThreadSnapshot(
+            summary("thread-1"),
+            listOf(CodexTurn("turn-1", TurnStatus.InProgress)),
+        )
+        var cache = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(snapshot, emptyList()),
+            limits,
+        )
+        val request = CodexServerRequest(
+            id = "request-1",
+            method = "item/tool/requestUserInput",
+            params = Json.parseToJsonElement(
+                """{"threadId":"thread-1","turnId":"turn-1","questions":[{"question":"Which?"}]}""",
+            ).jsonObject,
+        )
+
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.RequestStarted("thread-1", "turn-1", request),
+            limits,
+        )
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.RequestStarted("thread-1", "turn-1", request),
+            limits,
+        )
+        assertEquals(listOf(request), cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests)
+
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.RequestResolved("thread-1", requestId = "request-1"),
+            limits,
+        )
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.RequestResolved("thread-1", requestId = "request-1"),
+            limits,
+        )
+        assertTrue(cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests.isEmpty())
+    }
+
+    @Test
+    fun completed_turn_event_preserves_its_terminal_error() {
+        val snapshot = ThreadSnapshot(
+            summary("thread-1"),
+            listOf(CodexTurn("turn-1", TurnStatus.InProgress)),
+        )
+        var cache = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(snapshot, emptyList()),
+            limits,
+        )
+        val error = CodexTurnError(
+            message = "context full",
+            codexErrorInfo = Json.parseToJsonElement("\"contextWindowExceeded\""),
+        )
+
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.TurnCompleted("thread-1", "turn-1", TurnStatus.Failed, error = error),
+            limits,
+        )
+
+        val turn = cache.snapshot("host-1", "thread-1")!!.turns.single()
+        assertEquals(TurnStatus.Failed, turn.status)
+        assertEquals(error, turn.error)
+    }
+
+    @Test
+    fun successful_completion_clears_a_transient_retrying_stream_error() {
+        val retrying = CodexTurnError(message = "disconnected", willRetry = true)
+        val snapshot = ThreadSnapshot(
+            summary("thread-1"),
+            listOf(CodexTurn("turn-1", TurnStatus.InProgress, error = retrying)),
+        )
+        var cache = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(snapshot, emptyList()),
+            limits,
+        )
+
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.TurnCompleted("thread-1", "turn-1", TurnStatus.Completed),
+            limits,
+        )
+
+        assertEquals(null, cache.snapshot("host-1", "thread-1")!!.turns.single().error)
+    }
+
+    @Test
+    fun late_retrying_stream_error_cannot_reopen_a_successful_turn() {
+        val snapshot = ThreadSnapshot(
+            summary("thread-1"),
+            listOf(CodexTurn("turn-1", TurnStatus.Completed)),
+        )
+        var cache = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(snapshot, emptyList()),
+            limits,
+        )
+
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.Error(
+                threadId = "thread-1",
+                turnId = "turn-1",
+                error = CodexTurnError(message = "disconnected", willRetry = true),
+                willRetry = true,
+            ),
+            limits,
+        )
+
+        assertEquals(null, cache.snapshot("host-1", "thread-1")!!.turns.single().error)
+    }
+
+    @Test
+    fun thread_status_updates_the_list_and_snapshot_and_auto_review_obeys_visibility_lifecycle() {
+        val summary = summary("thread-1")
+        var cache = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(
+                ThreadSnapshot(summary, listOf(CodexTurn("turn-1", TurnStatus.InProgress))),
+                emptyList(),
+            ),
+            limits,
+        )
+        val active = ThreadStatus.Active(listOf("waitingOnApproval"))
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.ThreadStatusChanged("thread-1", status = active),
+            limits,
+        )
+        assertEquals(active, cache.profile("host-1").threadList.single().status)
+        assertEquals(active, cache.snapshot("host-1", "thread-1")!!.summary.status)
+
+        val raw = Json.parseToJsonElement(
+            """{"review":{"status":"denied","rationale":"too risky"}}""",
+        ).jsonObject
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.GuardianReviewChanged("thread-1", "turn-1", "review-1", "denied", raw),
+            limits,
+        )
+        assertEquals("automaticApprovalReview", (cache.snapshot("host-1", "thread-1")!!
+            .turns.single().items.single() as CodexItem.Unknown).codexType)
+
+        cache = applyLiveEvent(
+            cache,
+            "host-1",
+            ThreadEvent.GuardianReviewChanged("thread-1", "turn-1", "review-1", "approved", raw),
+            limits,
+        )
+        assertTrue(cache.snapshot("host-1", "thread-1")!!.turns.single().items.isEmpty())
+    }
+
+    @Test
     fun raw_codex_payloads_are_retained_without_byte_eviction() {
         val raw = RawCodexMessage.Notification(
             method = "future/notification",

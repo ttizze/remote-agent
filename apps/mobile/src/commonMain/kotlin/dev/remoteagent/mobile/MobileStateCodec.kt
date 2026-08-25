@@ -275,7 +275,16 @@ private fun MobileCache.toPersisted(): PersistedMobileCache = PersistedMobileCac
     profiles = profiles.mapValues { (_, profile) ->
         PersistedProfileMobileCache(
             threadList = profile.threadList,
-            snapshots = profile.snapshots,
+            snapshots = profile.snapshots.mapValues { (_, snapshot) ->
+                snapshot.copy(
+                    turns = snapshot.turns.map { turn ->
+                        turn.copy(
+                            error = turn.error?.takeUnless(CodexTurnError::willRetry),
+                            pendingRequests = emptyList(),
+                        )
+                    },
+                )
+            },
             unknownEvents = profile.unknownEvents,
             rawNotifications = profile.rawMessages
                 .filterIsInstance<RawCodexMessage.Notification>()

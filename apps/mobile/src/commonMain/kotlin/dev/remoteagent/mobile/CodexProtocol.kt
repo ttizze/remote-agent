@@ -155,6 +155,10 @@ internal fun codexTurn(value: JsonElement): CodexTurn {
         status = codexTurnStatus(raw.string("status")),
         items = raw.array("items").orEmpty().map(::codexItem),
         raw = raw,
+        startedAtMs = unixSecondsToMilliseconds(raw.long("startedAt")),
+        completedAtMs = unixSecondsToMilliseconds(raw.long("completedAt")),
+        durationMs = nonNegative(raw.long("durationMs")),
+        error = raw.childObject("error")?.let(::codexTurnError),
     )
 }
 
@@ -163,7 +167,7 @@ internal fun codexItem(value: JsonElement): CodexItem {
     val id = raw.string("id").orEmpty()
     return when (raw.string("type")) {
         "userMessage" -> CodexItem.UserMessage(id, raw.textLike())
-        "agentMessage" -> CodexItem.AgentMessage(id, raw.textLike())
+        "agentMessage" -> CodexItem.AgentMessage(id, raw.textLike(), agentMessagePhase(raw.string("phase")))
         "reasoning" -> CodexItem.Reasoning(id, raw.textLike())
         "commandExecution" -> CodexItem.CommandExecution(
             id = id,
@@ -208,12 +212,19 @@ internal fun codexThreadEvent(
             threadId,
             raw.childObject("turn")?.string("id").orEmpty(),
             TurnStatus.InProgress,
+            unixSecondsToMilliseconds(raw.childObject("turn")?.long("startedAt")),
         )
-        "turn/completed" -> ThreadEvent.TurnCompleted(
-            threadId,
-            raw.childObject("turn")?.string("id").orEmpty(),
-            codexTurnStatus(raw.childObject("turn")?.string("status")),
-        )
+        "turn/completed" -> raw.childObject("turn").let { turn ->
+            ThreadEvent.TurnCompleted(
+                threadId,
+                turn?.string("id").orEmpty(),
+                codexTurnStatus(turn?.string("status")),
+                unixSecondsToMilliseconds(turn?.long("startedAt")),
+                unixSecondsToMilliseconds(turn?.long("completedAt")),
+                nonNegative(turn?.long("durationMs")),
+                turn?.childObject("error")?.let(::codexTurnError),
+            )
+        }
         "item/started" -> ThreadEvent.ItemStarted(
             threadId,
             raw.string("turnId").orEmpty(),
@@ -249,9 +260,55 @@ internal fun codexThreadEvent(
             eventItemId(raw),
             eventDelta(raw),
         )
+        "error" -> ThreadEvent.Error(
+            threadId = threadId,
+            turnId = raw.string("turnId").orEmpty(),
+            error = codexTurnError(raw.childObject("error") ?: emptyJsonObject()).copy(
+                willRetry = raw.boolean("willRetry") == true,
+            ),
+            willRetry = raw.boolean("willRetry") == true,
+        )
+        "serverRequest/resolved" -> ThreadEvent.RequestResolved(
+            threadId = threadId,
+            requestId = raw["requestId"]?.stringOrNull() ?: raw["requestId"].toString(),
+        )
+        "thread/status/changed" -> ThreadEvent.ThreadStatusChanged(
+            threadId = threadId,
+            status = codexThreadStatus(raw["status"]),
+        )
+        "item/autoApprovalReview/started", "item/autoApprovalReview/completed" ->
+            ThreadEvent.GuardianReviewChanged(
+                threadId = threadId,
+                turnId = raw.string("turnId").orEmpty(),
+                reviewId = raw.string("reviewId").orEmpty(),
+                status = raw.childObject("review")?.string("status").orEmpty(),
+                raw = raw,
+            )
         else -> ThreadEvent.Unknown(threadId, raw.string("turnId").orEmpty(), method, raw, extensions)
     }
 }
+
+internal fun codexThreadEvent(message: RawCodexMessage): ThreadEvent = when (message) {
+    is RawCodexMessage.Notification -> codexThreadEvent(message.method, message.params, message.extensions)
+    is RawCodexMessage.ServerRequest -> {
+        val params = message.params.asObjectOrNull() ?: JsonObject(mapOf("value" to message.params))
+        ThreadEvent.RequestStarted(
+            threadId = params.string("threadId").orEmpty(),
+            turnId = params.string("turnId").orEmpty(),
+            request = CodexServerRequest(
+                id = message.id.stringOrNull() ?: message.id.toString(),
+                method = message.method,
+                params = params,
+            ),
+        )
+    }
+}
+
+private fun codexTurnError(raw: JsonObject): CodexTurnError = CodexTurnError(
+    message = raw.string("message").orEmpty(),
+    additionalDetails = raw.string("additionalDetails"),
+    codexErrorInfo = raw["codexErrorInfo"]?.takeUnless { it is JsonNull },
+)
 
 private fun eventItemId(raw: JsonObject): String = raw.string("itemId").orEmpty()
 
@@ -272,6 +329,19 @@ private fun codexTurnStatus(status: String?): TurnStatus = when (status) {
     "interrupted" -> TurnStatus.Interrupted
     "failed" -> TurnStatus.Failed
     else -> TurnStatus.Completed
+}
+
+private fun agentMessagePhase(phase: String?): AgentMessagePhase? = when (phase) {
+    "commentary" -> AgentMessagePhase.Commentary
+    "final_answer" -> AgentMessagePhase.FinalAnswer
+    else -> null
+}
+
+private fun nonNegative(value: Long?): Long? = value?.takeIf { it >= 0 }
+
+private fun unixSecondsToMilliseconds(value: Long?): Long? {
+    val seconds = nonNegative(value) ?: return null
+    return if (seconds > Long.MAX_VALUE / 1_000) Long.MAX_VALUE else seconds * 1_000
 }
 
 private fun codexCommandStatus(status: String?): CommandExecutionStatus = when (status) {
