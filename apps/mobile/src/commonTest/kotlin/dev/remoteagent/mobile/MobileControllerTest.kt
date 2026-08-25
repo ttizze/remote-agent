@@ -38,7 +38,8 @@ class MobileControllerTest {
 
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
 
-        assertEquals(listOf("/workspace"), gateway.listCwds)
+        assertEquals(1, gateway.projectListCalls)
+        assertEquals(listOf(""), gateway.listCwds)
         assertEquals(listOf("thread-1"), gateway.readIds)
         assertIs<LoadPhase.Ready>(controller.state.selectedView.threadList)
         assertIs<LoadPhase.Ready>(controller.state.selectedView.threadDetail)
@@ -118,6 +119,49 @@ class MobileControllerTest {
         assertIs<LoadPhase.Ready>(controller.state.selectedView.threadList)
         assertEquals("作業ディレクトリを指定してください。", controller.state.selectedView.notice)
         assertEquals(0, gateway.startCalls)
+    }
+
+    @Test
+    fun starting_a_project_task_forwards_the_desktop_assignment_root_and_first_prompt() {
+        val project = CodexProject(
+            id = "project-1",
+            name = "remote-agent",
+            roots = listOf(WorkingDirectory("/workspace/remote-agent")),
+            position = 0,
+            createdAtMs = 1,
+            updatedAtMs = 1,
+        )
+        val started = snapshot("thread-new").let { snapshot ->
+            snapshot.copy(summary = snapshot.summary.copy(
+                workingDirectory = WorkingDirectory("/workspace/remote-agent"),
+                projectId = project.id,
+            ))
+        }
+        val gateway = FakeHostGateway().apply {
+            projectResult = GatewayResult.Success(listOf(project))
+            projectStartResult = GatewayResult.Success(ThreadStartResult(started, "turn-new"))
+        }
+        val controller = controller(gateway)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        runSuspend {
+            controller.startThread(profile, project.id, "/workspace/remote-agent", "  Build it  ")
+        }
+
+        assertEquals(StartArguments(project.id, "/workspace/remote-agent", "Build it"), gateway.startArguments)
+        assertEquals("thread-new", controller.state.selectedView.selectedThreadId)
+    }
+
+    @Test
+    fun transport_closure_retires_the_connected_host() {
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+
+        gateway.closeStream("channel closed")
+
+        assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
+        assertEquals(1, gateway.disconnectCalls)
     }
 
     @Test
@@ -449,17 +493,22 @@ class MobileControllerTest {
         var connectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var connectBlock: (suspend () -> GatewayResult<Unit>)? = null
         var listResult: GatewayResult<List<ThreadSummary>> = GatewayResult.Success(emptyList())
+        var projectResult: GatewayResult<List<CodexProject>> = GatewayResult.Success(emptyList())
         var readResult: GatewayResult<ThreadReadResult> = GatewayResult.Failure("not configured")
         var startResult: GatewayResult<ThreadSnapshot> = GatewayResult.Failure("not configured")
+        var projectStartResult: GatewayResult<ThreadStartResult> = GatewayResult.Failure("not configured")
         var turnResult: GatewayResult<String> = GatewayResult.Success("turn-1")
         var interruptResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectBlock: (suspend () -> GatewayResult<Unit>)? = null
         var readHook: (() -> Unit)? = null
         var callback: ((RawCodexMessage) -> Unit)? = null
+        var closeCallback: ((String) -> Unit)? = null
         var listCwds = mutableListOf<String>()
         var readIds = mutableListOf<String>()
         var startCalls = 0
+        var projectListCalls = 0
+        var startArguments: StartArguments? = null
         var turnCwds = mutableListOf<String>()
         var turnTexts = mutableListOf<String>()
         var connectHook: (() -> Unit)? = null
@@ -484,6 +533,10 @@ class MobileControllerTest {
             subscriptionWasRetiredAtDisconnect = callback == null
             return disconnectBlock?.invoke() ?: disconnectResult
         }
+        override suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> {
+            projectListCalls += 1
+            return projectResult
+        }
         override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> {
             listCwds += cwd
             listHook?.invoke()
@@ -497,6 +550,15 @@ class MobileControllerTest {
         override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> {
             startCalls += 1
             return startResult
+        }
+        override suspend fun startThread(
+            profile: HostProfile,
+            cwd: String,
+            projectId: String?,
+            firstPrompt: String,
+        ): GatewayResult<ThreadStartResult> {
+            startArguments = StartArguments(projectId, cwd, firstPrompt)
+            return projectStartResult
         }
         override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> {
             turnCwds += cwd
@@ -517,6 +579,14 @@ class MobileControllerTest {
                 if (callback === onMessage) callback = null
             }
         }
+        override fun subscribeRaw(
+            profile: HostProfile,
+            onMessage: (RawCodexMessage) -> Unit,
+            onClosed: (String) -> Unit,
+        ): HostEventSubscription {
+            closeCallback = onClosed
+            return subscribeRaw(profile, onMessage)
+        }
         override suspend fun respondResult(profile: HostProfile, requestId: JsonElement, result: JsonElement): GatewayResult<Unit> =
             GatewayResult.Success(Unit)
         override suspend fun respondError(profile: HostProfile, requestId: JsonElement, error: JsonElement): GatewayResult<Unit> =
@@ -525,7 +595,13 @@ class MobileControllerTest {
         fun emit(message: RawCodexMessage) {
             callback?.invoke(message)
         }
+
+        fun closeStream(message: String) {
+            closeCallback?.invoke(message)
+        }
     }
+
+    private data class StartArguments(val projectId: String?, val cwd: String, val firstPrompt: String)
 
     private class FailingOnceMobileRepository(
         private val initialState: AppState,

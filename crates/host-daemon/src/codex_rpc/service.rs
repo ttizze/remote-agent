@@ -6,7 +6,7 @@ use codex_app_server::{
 use host_protocol::{
     RpcError, RpcId, RpcMessage, RpcNotification, RpcOutcome, RpcRequest, RpcResponse,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::sync::broadcast;
 
 use super::routing::{

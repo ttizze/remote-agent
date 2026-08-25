@@ -96,6 +96,9 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         json.parseToJsonElement(raw)
     }
 
+    override suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> =
+        commonCodexClient.listProjects(profile)
+
     override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> =
         commonCodexClient.listThreads(profile, cwd)
 
@@ -104,6 +107,13 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
 
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> =
         commonCodexClient.startThread(profile, cwd)
+
+    override suspend fun startThread(
+        profile: HostProfile,
+        cwd: String,
+        projectId: String?,
+        firstPrompt: String,
+    ): GatewayResult<ThreadStartResult> = commonCodexClient.startThread(profile, cwd, projectId, firstPrompt)
 
     override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> =
         commonCodexClient.startTurn(profile, threadId, cwd, text)
@@ -135,13 +145,20 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
      * One poller drains both native queues and fans every raw message out to
      * subscribers. No notification is decoded into a lossy allow-list here.
      */
-    override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
+    override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription =
+        subscribeRaw(profile, onMessage) {}
+
+    override fun subscribeRaw(
+        profile: HostProfile,
+        onMessage: (RawCodexMessage) -> Unit,
+        onClosed: (String) -> Unit,
+    ): HostEventSubscription {
         val subscribed = synchronized(stateLock) {
             val handle = handles[profile.hostIdentity] ?: return@synchronized false
             subscriptions.getOrPut(profile.hostIdentity) { linkedSetOf() }.add(onMessage)
             if (pollers[profile.hostIdentity] == null) {
                 pollers[profile.hostIdentity] = Thread {
-                    pollLoop(profile.hostIdentity, handle)
+                    pollLoop(profile.hostIdentity, handle, onClosed)
                 }.apply {
                     isDaemon = true
                     start()
@@ -161,7 +178,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         }
     }
 
-    private fun pollLoop(hostIdentity: String, handle: NativeHandle) {
+    private fun pollLoop(hostIdentity: String, handle: NativeHandle, onClosed: (String) -> Unit) {
         while (!Thread.currentThread().isInterrupted) {
             val currentHandle = synchronized(stateLock) { handles[hostIdentity] }
             if (currentHandle !== handle) return
@@ -171,6 +188,9 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
                 if (synchronized(stateLock) { handles[hostIdentity] } !== handle || handle.closed) return
                 NativeHostTransport.nextNotification(handle.pointer)
                     ?: NativeHostTransport.nextServerRequest(handle.pointer)
+            } catch (failure: Throwable) {
+                runCatching { onClosed(failure.message ?: "PC Host connection closed") }
+                return
             } finally {
                 readLock.unlock()
             }

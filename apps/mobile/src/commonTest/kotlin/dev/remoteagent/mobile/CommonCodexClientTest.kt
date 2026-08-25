@@ -15,10 +15,52 @@ class CommonCodexClientTest {
     private val profile = HostProfile("host-1", "Host", listOf("127.0.0.1:49152"), "device-1")
 
     @Test
+    fun desktop_projects_are_paginated_deduplicated_and_sorted_by_desktop_position() {
+        val gateway = FakeRawGateway()
+        gateway.enqueue(
+            "host/project/list",
+            success("""{"data":[{"id":"project-b","name":"B","roots":[{"path":"/b"}],"position":1}],"nextCursor":"next"}"""),
+            success("""{"data":[{"id":"project-a","name":"A","roots":[{"path":"/a"}],"position":0},{"id":"project-b","name":"duplicate","roots":[],"position":1}],"nextCursor":null}"""),
+        )
+
+        val result = runSuspend { CommonCodexClient(gateway).listProjects(profile) }
+
+        val projects = assertIs<GatewayResult.Success<List<CodexProject>>>(result).value
+        assertEquals(listOf("project-a", "project-b"), projects.map(CodexProject::id))
+        assertEquals(listOf("host/project/list", "host/project/list"), gateway.calls.map(RequestCall::method))
+    }
+
+    @Test
+    fun project_task_start_forwards_assignment_and_sends_the_first_prompt() {
+        val gateway = FakeRawGateway()
+        gateway.enqueue(
+            "host/thread/start",
+            success("""{"thread":{"id":"thread-new","cwd":"/workspace","projectId":"project-1","turns":[]}}"""),
+        )
+        gateway.enqueue("turn/start", success("""{"turn":{"id":"turn-new"}}"""))
+
+        val result = runSuspend {
+            CommonCodexClient(gateway).startThread(profile, "/workspace", "project-1", "Build it")
+        }
+
+        val started = assertIs<GatewayResult.Success<ThreadStartResult>>(result).value
+        assertEquals("thread-new", started.thread.summary.id)
+        assertEquals("turn-new", started.turnId)
+        assertEquals(
+            json.parseToJsonElement("""{"cwd":"/workspace","projectId":"project-1"}"""),
+            gateway.calls[0].params,
+        )
+        assertEquals(
+            json.parseToJsonElement("""{"threadId":"thread-new","input":[{"type":"text","text":"Build it"}]}"""),
+            gateway.calls[1].params,
+        )
+    }
+
+    @Test
     fun list_threads_uses_cwd_paginates_and_deduplicates_by_id_and_working_directory() {
         val gateway = FakeRawGateway()
         gateway.enqueue(
-            "thread/list",
+            "host/thread/list",
             success("""
                 {"data":[
                     {"id":"thread-1","cwd":"/workspace","preview":"one"},
@@ -41,7 +83,7 @@ class CommonCodexClientTest {
 
         val success = assertIs<GatewayResult.Success<List<ThreadSummary>>>(result)
         assertEquals(listOf("thread-1", "thread-1", "thread-2", "thread-3"), success.value.map(ThreadSummary::id))
-        assertEquals(listOf("thread/list", "thread/list"), gateway.calls.map(RequestCall::method))
+        assertEquals(listOf("host/thread/list", "host/thread/list"), gateway.calls.map(RequestCall::method))
         assertEquals(
             json.parseToJsonElement("""{"limit":4,"cwd":"/workspace"}"""),
             gateway.calls[0].params,
@@ -56,7 +98,7 @@ class CommonCodexClientTest {
     fun list_threads_stops_at_a_repeated_cursor_and_keeps_the_completed_pages() {
         val gateway = FakeRawGateway()
         gateway.enqueue(
-            "thread/list",
+            "host/thread/list",
             success("""{"data":[],"nextCursor":"same"}"""),
             success("""{"data":[],"nextCursor":"same"}"""),
         )
@@ -74,7 +116,7 @@ class CommonCodexClientTest {
     fun list_threads_stops_at_the_page_budget_and_keeps_the_completed_pages() {
         val gateway = FakeRawGateway()
         gateway.enqueue(
-            "thread/list",
+            "host/thread/list",
             success("""{"data":[],"nextCursor":"page-2"}"""),
         )
 
@@ -91,11 +133,11 @@ class CommonCodexClientTest {
     fun baseline_operations_emit_native_payloads_and_decode_results() {
         val gateway = FakeRawGateway()
         gateway.enqueue(
-            "thread/read",
+            "host/thread/read",
             success("""{"thread":{"id":"thread-1","cwd":"/workspace","turns":[]}}"""),
         )
         gateway.enqueue(
-            "thread/start",
+            "host/thread/start",
             success("""{"thread":{"id":"thread-2","cwd":"/workspace","turns":[]}}"""),
         )
         gateway.enqueue("thread/resume", success("{}"))
@@ -113,7 +155,7 @@ class CommonCodexClientTest {
         assertEquals("turn-1", assertIs<GatewayResult.Success<String>>(turn).value)
         assertIs<GatewayResult.Success<Unit>>(interrupted)
         assertEquals(
-            listOf("thread/read", "thread/start", "thread/resume", "turn/start", "turn/interrupt"),
+            listOf("host/thread/read", "host/thread/start", "thread/resume", "turn/start", "turn/interrupt"),
             gateway.calls.map(RequestCall::method),
         )
         assertEquals(
@@ -157,7 +199,7 @@ class CommonCodexClientTest {
     @Test
     fun start_turn_uses_the_explicit_cwd_without_relying_on_previous_thread_operations() {
         val gateway = FakeRawGateway()
-        gateway.enqueue("thread/read", success("""{"thread":{"id":"thread-1","cwd":"/old","turns":[]}}"""))
+        gateway.enqueue("host/thread/read", success("""{"thread":{"id":"thread-1","cwd":"/old","turns":[]}}"""))
         gateway.enqueue("thread/resume", success("{}"), success("{}"))
         gateway.enqueue("turn/start", success("""{"turn":{"id":"turn-1"}}"""), success("""{"turn":{"id":"turn-2"}}"""))
         val client = CommonCodexClient(gateway)
@@ -181,12 +223,12 @@ class CommonCodexClientTest {
     fun malformed_success_responses_become_failures_with_the_raw_payload() {
         val gateway = FakeRawGateway()
         val malformed = json.parseToJsonElement("""{"thread":{"cwd":"/workspace"}}""")
-        gateway.enqueue("thread/read", GatewayResult.Success(malformed))
+        gateway.enqueue("host/thread/read", GatewayResult.Success(malformed))
 
         val result = runSuspend { CommonCodexClient(gateway).readThread(profile, "thread-1") }
 
         val failure = assertIs<GatewayResult.Failure>(result)
-        assertTrue(failure.message.contains("Invalid thread/read response"))
+        assertTrue(failure.message.contains("Invalid host/thread/read response"))
         assertEquals(malformed, failure.rawError)
     }
 

@@ -117,38 +117,51 @@ internal class MobileController(
                         }
                         dispatch(AppAction.ConnectSucceeded(profile.hostIdentity))
                         val subscription = try {
-                            gateway.subscribeRaw(profile) { message ->
-                                val event = (message as? RawCodexMessage.Notification)?.let {
-                                    codexThreadEvent(it.method, it.params, it.extensions)
-                                }
-                                // Capture the generation and read barrier before
-                                // yielding. Native transports may invoke this
-                                // callback synchronously while a read is in flight.
-                                val current = sessions.isCurrent(profile.hostIdentity, generation)
-                                val buffered = if (current) {
-                                    event?.let {
-                                        sessions.bufferEvent(profile.hostIdentity, it).isHeld
-                                    } == true
-                                } else {
-                                    false
-                                }
-                                // Platform controllers provide their serialized
-                                // application/UI scope. Never reduce state
-                                // inline on a native poller thread.
-                                scope.launch {
-                                    eventMutex.withLock {
-                                        if (sessions.isCurrent(profile.hostIdentity, generation)) {
-                                            // Keep raw and typed projections in one
-                                            // serialized transition. This preserves
-                                            // wire arrival order for live output.
-                                            dispatch(AppAction.RawMessageReceived(profile.hostIdentity, message))
-                                            if (event != null && !buffered) {
-                                                dispatch(AppAction.LiveEventReceived(profile.hostIdentity, event))
+                            gateway.subscribeRaw(
+                                profile = profile,
+                                onMessage = { message ->
+                                    val notification = message as? RawCodexMessage.Notification
+                                    val refreshProjects = notification?.method == "project/changed"
+                                    val refreshThreads = notification?.method in ThreadListInvalidatingMethods
+                                    val event = notification
+                                        ?.takeUnless { refreshProjects || refreshThreads }
+                                        ?.let { codexThreadEvent(it.method, it.params, it.extensions) }
+                                    // Capture the generation and read barrier before
+                                    // yielding. Native transports may invoke this
+                                    // callback synchronously while a read is in flight.
+                                    val current = sessions.isCurrent(profile.hostIdentity, generation)
+                                    val buffered = if (current) {
+                                        event?.let {
+                                            sessions.bufferEvent(profile.hostIdentity, it).isHeld
+                                        } == true
+                                    } else {
+                                        false
+                                    }
+                                    // Platform controllers provide their serialized
+                                    // application/UI scope. Never reduce state
+                                    // inline on a native poller thread.
+                                    scope.launch {
+                                        eventMutex.withLock {
+                                            if (sessions.isCurrent(profile.hostIdentity, generation)) {
+                                                // Keep raw and typed projections in one
+                                                // serialized transition. This preserves
+                                                // wire arrival order for live output.
+                                                dispatch(AppAction.RawMessageReceived(profile.hostIdentity, message))
+                                                if (event != null && !buffered) {
+                                                    dispatch(AppAction.LiveEventReceived(profile.hostIdentity, event))
+                                                }
                                             }
                                         }
+                                        if (sessions.isCurrent(profile.hostIdentity, generation)) {
+                                            if (refreshProjects) listProjects(profile, generation)
+                                            if (refreshThreads) listThreads(profile, generation)
+                                        }
                                     }
-                                }
-                            }
+                                },
+                                onClosed = {
+                                    scope.launch { disconnect(profile, generation) }
+                                },
+                            )
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Throwable) {
@@ -164,6 +177,7 @@ internal class MobileController(
                         // list. Loading the list first also restores the list screen
                         // for a profile that had no selected thread.
                         val selectedThreadId = state.profileViews[profile.hostIdentity]?.selectedThreadId
+                        listProjects(profile, generation)
                         listThreads(profile, generation)
                         if (
                             sessions.isCurrent(profile.hostIdentity, generation) &&
@@ -193,6 +207,11 @@ internal class MobileController(
         listThreads(profile, generation)
     }
 
+    suspend fun listProjects(profile: HostProfile) {
+        val generation = sessions.currentGeneration(profile.hostIdentity) ?: return
+        listProjects(profile, generation)
+    }
+
     suspend fun readThread(profile: HostProfile, threadId: String) {
         val generation = sessions.currentGeneration(profile.hostIdentity) ?: return
         readThread(profile, threadId, generation)
@@ -212,6 +231,57 @@ internal class MobileController(
             success = { snapshot ->
                 dispatchIfCurrent(profile.hostIdentity, generation) {
                     AppAction.SnapshotReceived(profile.hostIdentity, ThreadReadResult(snapshot, emptyList()))
+                }
+            },
+            failure = { message ->
+                dispatchIfCurrent(profile.hostIdentity, generation) {
+                    AppAction.ThreadStartFailed(profile.hostIdentity, message)
+                }
+            },
+        )
+    }
+
+    suspend fun startThread(
+        profile: HostProfile,
+        projectId: String?,
+        cwd: String,
+        firstPrompt: String,
+    ) {
+        val generation = sessions.currentGeneration(profile.hostIdentity) ?: return
+        if (!isConnected(profile.hostIdentity, generation)) return
+        val normalizedCwd = cwd.trim()
+        val normalizedPrompt = firstPrompt.trim()
+        if (normalizedCwd.isBlank()) {
+            dispatchIfCurrent(profile.hostIdentity, generation) {
+                AppAction.ThreadStartFailed(profile.hostIdentity, "作業ディレクトリを指定してください。")
+            }
+            return
+        }
+        if (normalizedPrompt.isBlank()) {
+            dispatchIfCurrent(profile.hostIdentity, generation) {
+                AppAction.ThreadStartFailed(profile.hostIdentity, "最初のメッセージを入力してください。")
+            }
+            return
+        }
+        if (projectId != null) {
+            val project = state.cache.profile(profile.hostIdentity).projects.firstOrNull { it.id == projectId }
+            if (project == null || project.roots.none { it.path == normalizedCwd }) {
+                dispatchIfCurrent(profile.hostIdentity, generation) {
+                    AppAction.ThreadStartFailed(profile.hostIdentity, "Codexプロジェクトの作業ディレクトリを選択してください。")
+                }
+                return
+            }
+        }
+        gateway.startThread(profile, normalizedCwd, projectId, normalizedPrompt).fold(
+            success = { result ->
+                dispatchIfCurrent(profile.hostIdentity, generation) {
+                    AppAction.SnapshotReceived(
+                        profile.hostIdentity,
+                        ThreadReadResult(result.thread, emptyList()),
+                    )
+                }
+                dispatchIfCurrent(profile.hostIdentity, generation) {
+                    AppAction.TurnStartAcknowledged(profile.hostIdentity, result.thread.summary.id, result.turnId)
                 }
             },
             failure = { message ->
@@ -271,11 +341,12 @@ internal class MobileController(
 
     private suspend fun listThreads(profile: HostProfile, generation: Long) {
         if (!isConnected(profile.hostIdentity, generation)) return
-        val cwd = state.profileViews[profile.hostIdentity]?.workingDirectoryPath.orEmpty()
         dispatchIfCurrent(profile.hostIdentity, generation) {
             AppAction.ThreadListLoading(profile.hostIdentity)
         }
-        gateway.listThreads(profile, cwd).fold(
+        // The project list is a global Codex Desktop view. A cwd filter would
+        // hide threads belonging to the other displayed projects.
+        gateway.listThreads(profile, "").fold(
             success = { threads ->
                 dispatchIfCurrent(profile.hostIdentity, generation) {
                     AppAction.ThreadListLoaded(profile.hostIdentity, threads)
@@ -284,6 +355,25 @@ internal class MobileController(
             failure = { message ->
                 dispatchIfCurrent(profile.hostIdentity, generation) {
                     AppAction.ThreadListFailed(profile.hostIdentity, message)
+                }
+            },
+        )
+    }
+
+    private suspend fun listProjects(profile: HostProfile, generation: Long) {
+        if (!isConnected(profile.hostIdentity, generation)) return
+        dispatchIfCurrent(profile.hostIdentity, generation) {
+            AppAction.ProjectListLoading(profile.hostIdentity)
+        }
+        gateway.listProjects(profile).fold(
+            success = { projects ->
+                dispatchIfCurrent(profile.hostIdentity, generation) {
+                    AppAction.ProjectListLoaded(profile.hostIdentity, projects)
+                }
+            },
+            failure = { message ->
+                dispatchIfCurrent(profile.hostIdentity, generation) {
+                    AppAction.ProjectListFailed(profile.hostIdentity, message)
                 }
             },
         )
@@ -351,6 +441,13 @@ internal class MobileController(
 
     private companion object {
         const val MissingThreadWorkingDirectoryMessage = "タスクの作業ディレクトリが不明です。タスク一覧を更新してください"
+        val ThreadListInvalidatingMethods = setOf(
+            "thread/started",
+            "thread/name/updated",
+            "thread/project/updated",
+            "thread/archived",
+            "thread/unarchived",
+        )
     }
 
     private inline fun ifCurrent(hostIdentity: String, generation: Long, block: () -> Unit) {
@@ -392,6 +489,7 @@ private fun AppState.restoreDisconnected(): AppState = copy(
     profileViews = profileViews.mapValues { (_, view) ->
         view.copy(
             connection = ConnectionPhase.Disconnected,
+            projectList = LoadPhase.Idle,
             threadList = LoadPhase.Idle,
             threadDetail = LoadPhase.Idle,
             interruptingTurnId = null,

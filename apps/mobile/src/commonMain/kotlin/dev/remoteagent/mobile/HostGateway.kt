@@ -8,9 +8,17 @@ interface HostGateway : RawCodexGateway {
     suspend fun discover(profile: HostProfile): GatewayResult<List<String>>
     suspend fun connect(profile: HostProfile): GatewayResult<Unit>
     suspend fun disconnect(profile: HostProfile): GatewayResult<Unit>
+    suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> =
+        GatewayResult.Failure("Codex Desktop projects are unavailable on this Host.")
     suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>>
     suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult>
     suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot>
+    suspend fun startThread(
+        profile: HostProfile,
+        cwd: String,
+        projectId: String?,
+        firstPrompt: String,
+    ): GatewayResult<ThreadStartResult> = GatewayResult.Failure("Project task creation is unavailable on this Host.")
     suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String>
     suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit>
 
@@ -37,6 +45,13 @@ interface RawCodexGateway {
     ): GatewayResult<JsonElement>
 
     fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription
+
+    /** Reports terminal transport failure without weakening the lossless message callback. */
+    fun subscribeRaw(
+        profile: HostProfile,
+        onMessage: (RawCodexMessage) -> Unit,
+        onClosed: (String) -> Unit,
+    ): HostEventSubscription = subscribeRaw(profile, onMessage)
 
     suspend fun respondResult(
         profile: HostProfile,

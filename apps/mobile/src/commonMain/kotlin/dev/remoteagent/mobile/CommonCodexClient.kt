@@ -32,17 +32,47 @@ data class CommonCodexClientLimits(
 }
 
 /**
- * Common, typed orchestration for the baseline Codex thread/turn operations.
+ * Common, typed orchestration for Codex Desktop projects and Codex thread/turn operations.
  *
  * Platform gateways own pairing, transport, subscriptions, and the raw JSON
- * boundary.  This class owns the small amount of protocol knowledge that was
- * previously duplicated in Android and iOS.  Project APIs intentionally do
- * not belong here.
+ * boundary. This class owns the protocol knowledge that would otherwise be
+ * duplicated in Android and iOS.
  */
 class CommonCodexClient(
     private val rawGateway: RawCodexGateway,
     private val limits: CommonCodexClientLimits = CommonCodexClientLimits(),
 ) {
+    suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> {
+        val projects = mutableListOf<CodexProject>()
+        val seenProjects = mutableSetOf<String>()
+        val seenCursors = mutableSetOf<String>()
+        var cursor: String? = null
+        var pagesRead = 0
+
+        while (projects.size < limits.maxThreadItems && pagesRead < limits.maxThreadPages) {
+            val params = buildJsonObject {
+                put("limit", limits.maxThreadItems - projects.size)
+                cursor?.let { put("cursor", it) }
+            }
+            val page = request(profile, "host/project/list", params).decode("host/project/list", ::parseProjectListPage)
+            val pageValue = when (page) {
+                is GatewayResult.Success -> page.value
+                is GatewayResult.Failure -> return page
+            }
+
+            pagesRead += 1
+            pageValue.projects.forEach { project ->
+                if (projects.size < limits.maxThreadItems && seenProjects.add(project.id)) projects += project
+            }
+
+            val nextCursor = pageValue.nextCursor?.takeIf(String::isNotBlank)
+            if (nextCursor == null || projects.size >= limits.maxThreadItems || !seenCursors.add(nextCursor)) break
+            cursor = nextCursor
+        }
+
+        return GatewayResult.Success(projects.sortedBy(CodexProject::position))
+    }
+
     suspend fun listThreads(
         profile: HostProfile,
         cwd: String,
@@ -60,7 +90,7 @@ class CommonCodexClient(
                 if (cwd.isNotBlank()) put("cwd", cwd)
                 cursor?.let { put("cursor", it) }
             }
-            val page = request(profile, "thread/list", params).decode("thread/list") { value ->
+            val page = request(profile, "host/thread/list", params).decode("host/thread/list") { value ->
                 parseThreadListPage(value)
             }
             val pageValue = when (page) {
@@ -92,7 +122,7 @@ class CommonCodexClient(
             put("threadId", threadId)
             put("includeTurns", true)
         }
-        val result = request(profile, "thread/read", params).decode("thread/read") { value ->
+        val result = request(profile, "host/thread/read", params).decode("host/thread/read") { value ->
             parseThreadReadResult(value, threadId)
         }
         return result
@@ -103,10 +133,44 @@ class CommonCodexClient(
         cwd: String,
     ): GatewayResult<ThreadSnapshot> {
         val params = buildJsonObject { put("cwd", cwd) }
-        val result = request(profile, "thread/start", params).decode("thread/start") {
+        val result = request(profile, "host/thread/start", params).decode("host/thread/start") {
             parseThreadSnapshot(it)
         }
         return result
+    }
+
+    suspend fun startThread(
+        profile: HostProfile,
+        cwd: String,
+        projectId: String?,
+        firstPrompt: String,
+    ): GatewayResult<ThreadStartResult> {
+        val started = request(
+            profile,
+            "host/thread/start",
+            buildJsonObject {
+                put("cwd", cwd)
+                projectId?.let { put("projectId", it) }
+            },
+        ).decode("host/thread/start", ::parseThreadSnapshot)
+        val thread = when (started) {
+            is GatewayResult.Success -> started.value
+            is GatewayResult.Failure -> return started
+        }
+
+        return request(
+            profile,
+            "turn/start",
+            buildJsonObject {
+                put("threadId", thread.summary.id)
+                put("input", buildJsonArray {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", firstPrompt)
+                    })
+                })
+            },
+        ).decode("turn/start") { value -> ThreadStartResult(thread, parseTurnId(value)) }
     }
 
     /**
@@ -178,6 +242,32 @@ private data class ThreadListPage(
     val threads: List<ThreadSummary>,
     val nextCursor: String?,
 )
+
+private data class ProjectListPage(
+    val projects: List<CodexProject>,
+    val nextCursor: String?,
+)
+
+private fun parseProjectListPage(value: JsonElement): ProjectListPage {
+    val root = value as? JsonObject ?: invalid("expected an object")
+    val data = root["data"] as? JsonArray ?: invalid("data must be an array")
+    val projects = data.map { element ->
+        val objectValue = element as? JsonObject ?: invalid("data entries must be objects")
+        codexProject(objectValue).also { project ->
+            if (project.id.isBlank()) invalid("project data entry is missing id")
+        }
+    }
+    val nextCursor = when (val cursor = root["nextCursor"]) {
+        null, JsonNull -> null
+        is JsonPrimitive -> if (cursor.isString) {
+            cursor.stringOrNull() ?: invalid("nextCursor must be a string")
+        } else {
+            invalid("nextCursor must be a string")
+        }
+        else -> invalid("nextCursor must be a string or null")
+    }
+    return ProjectListPage(projects, nextCursor)
+}
 
 private fun parseThreadListPage(value: JsonElement): ThreadListPage {
     val root = value as? JsonObject ?: invalid("expected an object")

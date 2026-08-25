@@ -19,6 +19,7 @@ import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -72,7 +73,7 @@ import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 private const val DeviceKeyService = "dev.remoteagent.mobile.pkcs8"
-private const val DefaultMaxFrameBytes = 64 * 1024
+private const val DefaultMaxFrameBytes = 4 * 1024 * 1024
 private const val DefaultRequestTimeoutMs = 30_000L
 
 private val iosJson = Json {
@@ -182,6 +183,9 @@ internal class IosHostGateway : HostGateway {
         GatewayResult.Success(Unit)
     }
 
+    override suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> =
+        codexClient.listProjects(profile)
+
     override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> =
         codexClient.listThreads(profile, cwd)
 
@@ -190,6 +194,13 @@ internal class IosHostGateway : HostGateway {
 
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> =
         codexClient.startThread(profile, cwd)
+
+    override suspend fun startThread(
+        profile: HostProfile,
+        cwd: String,
+        projectId: String?,
+        firstPrompt: String,
+    ): GatewayResult<ThreadStartResult> = codexClient.startThread(profile, cwd, projectId, firstPrompt)
 
     override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> =
         codexClient.startTurn(profile, threadId, cwd, text)
@@ -209,7 +220,14 @@ internal class IosHostGateway : HostGateway {
         error: JsonElement,
     ): GatewayResult<Unit> = respond(profile, requestId, error, isError = true)
 
-    override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
+    override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription =
+        subscribeRaw(profile, onMessage) {}
+
+    override fun subscribeRaw(
+        profile: HostProfile,
+        onMessage: (RawCodexMessage) -> Unit,
+        onClosed: (String) -> Unit,
+    ): HostEventSubscription {
         val hostIdentity = profile.hostIdentity
         lateinit var job: Job
         val registered = synchronized(handleLock) {
@@ -222,6 +240,12 @@ internal class IosHostGateway : HostGateway {
                             onMessage(message)
                         }
                         delay(50)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    if (isCurrentHandle(hostIdentity, subscribedHandle)) {
+                        runCatching { onClosed(failure.message ?: "PC Hostとの接続が切れました") }
                     }
                 } finally {
                     currentCoroutineContext()[Job]?.let { removeSubscription(hostIdentity, it) }
