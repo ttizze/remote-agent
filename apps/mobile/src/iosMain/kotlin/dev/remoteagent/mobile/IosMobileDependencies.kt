@@ -73,7 +73,7 @@ import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
 private const val DeviceKeyService = "dev.remoteagent.mobile.pkcs8"
-private const val DefaultMaxFrameBytes = 4 * 1024 * 1024
+private const val DefaultMaxFrameBytes = 256 * 1024 * 1024
 private const val DefaultRequestTimeoutMs = 30_000L
 
 private val iosJson = Json {
@@ -123,7 +123,7 @@ internal class IosHostGateway : HostGateway {
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = withContext(Dispatchers.Default) {
         val identityReference = payload.hostIdentity
-        val addresses = (payload.addresses + IosBonjourBridge.candidates()).filter(String::isNotBlank).distinct()
+        val addresses = connectionCandidates(payload.addresses)
         val key = try {
             IosPkcs8KeyStore.loadOrGenerate(identityReference) { generatedPkcs8() }
         } catch (error: Throwable) {
@@ -145,7 +145,7 @@ internal class IosHostGateway : HostGateway {
     }
 
     override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> =
-        GatewayResult.Success((profile.addresses + IosBonjourBridge.candidates()).distinct())
+        GatewayResult.Success(connectionCandidates(profile.addresses))
 
     override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = withContext(Dispatchers.Default) {
         val key = try {
@@ -155,7 +155,7 @@ internal class IosHostGateway : HostGateway {
             return@withContext GatewayResult.Failure(error.message ?: "端末鍵を読み出せませんでした")
         }
         try {
-            connect((profile.addresses + IosBonjourBridge.candidates()).filter(String::isNotBlank).distinct(), profile.hostIdentity, null, key)
+            connect(connectionCandidates(profile.addresses), profile.hostIdentity, null, key)
         } finally {
             key.fill(0)
         }
@@ -297,6 +297,10 @@ internal class IosHostGateway : HostGateway {
         }
         return GatewayResult.Failure(lastFailure)
     }
+
+    /** Fresh Bonjour answers precede persisted addresses, whose ports may be stale after Host restart. */
+    private fun connectionCandidates(configured: List<String>): List<String> =
+        (IosBonjourBridge.candidates() + configured).filter(String::isNotBlank).distinct()
 
     private suspend fun request(hostIdentity: String, method: String, params: JsonElement): GatewayResult<String> {
         return withHandle(hostIdentity) { current -> memScoped {

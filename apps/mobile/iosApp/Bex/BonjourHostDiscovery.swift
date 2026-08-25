@@ -11,7 +11,7 @@ struct BexBonjourHost: Hashable, Identifiable {
     var id: String { "\(name)|\(type)|\(domain)|\(interfaceName ?? "")" }
 }
 
-/// Discovers only Bex's UDP service. Resolving and authenticating a result is
+/// Discovers only Bex's TCP service. Resolving and authenticating a result is
 /// the transport adapter's job; a Bonjour name is never proof of Host identity.
 final class BexBonjourHostDiscovery {
     private var browser: NWBrowser?
@@ -26,7 +26,7 @@ final class BexBonjourHostDiscovery {
 
     func start() {
         guard browser == nil else { return }
-        let browser = NWBrowser(for: .bonjour(type: "_bex._udp", domain: nil), using: .udp)
+        let browser = NWBrowser(for: .bonjour(type: "_bex._tcp", domain: nil), using: .tcp)
         browser.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async { self?.onStateChanged?(state) }
         }

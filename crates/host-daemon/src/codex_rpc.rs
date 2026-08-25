@@ -1,11 +1,8 @@
-//! Gateway between authenticated mobile sessions and Codex App Server.
+//! Small in-process router for one shared Codex App Server.
 //!
-//! The daemon owns the transport and device authentication boundary. Once a
-//! session is authenticated, Codex owns the RPC vocabulary: this module does
-//! not maintain a second allow-list or a second model of Codex's objects. A
-//! few small pieces of state are still required at the seam: mobile session
-//! queues, proxy ids for Codex-originated requests, and response arbitration
-//! when more than one authenticated session is connected.
+//! The wire protocol is Codex's JSONL protocol. The router only needs the
+//! top-level id to proxy Codex-originated requests to more than one phone;
+//! it never models Codex params, results, errors, or extension members.
 
 mod routing;
 mod service;

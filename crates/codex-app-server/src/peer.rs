@@ -2,42 +2,48 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Map, Value, json};
+use host_protocol::{
+    JsonlReader, JsonlWriter, RpcMessageKind, classify_message, rewrite_top_level_id,
+};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite},
     sync::{broadcast, mpsc, oneshot},
     time::timeout,
 };
 
-use crate::wire::{RawResponse, RequestId, ServerEvent, ServerResponse};
-use crate::{Error, RemoteError};
+use crate::Error;
 
 const DEFAULT_OUTBOUND_QUEUE: usize = 128;
 
+/// A single raw JSONL peer backed by one Codex App Server child process.
+///
+/// The peer only parses the message envelope needed for routing. All nested
+/// JSON, including params, result, error, and unknown extension members,
+/// remains in the original source line.
 pub(crate) struct RpcPeer {
     next_id: AtomicU64,
     outbound: mpsc::Sender<String>,
     pending: Arc<Mutex<HashMap<u64, PendingRequest>>>,
     events: EventSource,
+    closed: Arc<AtomicBool>,
     request_timeout: Duration,
 }
 
 struct PendingRequest {
     method: String,
-    response: oneshot::Sender<Result<RawResponse, Error>>,
+    original_id: String,
+    response: oneshot::Sender<Result<String, Error>>,
 }
 
-/// Removes a request from the correlation table if its caller stops waiting.
-///
-/// The pending table uses a synchronous mutex deliberately: `Drop` cannot
-/// await a Tokio mutex, while cancellation cleanup must happen when the
-/// request future is dropped rather than at some later response or timeout.
+/// Removes a request from the correlation table when the request future is
+/// dropped. This is what makes cancellation different from merely stopping
+/// to poll the response: a later Codex response becomes an unknown response
+/// and is ignored instead of being delivered to another request.
 struct PendingCleanup {
     pending: Arc<Mutex<HashMap<u64, PendingRequest>>>,
     id: Option<u64>,
@@ -64,14 +70,12 @@ impl Drop for PendingCleanup {
     }
 }
 
-/// Owns the sole event sender independently of the peer handle.
-///
-/// The read loop takes the sender out when its input reaches EOF or becomes
-/// malformed. Existing subscribers then observe `RecvError::Closed`, while a
-/// subscription made after closure receives an already-closed receiver.
+/// Keeps a broadcast sender independently of the peer handle. Once the
+/// reader or writer terminates, existing subscribers observe `Closed` and a
+/// later subscription receives an already-closed receiver.
 #[derive(Clone)]
 struct EventSource {
-    sender: Arc<Mutex<Option<broadcast::Sender<ServerEvent>>>>,
+    sender: Arc<Mutex<Option<broadcast::Sender<String>>>>,
 }
 
 impl EventSource {
@@ -82,7 +86,7 @@ impl EventSource {
         }
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+    fn subscribe(&self) -> broadcast::Receiver<String> {
         let sender = self.sender.lock().expect("event sender mutex poisoned");
         match sender.as_ref() {
             Some(sender) => sender.subscribe(),
@@ -94,10 +98,10 @@ impl EventSource {
         }
     }
 
-    fn send(&self, event: ServerEvent) {
+    fn send(&self, line: String) {
         let sender = self.sender.lock().expect("event sender mutex poisoned");
         if let Some(sender) = sender.as_ref() {
-            let _ = sender.send(event);
+            let _ = sender.send(line);
         }
     }
 
@@ -118,302 +122,228 @@ impl RpcPeer {
         let (outbound, outbound_rx) = mpsc::channel(DEFAULT_OUTBOUND_QUEUE);
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let events = EventSource::new();
+        let closed = Arc::new(AtomicBool::new(false));
 
         tokio::spawn(write_loop(
             writer,
             outbound_rx,
             pending.clone(),
             events.clone(),
+            closed.clone(),
         ));
-        tokio::spawn(read_loop(reader, pending.clone(), events.clone()));
+        tokio::spawn(read_loop(
+            reader,
+            pending.clone(),
+            events.clone(),
+            closed.clone(),
+        ));
 
         Self {
             next_id: AtomicU64::new(1),
             outbound,
             pending,
             events,
+            closed,
             request_timeout,
         }
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<String> {
         self.events.subscribe()
     }
 
-    pub(crate) async fn request<P, R>(&self, method: &str, params: P) -> Result<R, Error>
-    where
-        P: Serialize,
-        R: DeserializeOwned,
-    {
-        let params = serde_json::to_value(params)?;
-        let value = self.request_json(method, params, Map::new()).await?;
+    /// Sends a raw JSON-RPC request and returns the raw response line with
+    /// the caller's original top-level id restored.
+    pub(crate) async fn request_raw(&self, line: &str) -> Result<String, Error> {
+        let parsed = classify_message(line).map_err(invalid_message)?;
+        if parsed.kind() != RpcMessageKind::Request {
+            return Err(Error::InvalidMessage(
+                "Codex request must contain method and id".to_owned(),
+            ));
+        }
+        let original_id = parsed.raw_id().map(str::to_owned).ok_or_else(|| {
+            Error::InvalidMessage("Codex request is missing its top-level id".to_owned())
+        })?;
+        let method = parsed.method().map(str::to_owned).ok_or_else(|| {
+            Error::InvalidMessage("Codex request is missing its method".to_owned())
+        })?;
 
-        serde_json::from_value(value).map_err(|error| Error::UnexpectedResponse {
-            method: method.to_owned(),
-            reason: error.to_string(),
-        })
-    }
-
-    pub(crate) async fn request_json(
-        &self,
-        method: &str,
-        params: Value,
-        extensions: Map<String, Value>,
-    ) -> Result<Value, Error> {
-        self.request_json_with_extensions(method, params, extensions)
-            .await
-            .map(|response| response.result)
-    }
-
-    pub(crate) async fn request_json_with_extensions(
-        &self,
-        method: &str,
-        params: Value,
-        extensions: Map<String, Value>,
-    ) -> Result<RawResponse, Error> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut object = extensions;
-        object.insert("id".to_owned(), json!(id));
-        object.insert("method".to_owned(), json!(method));
-        object.insert("params".to_owned(), params);
-        let message = serde_json::to_string(&object)?;
         let (response_tx, response_rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("pending request mutex poisoned")
-            .insert(
-                id,
-                PendingRequest {
-                    method: method.to_owned(),
-                    response: response_tx,
-                },
-            );
-        let _cleanup = PendingCleanup::new(self.pending.clone(), id);
+        let upstream_id = self.reserve_request(PendingRequest {
+            method: method.clone(),
+            original_id: original_id.clone(),
+            response: response_tx,
+        });
+        let upstream_id_text = upstream_id.to_string();
+        let outbound_line = if original_id == upstream_id_text {
+            line.to_owned()
+        } else {
+            match rewrite_top_level_id(line, &upstream_id_text) {
+                Ok(line) => line,
+                Err(error) => {
+                    self.pending
+                        .lock()
+                        .expect("pending request mutex poisoned")
+                        .remove(&upstream_id);
+                    return Err(invalid_message(error));
+                }
+            }
+        };
+        let _cleanup = PendingCleanup::new(self.pending.clone(), upstream_id);
 
         let exchange = async {
-            self.outbound
-                .send(message)
-                .await
-                .map_err(|_| Error::ConnectionClosed("writer task stopped".to_owned()))?;
+            self.enqueue(outbound_line).await?;
             response_rx
                 .await
                 .map_err(|_| Error::ConnectionClosed("reader task stopped".to_owned()))?
         };
         match timeout(self.request_timeout, exchange).await {
             Ok(response) => response,
-            Err(_) => Err(Error::RequestTimeout {
-                method: method.to_owned(),
-            }),
+            Err(_) => Err(Error::RequestTimeout { method }),
         }
     }
 
-    pub(crate) async fn notify(&self, method: &str, params: impl Serialize) -> Result<(), Error> {
-        self.notify_json(method, serde_json::to_value(params)?, Map::new())
-            .await
+    /// Sends a notification or response exactly as supplied, after checking
+    /// its JSON-RPC envelope. Requests must go through `request_raw` so the
+    /// peer can correlate and restore their caller-owned id.
+    pub(crate) async fn send_raw(&self, line: &str) -> Result<(), Error> {
+        let parsed = classify_message(line).map_err(invalid_message)?;
+        if parsed.kind() == RpcMessageKind::Request {
+            return Err(Error::InvalidMessage(
+                "raw requests must be sent through request_raw".to_owned(),
+            ));
+        }
+        self.enqueue(line.to_owned()).await
     }
 
-    pub(crate) async fn notify_json(
-        &self,
-        method: &str,
-        params: Value,
-        extensions: Map<String, Value>,
-    ) -> Result<(), Error> {
-        let mut object = extensions;
-        object.insert("method".to_owned(), json!(method));
-        object.insert("params".to_owned(), params);
-        let message = serde_json::to_string(&object)?;
+    async fn enqueue(&self, line: String) -> Result<(), Error> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::ConnectionClosed("peer is closed".to_owned()));
+        }
         self.outbound
-            .send(message)
+            .send(line)
             .await
             .map_err(|_| Error::ConnectionClosed("writer task stopped".to_owned()))
     }
 
-    pub(crate) async fn respond_json(
-        &self,
-        id: RequestId,
-        response: ServerResponse,
-        extensions: Map<String, Value>,
-    ) -> Result<(), Error> {
-        let mut message_object = extensions;
-        message_object.insert("id".to_owned(), serde_json::to_value(id)?);
-        let response_object = serde_json::to_value(response)?;
-        let Some(response_object) = response_object.as_object() else {
-            return Err(Error::UnexpectedResponse {
-                method: "server request response".to_owned(),
-                reason: "raw response was not a JSON object".to_owned(),
-            });
-        };
-        message_object.extend(response_object.clone());
-        let message = serde_json::to_string(&Value::Object(message_object))?;
-        self.outbound
-            .send(message)
-            .await
-            .map_err(|_| Error::ConnectionClosed("writer task stopped".to_owned()))
+    fn reserve_request(&self, pending_request: PendingRequest) -> u64 {
+        loop {
+            // Zero is deliberately skipped. It is valid JSON-RPC, but using
+            // positive ids keeps the process-owned namespace unambiguous.
+            let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+            if id == 0 {
+                continue;
+            }
+            let mut pending = self.pending.lock().expect("pending request mutex poisoned");
+            if pending.contains_key(&id) {
+                continue;
+            }
+            pending.insert(id, pending_request);
+            return id;
+        }
     }
 }
 
+fn invalid_message(error: impl std::fmt::Display) -> Error {
+    Error::InvalidMessage(error.to_string())
+}
+
 async fn write_loop<W>(
-    mut writer: W,
+    writer: W,
     mut outbound: mpsc::Receiver<String>,
     pending: Arc<Mutex<HashMap<u64, PendingRequest>>>,
     events: EventSource,
+    closed: Arc<AtomicBool>,
 ) where
     W: AsyncWrite + Unpin,
 {
+    let mut writer = JsonlWriter::new(writer);
     let reason = loop {
-        let Some(message) = outbound.recv().await else {
+        let Some(line) = outbound.recv().await else {
             break "outbound queue closed".to_owned();
         };
-        if let Err(error) = writer.write_all(message.as_bytes()).await {
-            break format!("write failed: {error}");
-        }
-        if let Err(error) = writer.write_all(b"\n").await {
-            break format!("write failed: {error}");
-        }
-        if let Err(error) = writer.flush().await {
+        if let Err(error) = writer.write_line(&line).await {
             break format!("flush failed: {error}");
         }
     };
-    terminate_peer(&pending, &events, reason);
+    terminate_peer(&pending, &events, &closed, reason);
 }
 
 async fn read_loop<R>(
     reader: R,
     pending: Arc<Mutex<HashMap<u64, PendingRequest>>>,
     events: EventSource,
+    closed: Arc<AtomicBool>,
 ) where
     R: AsyncRead + Unpin,
 {
-    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let mut lines = JsonlReader::new(reader);
     let reason = loop {
-        let line = match lines.next_line().await {
+        let line = match lines.read_line().await {
             Ok(Some(line)) => line,
             Ok(None) => break "stdout reached EOF".to_owned(),
             Err(error) => break format!("failed to read JSONL input: {error}"),
         };
-        let message: Value = match serde_json::from_str(&line) {
+        let message = match classify_message(&line) {
             Ok(message) => message,
-            Err(error) => break format!("invalid JSON: {error}"),
+            Err(error) => break format!("invalid JSONL message: {error}"),
         };
 
-        if let Some(method) = message.get("method").and_then(Value::as_str) {
-            let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
-            let extensions = message
-                .as_object()
-                .into_iter()
-                .flat_map(|object| object.iter())
-                .filter(|(key, _)| !matches!(key.as_str(), "id" | "method" | "params"))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
-            if let Some(id) = message.get("id") {
-                match serde_json::from_value::<RequestId>(id.clone()) {
-                    Ok(id) => {
-                        events.send(ServerEvent::Request {
-                            id,
-                            method: method.to_owned(),
-                            params,
-                            extensions,
-                        });
+        match message.kind() {
+            RpcMessageKind::Request | RpcMessageKind::Notification => {
+                events.send(line);
+            }
+            RpcMessageKind::Response => {
+                // App Server responses to this peer use numeric ids allocated
+                // above. A response with any other id is a late or unrelated
+                // response and is intentionally ignored.
+                let Some(raw_id) = message.raw_id() else {
+                    break "response had no id".to_owned();
+                };
+                let Ok(id) = serde_json::from_str::<u64>(raw_id) else {
+                    continue;
+                };
+                let pending_request = pending
+                    .lock()
+                    .expect("pending request mutex poisoned")
+                    .remove(&id);
+                let Some(pending_request) = pending_request else {
+                    continue;
+                };
+                let response = if pending_request.original_id == raw_id {
+                    Ok(line)
+                } else {
+                    rewrite_top_level_id(&line, &pending_request.original_id).map_err(|error| {
+                        format!(
+                            "could not restore response id for {}: {error}",
+                            pending_request.method
+                        )
+                    })
+                };
+                match response {
+                    Ok(response) => {
+                        let _ = pending_request.response.send(Ok(response));
                     }
-                    Err(error) => {
-                        break format!("invalid server request id: {error}");
+                    Err(reason) => {
+                        let _ = pending_request
+                            .response
+                            .send(Err(Error::InvalidMessage(reason.clone())));
+                        break reason;
                     }
                 }
-            } else {
-                events.send(ServerEvent::Notification {
-                    method: method.to_owned(),
-                    params,
-                    extensions,
-                });
             }
-            continue;
         }
-
-        let Some(id) = message.get("id").and_then(Value::as_u64) else {
-            break "message had neither method nor numeric response id".to_owned();
-        };
-        let Some(pending_request) = pending
-            .lock()
-            .expect("pending request mutex poisoned")
-            .remove(&id)
-        else {
-            continue;
-        };
-
-        let response_extensions = response_extensions(&message);
-        if let Some(result) = message.get("result") {
-            let _ = pending_request.response.send(Ok(RawResponse {
-                result: result.clone(),
-                extensions: response_extensions,
-            }));
-            continue;
-        }
-
-        if let Some(error) = message.get("error") {
-            let (code, message, data, additional_fields) = remote_error_fields(error);
-            let _ = pending_request.response.send(Err(Error::Remote {
-                method: pending_request.method,
-                detail: Box::new(RemoteError {
-                    code,
-                    message,
-                    data,
-                    additional_fields,
-                    response_extensions,
-                }),
-            }));
-            continue;
-        }
-
-        let reason = "response had neither result nor error".to_owned();
-        let _ = pending_request
-            .response
-            .send(Err(Error::ConnectionClosed(reason.clone())));
-        break reason;
     };
 
-    terminate_peer(&pending, &events, reason);
-}
-
-fn response_extensions(message: &Value) -> Map<String, Value> {
-    message
-        .as_object()
-        .into_iter()
-        .flat_map(|object| object.iter())
-        .filter(|(key, _)| !matches!(key.as_str(), "id" | "result" | "error"))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect()
-}
-
-fn remote_error_fields(error: &Value) -> (Value, String, Option<Value>, Map<String, Value>) {
-    let Some(object) = error.as_object() else {
-        return (
-            json!(-1),
-            "unknown App Server error".to_owned(),
-            None,
-            Map::from_iter([(String::from("raw"), error.clone())]),
-        );
-    };
-
-    let code = object.get("code").cloned().unwrap_or_else(|| json!(-1));
-    let message = object
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown App Server error")
-        .to_owned();
-    let data = object.get("data").cloned();
-    let additional_fields = object
-        .iter()
-        .filter(|(key, _)| !matches!(key.as_str(), "code" | "message" | "data"))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    (code, message, data, additional_fields)
+    terminate_peer(&pending, &events, &closed, reason);
 }
 
 fn fail_pending(pending: &Arc<Mutex<HashMap<u64, PendingRequest>>>, reason: String) {
-    for (_, pending_request) in pending
+    for pending_request in pending
         .lock()
         .expect("pending request mutex poisoned")
         .drain()
+        .map(|(_, request)| request)
     {
         let _ = pending_request
             .response
@@ -424,8 +354,10 @@ fn fail_pending(pending: &Arc<Mutex<HashMap<u64, PendingRequest>>>, reason: Stri
 fn terminate_peer(
     pending: &Arc<Mutex<HashMap<u64, PendingRequest>>>,
     events: &EventSource,
+    closed: &Arc<AtomicBool>,
     reason: String,
 ) {
+    closed.store(true, Ordering::Release);
     fail_pending(pending, reason);
     events.close();
 }
@@ -433,72 +365,80 @@ fn terminate_peer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        io,
-        pin::Pin,
-        sync::Arc,
-        task::{Context, Poll},
-    };
+    use serde_json::{Value, json};
+    use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
 
-    struct FailingWriter;
+    fn make_peer() -> (
+        Arc<RpcPeer>,
+        tokio::io::ReadHalf<tokio::io::DuplexStream>,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        let (client_io, server_io) = duplex(32 * 1024);
+        let (client_reader, client_writer) = tokio::io::split(client_io);
+        let (server_reader, server_writer) = tokio::io::split(server_io);
+        (
+            Arc::new(RpcPeer::open(
+                client_reader,
+                client_writer,
+                Duration::from_secs(1),
+            )),
+            server_reader,
+            server_writer,
+        )
+    }
 
-    impl AsyncWrite for FailingWriter {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _context: &mut Context<'_>,
-            _buffer: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "injected write failure",
-            )))
+    async fn read_line(
+        reader: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    ) -> String {
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .expect("server read should succeed");
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
         }
-
-        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
+        line
     }
 
     #[tokio::test]
-    async fn correlates_out_of_order_responses() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_secs(1),
-        ));
-
+    async fn correlates_responses_and_restores_original_raw_ids() {
+        let (peer, server_reader, mut server_writer) = make_peer();
+        let mut lines = BufReader::new(server_reader);
         let first = {
             let peer = peer.clone();
-            tokio::spawn(async move { peer.request::<_, Value>("first", json!({})).await })
+            tokio::spawn(async move {
+                peer.request_raw(
+                    r#"{"id":"mobile-a","method":"first","params":{"nested":{"id":1}},"future":{"keep":true}}"#,
+                )
+                .await
+            })
         };
         let second = {
             let peer = peer.clone();
-            tokio::spawn(async move { peer.request::<_, Value>("second", json!({})).await })
+            tokio::spawn(async move {
+                peer.request_raw(r#"{"id":42,"method":"second","params":{"unknown":[1,2,3]}}"#)
+                    .await
+            })
         };
 
-        let mut lines = BufReader::new(server_reader).lines();
-        let request_a: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        let request_b: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let request_a: Value = serde_json::from_str(&read_line(&mut lines).await).unwrap();
+        let request_b: Value = serde_json::from_str(&read_line(&mut lines).await).unwrap();
         let id_a = request_a["id"].as_u64().unwrap();
         let id_b = request_b["id"].as_u64().unwrap();
-        let method_a = request_a["method"].as_str().unwrap();
-        let method_b = request_b["method"].as_str().unwrap();
+        assert_ne!(id_a, id_b);
+        assert_eq!(request_a["params"]["nested"]["id"], 1);
+        assert_eq!(request_a["future"]["keep"], true);
+        assert_eq!(request_b["params"]["unknown"], json!([1, 2, 3]));
 
         server_writer
             .write_all(
                 format!(
-                    "{}\n",
-                    json!({ "id": id_b, "result": { "method": method_b } })
+                    "{{\"id\":{id_b},\"result\":{{\"method\":\"second\",\"futureResult\":{{\"id\":99}}}},\"unknown\":[true]}}\n"
                 )
                 .as_bytes(),
             )
@@ -507,516 +447,138 @@ mod tests {
         server_writer
             .write_all(
                 format!(
-                    "{}\n",
-                    json!({ "id": id_a, "result": { "method": method_a } })
+                    "{{\"id\":{id_a},\"error\":{{\"code\":-1,\"message\":\"nope\",\"futureError\":{{\"id\":7}}}},\"extension\":{{\"keep\":true}}}}\n"
                 )
                 .as_bytes(),
             )
             .await
             .unwrap();
 
-        let first = first.await.unwrap().unwrap();
-        let second = second.await.unwrap().unwrap();
-        assert_eq!(first["method"], "first");
-        assert_eq!(second["method"], "second");
+        let first: Value = serde_json::from_str(&first.await.unwrap().unwrap()).unwrap();
+        let second: Value = serde_json::from_str(&second.await.unwrap().unwrap()).unwrap();
+        assert_eq!(first["id"], "mobile-a");
+        assert_eq!(first["error"]["futureError"]["id"], 7);
+        assert_eq!(first["extension"]["keep"], true);
+        assert_eq!(second["id"], 42);
+        assert_eq!(second["result"]["futureResult"]["id"], 99);
+        assert_eq!(second["unknown"], json!([true]));
     }
 
     #[tokio::test]
-    async fn sends_arbitrary_json_request_and_returns_raw_result() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_secs(1),
-        ));
+    async fn publishes_raw_notifications_and_server_requests() {
+        let (peer, server_reader, mut server_writer) = make_peer();
+        let mut events = peer.subscribe();
+        drop(server_reader);
+        let notification = r#" {"method":"item/started","params":{"future":{"id":1}}} "#;
+        let request = r#"{"id":"approval-1","method":"item/approval","params":{"opaque":[1,2]}}"#;
+        server_writer
+            .write_all(format!("{notification}\n{request}\n").as_bytes())
+            .await
+            .unwrap();
 
+        assert_eq!(events.recv().await.unwrap(), notification);
+        assert_eq!(events.recv().await.unwrap(), request);
+    }
+
+    #[tokio::test]
+    async fn sends_validated_notification_and_response_without_rewriting() {
+        let (peer, server_reader, _server_writer) = make_peer();
+        let mut lines = BufReader::new(server_reader);
+        let notification = r#" {"method":"event","params":{"future":true}} "#;
+        let response = r#"{"id":"approval","result":{"future":[1,2]}}"#;
+        peer.send_raw(notification).await.unwrap();
+        peer.send_raw(response).await.unwrap();
+        assert_eq!(read_line(&mut lines).await, notification);
+        assert_eq!(read_line(&mut lines).await, response);
+        assert!(
+            peer.send_raw(r#"{"id":1,"method":"not-a-response"}"#)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn ignores_unknown_and_late_responses() {
+        let (peer, server_reader, mut server_writer) = make_peer();
+        let mut lines = BufReader::new(server_reader);
         let request = {
             let peer = peer.clone();
             tokio::spawn(async move {
-                peer.request_json(
-                    "item/commandExecution/requestApproval",
-                    json!({
-                        "command": ["cargo", "test"],
-                        "futureField": {"enabled": true},
-                    }),
-                    Map::from_iter([(String::from("jsonrpc"), json!("2.0"))]),
-                )
-                .await
+                peer.request_raw(r#"{"id":"caller","method":"wait","params":{}}"#)
+                    .await
             })
         };
-
-        let mut lines = BufReader::new(server_reader).lines();
-        let sent: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let sent: Value = serde_json::from_str(&read_line(&mut lines).await).unwrap();
         let id = sent["id"].as_u64().unwrap();
-        assert_eq!(sent["method"], "item/commandExecution/requestApproval");
-        assert_eq!(sent["jsonrpc"], "2.0");
-        assert_eq!(
-            sent["params"],
-            json!({
-                "command": ["cargo", "test"],
-                "futureField": {"enabled": true},
-            })
-        );
-
         server_writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({
-                        "id": id,
-                        "result": {
-                            "decision": "accept",
-                            "newResultField": [1, 2, 3],
-                        },
-                    })
-                )
-                .as_bytes(),
-            )
+            .write_all(b"{\"id\":999,\"result\":{\"late\":true}}\n")
             .await
             .unwrap();
-
-        assert_eq!(
-            request.await.unwrap().unwrap(),
-            json!({
-                "decision": "accept",
-                "newResultField": [1, 2, 3],
-            })
-        );
+        server_writer
+            .write_all(format!("{{\"id\":{id},\"result\":{{\"ok\":true}}}}\n").as_bytes())
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&request.await.unwrap().unwrap()).unwrap();
+        assert_eq!(response["id"], "caller");
+        assert_eq!(response["result"]["ok"], true);
     }
 
     #[tokio::test]
-    async fn preserves_top_level_extensions_on_raw_success_response() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let peer = RpcPeer::open(client_reader, client_writer, Duration::from_secs(1));
-        let request = tokio::spawn(async move {
-            peer.request_json_with_extensions("future/method", json!({"input": true}), Map::new())
-                .await
-        });
-
-        let mut lines = BufReader::new(server_reader).lines();
-        let sent: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        let id = sent["id"].as_u64().unwrap();
-        server_writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({
-                        "id": id,
-                        "result": {"accepted": true},
-                        "jsonrpc": "2.0",
-                        "responseFuture": {"kept": true},
-                    })
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-
-        let response = request.await.unwrap().unwrap();
-        assert_eq!(response.result, json!({"accepted": true}));
-        assert_eq!(
-            response.extensions,
-            Map::from_iter([
-                (String::from("jsonrpc"), json!("2.0")),
-                (String::from("responseFuture"), json!({"kept": true})),
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn preserves_numeric_remote_error_code_and_unknown_fields() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let peer = RpcPeer::open(client_reader, client_writer, Duration::from_secs(1));
-        let request = tokio::spawn(async move {
-            peer.request_json("future/method", json!({"input": true}), Map::new())
-                .await
-        });
-
-        let mut lines = BufReader::new(server_reader).lines();
-        let sent: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        let id = sent["id"].as_u64().unwrap();
-        server_writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({
-                        "id": id,
-                        "error": {
-                            "code": -32001,
-                            "message": "approval unavailable",
-                            "data": {"retryable": true},
-                            "futureField": [1, 2, 3],
-                        },
-                        "jsonrpc": "2.0",
-                        "responseFuture": {"kept": true},
-                    })
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-
-        let error = request.await.unwrap().unwrap_err();
-        match error {
-            Error::Remote { method, detail } => {
-                assert_eq!(method, "future/method");
-                assert_eq!(detail.code, json!(-32001));
-                assert_eq!(detail.message, "approval unavailable");
-                assert_eq!(detail.data, Some(json!({"retryable": true})));
-                assert_eq!(
-                    detail.additional_fields.get("futureField"),
-                    Some(&json!([1, 2, 3]))
-                );
-                assert_eq!(
-                    detail.response_extensions,
-                    Map::from_iter([
-                        (String::from("jsonrpc"), json!("2.0")),
-                        (String::from("responseFuture"), json!({"kept": true})),
-                    ])
-                );
-                let display = Error::Remote {
-                    method: "future/method".to_owned(),
-                    detail,
-                }
-                .to_string();
-                assert!(display.contains("future/method"));
-                assert!(display.contains("-32001"));
-                assert!(display.contains("approval unavailable"));
-            }
-            other => panic!("expected remote error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn serializes_raw_result_and_error_server_responses() {
-        let (client_io, server_io) = duplex(8 * 1024);
+    async fn timeout_removes_pending_request() {
+        let (client_io, server_io) = duplex(32 * 1024);
         let (client_reader, client_writer) = tokio::io::split(client_io);
         let (server_reader, _server_writer) = tokio::io::split(server_io);
-        let peer = RpcPeer::open(client_reader, client_writer, Duration::from_secs(1));
-        let mut lines = BufReader::new(server_reader).lines();
-
-        peer.respond_json(
-            RequestId::String("approval-1".to_owned()),
-            ServerResponse::Result {
-                result: json!({"decision": "accept", "future": {"kept": true}}),
-            },
-            Map::from_iter([(String::from("jsonrpc"), json!("2.0"))]),
-        )
-        .await
-        .unwrap();
-        let result: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        assert_eq!(
-            result,
-            json!({
-                "id": "approval-1",
-                "jsonrpc": "2.0",
-                "result": {"decision": "accept", "future": {"kept": true}},
-            })
-        );
-
-        peer.respond_json(
-            RequestId::String("approval-2".to_owned()),
-            ServerResponse::Error {
-                error: json!({
-                    "code": -32002,
-                    "message": "declined",
-                    "futureErrorField": {"preserved": true},
-                }),
-            },
-            Map::new(),
-        )
-        .await
-        .unwrap();
-        let error: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        assert_eq!(
-            error,
-            json!({
-                "id": "approval-2",
-                "error": {
-                    "code": -32002,
-                    "message": "declined",
-                    "futureErrorField": {"preserved": true},
-                },
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn emits_notifications_and_server_requests() {
-        let (client_io, mut server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let peer = RpcPeer::open(client_reader, client_writer, Duration::from_secs(1));
-        let mut events = peer.subscribe();
-
-        server_io
-            .write_all(
-                b"{\"method\":\"turn/started\",\"params\":{\"turnId\":\"t1\"},\"future\":true}\n",
-            )
-            .await
-            .unwrap();
-        server_io
-            .write_all(b"{\"id\":\"approval-1\",\"method\":\"item/commandExecution/requestApproval\",\"params\":{},\"jsonrpc\":\"2.0\"}\n")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            events.recv().await.unwrap(),
-            ServerEvent::Notification {
-                method: "turn/started".to_owned(),
-                params: json!({ "turnId": "t1" }),
-                extensions: Map::from_iter([(String::from("future"), json!(true))]),
-            }
-        );
-        assert_eq!(
-            events.recv().await.unwrap(),
-            ServerEvent::Request {
-                id: RequestId::String("approval-1".to_owned()),
-                method: "item/commandExecution/requestApproval".to_owned(),
-                params: json!({}),
-                extensions: Map::from_iter([(String::from("jsonrpc"), json!("2.0"))]),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn times_out_and_removes_pending_request() {
-        let (client_io, _server_io) = duplex(1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let peer = RpcPeer::open(client_reader, client_writer, Duration::from_millis(10));
-
+        let peer = Arc::new(RpcPeer::open(
+            client_reader,
+            client_writer,
+            Duration::from_millis(10),
+        ));
+        let mut lines = BufReader::new(server_reader);
         let error = peer
-            .request::<_, Value>("never-responds", json!({}))
+            .request_raw(r#"{"id":"timeout","method":"blocked","params":{}}"#)
             .await
             .unwrap_err();
-
-        assert!(matches!(
-            error,
-            Error::RequestTimeout { ref method } if method == "never-responds"
-        ));
-        assert!(
-            peer.pending
-                .lock()
-                .expect("pending request mutex poisoned")
-                .is_empty()
-        );
+        let _ = read_line(&mut lines).await;
+        assert!(matches!(error, Error::RequestTimeout { method } if method == "blocked"));
     }
 
     #[tokio::test]
-    async fn request_deadline_includes_waiting_for_outbound_capacity() {
-        let (client_io, server_io) = duplex(1);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_millis(20),
-        ));
-        let mut requests = tokio::task::JoinSet::new();
-        for _ in 0..140 {
+    async fn cancellation_removes_pending_request_and_late_response_is_ignored() {
+        let (peer, server_reader, mut server_writer) = make_peer();
+        let mut lines = BufReader::new(server_reader);
+        let cancelled = {
             let peer = peer.clone();
-            requests
-                .spawn(async move { peer.request_json("blocked", json!({}), Map::new()).await });
-        }
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while let Some(request) = requests.join_next().await {
-                assert!(matches!(
-                    request.unwrap(),
-                    Err(Error::RequestTimeout { ref method }) if method == "blocked"
-                ));
-            }
-        })
-        .await
-        .expect("every queued request must observe its deadline");
-        assert!(
-            peer.pending
-                .lock()
-                .expect("pending request mutex poisoned")
-                .is_empty()
-        );
-        drop(server_io);
-    }
-
-    #[tokio::test]
-    async fn cancellation_removes_pending_request() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, _server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_secs(1),
-        ));
-        let request = {
-            let peer = peer.clone();
-            tokio::spawn(async move { peer.request_json("cancelled", json!({}), Map::new()).await })
+            tokio::spawn(async move {
+                peer.request_raw(r#"{"id":"cancelled","method":"cancel","params":{}}"#)
+                    .await
+            })
         };
+        let sent: Value = serde_json::from_str(&read_line(&mut lines).await).unwrap();
+        let cancelled_id = sent["id"].as_u64().unwrap();
+        cancelled.abort();
+        let _ = cancelled.await;
 
-        let mut lines = BufReader::new(server_reader).lines();
-        lines.next_line().await.unwrap().unwrap();
-        request.abort();
-        assert!(request.await.unwrap_err().is_cancelled());
-        assert!(
-            peer.pending
-                .lock()
-                .expect("pending request mutex poisoned")
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn writer_failure_closes_event_source() {
-        let (reader, _server_writer) = duplex(1024);
-        let peer = RpcPeer::open(reader, FailingWriter, Duration::from_secs(1));
-        let mut events = peer.subscribe();
-
-        peer.notify_json("test/notification", json!({}), Map::new())
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), events.recv())
-                .await
-                .expect("writer failure must terminate the event source"),
-            Err(broadcast::error::RecvError::Closed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn invalid_response_shape_terminates_every_pending_request() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_secs(1),
-        ));
-        let mut events = peer.subscribe();
-        let mut requests = tokio::task::JoinSet::new();
-        for method in ["first", "second"] {
-            let peer = peer.clone();
-            requests.spawn(async move { peer.request::<_, Value>(method, json!({})).await });
-        }
-
-        let mut lines = BufReader::new(server_reader).lines();
-        let first_request: Value =
-            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-        lines.next_line().await.unwrap().unwrap();
         server_writer
-            .write_all(format!("{}\n", json!({ "id": first_request["id"] })).as_bytes())
+            .write_all(
+                format!("{{\"id\":{cancelled_id},\"result\":{{\"late\":true}}}}\n").as_bytes(),
+            )
             .await
             .unwrap();
-
-        while let Some(request) = requests.join_next().await {
-            assert!(matches!(
-                request.unwrap(),
-                Err(Error::ConnectionClosed(ref reason))
-                    if reason.contains("neither result nor error")
-            ));
-        }
-        assert!(matches!(
-            events.recv().await,
-            Err(broadcast::error::RecvError::Closed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn accepts_messages_larger_than_the_removed_four_mibibyte_limit() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_secs(1),
-        ));
-        let request = {
+        let next = {
             let peer = peer.clone();
-            tokio::spawn(async move { peer.request::<_, Value>("waiting", json!({})).await })
+            tokio::spawn(async move {
+                peer.request_raw(r#"{"id":"next","method":"next","params":{}}"#)
+                    .await
+            })
         };
-
-        let mut lines = BufReader::new(server_reader).lines();
-        lines.next_line().await.unwrap().unwrap();
-        let content = "x".repeat(4 * 1024 * 1024 + 1);
-        let response = serde_json::to_vec(&json!({
-            "id": 1,
-            "result": { "content": content },
-        }))
-        .unwrap();
-        server_writer.write_all(&response).await.unwrap();
-        server_writer.write_all(b"\n").await.unwrap();
-
-        let result = request.await.unwrap().unwrap();
-        assert_eq!(
-            result.get("content").and_then(Value::as_str).unwrap().len(),
-            4 * 1024 * 1024 + 1
-        );
-    }
-
-    #[tokio::test]
-    async fn malformed_json_closes_pending_requests_and_event_source() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, mut server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_secs(1),
-        ));
-        let mut events = peer.subscribe();
-        let request = {
-            let peer = peer.clone();
-            tokio::spawn(async move { peer.request::<_, Value>("waiting", json!({})).await })
-        };
-
-        let mut lines = BufReader::new(server_reader).lines();
-        lines.next_line().await.unwrap().unwrap();
-        server_writer.write_all(b"{not-json}\n").await.unwrap();
-
-        let error = request.await.unwrap().unwrap_err();
-        assert!(
-            matches!(error, Error::ConnectionClosed(reason) if reason.contains("invalid JSON"))
-        );
-        assert!(matches!(
-            events.recv().await,
-            Err(broadcast::error::RecvError::Closed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn eof_closes_pending_requests_and_event_source() {
-        let (client_io, server_io) = duplex(8 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(RpcPeer::open(
-            client_reader,
-            client_writer,
-            Duration::from_secs(1),
-        ));
-        let mut events = peer.subscribe();
-        let request = {
-            let peer = peer.clone();
-            tokio::spawn(async move { peer.request::<_, Value>("waiting", json!({})).await })
-        };
-
-        let mut lines = BufReader::new(server_reader).lines();
-        lines.next_line().await.unwrap().unwrap();
-        drop(lines);
-        drop(server_writer);
-
-        let error = request.await.unwrap().unwrap_err();
-        assert!(matches!(error, Error::ConnectionClosed(reason) if reason.contains("EOF")));
-        assert!(matches!(
-            events.recv().await,
-            Err(broadcast::error::RecvError::Closed)
-        ));
+        let sent: Value = serde_json::from_str(&read_line(&mut lines).await).unwrap();
+        let next_id = sent["id"].as_u64().unwrap();
+        server_writer
+            .write_all(format!("{{\"id\":{next_id},\"result\":{{\"ok\":true}}}}\n").as_bytes())
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&next.await.unwrap().unwrap()).unwrap();
+        assert_eq!(response["id"], "next");
+        assert_eq!(response["result"]["ok"], true);
     }
 }

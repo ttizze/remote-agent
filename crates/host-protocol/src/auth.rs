@@ -4,13 +4,20 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
-const ED25519_SIGNATURE_BYTES: usize = 64;
-const TRANSPORT_CERTIFICATE_HASH_BYTES: usize = 32;
 const PAIRING_TOKEN_BYTES: usize = 32;
-const AUTHENTICATION_CHALLENGE_BYTES: usize = 32;
-const CONNECTION_NONCE_BYTES: usize = 32;
-const PAIRING_PROOF_CONTEXT: &[u8] = b"remote-agent pairing proof v1\0";
-const AUTHENTICATION_PROOF_CONTEXT: &[u8] = b"remote-agent authentication proof v1\0";
+
+/// A stable error returned when an SSH-mapped base64url value is malformed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Base64UrlError {
+    #[error("invalid base64url: {0}")]
+    InvalidEncoding(String),
+    #[error("{kind} must be {expected} bytes, got {actual}")]
+    InvalidLength {
+        kind: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PairingToken([u8; PAIRING_TOKEN_BYTES]);
@@ -22,6 +29,40 @@ impl PairingToken {
 
     pub const fn as_bytes(&self) -> &[u8; PAIRING_TOKEN_BYTES] {
         &self.0
+    }
+
+    /// Encodes this token using unpadded URL-safe base64.
+    ///
+    /// The alphabet is safe for the SSH username mapping used by the host;
+    /// unlike Debug, this method intentionally returns the token itself.
+    pub fn to_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.0)
+    }
+
+    /// Decodes an unpadded URL-safe base64 token.
+    pub fn from_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|error| Base64UrlError::InvalidEncoding(error.to_string()))?;
+        let actual = bytes.len();
+        let bytes = bytes
+            .try_into()
+            .map_err(|_: Vec<u8>| Base64UrlError::InvalidLength {
+                kind: "pairing token",
+                expected: PAIRING_TOKEN_BYTES,
+                actual,
+            })?;
+        Ok(Self(bytes))
+    }
+
+    /// Alias for callers that prefer an explicit encoding verb.
+    pub fn encode_base64url(&self) -> String {
+        self.to_base64url()
+    }
+
+    /// Alias for callers that prefer an explicit decoding verb.
+    pub fn decode_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
+        Self::from_base64url(encoded)
     }
 }
 
@@ -36,7 +77,7 @@ impl Serialize for PairingToken {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
+        serializer.serialize_str(&self.to_base64url())
     }
 }
 
@@ -46,16 +87,7 @@ impl<'de> Deserialize<'de> for PairingToken {
         D: serde::Deserializer<'de>,
     {
         let encoded = String::deserialize(deserializer)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(serde::de::Error::custom)?;
-        let bytes = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            serde::de::Error::custom(format!(
-                "pairing token must be {PAIRING_TOKEN_BYTES} bytes, got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(Self(bytes))
+        Self::from_base64url(&encoded).map_err(serde::de::Error::custom)
     }
 }
 
@@ -70,6 +102,37 @@ impl Ed25519PublicKey {
     pub const fn as_bytes(&self) -> &[u8; ED25519_PUBLIC_KEY_BYTES] {
         &self.0
     }
+
+    /// Encodes this public key using unpadded URL-safe base64.
+    pub fn to_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.0)
+    }
+
+    /// Decodes an unpadded URL-safe base64 public key.
+    pub fn from_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|error| Base64UrlError::InvalidEncoding(error.to_string()))?;
+        let actual = bytes.len();
+        let bytes = bytes
+            .try_into()
+            .map_err(|_: Vec<u8>| Base64UrlError::InvalidLength {
+                kind: "Ed25519 public key",
+                expected: ED25519_PUBLIC_KEY_BYTES,
+                actual,
+            })?;
+        Ok(Self(bytes))
+    }
+
+    /// Alias for callers that prefer an explicit encoding verb.
+    pub fn encode_base64url(&self) -> String {
+        self.to_base64url()
+    }
+
+    /// Alias for callers that prefer an explicit decoding verb.
+    pub fn decode_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
+        Self::from_base64url(encoded)
+    }
 }
 
 impl Serialize for Ed25519PublicKey {
@@ -77,7 +140,7 @@ impl Serialize for Ed25519PublicKey {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
+        serializer.serialize_str(&self.to_base64url())
     }
 }
 
@@ -87,198 +150,7 @@ impl<'de> Deserialize<'de> for Ed25519PublicKey {
         D: serde::Deserializer<'de>,
     {
         let encoded = String::deserialize(deserializer)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(serde::de::Error::custom)?;
-        let bytes = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            serde::de::Error::custom(format!(
-                "Ed25519 public key must be {ED25519_PUBLIC_KEY_BYTES} bytes, got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(Self(bytes))
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct ConnectionNonce([u8; CONNECTION_NONCE_BYTES]);
-
-impl ConnectionNonce {
-    pub const fn from_bytes(bytes: [u8; CONNECTION_NONCE_BYTES]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; CONNECTION_NONCE_BYTES] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for ConnectionNonce {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ConnectionNonce([redacted])")
-    }
-}
-
-impl Serialize for ConnectionNonce {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for ConnectionNonce {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(serde::de::Error::custom)?;
-        let bytes = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            serde::de::Error::custom(format!(
-                "connection nonce must be {CONNECTION_NONCE_BYTES} bytes, got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(Self(bytes))
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Ed25519Signature([u8; ED25519_SIGNATURE_BYTES]);
-
-impl Ed25519Signature {
-    pub const fn from_bytes(bytes: [u8; ED25519_SIGNATURE_BYTES]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; ED25519_SIGNATURE_BYTES] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Ed25519Signature {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Ed25519Signature([redacted])")
-    }
-}
-
-impl Serialize for Ed25519Signature {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for Ed25519Signature {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(serde::de::Error::custom)?;
-        let bytes = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            serde::de::Error::custom(format!(
-                "Ed25519 signature must be {ED25519_SIGNATURE_BYTES} bytes, got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(Self(bytes))
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TransportCertificateHash([u8; TRANSPORT_CERTIFICATE_HASH_BYTES]);
-
-impl TransportCertificateHash {
-    pub const fn from_bytes(bytes: [u8; TRANSPORT_CERTIFICATE_HASH_BYTES]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; TRANSPORT_CERTIFICATE_HASH_BYTES] {
-        &self.0
-    }
-}
-
-impl Serialize for TransportCertificateHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for TransportCertificateHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(serde::de::Error::custom)?;
-        let bytes = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            serde::de::Error::custom(format!(
-                "transport certificate hash must be {TRANSPORT_CERTIFICATE_HASH_BYTES} bytes, got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(Self(bytes))
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AuthenticationChallengeToken([u8; AUTHENTICATION_CHALLENGE_BYTES]);
-
-impl AuthenticationChallengeToken {
-    pub const fn from_bytes(bytes: [u8; AUTHENTICATION_CHALLENGE_BYTES]) -> Self {
-        Self(bytes)
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; AUTHENTICATION_CHALLENGE_BYTES] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for AuthenticationChallengeToken {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("AuthenticationChallengeToken([redacted])")
-    }
-}
-
-impl Serialize for AuthenticationChallengeToken {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for AuthenticationChallengeToken {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let encoded = String::deserialize(deserializer)?;
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(serde::de::Error::custom)?;
-        let bytes = bytes.try_into().map_err(|bytes: Vec<u8>| {
-            serde::de::Error::custom(format!(
-                "authentication challenge must be {AUTHENTICATION_CHALLENGE_BYTES} bytes, got {}",
-                bytes.len()
-            ))
-        })?;
-        Ok(Self(bytes))
+        Self::from_base64url(&encoded).map_err(serde::de::Error::custom)
     }
 }
 
@@ -290,70 +162,6 @@ pub struct PairingQrPayload {
     pub addresses: Vec<String>,
     pub ticket: PairingToken,
     pub expires_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingRequest {
-    pub ticket: PairingToken,
-    pub device_identity: Ed25519PublicKey,
-    pub device_name: String,
-    pub signature: Ed25519Signature,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthenticationChallenge {
-    pub token: AuthenticationChallengeToken,
-    pub host_identity: Ed25519PublicKey,
-    pub expires_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthenticationProof {
-    pub token: AuthenticationChallengeToken,
-    pub signature: Ed25519Signature,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum DeviceAuthenticationStart {
-    Pair { request: PairingRequest },
-    Authenticate { device_identity: Ed25519PublicKey },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum DeviceAuthenticationReply {
-    Challenge { challenge: AuthenticationChallenge },
-    Accepted { device_identity: Ed25519PublicKey },
-}
-
-pub fn pairing_proof_message(
-    host_identity: Ed25519PublicKey,
-    ticket: PairingToken,
-    device_identity: Ed25519PublicKey,
-) -> Vec<u8> {
-    let mut message = Vec::with_capacity(PAIRING_PROOF_CONTEXT.len() + 32 * 3);
-    message.extend_from_slice(PAIRING_PROOF_CONTEXT);
-    message.extend_from_slice(host_identity.as_bytes());
-    message.extend_from_slice(ticket.as_bytes());
-    message.extend_from_slice(device_identity.as_bytes());
-    message
-}
-
-pub fn authentication_proof_message(
-    host_identity: Ed25519PublicKey,
-    token: AuthenticationChallengeToken,
-    device_identity: Ed25519PublicKey,
-) -> Vec<u8> {
-    let mut message = Vec::with_capacity(AUTHENTICATION_PROOF_CONTEXT.len() + 32 * 3);
-    message.extend_from_slice(AUTHENTICATION_PROOF_CONTEXT);
-    message.extend_from_slice(host_identity.as_bytes());
-    message.extend_from_slice(token.as_bytes());
-    message.extend_from_slice(device_identity.as_bytes());
-    message
 }
 
 #[cfg(test)]
@@ -392,27 +200,34 @@ mod tests {
         }))
         .unwrap_err();
 
-        assert!(error.to_string().contains("public key must be 32 bytes"));
-    }
-
-    #[test]
-    fn transport_certificate_hash_is_fixed_length_base64url() {
-        let hash = TransportCertificateHash::from_bytes([5; TRANSPORT_CERTIFICATE_HASH_BYTES]);
-        let encoded = serde_json::to_string(&hash).unwrap();
-        assert!(!encoded.contains('='));
-        assert_eq!(
-            serde_json::from_str::<TransportCertificateHash>(&encoded).unwrap(),
-            hash
-        );
-
-        let error = serde_json::from_value::<TransportCertificateHash>(json!(
-            URL_SAFE_NO_PAD.encode([5; TRANSPORT_CERTIFICATE_HASH_BYTES - 1])
-        ))
-        .unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("transport certificate hash must be 32 bytes")
+                .contains("Ed25519 public key must be 32 bytes")
         );
+    }
+
+    #[test]
+    fn ssh_mapping_helpers_round_trip_and_reject_bad_lengths() {
+        let token = PairingToken::from_bytes([9; PAIRING_TOKEN_BYTES]);
+        let key = Ed25519PublicKey::from_bytes([7; ED25519_PUBLIC_KEY_BYTES]);
+
+        assert_eq!(
+            PairingToken::from_base64url(&token.to_base64url()),
+            Ok(token)
+        );
+        assert_eq!(
+            Ed25519PublicKey::from_base64url(&key.to_base64url()),
+            Ok(key)
+        );
+        assert!(!format!("{:?}", token).contains(&token.to_base64url()));
+        assert!(matches!(
+            PairingToken::from_base64url(&URL_SAFE_NO_PAD.encode([1; 31])),
+            Err(Base64UrlError::InvalidLength { .. })
+        ));
+        assert!(matches!(
+            Ed25519PublicKey::from_base64url("not base64url"),
+            Err(Base64UrlError::InvalidEncoding(_))
+        ));
     }
 }

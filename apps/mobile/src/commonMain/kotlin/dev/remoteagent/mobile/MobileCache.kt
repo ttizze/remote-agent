@@ -2,15 +2,13 @@ package dev.remoteagent.mobile
 
 /** Limits are local-device bounds, never a statement about Codex history retention. */
 data class MobileCacheLimits(
-    val maxThreads: Int = 64,
-    val maxItemsPerThread: Int = 256,
-    val maxTextCharacters: Int = 4 * 1024,
+    val maxThreads: Int = 5,
+    val maxTurnsPerThread: Int = 10,
     val maxApproximateBytes: Int = 512 * 1024,
 ) {
     init {
         require(maxThreads > 0)
-        require(maxItemsPerThread > 0)
-        require(maxTextCharacters > 0)
+        require(maxTurnsPerThread > 0)
         require(maxApproximateBytes > 0)
     }
 }
@@ -117,10 +115,8 @@ private fun MobileCache.bounded(limits: MobileCacheLimits): MobileCache {
 }
 
 private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobileCache {
-    val projects = projects.distinctBy { it.id }.sortedBy { it.position }.map { it.bounded(limits.maxTextCharacters) }
-    val list = threadList.asReversed().distinctBy { it.id }.take(limits.maxThreads).asReversed().map {
-        it.bounded(limits.maxTextCharacters)
-    }
+    val projects = projects.distinctBy { it.id }.sortedBy { it.position }
+    val list = threadList.asReversed().distinctBy { it.id }.take(limits.maxThreads).asReversed()
     val allowed = list.mapTo(mutableSetOf()) { it.id }
     val snapshots = snapshots.filterKeys { it in allowed }.values
         .sortedByDescending { it.summary.updatedAtMs }
@@ -135,38 +131,8 @@ private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobile
     )
 }
 
-private fun CodexProject.bounded(max: Int): CodexProject = copy(
-    name = name.truncated(max),
-    roots = roots.map { it.copy(path = it.path.truncated(max)) },
-)
-
 private fun ThreadSnapshot.bounded(limits: MobileCacheLimits): ThreadSnapshot {
-    val retained = turns.flatMap { turn -> turn.items.map { turn.id to it.id } }.takeLast(limits.maxItemsPerThread).toSet()
-    return copy(
-        summary = summary.bounded(limits.maxTextCharacters),
-        turns = turns.map { turn ->
-            turn.copy(items = turn.items.filter { turn.id to it.id in retained }.map { it.bounded(limits.maxTextCharacters) })
-        }.filter { it.items.isNotEmpty() || it.status == TurnStatus.InProgress },
-    )
-}
-
-private fun ThreadSummary.bounded(max: Int): ThreadSummary = copy(
-    name = name?.truncated(max),
-    preview = preview.truncated(max),
-    workingDirectory = workingDirectory.copy(path = workingDirectory.path.truncated(max)),
-)
-
-private fun CodexItem.bounded(max: Int): CodexItem = when (this) {
-    is CodexItem.UserMessage -> copy(text = text.truncated(max))
-    is CodexItem.AgentMessage -> copy(text = text.truncated(max))
-    is CodexItem.Reasoning -> copy(summary = summary.truncated(max))
-    is CodexItem.CommandExecution -> copy(
-        command = command.truncated(max), cwd = cwd?.truncated(max), output = output.truncated(max),
-    )
-    is CodexItem.FileChange -> copy(changes = changes.map { change ->
-        change.copy(path = change.path.truncated(max), diff = change.diff.truncated(max))
-    })
-    is CodexItem.Unknown -> copy(raw = raw)
+    return copy(turns = turns.takeLast(limits.maxTurnsPerThread))
 }
 
 private fun <T> List<T>.replaceById(id: String, value: T, idOf: (T) -> String): List<T> {
@@ -176,5 +142,3 @@ private fun <T> List<T>.replaceById(id: String, value: T, idOf: (T) -> String): 
 
 private fun List<ThreadSummary>.replaceById(id: String, value: ThreadSummary): List<ThreadSummary> =
     replaceById(id, value) { it.id }
-
-private fun String.truncated(max: Int): String = if (length <= max) this else take(max - 1) + "…"

@@ -1,409 +1,194 @@
-use std::{
-    net::IpAddr,
-    sync::{Arc, Mutex as StdMutex},
-    time::Duration,
+use std::{sync::Arc, time::Duration};
+
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use host_protocol::{Ed25519PublicKey, SSH_SUBSYSTEM};
+use russh::{
+    ChannelMsg, ChannelStream,
+    client::{self, Handler},
+    keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate},
 };
 
-use host_protocol::{
-    AuthenticationProof, ClientHello, ConnectionLimits, ConnectionNonce, DeviceAuthenticationReply,
-    DeviceAuthenticationStart, Ed25519PublicKey, Ed25519Signature, PairingRequest, ProtocolRange,
-    ServerHello, TransportCertificateHash, authentication_proof_message, pairing_proof_message,
-    read_frame, server_hello_proof_message, write_frame,
-};
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use ring::{
-    rand::{SecureRandom, SystemRandom},
-    signature::{ED25519, Ed25519KeyPair, UnparsedPublicKey},
-};
-use rustls::{
-    ClientConfig as TlsClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme,
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature},
-    pki_types::{CertificateDer, ServerName, UnixTime},
-};
+use crate::{MobileClientConfig, MobileClientError};
 
-use crate::{ConnectedHost, MobileClientConfig, MobileClientError};
+const SSH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const SSH_KEEPALIVE_MAX: usize = 3;
 
-const HANDSHAKE_MAX_FRAME_BYTES: u32 = 64 * 1024;
-const MAX_IN_FLIGHT_REQUESTS: u32 = 1_024;
-const MAX_OUTBOUND_QUEUE_MESSAGES: u32 = 4_096;
+/// The concrete russh message type is deliberately kept behind this module.
+/// Callers only see the authenticated stream and never a transport DTO.
+type SessionHandle = client::Handle<PinnedHostKeyHandler>;
+pub(crate) type SshSession = SessionHandle;
 
 pub(crate) struct AuthenticatedChannel {
-    pub(crate) endpoint: Endpoint,
-    pub(crate) connection: Connection,
-    pub(crate) send: SendStream,
-    pub(crate) receive: RecvStream,
-    pub(crate) host: ConnectedHost,
+    pub(crate) session: SessionHandle,
+    pub(crate) stream: ChannelStream<client::Msg>,
 }
 
-/// Establishes an encrypted QUIC channel, verifies the pinned Host proof, and
-/// authenticates the supplied device before returning streams for RPC.
+#[derive(Clone, Debug)]
+pub(crate) struct PinnedHostKeyHandler {
+    expected: Ed25519PublicKey,
+}
+
+impl Handler for PinnedHostKeyHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        Ok(host_key_matches(self.expected, server_public_key))
+    }
+}
+
+/// Establishes SSH, pins the server host key, authenticates the device public
+/// key, and opens the single allowed subsystem. No shell or exec request is
+/// made: all application traffic is carried as Codex JSONL.
 pub(crate) async fn establish(
     config: &MobileClientConfig,
-    device_key: &Ed25519KeyPair,
-    device_identity: Ed25519PublicKey,
+    device_key: PrivateKey,
 ) -> Result<AuthenticatedChannel, MobileClientError> {
-    let bind = match config.address.ip() {
-        IpAddr::V4(_) => "0.0.0.0:0".parse().expect("valid IPv4 socket address"),
-        IpAddr::V6(_) => "[::]:0".parse().expect("valid IPv6 socket address"),
+    let ssh_config = client::Config {
+        inactivity_timeout: None,
+        keepalive_interval: Some(SSH_KEEPALIVE_INTERVAL),
+        keepalive_max: SSH_KEEPALIVE_MAX,
+        nodelay: true,
+        ..client::Config::default()
     };
-    let mut endpoint = Endpoint::client(bind).map_err(MobileClientError::Endpoint)?;
-    let (tls, observed_certificate) = tls_client_config()?;
-    let mut transport = quinn::TransportConfig::default();
-    transport.keep_alive_interval(Some(Duration::from_secs(10)));
-    let mut client_config = quinn::ClientConfig::new(Arc::new(tls));
-    client_config.transport_config(Arc::new(transport));
-    endpoint.set_default_client_config(client_config);
-    let connection = endpoint
-        .connect(config.address, &config.server_name)
-        .map_err(MobileClientError::Connect)?
-        .await
-        .map_err(MobileClientError::Connection)?;
-
-    let nonce = random_nonce()?;
-    let hello = ClientHello {
-        versions: ProtocolRange::CURRENT,
-        max_frame_bytes: config.max_frame_bytes,
-        nonce,
-    };
-    let (mut send, mut receive) = connection
-        .open_bi()
-        .await
-        .map_err(MobileClientError::Connection)?;
-    write_frame(&mut send, &hello, HANDSHAKE_MAX_FRAME_BYTES).await?;
-    let server_hello: ServerHello = read_frame(&mut receive, HANDSHAKE_MAX_FRAME_BYTES).await?;
-    verify_server_hello(
-        &hello,
-        &server_hello,
-        config.host_identity,
-        observed_certificate.get()?,
-    )?;
-
-    authenticate(
-        &mut send,
-        &mut receive,
-        server_hello.limits.max_frame_bytes,
-        config.host_identity,
-        device_key,
-        device_identity,
-        config,
+    let mut session = client::connect(
+        Arc::new(ssh_config),
+        config.address,
+        PinnedHostKeyHandler {
+            expected: config.host_identity,
+        },
     )
-    .await?;
+    .await
+    .map_err(MobileClientError::Ssh)?;
 
-    let host = ConnectedHost {
-        version: server_hello.version,
-        limits: server_hello.limits,
-        supported_methods: server_hello.supported_methods,
-    };
-    Ok(AuthenticatedChannel {
-        endpoint,
-        connection,
-        send,
-        receive,
-        host,
-    })
-}
-
-async fn authenticate(
-    send: &mut SendStream,
-    receive: &mut RecvStream,
-    max_frame_bytes: u32,
-    host_identity: Ed25519PublicKey,
-    device_key: &Ed25519KeyPair,
-    device_identity: Ed25519PublicKey,
-    config: &MobileClientConfig,
-) -> Result<(), MobileClientError> {
-    if let Some(ticket) = config.pairing_ticket {
-        let signature = sign(
-            device_key,
-            &pairing_proof_message(host_identity, ticket, device_identity),
-        );
-        let start = DeviceAuthenticationStart::Pair {
-            request: PairingRequest {
-                ticket,
-                device_identity,
-                device_name: config.device_name.clone(),
-                signature,
-            },
-        };
-        write_frame(send, &start, max_frame_bytes).await?;
-        match read_frame(receive, max_frame_bytes).await? {
-            DeviceAuthenticationReply::Accepted {
-                device_identity: accepted,
-            } if accepted == device_identity => Ok(()),
-            _ => Err(MobileClientError::AuthenticationRejected),
-        }
-    } else {
-        write_frame(
-            send,
-            &DeviceAuthenticationStart::Authenticate { device_identity },
-            max_frame_bytes,
+    let username = pairing_username(config)?;
+    let auth = session
+        .authenticate_publickey(
+            username,
+            PrivateKeyWithHashAlg::new(Arc::new(device_key), None),
         )
-        .await?;
-        let challenge = match read_frame(receive, max_frame_bytes).await? {
-            DeviceAuthenticationReply::Challenge { challenge }
-                if challenge.host_identity == host_identity =>
-            {
-                challenge
+        .await
+        .map_err(MobileClientError::Ssh)?;
+    if !auth.success() {
+        return Err(MobileClientError::AuthenticationRejected);
+    }
+
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(MobileClientError::Ssh)?;
+    channel
+        .request_subsystem(true, SSH_SUBSYSTEM)
+        .await
+        .map_err(MobileClientError::Ssh)?;
+    tokio::time::timeout(config.request_timeout, async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => return Ok(()),
+                Some(ChannelMsg::Failure | ChannelMsg::Close | ChannelMsg::Eof) | None => {
+                    return Err(MobileClientError::SubsystemRejected);
+                }
+                Some(_) => {}
             }
-            _ => return Err(MobileClientError::AuthenticationRejected),
-        };
-        let proof = AuthenticationProof {
-            token: challenge.token,
-            signature: sign(
-                device_key,
-                &authentication_proof_message(host_identity, challenge.token, device_identity),
-            ),
-        };
-        write_frame(send, &proof, max_frame_bytes).await?;
-        match read_frame(receive, max_frame_bytes).await? {
-            DeviceAuthenticationReply::Accepted {
-                device_identity: accepted,
-            } if accepted == device_identity => Ok(()),
-            _ => Err(MobileClientError::AuthenticationRejected),
         }
+    })
+    .await
+    .map_err(|_| MobileClientError::SubsystemTimeout)??;
+    let stream = channel.into_stream();
+
+    Ok(AuthenticatedChannel { session, stream })
+}
+
+pub(crate) fn decode_device_key(device_pkcs8: &[u8]) -> Result<PrivateKey, MobileClientError> {
+    let key = russh::keys::pkcs8::decode_pkcs8(device_pkcs8, None)
+        .map_err(|_| MobileClientError::InvalidDeviceKey)?;
+    if key.algorithm() != Algorithm::Ed25519 {
+        return Err(MobileClientError::InvalidDeviceKey);
+    }
+    Ok(key)
+}
+
+/// Maps the pairing state to the SSH username understood by the Host.
+///
+/// The ticket is not sent as an application frame. It is carried in the
+/// username while the device private key signature proves possession of the
+/// paired key. Reconnects use the stable subsystem username.
+pub(crate) fn pairing_username(config: &MobileClientConfig) -> Result<String, MobileClientError> {
+    if let Some(ticket) = config.pairing_ticket {
+        let device_name = URL_SAFE_NO_PAD.encode(config.device_name.as_bytes());
+        Ok(format!("pair-v1.{}.{}", ticket.to_base64url(), device_name))
+    } else {
+        Ok(SSH_SUBSYSTEM.to_owned())
     }
 }
 
-fn verify_server_hello(
-    hello: &ClientHello,
-    server: &ServerHello,
-    expected_identity: Ed25519PublicKey,
-    observed_certificate_hash: TransportCertificateHash,
-) -> Result<(), MobileClientError> {
-    validate_limits(&server.limits)?;
-    if server.version < hello.versions.min || server.version > hello.versions.max {
-        return Err(MobileClientError::InvalidHandshake(
-            "Host selected an unsupported protocol version",
-        ));
-    }
-    if server.limits.max_frame_bytes > hello.max_frame_bytes {
-        return Err(MobileClientError::InvalidHandshake(
-            "Host exceeded the offered maximum frame size",
-        ));
-    }
-    if server.host_identity != expected_identity {
-        return Err(MobileClientError::HostIdentityMismatch);
-    }
-    if server.transport_certificate_hash != observed_certificate_hash {
-        return Err(MobileClientError::TransportCertificateMismatch);
-    }
-    let message = server_hello_proof_message(
-        hello.nonce,
-        server.version,
-        server.limits.max_frame_bytes,
-        server.host_identity,
-        server.transport_certificate_hash,
-    );
-    UnparsedPublicKey::new(&ED25519, server.host_identity.as_bytes())
-        .verify(&message, server.host_signature.as_bytes())
-        .map_err(|_| MobileClientError::InvalidHostProof)
-}
-
-fn validate_limits(limits: &ConnectionLimits) -> Result<(), MobileClientError> {
-    if limits.max_frame_bytes == 0
-        || limits.max_in_flight_requests == 0
-        || limits.outbound_queue_messages == 0
-        || limits.request_timeout_ms == 0
-    {
-        return Err(MobileClientError::InvalidHandshake(
-            "Host advertised a zero limit",
-        ));
-    }
-    if limits.max_in_flight_requests > MAX_IN_FLIGHT_REQUESTS {
-        return Err(MobileClientError::InvalidHandshake(
-            "Host advertised too many in-flight requests",
-        ));
-    }
-    if limits.outbound_queue_messages > MAX_OUTBOUND_QUEUE_MESSAGES {
-        return Err(MobileClientError::InvalidHandshake(
-            "Host advertised an outbound queue larger than the mobile limit",
-        ));
-    }
-    Ok(())
-}
-
-fn tls_client_config()
--> Result<(quinn::crypto::rustls::QuicClientConfig, ObservedCertificate), MobileClientError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let observed_certificate = ObservedCertificate::default();
-    let verifier = ProofOnlyServerCertVerifier {
-        algorithms: provider.signature_verification_algorithms,
-        observed_certificate: observed_certificate.clone(),
-    };
-    let tls = TlsClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|error| MobileClientError::Tls(error.to_string()))?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth();
-    let quic = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-        .map_err(|error| MobileClientError::Tls(error.to_string()))?;
-    Ok((quic, observed_certificate))
-}
-
-/// A rotating transport certificate is accepted only to form encrypted QUIC.
-/// Its TLS handshake signature is still verified. Before a device proof or any
-/// RPC is sent, the ServerHello signature is verified with the pinned Ed25519
-/// Host identity from pairing; that application proof authenticates the Host.
-#[derive(Debug)]
-struct ProofOnlyServerCertVerifier {
-    algorithms: WebPkiSupportedAlgorithms,
-    observed_certificate: ObservedCertificate,
-}
-
-impl ServerCertVerifier for ProofOnlyServerCertVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, TlsError> {
-        self.observed_certificate.record(end_entity);
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, TlsError> {
-        verify_tls12_signature(message, cert, dss, &self.algorithms)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, TlsError> {
-        verify_tls13_signature(message, cert, dss, &self.algorithms)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algorithms.supported_schemes()
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct ObservedCertificate(Arc<StdMutex<Option<TransportCertificateHash>>>);
-
-impl ObservedCertificate {
-    fn record(&self, certificate: &CertificateDer<'_>) {
-        let digest = ring::digest::digest(&ring::digest::SHA256, certificate.as_ref());
-        let hash = TransportCertificateHash::from_bytes(
-            digest
-                .as_ref()
-                .try_into()
-                .expect("SHA-256 digests have 32 bytes"),
-        );
-        *self.0.lock().expect("certificate observer mutex poisoned") = Some(hash);
-    }
-
-    fn get(&self) -> Result<TransportCertificateHash, MobileClientError> {
-        self.0
-            .lock()
-            .map_err(|_| MobileClientError::Tls("certificate observer mutex poisoned".to_owned()))?
-            .ok_or(MobileClientError::MissingTransportCertificate)
-    }
-}
-
-fn random_nonce() -> Result<ConnectionNonce, MobileClientError> {
-    let mut bytes = [0_u8; 32];
-    SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| MobileClientError::Random)?;
-    Ok(ConnectionNonce::from_bytes(bytes))
-}
-
-fn sign(key: &Ed25519KeyPair, message: &[u8]) -> Ed25519Signature {
-    Ed25519Signature::from_bytes(
-        key.sign(message)
-            .as_ref()
-            .try_into()
-            .expect("ring Ed25519 signatures have 64 bytes"),
-    )
+pub(crate) fn host_key_matches(
+    expected: Ed25519PublicKey,
+    observed: &PublicKeyOrCertificate,
+) -> bool {
+    let key = observed.public_key();
+    key.algorithm() == Algorithm::Ed25519
+        && key
+            .key_data()
+            .ed25519()
+            .is_some_and(|public| public.as_ref() == expected.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
-    use host_protocol::{ConnectionLimits, DEFAULT_MAX_FRAME_BYTES};
-
     use super::*;
+    use host_protocol::PairingToken;
+    use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
+    use russh::keys::ssh_key::{PublicKey, public::KeyData};
 
-    #[test]
-    fn handshake_and_data_frame_limits_are_distinct() {
-        assert_eq!(HANDSHAKE_MAX_FRAME_BYTES, 64 * 1024);
-        assert_eq!(DEFAULT_MAX_FRAME_BYTES, 4 * 1024 * 1024);
+    fn config(ticket: Option<PairingToken>) -> MobileClientConfig {
+        MobileClientConfig {
+            address: "127.0.0.1:22".parse().unwrap(),
+            server_name: "host.local".to_owned(),
+            host_identity: Ed25519PublicKey::from_bytes([7; 32]),
+            device_name: "test phone".to_owned(),
+            pairing_ticket: ticket,
+            max_frame_bytes: 4096,
+            request_timeout: Duration::from_secs(1),
+        }
     }
 
     #[test]
-    fn validate_limits_rejects_zero_advertised_limit() {
-        let limits = ConnectionLimits {
-            max_frame_bytes: 0,
-            max_in_flight_requests: 1,
-            outbound_queue_messages: 1,
-            request_timeout_ms: 1,
-        };
-        assert!(matches!(
-            validate_limits(&limits),
-            Err(MobileClientError::InvalidHandshake(
-                "Host advertised a zero limit"
-            ))
+    fn first_pairing_username_contains_only_url_safe_components() {
+        let username = pairing_username(&config(Some(PairingToken::from_bytes([9; 32])))).unwrap();
+        assert_eq!(
+            username,
+            "pair-v1.CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk.dGVzdCBwaG9uZQ"
+        );
+        assert!(!username.contains('='));
+        assert!(!username.contains('/'));
+    }
+
+    #[test]
+    fn reconnect_username_is_stable() {
+        assert_eq!(pairing_username(&config(None)).unwrap(), SSH_SUBSYSTEM);
+    }
+
+    #[test]
+    fn host_key_pin_accepts_only_the_expected_ed25519_key() {
+        let expected = Ed25519PublicKey::from_bytes([7; 32]);
+        let observed = PublicKey::from(KeyData::Ed25519(
+            russh::keys::ssh_key::public::Ed25519PublicKey([7; 32]),
         ));
-    }
+        assert!(host_key_matches(expected, &observed.into()));
 
-    #[test]
-    fn validate_limits_accepts_mobile_resource_budget_boundaries() {
-        let in_flight = ConnectionLimits {
-            max_frame_bytes: 1,
-            max_in_flight_requests: MAX_IN_FLIGHT_REQUESTS,
-            outbound_queue_messages: 1,
-            request_timeout_ms: 1,
-        };
-        assert!(validate_limits(&in_flight).is_ok());
-
-        let queue = ConnectionLimits {
-            max_frame_bytes: 1,
-            max_in_flight_requests: 1,
-            outbound_queue_messages: MAX_OUTBOUND_QUEUE_MESSAGES,
-            request_timeout_ms: 1,
-        };
-        assert!(validate_limits(&queue).is_ok());
-    }
-
-    #[test]
-    fn validate_limits_rejects_in_flight_budget_overflow() {
-        let limits = ConnectionLimits {
-            max_frame_bytes: 1,
-            max_in_flight_requests: MAX_IN_FLIGHT_REQUESTS + 1,
-            outbound_queue_messages: 1,
-            request_timeout_ms: 1,
-        };
-        assert!(matches!(
-            validate_limits(&limits),
-            Err(MobileClientError::InvalidHandshake(
-                "Host advertised too many in-flight requests"
-            ))
+        let wrong = PublicKey::from(KeyData::Ed25519(
+            russh::keys::ssh_key::public::Ed25519PublicKey([8; 32]),
         ));
+        assert!(!host_key_matches(expected, &wrong.into()));
     }
 
     #[test]
-    fn validate_limits_rejects_queue_budget_overflow() {
-        let limits = ConnectionLimits {
-            max_frame_bytes: 1,
-            max_in_flight_requests: 1,
-            outbound_queue_messages: MAX_OUTBOUND_QUEUE_MESSAGES + 1,
-            request_timeout_ms: 1,
-        };
-        assert!(matches!(
-            validate_limits(&limits),
-            Err(MobileClientError::InvalidHandshake(
-                "Host advertised an outbound queue larger than the mobile limit"
-            ))
-        ));
+    fn ring_generated_pkcs8_device_keys_are_accepted_by_russh() {
+        let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let parsed = decode_device_key(key.as_ref()).unwrap();
+        assert_eq!(parsed.algorithm(), Algorithm::Ed25519);
     }
 }

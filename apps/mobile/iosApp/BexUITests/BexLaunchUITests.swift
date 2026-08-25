@@ -39,6 +39,7 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(contents.waitForExistence(timeout: 10))
         contents.tap()
         contents.typeText(payload)
+        XCTAssertEqual(contents.value as? String, payload, "Pairing payload was not entered verbatim")
 
         let submit = app.buttons["pairing.submit"]
         XCTAssertTrue(submit.waitForExistence(timeout: 10))
@@ -47,7 +48,13 @@ final class BexLaunchUITests: XCTestCase {
         submit.tap()
 
         let connectButton = app.buttons["connect.start"]
-        XCTAssertTrue(connectButton.waitForExistence(timeout: 30))
+        let paired = connectButton.waitForExistence(timeout: 30)
+        let pairingNotice = app.staticTexts["notice"]
+        let pairingFailure = pairingNotice.exists ? pairingNotice.label : "(none)"
+        XCTAssertTrue(
+            paired,
+            "Pairing did not complete; notice: \(pairingFailure)",
+        )
         XCTAssertFalse(app.staticTexts["PCとペアリング"].exists)
 
         connectButton.tap()
@@ -76,7 +83,13 @@ final class BexLaunchUITests: XCTestCase {
         app.launch()
 
         let connectButton = app.buttons["connect.start"]
-        XCTAssertTrue(connectButton.waitForExistence(timeout: 30), "Connect button did not appear")
+        let connectReady = connectButton.waitForExistence(timeout: 30)
+        let connectionNotice = app.staticTexts["notice"]
+        let connectionFailure = connectionNotice.exists ? connectionNotice.label : "(none)"
+        XCTAssertTrue(
+            connectReady,
+            "Connect button did not appear; notice: \(connectionFailure)",
+        )
         connectButton.tap()
 
         let taskList = app.descendants(matching: .any)["tasks.list"]
@@ -84,7 +97,7 @@ final class BexLaunchUITests: XCTestCase {
         if !taskList.waitForExistence(timeout: 3) {
             XCTAssertTrue(
                 backButton.waitForExistence(timeout: 30),
-                "Neither the task list nor the persisted task detail appeared after connecting",
+                "Neither the task list nor the persisted task detail appeared after connecting; notice: \(connectionNotice.exists ? connectionNotice.label : "(none)")",
             )
             backButton.tap()
         }

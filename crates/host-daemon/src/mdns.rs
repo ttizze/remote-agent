@@ -3,7 +3,7 @@ use ring::digest::{SHA256, digest};
 
 use host_protocol::{CURRENT_PROTOCOL_VERSION, Ed25519PublicKey};
 
-pub const SERVICE_TYPE: &str = "_bex._udp.local.";
+pub const SERVICE_TYPE: &str = "_bex._tcp.local.";
 const FINGERPRINT_BYTES: usize = 8;
 const PROTOCOL_VERSION_TXT_KEY: &str = "protocolVersion";
 const HOST_IDENTITY_FINGERPRINT_TXT_KEY: &str = "hostIdentityFingerprint";
@@ -11,7 +11,7 @@ const HOST_IDENTITY_FINGERPRINT_TXT_KEY: &str = "hostIdentityFingerprint";
 /// The non-secret discovery information advertised for one running Host.
 ///
 /// Discovery identifies a possible Host only. A Mobile Client must still
-/// authenticate the Host's pinned long-lived identity over QUIC before using it.
+/// authenticate the Host's pinned long-lived identity over SSH before using it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceMetadata {
     pub instance_name: String,

@@ -1,18 +1,12 @@
 mod auth;
-mod frame;
-mod handshake;
+mod jsonl;
 mod rpc;
 
-pub use auth::{
-    AuthenticationChallenge, AuthenticationChallengeToken, AuthenticationProof, ConnectionNonce,
-    DeviceAuthenticationReply, DeviceAuthenticationStart, Ed25519PublicKey, Ed25519Signature,
-    PairingQrPayload, PairingRequest, PairingToken, TransportCertificateHash,
-    authentication_proof_message, pairing_proof_message,
+pub use auth::{Ed25519PublicKey, PairingQrPayload, PairingToken};
+pub use jsonl::{DEFAULT_MAX_MESSAGE_BYTES, JsonlError, JsonlReader, JsonlWriter};
+pub use rpc::{
+    RpcMessage, RpcMessageError, RpcMessageKind, classify_message, raw_object, rewrite_top_level_id,
 };
-pub use frame::{FrameError, read_frame, write_frame};
-pub use handshake::{
-    CURRENT_PROTOCOL_VERSION, ClientHello, ConnectionLimits, DEFAULT_MAX_FRAME_BYTES,
-    ProtocolRange, ServerHello, VersionNegotiationError, negotiate_version,
-    server_hello_proof_message,
-};
-pub use rpc::{RpcError, RpcId, RpcMessage, RpcNotification, RpcOutcome, RpcRequest, RpcResponse};
+
+pub const CURRENT_PROTOCOL_VERSION: u16 = 3;
+pub const SSH_SUBSYSTEM: &str = "remote-agent-v3";

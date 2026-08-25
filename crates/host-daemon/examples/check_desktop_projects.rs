@@ -1,6 +1,7 @@
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::DesktopProjectStore;
-use serde_json::{Map, Value, json};
+use host_protocol::raw_object;
+use serde_json::{Value, json};
 
 #[tokio::main]
 async fn main() {
@@ -20,9 +21,11 @@ async fn check() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(0);
 
     let app_server = CodexAppServer::spawn(AppServerConfig::default()).await?;
-    let threads = app_server
-        .request_json("thread/list", json!({"limit": 512}), Map::new())
+    let response = app_server
+        .request_raw(r#"{"id":1,"method":"thread/list","params":{"limit":512}}"#)
         .await?;
+    let object = raw_object(&response)?;
+    let threads: Value = serde_json::from_str(object["result"].get())?;
     let upstream_assigned = assigned_thread_count(&threads);
     let enriched = store.enrich_threads(threads).await?;
     let thread_count = enriched

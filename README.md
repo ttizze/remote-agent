@@ -2,7 +2,7 @@
 
 Remote Agent lets a Mobile Client control a Codex instance running on a trusted PC Host. The PC Host keeps Codex credentials, Workspace files, and authoritative conversation history on the computer; the Mobile Client is a remote display and control surface with a non-authoritative Mobile Cache.
 
-The first product slice targets Codex, a Rust Host Daemon on macOS, shared Kotlin application logic, an Android Compose UI, and a native iOS SwiftUI app.
+The first product slice targets Codex, a Rust Host Daemon on macOS, shared Kotlin application logic, an Android Compose UI, and a native iOS SwiftUI app. The Host embeds an SSH server with `russh`; the Mobile Client authenticates with its SSH device key and uses the `remote-agent-v3` subsystem over TCP.
 
 ## Development
 
@@ -23,7 +23,7 @@ nix develop . --command ./scripts/build-host-macos.sh
 
 The script selects the sole `Apple Development` identity in the user keychain. Set `HOST_CODE_SIGN_IDENTITY` explicitly when more than one is installed.
 
-The mobile build links the Rust QUIC client into each native application. The Nix shell includes the Rust standard libraries for iOS devices, Apple Silicon iOS Simulator, and the supported Android ABIs:
+The mobile build links the Rust SSH client into each native application. The Nix shell includes the Rust standard libraries for iOS devices, Apple Silicon iOS Simulator, and the supported Android ABIs:
 
 ```sh
 nix develop .

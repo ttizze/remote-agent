@@ -9,7 +9,7 @@ class PairingQrTest {
 
     private val hostGeneratedV2Payload = """
         {
-          "protocolVersion": 2,
+          "protocolVersion": 3,
           "hostIdentity": "$fixed32Bytes",
           "addresses": ["192.0.2.1:49152"],
           "ticket": "$fixed32Bytes",
@@ -58,7 +58,7 @@ class PairingQrTest {
 
     private fun payload(
         expiresAtMs: Long,
-        protocolVersion: Int = 2,
+        protocolVersion: Int = 3,
         hostIdentity: String = fixed32Bytes,
         addresses: String = "\"192.0.2.1:49152\"",
     ): String = """

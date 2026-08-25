@@ -15,6 +15,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.encodeToJsonElement
 
+private const val DefaultMaxFrameBytes = 256 * 1024 * 1024
+
 /** Android adapter over the native raw Codex JSON-RPC client. */
 class AndroidHostGateway(private val context: Context) : HostGateway {
     private val json = Json { ignoreUnknownKeys = false; isLenient = false }
@@ -268,7 +270,8 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     private fun config(address: String, identity: String, ticket: String?): String = buildString {
         append("{\"address\":").append(quote(address)).append(",\"serverName\":\"remote-agent\",\"hostIdentity\":")
         append(quote(identity)).append(",\"deviceName\":").append(quote(Build.MODEL))
-        append(",\"maxFrameBytes\":4194304,\"requestTimeoutMs\":30000")
+        append(",\"maxFrameBytes\":").append(DefaultMaxFrameBytes)
+            .append(",\"requestTimeoutMs\":30000")
         if (ticket != null) append(",\"pairingTicket\":").append(quote(ticket))
         append('}')
     }

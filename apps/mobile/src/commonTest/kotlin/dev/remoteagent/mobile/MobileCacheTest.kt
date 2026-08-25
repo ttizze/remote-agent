@@ -9,7 +9,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 
 class MobileCacheTest {
-    private val limits = MobileCacheLimits(maxThreads = 2, maxItemsPerThread = 2, maxTextCharacters = 20, maxApproximateBytes = 1_024)
+    private val limits = MobileCacheLimits(maxThreads = 2, maxTurnsPerThread = 2, maxApproximateBytes = 1_024)
 
     @Test
     fun read_replaces_snapshot_then_applies_buffered_events_in_order() {
@@ -51,21 +51,81 @@ class MobileCacheTest {
     }
 
     @Test
-    fun cache_is_profile_isolated_and_enforces_thread_and_item_bounds() {
-        val large = "x".repeat(500)
+    fun default_limits_keep_the_latest_five_threads() {
+        val summaries = (1..6).map { summary("thread-$it", updatedAtMs = it.toLong()) }
+
+        val cache = reconcileThreadList(MobileCache(), "host-1", summaries, MobileCacheLimits())
+
+        assertEquals(
+            listOf("thread-2", "thread-3", "thread-4", "thread-5", "thread-6"),
+            cache.profile("host-1").threadList.map { it.id },
+        )
+    }
+
+    @Test
+    fun snapshots_keep_the_latest_ten_turns_with_all_items_and_text_unchanged() {
+        val largeText = "x".repeat(5_000)
+        val turns = (1..11).map { turnNumber ->
+            CodexTurn(
+                id = "turn-$turnNumber",
+                status = TurnStatus.Completed,
+                items = listOf(
+                    CodexItem.UserMessage("user-$turnNumber", largeText),
+                    CodexItem.AgentMessage("agent-$turnNumber", largeText),
+                    CodexItem.Reasoning("reasoning-$turnNumber", largeText),
+                    CodexItem.CommandExecution(
+                        id = "command-$turnNumber",
+                        command = largeText,
+                        cwd = largeText,
+                        output = largeText,
+                        status = CommandExecutionStatus.Completed,
+                    ),
+                    CodexItem.FileChange(
+                        id = "file-$turnNumber",
+                        changes = listOf(FileUpdateChange(largeText, FileUpdateKind.Update, largeText)),
+                        status = FileChangeStatus.Completed,
+                    ),
+                ),
+            )
+        }
+        val summary = summary("thread-1").copy(
+            name = largeText,
+            preview = largeText,
+            workingDirectory = WorkingDirectory(largeText),
+        )
+        val snapshot = ThreadSnapshot(summary = summary, turns = turns)
+        val limits = MobileCacheLimits(maxThreads = 1, maxTurnsPerThread = 10, maxApproximateBytes = 1_024)
+
+        val cached = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(snapshot, emptyList()),
+            limits,
+        ).snapshot("host-1", "thread-1")!!
+
+        assertEquals(turns.drop(1), cached.turns)
+        assertEquals(summary, cached.summary)
+
+        val codexProject = project("project-1", 1).copy(
+            name = largeText,
+            roots = listOf(WorkingDirectory(largeText)),
+        )
+        val projectCache = reconcileProjectList(MobileCache(), "host-1", listOf(codexProject), limits)
+        assertEquals(listOf(codexProject), projectCache.profile("host-1").projects)
+    }
+
+    @Test
+    fun cache_is_profile_isolated_and_enforces_thread_bounds() {
         val first = ThreadSnapshot(
             summary("one", 1),
-            listOf(CodexTurn("turn", TurnStatus.Completed, listOf(
-                CodexItem.AgentMessage("a", large), CodexItem.AgentMessage("b", large), CodexItem.AgentMessage("c", large),
-            ))),
+            listOf(
+                CodexTurn("turn-1", TurnStatus.Completed),
+                CodexTurn("turn-2", TurnStatus.Completed),
+                CodexTurn("turn-3", TurnStatus.Completed),
+            ),
         )
         var cache = reconcileThreadRead(MobileCache(), "host-a", ThreadReadResult(first, emptyList()), limits)
-        assertEquals(2, cache.snapshot("host-a", "one")!!.turns.single().items.size)
-        assertTrue(
-            cache.snapshot("host-a", "one")!!.turns.single().items.all {
-                (it as CodexItem.AgentMessage).text.length <= limits.maxTextCharacters
-            },
-        )
+        assertEquals(listOf("turn-2", "turn-3"), cache.snapshot("host-a", "one")!!.turns.map { it.id })
         cache = reconcileThreadList(cache, "host-a", listOf(summary("one", 1), summary("two", 2), summary("three", 3)), limits)
         cache = reconcileThreadRead(cache, "host-b", ThreadReadResult(ThreadSnapshot(summary("other"), emptyList()), emptyList()), limits)
 

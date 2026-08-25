@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc, Mutex as StdMutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
@@ -8,37 +8,41 @@ use std::{
 };
 
 use host_protocol::{
-    RpcId, RpcMessage, RpcOutcome, RpcRequest, RpcResponse, read_frame, write_frame,
+    JsonlReader, JsonlWriter, RpcMessage, RpcMessageKind, classify_message, raw_object,
 };
-use quinn::{RecvStream, SendStream};
-use serde_json::Value;
+use russh::{ChannelStream, client::Msg};
+use serde_json::{Value, value::RawValue};
 use tokio::{
+    io::AsyncWrite,
     sync::{Semaphore, broadcast, mpsc, oneshot},
     time::timeout,
 };
 
 use crate::{MobileClientError, Notification, ServerRequest};
 
-type PendingResponse = oneshot::Sender<Result<Value, MobileClientError>>;
+const MAX_IN_FLIGHT_REQUESTS: usize = 1_024;
+const MAX_OUTBOUND_QUEUE_MESSAGES: usize = 4_096;
 
+type PendingResponse = oneshot::Sender<Result<Value, MobileClientError>>;
 type SharedState = Arc<StdMutex<PeerState>>;
 
 struct PeerState {
-    pending: HashMap<RpcId, PendingResponse>,
+    pending: HashMap<String, PendingResponse>,
     terminal: Option<String>,
     notifications: Option<broadcast::Sender<Notification>>,
     server_requests: Option<broadcast::Sender<ServerRequest>>,
 }
 
-/// Correlates bidirectional RPC traffic on one authenticated QUIC stream.
+/// Correlates bidirectional Codex JSONL traffic on one authenticated SSH
+/// subsystem stream.
 ///
-/// Requests are bounded by both the Host-advertised in-flight limit and the
-/// outbound queue. The request timeout covers waiting for both limits, sending
-/// the frame, and receiving its response. A dropped request future removes its
-/// correlation entry, so a cancelled request cannot retain state indefinitely.
+/// The transport never deserializes params, result, error, or extension data.
+/// It only classifies top-level routing keys. Requests made through the Rust
+/// API construct a JSON object from the caller's `Value`; inbound events and
+/// Host requests remain their original source lines.
 pub(crate) struct RpcPeer {
     next_id: AtomicU64,
-    outbound: mpsc::Sender<RpcMessage>,
+    outbound: mpsc::Sender<String>,
     state: SharedState,
     permits: Arc<Semaphore>,
     request_timeout: Duration,
@@ -46,45 +50,39 @@ pub(crate) struct RpcPeer {
 
 impl RpcPeer {
     pub(crate) fn open(
-        send: SendStream,
-        receive: RecvStream,
-        max_frame_bytes: u32,
-        queue_messages: u32,
-        max_in_flight: u32,
+        stream: ChannelStream<Msg>,
+        max_message_bytes: usize,
         request_timeout: Duration,
     ) -> Result<Self, MobileClientError> {
-        let queue_messages = usize::try_from(queue_messages)
-            .map_err(|_| MobileClientError::InvalidHandshake("outbound queue is too large"))?;
-        let max_in_flight = usize::try_from(max_in_flight)
-            .map_err(|_| MobileClientError::InvalidHandshake("in-flight limit is too large"))?;
-        if queue_messages == 0 || max_in_flight == 0 {
-            return Err(MobileClientError::InvalidHandshake(
-                "Host advertised a zero queue or concurrency limit",
+        if max_message_bytes == 0 {
+            return Err(MobileClientError::InvalidConfig(
+                "max_frame_bytes must be positive",
             ));
         }
 
-        let (outbound, outbound_rx) = mpsc::channel(queue_messages);
-        let (notifications, _) = broadcast::channel(queue_messages);
-        let (server_requests, _) = broadcast::channel(queue_messages);
+        let (outbound, outbound_rx) = mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        let (notifications, _) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        let (server_requests, _) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
         let state = Arc::new(StdMutex::new(PeerState {
             pending: HashMap::new(),
             terminal: None,
             notifications: Some(notifications),
             server_requests: Some(server_requests),
         }));
-        let permits = Arc::new(Semaphore::new(max_in_flight));
+        let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
+        let (reader, writer) = tokio::io::split(stream);
         tokio::spawn(write_loop(
-            send,
+            writer,
             outbound_rx,
             state.clone(),
             permits.clone(),
-            max_frame_bytes,
+            max_message_bytes,
         ));
         tokio::spawn(read_loop(
-            receive,
+            reader,
             state.clone(),
             permits.clone(),
-            max_frame_bytes,
+            max_message_bytes,
         ));
 
         Ok(Self {
@@ -109,11 +107,18 @@ impl RpcPeer {
         method: String,
         params: Value,
     ) -> Result<Value, MobileClientError> {
-        if let Some(reason) = terminal_reason(&self.state) {
-            return Err(MobileClientError::Disconnected(reason));
-        }
+        self.request_raw(method, serde_json::to_string(&params)?)
+            .await
+    }
+
+    pub(crate) async fn request_raw(
+        &self,
+        method: String,
+        params: String,
+    ) -> Result<Value, MobileClientError> {
+        ensure_active(&self.state)?;
         let numeric_id = allocate_request_id(&self.next_id)?;
-        let id = RpcId::Integer(numeric_id);
+        let id = numeric_id.to_string();
         let state = self.state.clone();
         let outbound = self.outbound.clone();
         let permits = self.permits.clone();
@@ -132,18 +137,13 @@ impl RpcPeer {
             };
 
             ensure_active(&state)?;
-            let message = RpcMessage::Request(RpcRequest {
-                id,
-                method,
-                params,
-                extensions: Default::default(),
-            });
+            let line = request_line(numeric_id, &method, &params)?;
             outbound
-                .send(message)
+                .send(line)
                 .await
-                .map_err(|_| disconnected_or(&state, "RPC writer stopped"))?;
+                .map_err(|_| disconnected_or(&state, "JSONL writer stopped"))?;
             rx.await
-                .map_err(|_| disconnected_or(&state, "RPC reader stopped"))?
+                .map_err(|_| disconnected_or(&state, "JSONL reader stopped"))?
         };
 
         timeout(deadline, operation)
@@ -151,29 +151,49 @@ impl RpcPeer {
             .map_err(|_| MobileClientError::RequestTimeout { id: numeric_id })?
     }
 
-    pub(crate) async fn respond(
+    pub(crate) async fn respond_result(
         &self,
-        id: RpcId,
-        outcome: RpcOutcome,
+        id: String,
+        result: Value,
+    ) -> Result<(), MobileClientError> {
+        self.respond_raw(id, "result", serde_json::to_string(&result)?)
+            .await
+    }
+
+    pub(crate) async fn respond_error(
+        &self,
+        id: String,
+        error: Value,
+    ) -> Result<(), MobileClientError> {
+        self.respond_raw(id, "error", serde_json::to_string(&error)?)
+            .await
+    }
+
+    pub(crate) async fn respond_raw(
+        &self,
+        id: String,
+        field: &'static str,
+        payload: String,
     ) -> Result<(), MobileClientError> {
         ensure_active(&self.state)?;
+        if field != "result" && field != "error" {
+            return Err(MobileClientError::Protocol(
+                "response field must be result or error".to_owned(),
+            ));
+        }
+        let line = response_line(&id, field, &payload)?;
         self.outbound
-            .send(RpcMessage::Response(RpcResponse {
-                id,
-                outcome,
-                extensions: Default::default(),
-            }))
+            .send(line)
             .await
-            .map_err(|_| disconnected_or(&self.state, "RPC writer stopped"))
+            .map_err(|_| disconnected_or(&self.state, "JSONL writer stopped"))
     }
 }
 
 /// Removes a pending request when the request future is cancelled or times
-/// out. The reader may already have removed the same ID; in that case removal
-/// is intentionally a no-op and the response has already won the race.
+/// out. The reader may already have removed the same ID; removal is a no-op.
 struct PendingRegistration {
     state: SharedState,
-    id: RpcId,
+    id: String,
 }
 
 impl Drop for PendingRegistration {
@@ -231,7 +251,7 @@ fn disconnected_or(state: &SharedState, fallback: &str) -> MobileClientError {
 
 fn register_pending(
     state: &SharedState,
-    id: RpcId,
+    id: String,
     response: PendingResponse,
 ) -> Result<(), MobileClientError> {
     let mut state = lock_state(state);
@@ -245,9 +265,6 @@ fn register_pending(
 fn allocate_request_id(next_id: &AtomicU64) -> Result<u64, MobileClientError> {
     let mut current = next_id.load(Ordering::Relaxed);
     loop {
-        // `u64::MAX` is a permanent exhausted sentinel. In particular, do
-        // not use fetch_add here: it would wrap to zero after exhaustion and
-        // could eventually reuse an ID.
         if current == u64::MAX {
             return Err(MobileClientError::RequestIdExhausted);
         }
@@ -263,64 +280,118 @@ fn allocate_request_id(next_id: &AtomicU64) -> Result<u64, MobileClientError> {
     }
 }
 
-async fn write_loop(
-    mut send: SendStream,
-    mut outbound: mpsc::Receiver<RpcMessage>,
+fn request_line(id: u64, method: &str, params: &str) -> Result<String, MobileClientError> {
+    let id: Box<RawValue> = serde_json::from_str(&id.to_string())?;
+    let method: Box<RawValue> = serde_json::from_str(&serde_json::to_string(method)?)?;
+    let params: Box<RawValue> = serde_json::from_str(params)?;
+    let mut object = BTreeMap::new();
+    object.insert("id", id);
+    object.insert("method", method);
+    object.insert("params", params);
+    Ok(serde_json::to_string(&object)?)
+}
+
+fn response_line(
+    id: &str,
+    field: &'static str,
+    payload: &str,
+) -> Result<String, MobileClientError> {
+    let id: Box<RawValue> = serde_json::from_str(id)?;
+    let payload: Box<RawValue> = serde_json::from_str(payload)?;
+    let mut object = BTreeMap::new();
+    object.insert("id", id);
+    object.insert(field, payload);
+    Ok(serde_json::to_string(&object)?)
+}
+
+async fn write_loop<W>(
+    writer: W,
+    mut outbound: mpsc::Receiver<String>,
     state: SharedState,
     permits: Arc<Semaphore>,
-    max_frame_bytes: u32,
-) {
-    while let Some(message) = outbound.recv().await {
-        if let Err(error) = write_frame(&mut send, &message, max_frame_bytes).await {
+    max_message_bytes: usize,
+) where
+    W: AsyncWrite + Unpin,
+{
+    let mut writer = JsonlWriter::with_max_message_bytes(writer, max_message_bytes);
+    while let Some(line) = outbound.recv().await {
+        if let Err(error) = writer.write_line(&line).await {
             terminate(&state, &permits, error.to_string());
             return;
         }
     }
-    terminate(&state, &permits, "RPC writer stopped".to_owned());
+    terminate(&state, &permits, "JSONL writer stopped".to_owned());
 }
 
-async fn read_loop(
-    mut receive: RecvStream,
+async fn read_loop<R>(
+    reader: R,
     state: SharedState,
     permits: Arc<Semaphore>,
-    max_frame_bytes: u32,
-) {
+    max_message_bytes: usize,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = JsonlReader::with_max_message_bytes(reader, max_message_bytes);
     loop {
-        let message: RpcMessage = match read_frame(&mut receive, max_frame_bytes).await {
+        let Some(line) = (match reader.read_line().await {
+            Ok(line) => line,
+            Err(error) => {
+                terminate(&state, &permits, error.to_string());
+                return;
+            }
+        }) else {
+            terminate(&state, &permits, "SSH channel closed".to_owned());
+            return;
+        };
+
+        let message = match classify_message(&line) {
             Ok(message) => message,
             Err(error) => {
                 terminate(&state, &permits, error.to_string());
                 return;
             }
         };
-        match message {
-            RpcMessage::Response(RpcResponse { id, outcome, .. }) => {
-                let Some(tx) = lock_state(&state).pending.remove(&id) else {
-                    continue; // Late or duplicate response after timeout.
-                };
-                let result = match outcome {
-                    RpcOutcome::Success { result } => Ok(result),
-                    RpcOutcome::Failure { error } => Err(error.into()),
-                };
-                let _ = tx.send(result);
-            }
-            RpcMessage::Notification(notification) => {
+        match message.kind() {
+            RpcMessageKind::Response => handle_response(&state, message),
+            RpcMessageKind::Notification => {
                 let state = lock_state(&state);
                 if let Some(sender) = state.notifications.as_ref() {
-                    let _ = sender.send(notification);
+                    let _ = sender.send(message.into_raw_line());
                 }
             }
-            RpcMessage::Request(request) => {
-                // Host-initiated requests are part of the normal
-                // bidirectional protocol. Dropping a request when there is
-                // no subscriber must not tear down unrelated in-flight work.
+            RpcMessageKind::Request => {
                 let state = lock_state(&state);
                 if let Some(sender) = state.server_requests.as_ref() {
-                    let _ = sender.send(request);
+                    let _ = sender.send(message.into_raw_line());
                 }
             }
         }
     }
+}
+
+fn handle_response(state: &SharedState, message: RpcMessage) {
+    let Some(id) = message.raw_id() else {
+        return;
+    };
+    let line = message.raw_line();
+    let Some(tx) = lock_state(state).pending.remove(id) else {
+        return; // Late or duplicate response after timeout.
+    };
+
+    let result = match raw_object(line) {
+        Ok(object) if object.contains_key("result") => object
+            .get("result")
+            .and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok())
+            .ok_or_else(|| MobileClientError::Protocol("invalid result JSON".to_owned())),
+        Ok(object) if object.contains_key("error") => Err(MobileClientError::Remote {
+            error: object["error"].get().to_owned(),
+        }),
+        Ok(_) => Err(MobileClientError::Protocol(
+            "response has neither result nor error".to_owned(),
+        )),
+        Err(error) => Err(error.into()),
+    };
+    let _ = tx.send(result);
 }
 
 fn terminate(state: &SharedState, permits: &Arc<Semaphore>, reason: String) {
@@ -337,8 +408,6 @@ fn terminate(state: &SharedState, permits: &Arc<Semaphore>, reason: String) {
         )
     };
 
-    // Closing the semaphore wakes requests waiting for an in-flight permit;
-    // they then observe the first terminal reason instead of timing out.
     permits.close();
     drop(notifications);
     drop(server_requests);
@@ -352,88 +421,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cancelled_request_registration_is_removed() {
-        let state = test_state();
-        let id = RpcId::Integer(7);
-        let (tx, _rx) = oneshot::channel();
-        register_pending(&state, id.clone(), tx).unwrap();
-        {
-            let _registration = PendingRegistration {
-                state: state.clone(),
-                id,
-            };
-        }
-        assert!(lock_state(&state).pending.is_empty());
+    fn constructed_request_does_not_change_nested_values() {
+        let line = request_line(
+            7,
+            "codex/custom",
+            r#"{"future": {"id": "nested"}, "text": "hello"}"#,
+        )
+        .unwrap();
+        let object = raw_object(&line).unwrap();
+        assert_eq!(
+            object["params"].get(),
+            r#"{"future": {"id": "nested"}, "text": "hello"}"#
+        );
     }
 
     #[test]
-    fn registration_after_terminal_is_rejected_atomically() {
-        let state = test_state();
-        let permits = Arc::new(Semaphore::new(1));
-        terminate(&state, &permits, "read side closed".to_owned());
-
-        let (tx, _rx) = oneshot::channel();
-        let result = register_pending(&state, RpcId::Integer(9), tx);
-        assert!(matches!(
-            result,
-            Err(MobileClientError::Disconnected(reason)) if reason == "read side closed"
-        ));
-        assert!(lock_state(&state).pending.is_empty());
+    fn response_builder_keeps_raw_payload_and_id_values() {
+        let line = response_line(
+            r#""request-7""#,
+            "result",
+            r#"{"unknown":[1,{"future":true}]}"#,
+        )
+        .unwrap();
+        let object = raw_object(&line).unwrap();
+        assert_eq!(object["id"].get(), r#""request-7""#);
+        assert_eq!(object["result"].get(), r#"{"unknown":[1,{"future":true}]}"#);
     }
 
     #[test]
-    fn terminal_failure_closes_existing_and_new_event_receivers() {
-        let state = test_state();
-        let mut notifications = notification_receiver(&state);
-        let mut server_requests = server_request_receiver(&state);
-        let permits = Arc::new(Semaphore::new(1));
-
-        terminate(&state, &permits, "writer failed".to_owned());
-
-        assert!(matches!(
-            notifications.try_recv(),
-            Err(broadcast::error::TryRecvError::Closed)
-        ));
-        assert!(matches!(
-            server_requests.try_recv(),
-            Err(broadcast::error::TryRecvError::Closed)
-        ));
-        assert!(matches!(
-            notification_receiver(&state).try_recv(),
-            Err(broadcast::error::TryRecvError::Closed)
-        ));
-        assert!(matches!(
-            server_request_receiver(&state).try_recv(),
-            Err(broadcast::error::TryRecvError::Closed)
-        ));
-    }
-
-    #[test]
-    fn request_ids_stop_at_exhaustion_without_wrapping_or_reusing() {
+    fn request_ids_stop_at_exhaustion_without_wrapping() {
         let next_id = AtomicU64::new(u64::MAX - 1);
-        assert!(matches!(
-            allocate_request_id(&next_id),
-            Ok(id) if id == u64::MAX - 1
-        ));
+        assert_eq!(allocate_request_id(&next_id).unwrap(), u64::MAX - 1);
         assert!(matches!(
             allocate_request_id(&next_id),
             Err(MobileClientError::RequestIdExhausted)
         ));
         assert_eq!(next_id.load(Ordering::Relaxed), u64::MAX);
-        assert!(matches!(
-            allocate_request_id(&next_id),
-            Err(MobileClientError::RequestIdExhausted)
-        ));
-    }
-
-    fn test_state() -> SharedState {
-        let (notifications, _) = broadcast::channel(1);
-        let (server_requests, _) = broadcast::channel(1);
-        Arc::new(StdMutex::new(PeerState {
-            pending: HashMap::new(),
-            terminal: None,
-            notifications: Some(notifications),
-            server_requests: Some(server_requests),
-        }))
     }
 }

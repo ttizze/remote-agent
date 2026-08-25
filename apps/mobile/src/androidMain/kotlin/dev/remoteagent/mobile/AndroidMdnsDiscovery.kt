@@ -43,5 +43,5 @@ class AndroidMdnsDiscovery(context: Context) {
         })
     }
 
-    private companion object { const val ServiceType = "_bex._udp." }
+    private companion object { const val ServiceType = "_bex._tcp." }
 }

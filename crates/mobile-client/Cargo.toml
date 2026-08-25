@@ -11,17 +11,13 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 [dependencies]
 host-protocol = { path = "../host-protocol" }
 base64.workspace = true
-quinn.workspace = true
 ring.workspace = true
-rustls.workspace = true
+russh.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
-
-[dev-dependencies]
-rcgen.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"

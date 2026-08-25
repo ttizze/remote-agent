@@ -2,15 +2,15 @@
 
 ## Current implementation status
 
-- Milestone 1 is implemented: the Rust workspace, Codex App Server lifecycle, installed-binary Schema preflight, raw JSONL operations, deterministic tests, and a live read-only Codex check.
-- Milestone 2 is implemented: version 2 length-prefixed Mobile RPC, arbitrary Codex methods, bidirectional requests, bounded QUIC handling, deadlines, cancellation, and loopback tests.
-- Milestone 3 Host work is implemented: expiring one-use pairing tickets, pinned Host proofs, device challenge authentication, atomic settings, and macOS Keychain Host identity storage. QR camera UI remains part of the mobile work.
-- Milestone 4 implementation is complete: Android Jetpack Compose and iOS SwiftUI use the same Kotlin application state and raw Codex boundary with local UI projections; both platforms provide QR capture, per-Host secure device identity, Rust/Quinn transport bindings, authenticated mDNS rediscovery, isolated Host Profiles, and the Project/Thread/Turn flow. The Host reads the current Codex Desktop Project index without persisting a copy, overlays its explicit Thread assignments on App Server results, and starts each new task with its first prompt.
-- Milestone 4 verification covers the Rust workspace unit/integration targets, shared Kotlin tests on iOS and Android, Android debug/release compilation, the installed Codex Desktop global-state schema, live read-only App Server probes, a headless XCUITest run in iOS Simulator, and physical-iPhone installation, connection, and transport-closure stability. Populated real-data grouping on the final integrated physical-device build and the Android emulator UI flow remain unverified.
+- The Codex App Server lifecycle, installed-binary Schema preflight, raw JSONL peer, Project read projection, Mobile Cache rules, and deterministic foundation tests exist in the tree.
+- The transport uses embedded `russh` SSH/TCP on both Host and Mobile. Both sides use the `remote-agent-v3` subsystem, and the old QUIC, custom handshake, and length-prefixed frame layers have been removed.
+- The raw JSONL boundary and classifier inspect only top-level `method` and `id` for routing. The 256 MiB line ceiling remains a last-resort safety bound, not a Codex payload policy.
+- SSH Host-key pinning, device public-key authentication, initial ticket mapping, reconnect authentication, raw routing, and first-response-wins behavior have deterministic tests. A live Host-to-phone pairing run remains unverified.
+- The Rust workspace tests and strict Clippy checks pass. Kotlin tests, the iOS Simulator native build, and the Android debug build pass; physical-device behavior and a live Codex/SSH end-to-end run remain unverified.
 
 ## Outcome
 
-Build a native Android/iOS control surface for a Codex installation running on a trusted computer. The Mobile Client connects directly to the PC Host over QUIC. Remote Agent does not provide a web client, hosted backend, relay, or durable authoritative conversation store. A Mobile Client may keep a durable Mobile Cache; Codex remains authoritative.
+Build a native Android/iOS control surface for a Codex installation running on a trusted computer. The Mobile Client connects directly to the PC Host over an embedded SSH server and its `remote-agent-v3` subsystem. The Host starts one Codex App Server and keeps it alive independently of individual phone connections. Remote Agent does not provide a web client, hosted backend, relay, or durable authoritative conversation store. A Mobile Client may keep a durable Mobile Cache; Codex remains authoritative.
 
 The first implementation supports Codex only. A common agent adapter interface will not be introduced until a second agent supplies a real variation that needs one.
 
@@ -22,7 +22,7 @@ The first implementation supports Codex only. A common agent adapter interface w
 - A Project task supplies the Desktop Project ID as `thread/start.projectId` and one of its roots as `cwd`. Remote Agent does not write Desktop global-state while this integration remains read-only.
 - A Codex Thread is identified only by its Codex `threadId`. Remote Agent does not mint a competing session ID or add a provider discriminator while Codex is the only provider.
 - The PC Host persists paired device public keys and PC Host settings.
-- The PC Host private key is stored in the operating system secure store.
+- The PC Host SSH host private key is stored in the operating system secure store; its public key is the Host identity shown in the pairing QR.
 - macOS development and installed Host binaries use the stable `dev.remoteagent.host-daemon` code-signing identifier so rebuilding the Host does not create a new Keychain client identity.
 - Images and files use temporary Blob storage and are never stored in a Remote Agent database.
 - A Paired Device may select any working directory available to the PC Host account.
@@ -36,21 +36,21 @@ The first implementation supports Codex only. A common agent adapter interface w
 - The local network, unpaired peers, incoming RPC, file names, file content, and Codex output are untrusted. Pairing authorizes a device to control Codex with the PC Host account's filesystem reach.
 - Mobile Clients persist Thread lists, messages, tool output, and diffs in a Mobile Cache and reconcile it with Codex through a fresh Snapshot after reconnection. Blobs and Workspace files are not cached durably.
 - Pairing tickets and Paired Device removal are available only through the local Host Manager.
-- The long-lived PC Host Identity authenticates replaceable QUIC transport certificates, so routine certificate rotation does not require re-pairing.
+- The long-lived PC Host SSH host key is pinned by each Mobile Host Profile, so reconnects do not require a new pairing ticket while that key is unchanged.
 - A Mobile Client may maintain multiple PC Host Profiles. Each profile has separate device credentials, addresses, and Mobile Cache keyed by PC Host Identity.
 - The Mobile Cache relies on the operating system's device-lock and application-data protection; Remote Agent does not add an application-level biometric gate.
-- An active Turn continues when every Mobile Client disconnects. Reconnection obtains and reconciles its current state from Codex.
+- One Host-owned Codex App Server remains alive after every Mobile Client disconnects. An active Turn therefore continues when phones disappear; reconnection obtains and reconciles its current state from Codex.
 - The Mobile Client exposes one-time approval and decline decisions only; it does not expose Codex's broader `acceptForSession` decision.
 
 "The PC Host owns no conversation state" means it owns no durable conversation or event history. While running, the Host Daemon necessarily owns ephemeral process handles, pending RPC requests, approval continuations, Blob transfers, and reconnection buffers. A Host Daemon restart can reload a persisted Codex Thread, but does not promise to preserve an in-flight Turn. The Mobile Cache is a non-authoritative display copy.
 
 ## Technology and repository shape
 
-- Host Daemon and transport: Rust, Tokio, Quinn, Rustls.
-- Codex connection: one `codex app-server` child process using stdio JSONL.
-- Mobile application state and RPC DTOs: Kotlin Multiplatform, shared by Android and iOS.
+- Host Daemon and transport: Rust, Tokio, and embedded `russh` over TCP.
+- Codex connection: one Host-owned `codex app-server` child process using stdio JSONL. Its lifetime is independent of SSH sessions.
+- Mobile application state and UI projections: Kotlin Multiplatform, shared by Android and iOS. The transport does not introduce typed `params`, `result`, or `error` DTOs.
 - Mobile UI: Jetpack Compose in `androidMain`; SwiftUI in the iOS application target.
-- Mobile platform facilities: `androidMain` and `iosMain` implementations for QR capture, secure storage, file picking, lifecycle, and initially QUIC.
+- Mobile platform facilities: `androidMain` and `iosMain` implementations for QR capture, secure storage, file picking, lifecycle, and SSH connection setup.
 - The minimum iOS version is 15. Platform-specific implementations are permitted where no suitable common API exists.
 - Host Manager: Compose Multiplatform Desktop after the daemon interface is stable.
 - macOS Host Daemon lifecycle: `launchd`; Windows and Linux service integration follow the same executable later.
@@ -62,7 +62,7 @@ Planned top-level shape:
 remote-agent/
 ├── crates/
 │   ├── codex-app-server/   # Codex process and JSONL protocol ownership
-│   ├── host-protocol/      # Mobile RPC and Blob framing, added with QUIC
+│   ├── host-protocol/      # SSH pairing data and raw Codex JSONL classification
 │   └── host-daemon/        # Pairing, connections, composition root
 ├── apps/
 │   ├── mobile/             # Shared Kotlin state, Android Compose, and iOS SwiftUI application
@@ -76,54 +76,65 @@ Directories are added only when their capability begins; this document does not 
 
 ## Codex App Server module
 
-The module owns the process, initialization handshake, request correlation, JSONL decoding, timeouts, server notifications, server-initiated requests, and shutdown. It does not impose a fixed per-message limit that is absent from the Codex stdio protocol. Its gateway interface is deliberately raw:
+The module owns the one Host-wide process, initialization handshake, request correlation, JSONL decoding, timeouts, server notifications, server-initiated requests, and shutdown. A phone disconnect closes only its SSH session; it does not stop this process. The raw gateway interface is deliberately small:
 
 - spawn and initialize one App Server;
-- send any Codex request or notification with its native method and JSON params;
-- subscribe to notifications and server requests;
-- respond to a server request with a native result or error;
+- send any Codex request or notification as a native JSONL line;
+- subscribe to raw notifications and server requests;
+- respond to a server request with its native raw JSONL response;
 - shut down the child process.
 
-The implementation sends `initialize`, waits for the response, and then sends `initialized` before exposing the ready instance. Codex-generated JSON Schema is the compatibility reference. The module must not leak its internal request IDs into the Mobile RPC.
+The implementation sends `initialize`, waits for the response, and then sends `initialized` before exposing the ready instance. Codex-generated JSON Schema is the compatibility reference. The module must not leak its internal request IDs into the Mobile RPC; the Host restores each phone's original request ID on the way back.
 
-At Host Daemon startup, Remote Agent resolves the Codex executable, preferring the Codex bundled with ChatGPT Desktop on macOS and falling back to `codex` on `PATH`; an explicit `--codex <PATH>` remains authoritative. It asks the exact resolved executable to write its embedded App Server JSON Schema into a private temporary directory, then spawns that same executable. Schema generation is a readiness preflight and capability advertisement, not a Host-side method allow-list. After the Host-owned `initialize`/`initialized` handshake, authenticated Mobile RPC forwards Codex-native methods and JSON without a second Codex object model. The Project-aware `host/project/list` and `host/thread/{list,read,start}` methods form a separate Host-owned read projection over Desktop Project state and App Server Thread results.
+At Host Daemon startup, Remote Agent resolves the Codex executable, preferring the Codex bundled with ChatGPT Desktop on macOS and falling back to `codex` on `PATH`; an explicit `--codex <PATH>` remains authoritative. It asks the exact resolved executable to write its embedded App Server JSON Schema into a private temporary directory, then spawns that same executable. Schema generation is a readiness preflight and capability advertisement, not a Host-side method allow-list. After the Host-owned `initialize`/`initialized` handshake, authenticated SSH sessions forward Codex-native JSONL without a second Codex object model. The Project-aware `host/project/list` and `host/thread/{list,read,start}` methods form a separate Host-owned read projection over Desktop Project state and App Server Thread results; only those Host-owned methods need application-level interpretation.
 
-## Mobile RPC
+## SSH subsystem and Codex JSONL
 
-One client-initiated bidirectional QUIC stream carries all structured traffic. Frames are a four-byte big-endian length followed by one UTF-8 JSON object. Every decoder enforces a configured maximum before allocation.
+The Host Daemon embeds a `russh` SSH server and listens on TCP. Each authenticated session may open only the `remote-agent-v3` subsystem. Shell, PTY, exec, and port-forwarding channels are rejected. The subsystem is a newline-delimited stream of Codex JSON objects with no additional application framing, handshake, or RPC framework.
+
+The wire messages are the Codex messages themselves:
 
 ```json
-{
-  "id": 42,
-  "method": "turn/start",
-  "params": {
-    "threadId": "019...",
-    "input": [{ "type": "text", "text": "continue" }]
-  }
-}
+{"id":1,"method":"thread/list","params":{}}
+{"id":1,"result":{}}
+{"id":1,"error":{}}
+{"method":"thread/started","params":{}}
 ```
 
-Responses contain the request `id` and either `result` or `error`. IDs may be JSON integers or strings. Notifications omit `id`. Codex-originated requests contain `id`, `method`, and `params`; a Mobile Client answers them with a response carrying the same connection-local proxy ID. Codex method names, params, results, errors, notifications, and extension fields cross the gateway without Host DTO translation. Host-owned Project methods are advertised separately in the same capability list and return the Mobile Project/Thread projection described above.
+The JSONL reader preserves each source line and applies the 256 MiB last-resort safety ceiling before allocation. This is a framing guard, not a product-level limit on Codex payloads. The Host does not define `RpcRequest`, `RpcResponse`, or typed `params`/`result`/`error` DTOs. It validates only the top-level envelope needed for routing:
 
-RPC version negotiation, message size, queue length, request deadline, and the installed Codex method set are part of the connection handshake. The method set is a capability hint only. Unknown methods are forwarded so Codex itself decides whether they are valid.
+- `method` and `id` means request;
+- `method` without `id` means notification;
+- `id` with `result` or `error` means response;
+- anything else is invalid.
+
+For one phone, the Host can behave like a direct JSONL pipe. With multiple phones, the Host is a thin multiplexer around the one Host-owned Codex process:
+
+- A phone request is assigned a Host-local upstream ID. The Host rewrites only the top-level `id`, remembers the originating SSH session and original ID, and restores that ID on the response. The nested JSON remains raw.
+- A Codex response is routed by that upstream ID to the originating phone. Unknown or late responses are ignored or reported as an already-completed request without being delivered to another phone.
+- Codex notifications are forwarded as raw lines to every live subscribed phone.
+- A Codex server request is forwarded as a raw line to the live phones that can answer it. The first valid response wins; later responses are rejected as already resolved. The selected response is forwarded to Codex with its original request ID.
+- Host-owned `host/project/list` and `host/thread/{list,read,start}` operations may inspect their own application fields, but they do not require a second Codex object model. All other Codex methods and extension fields pass through unchanged.
+
+The Codex method set remains a capability hint, not a Host allow-list. Unknown methods are forwarded so the installed Codex App Server decides whether they are valid. Queue bounds, request deadlines, cancellation, disconnect cleanup, and the JSONL safety ceiling are resource and lifecycle controls at the Host seam, not new wire message types.
 
 ## Pairing and connection authentication
 
-The QR payload contains a protocol version, PC Host identity/public key, candidate addresses, a random single-use pairing ticket, and an expiry. The Mobile Client first authenticates the PC Host by pinning the scanned key, then submits its own public key and the ticket through the encrypted connection. Ticket consumption is atomic and never persisted after use.
+The QR payload contains a protocol version, SSH Host public key, candidate TCP addresses, a random single-use pairing ticket, and an expiry. The Mobile Client pins the scanned Host key before opening SSH. During the initial public-key authentication, the device proves possession of its own Ed25519 private key and presents the ticket as pairing metadata. Ticket consumption is atomic and the ticket is not persisted as Paired Device state.
 
-Later connections authenticate the PC Host with the saved pin and authenticate the device by signing a fresh Host Daemon challenge. Replay, expired ticket, removed device, and mismatched PC Host identity are rejected before Codex data is returned.
+The Host stores the device public key as a Paired Device. Later connections authenticate with the same SSH public key and do not carry a pairing ticket. Replay, expired ticket, removed device, unsupported key, and mismatched SSH Host key are rejected before the subsystem opens. A ticket is never part of the Codex JSONL stream and is never logged.
 
 Only the local Host Manager can create a pairing ticket or remove a Paired Device. Pairing grants control over Codex and its available working directories, so removing a device revokes its future connections.
 
 ## Direct reachability
 
-The Host Manager offers a user-initiated `Set up direct external connection` action. It starts or confirms the QUIC UDP listener, attempts a time-bounded router mapping through supported PCP, NAT-PMP, or UPnP mechanisms, and asks the Mobile Client to verify reachability. It does not alter the PC firewall and does not claim success when only a local listener or router mapping exists. While the feature remains enabled, the Host Daemon renews expiring mappings and removes them when disabled or during clean shutdown. Mappings are reported separately from end-to-end verification, and unsupported or unreachable networks fall back to manual configuration, IPv6, or a user-managed virtual network.
+The Host Manager offers a user-initiated `Set up direct external connection` action. It starts or confirms the SSH/TCP listener, attempts a time-bounded router mapping through supported PCP, NAT-PMP, or UPnP mechanisms, and asks the Mobile Client to verify reachability. It does not alter the PC firewall and does not claim success when only a local listener or router mapping exists. While the feature remains enabled, the Host Daemon renews expiring mappings and removes them when disabled or during clean shutdown. Mappings are reported separately from end-to-end verification, and unsupported or unreachable networks fall back to manual configuration, IPv6, or a user-managed virtual network.
 
-On the local network, the Host Daemon advertises a non-secret service identifier through mDNS. A Mobile Client resolves candidates and accepts a rediscovered address only after authenticating the saved PC Host Identity. Saved addresses and manual address entry remain fallback paths; an IP address change does not require re-pairing.
+On the local network, the Host Daemon advertises a non-secret `_bex._tcp` service identifier through mDNS. A Mobile Client resolves candidates and accepts a rediscovered address only after verifying the saved SSH Host key. Saved addresses and manual address entry remain fallback paths; an IP address change does not require re-pairing.
 
 ## Blob transfer
 
-Each Blob uses a temporary unidirectional QUIC stream. An RPC grant precedes the stream and binds a transfer ID to direction, purpose, declared byte length, SHA-256 digest, MIME type, and expiry.
+Blob transfer remains a later capability. Its control grant must travel as an authenticated JSONL operation and bind a transfer ID to direction, purpose, declared byte length, SHA-256 digest, MIME type, and expiry. The data path must be bounded and owned by the Host subsystem; this transport migration does not claim a binary-transfer implementation and must not add shell, exec, or forwarding access to SSH.
 
 The receiver enforces byte and disk quotas while streaming, verifies the digest before use, uses owner-only temporary files, and deletes incomplete, expired, consumed, or disconnected transfers. User-provided filenames are display metadata and never become filesystem paths.
 
@@ -137,7 +148,7 @@ The Mobile Client presents Manual Edit and AI Edit as distinct actions. A Manual
 
 ## Reconnection
 
-For a selected thread, the Mobile Client consumes the raw notification stream and uses `host/thread/read` with `includeTurns` to obtain App Server history plus current Desktop Project membership without loading a writer. Immediately before starting a later Turn, it calls native `thread/resume` with that thread's working directory, followed by `turn/start`. It projects returned Codex objects into its UI cache while retaining unknown notifications and Item kinds as raw JSON. The Host Daemon does not synthesize a durable Snapshot or translate live events.
+For a selected thread, the Mobile Client consumes the raw notification stream and uses `host/thread/read` with `includeTurns` to obtain the latest 10 App Server Turns plus current Desktop Project membership without loading a writer. The Host trims only this Mobile read projection; live `turn/*` and `item/*` events continue to stream without translation. Immediately before starting a later Turn, it calls native `thread/resume` with that thread's working directory, followed by `turn/start`. It projects returned Codex objects into its UI cache while retaining unknown notifications and Item kinds as raw JSON. The Host Daemon does not synthesize a durable Snapshot.
 
 No event cursor is persisted. A new transport connection always performs synchronization from Codex.
 
@@ -153,26 +164,30 @@ No event cursor is persisted. A new transport connection always performs synchro
 - Reject malformed, timed-out, or closed JSONL connections deterministically without inventing a fixed Codex message-size limit.
 - Verify deterministic tests with an in-memory App Server peer and a read-only live compatibility check against the installed Codex CLI.
 
-### 2. QUIC control channel
+### 2. SSH/TCP control channel
 
-- Add the versioned Mobile RPC types and length-prefixed framing.
-- Complete bidirectional request/response and notification exchange over loopback QUIC.
-- Bound frame sizes, queues, concurrency, and deadlines.
-- Test disconnects, cancellation, malformed frames, slow peers, and graceful shutdown.
+- Embed a `russh` SSH server in the Host Daemon and a `russh` client in the Rust Mobile transport.
+- Pin the SSH Host key from the QR payload, authenticate each device with its SSH public key, and expose only the `remote-agent-v3` subsystem.
+- Carry Codex-native JSONL unchanged wherever no ID rewrite is needed; classify only top-level `method` and `id`.
+- Run one Host-owned Codex App Server and multiplex multiple authenticated phones by rewriting and restoring request IDs.
+- Fan out raw Codex notifications and server requests, with first-response-wins handling for server requests.
+- Bound JSONL lines, queues, concurrency, and deadlines; test disconnects, cancellation, malformed JSONL, slow peers, and graceful shutdown.
 
 ### 3. Pairing and device authentication
 
 - Display and scan an expiring QR payload.
-- Pin the PC Host Identity and persist a Paired Device after one successful ticket use.
+- Pin the SSH Host key and persist a Paired Device after one successful ticket-bearing SSH public-key authentication.
+- Carry the pairing ticket only during initial authentication; reconnect with the stored device key without a ticket.
 - Store private keys in OS secure storage and non-secret settings with atomic replacement.
 - Let an authenticated Paired Device select any working directory available to the PC Host account.
-- Test replay, expiry, signature failure, and device removal.
+- Reject shell, PTY, exec, and forwarding requests; expose only `remote-agent-v3`.
+- Test Host-key mismatch, replay, expiry, signature failure, unsupported keys, and device removal.
 
 ### 4. Android/iOS vertical slice
 
 - Create the Android Compose and iOS SwiftUI applications over common Kotlin application state.
 - Implement QR capture and secure device identity on both platforms.
-- Support multiple isolated PC Host Profiles and authenticated mDNS rediscovery.
+- Support multiple isolated PC Host Profiles and authenticated `_bex._tcp` mDNS rediscovery.
 - Connect and load the paginated Codex Desktop Project index and App Server Thread list through the Host-owned read projection.
 - Group Threads by Desktop's explicit assignment in Desktop Project order and show explicitly projectless, unassigned, and unknown-Project Threads in a final Chat section.
 - Start a task from a Project using `thread/start.projectId` and one of that Project's roots as `cwd`, then submit its first prompt in the same creation flow.

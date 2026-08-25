@@ -1,8 +1,8 @@
-//! QUIC client core for the Bex Mobile Client.
+//! SSH client core for the Bex Mobile Client.
 //!
 //! The caller owns the device PKCS#8 document (normally in platform secure
 //! storage). It is supplied only while connecting, used to sign the pairing
-//! or authentication proof, and is never retained or logged by this crate.
+//! or SSH authentication, and is never retained or logged by this crate.
 
 mod client;
 mod rpc;

@@ -125,7 +125,7 @@ class MobileStateCodecTest {
         val restored = success(
             MobileStateCodec.decodeCache(
                 MobileStateCodec.encodeCache(cache),
-                MobileCacheLimits(maxThreads = 1, maxItemsPerThread = 2, maxTextCharacters = 100, maxApproximateBytes = 16 * 1024),
+                MobileCacheLimits(maxThreads = 1, maxTurnsPerThread = 10, maxApproximateBytes = 16 * 1024),
             ),
         )
 

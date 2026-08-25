@@ -11,10 +11,9 @@ use std::{
     time::Duration,
 };
 
-use host_protocol::{Ed25519PublicKey, PairingToken, RpcError, RpcId};
+use host_protocol::{Ed25519PublicKey, PairingToken};
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::sync::broadcast;
 use zeroize::Zeroizing;
 
@@ -140,29 +139,18 @@ pub(crate) fn connect_handle(config: CConfig, key: &[u8]) -> Result<*mut Handle,
 pub(crate) fn request_json(
     handle: &Handle,
     method: String,
-    params: Value,
+    params_json: String,
 ) -> Result<String, String> {
     let result = handle
         .runtime
-        .block_on(handle.client.request(method, params))
+        .block_on(handle.client.request_raw(method, params_json))
         .map_err(encode_mobile_error)?;
     serde_json::to_string(&result).map_err(|_| "failed to encode response".to_owned())
 }
 
 fn encode_mobile_error(error: MobileClientError) -> String {
     match error {
-        MobileClientError::Remote {
-            code,
-            message,
-            data,
-            extensions,
-        } => serde_json::to_string(&RpcError {
-            code,
-            message,
-            data,
-            extensions,
-        })
-        .unwrap_or_else(|serialization| serialization.to_string()),
+        MobileClientError::Remote { error } => error,
         other => other.to_string(),
     }
 }
@@ -172,13 +160,13 @@ pub(crate) fn respond_result_json(
     request_id_json: &str,
     result_json: &str,
 ) -> Result<(), String> {
-    let request_id = serde_json::from_str::<RpcId>(request_id_json)
-        .map_err(|_| "invalid request ID JSON".to_owned())?;
-    let result =
-        serde_json::from_str::<Value>(result_json).map_err(|_| "invalid result JSON".to_owned())?;
     handle
         .runtime
-        .block_on(handle.client.respond_result(request_id, result))
+        .block_on(handle.client.respond_raw(
+            request_id_json.to_owned(),
+            "result",
+            result_json.to_owned(),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -187,13 +175,13 @@ pub(crate) fn respond_error_json(
     request_id_json: &str,
     error_json: &str,
 ) -> Result<(), String> {
-    let request_id = serde_json::from_str::<RpcId>(request_id_json)
-        .map_err(|_| "invalid request ID JSON".to_owned())?;
-    let error = serde_json::from_str::<RpcError>(error_json)
-        .map_err(|_| "invalid RPC error JSON".to_owned())?;
     handle
         .runtime
-        .block_on(handle.client.respond_error(request_id, error))
+        .block_on(handle.client.respond_raw(
+            request_id_json.to_owned(),
+            "error",
+            error_json.to_owned(),
+        ))
         .map_err(|error| error.to_string())
 }
 
@@ -203,9 +191,7 @@ pub(crate) fn next_notification_json(handle: &Handle) -> Result<Option<String>, 
         .lock()
         .map_err(|_| "notification lock poisoned")?;
     match notifications.try_recv() {
-        Ok(notification) => serde_json::to_string(&notification)
-            .map(Some)
-            .map_err(|_| "failed to encode notification".to_owned()),
+        Ok(notification) => Ok(Some(notification)),
         Err(broadcast::error::TryRecvError::Empty) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -217,9 +203,7 @@ pub(crate) fn next_server_request_json(handle: &Handle) -> Result<Option<String>
         .lock()
         .map_err(|_| "server-request lock poisoned")?;
     match requests.try_recv() {
-        Ok(request) => serde_json::to_string(&request)
-            .map(Some)
-            .map_err(|_| "failed to encode server request".to_owned()),
+        Ok(request) => Ok(Some(request)),
         Err(broadcast::error::TryRecvError::Empty) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -297,8 +281,7 @@ pub unsafe extern "C" fn mobile_client_request(
     }
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<CString, String> {
         let method = input_string(method)?.to_owned();
-        let params = serde_json::from_str(input_string(params_json)?)
-            .map_err(|_| "invalid params JSON".to_owned())?;
+        let params = input_string(params_json)?.to_owned();
         // SAFETY: checked non-null and the handle remains owned by caller.
         let handle = unsafe { &*handle };
         CString::new(request_json(handle, method, params)?)

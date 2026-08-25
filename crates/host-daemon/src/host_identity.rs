@@ -5,35 +5,27 @@ use ring::{
 };
 use zeroize::Zeroizing;
 
+/// Secure persistence seam for the stable SSH host identity.
 pub trait HostIdentityKeyStore {
     fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, KeyStoreError>;
     fn save(&self, pkcs8: &[u8]) -> Result<(), KeyStoreError>;
 }
 
+/// The Ed25519 key is both the SSH host key and the identity printed in QR.
 pub struct HostIdentity {
     key_pair: Ed25519KeyPair,
+    ssh_key: russh::keys::PrivateKey,
 }
 
 impl HostIdentity {
-    #[cfg(test)]
-    pub(crate) fn generate_unstored() -> Result<Self, HostIdentityError> {
-        let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
-            .map_err(|_| HostIdentityError::Random)?;
-        parse_identity(document.as_ref())
-    }
-
     pub fn public_key(&self) -> Ed25519PublicKey {
         Ed25519PublicKey::from_bytes(self.key_pair.public_key().as_ref().try_into().expect(
             "ring Ed25519 public keys always have the protocol's fixed 32-byte representation",
         ))
     }
 
-    pub fn sign(&self, message: &[u8]) -> host_protocol::Ed25519Signature {
-        host_protocol::Ed25519Signature::from_bytes(
-            self.key_pair.sign(message).as_ref().try_into().expect(
-                "ring Ed25519 signatures always have the protocol's fixed 64-byte representation",
-            ),
-        )
+    pub fn server_key(&self) -> russh::keys::PrivateKey {
+        self.ssh_key.clone()
     }
 }
 
@@ -53,7 +45,20 @@ pub fn load_or_create_host_identity(
 fn parse_identity(document: &[u8]) -> Result<HostIdentity, HostIdentityError> {
     let key_pair = Ed25519KeyPair::from_pkcs8(document)
         .map_err(|_| HostIdentityError::InvalidStoredIdentity)?;
-    Ok(HostIdentity { key_pair })
+    let ssh_key = russh::keys::pkcs8::decode_pkcs8(document, None)
+        .map_err(|_| HostIdentityError::InvalidStoredIdentity)?;
+    if ssh_key.algorithm() != russh::keys::Algorithm::Ed25519 {
+        return Err(HostIdentityError::InvalidStoredIdentity);
+    }
+    let ssh_public = ssh_key
+        .public_key()
+        .key_data()
+        .ed25519()
+        .ok_or(HostIdentityError::InvalidStoredIdentity)?;
+    if ssh_public.as_ref() != key_pair.public_key().as_ref() {
+        return Err(HostIdentityError::InvalidStoredIdentity);
+    }
+    Ok(HostIdentity { key_pair, ssh_key })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,20 +151,22 @@ mod tests {
     }
 
     #[test]
-    fn creates_once_then_loads_the_same_host_identity() {
+    fn creates_once_then_loads_the_same_ssh_host_identity() {
         let store = MemoryKeyStore::default();
         let first = load_or_create_host_identity(&store).unwrap();
         let second = load_or_create_host_identity(&store).unwrap();
 
         assert_eq!(first.public_key(), second.public_key());
-        let message = b"host proof";
-        let signature = first.sign(message);
-        ring::signature::UnparsedPublicKey::new(
-            &ring::signature::ED25519,
-            first.public_key().as_bytes(),
-        )
-        .verify(message, signature.as_bytes())
-        .unwrap();
+        assert_eq!(
+            first
+                .server_key()
+                .public_key()
+                .key_data()
+                .ed25519()
+                .unwrap()
+                .as_ref(),
+            first.public_key().as_bytes()
+        );
     }
 
     #[test]

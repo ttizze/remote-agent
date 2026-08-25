@@ -7,7 +7,7 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /** Must stay aligned with host_protocol::CURRENT_PROTOCOL_VERSION. */
-private const val CurrentProtocolVersion = 2
+private const val CurrentProtocolVersion = 3
 private const val MaximumQrCharacters = 8 * 1024
 private const val IdentityBytes = 32
 private const val PairingTicketBytes = 32

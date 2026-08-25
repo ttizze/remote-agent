@@ -93,9 +93,9 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_request(
     params_json: JString<'_>,
 ) -> jstring {
     let result = (|| {
-        let params = serde_json::from_str(&string(&mut env, params_json)?)
-            .map_err(|_| "invalid params JSON".to_owned())?;
-        ffi::request_json(borrowed_handle(handle)?, string(&mut env, method)?, params)
+        let method = string(&mut env, method)?;
+        let params = string(&mut env, params_json)?;
+        ffi::request_json(borrowed_handle(handle)?, method, params)
     })();
     match result {
         Ok(response) => java_string(&mut env, response),

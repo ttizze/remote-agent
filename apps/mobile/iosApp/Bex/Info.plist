@@ -26,7 +26,7 @@
     <true/>
     <key>NSBonjourServices</key>
     <array>
-        <string>_bex._udp</string>
+        <string>_bex._tcp</string>
     </array>
     <key>NSCameraUsageDescription</key>
     <string>Bex uses the camera only to scan a pairing QR code displayed by your PC.</string>

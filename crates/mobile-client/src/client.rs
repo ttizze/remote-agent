@@ -1,20 +1,18 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Mutex as StdMutex, time::Duration};
 
-use host_protocol::{
-    ConnectionLimits, DEFAULT_MAX_FRAME_BYTES, Ed25519PublicKey, PairingToken, RpcError, RpcId,
-    RpcNotification, RpcOutcome, RpcRequest,
-};
-use quinn::{Connection, Endpoint};
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use host_protocol::{DEFAULT_MAX_MESSAGE_BYTES, Ed25519PublicKey, PairingToken, SSH_SUBSYSTEM};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::broadcast;
+use tokio::time::timeout;
 
 use crate::{rpc::RpcPeer, transport};
 
-/// Connection parameters obtained from a trusted pairing payload. `server_name`
-/// is a QUIC/TLS routing name only: the Host authentication boundary is the
-/// pinned Ed25519 identity and ServerHello proof, not the rotating TLS cert.
+/// Connection parameters obtained from a trusted pairing payload.
+///
+/// `server_name` remains in the configuration for mobile-config compatibility
+/// with earlier releases. SSH authenticates the peer with the pinned
+/// `host_identity`; the value is not used as a TLS/SNI name.
 #[derive(Debug, Clone)]
 pub struct MobileClientConfig {
     pub address: SocketAddr,
@@ -22,6 +20,8 @@ pub struct MobileClientConfig {
     pub host_identity: Ed25519PublicKey,
     pub device_name: String,
     pub pairing_ticket: Option<PairingToken>,
+    /// Compatibility name retained for the mobile ABI. It is the maximum
+    /// JSONL message size on the SSH subsystem stream.
     pub max_frame_bytes: u32,
     pub request_timeout: Duration,
 }
@@ -39,7 +39,7 @@ impl MobileClientConfig {
                 "max_frame_bytes must be positive",
             ));
         }
-        if self.max_frame_bytes > DEFAULT_MAX_FRAME_BYTES {
+        if usize::try_from(self.max_frame_bytes).unwrap_or(usize::MAX) > DEFAULT_MAX_MESSAGE_BYTES {
             return Err(MobileClientError::InvalidConfig(
                 "max_frame_bytes exceeds data-frame maximum",
             ));
@@ -49,72 +49,67 @@ impl MobileClientConfig {
                 "request_timeout must be positive",
             ));
         }
+        if transport::pairing_username(self)?.len() > 255 {
+            return Err(MobileClientError::InvalidConfig(
+                "device_name is too long for SSH authentication",
+            ));
+        }
         Ok(())
+    }
+
+    pub(crate) const fn max_message_bytes(&self) -> usize {
+        self.max_frame_bytes as usize
     }
 }
 
-/// A Host notification preserved exactly as it appeared on the RPC wire.
-pub type Notification = RpcNotification;
+/// A notification preserved exactly as it appeared on the Codex JSONL wire.
+pub type Notification = String;
 
-/// A request initiated by the Host (for example an approval request).
-///
-/// This is intentionally the raw host-protocol request rather than a fixed
-/// allow-list of Codex operations. Callers must answer it with
-/// [`MobileClient::respond_result`] or [`MobileClient::respond_error`].
-pub type ServerRequest = RpcRequest;
+/// A request initiated by the Host, preserved as its raw JSON object.
+pub type ServerRequest = String;
 
-#[derive(Debug, Clone)]
+/// The SSH subsystem is intentionally the only connection metadata exposed.
+/// Codex's initialize response is not a transport handshake and is therefore
+/// not decoded into a transport DTO here.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedHost {
     pub version: u16,
-    pub limits: ConnectionLimits,
-    pub supported_methods: Vec<String>,
+    pub subsystem: String,
 }
 
 pub struct MobileClient {
-    _endpoint: Endpoint,
-    connection: Connection,
+    // Keeping the russh handle alive keeps the SSH session alive after the
+    // channel reader/writer tasks are spawned. Dropping it closes only this
+    // mobile connection; the Host-owned Codex process is unaffected.
+    session: StdMutex<Option<transport::SshSession>>,
     peer: RpcPeer,
     host: ConnectedHost,
 }
 
 impl MobileClient {
-    /// Establishes QUIC, verifies the pinned Host identity proof, then pairs
-    /// or authenticates the supplied device identity before exposing RPC.
+    /// Establishes SSH, verifies the pinned Host public key, authenticates the
+    /// device key, and opens the `remote-agent-v3` subsystem carrying raw
+    /// Codex JSONL.
     pub async fn connect(
         config: MobileClientConfig,
         device_pkcs8: &[u8],
     ) -> Result<Self, MobileClientError> {
         config.validate()?;
-        let device_key = Ed25519KeyPair::from_pkcs8(device_pkcs8)
-            .map_err(|_| MobileClientError::InvalidDeviceKey)?;
-        let device_identity = Ed25519PublicKey::from_bytes(
-            device_key
-                .public_key()
-                .as_ref()
-                .try_into()
-                .expect("ring Ed25519 public keys have 32 bytes"),
-        );
-
-        let transport::AuthenticatedChannel {
-            endpoint,
-            connection,
-            send,
-            receive,
-            host,
-        } = transport::establish(&config, &device_key, device_identity).await?;
-        let peer = RpcPeer::open(
-            send,
-            receive,
-            host.limits.max_frame_bytes,
-            host.limits.outbound_queue_messages,
-            host.limits.max_in_flight_requests,
+        let device_key = transport::decode_device_key(device_pkcs8)?;
+        let transport::AuthenticatedChannel { session, stream } = timeout(
             config.request_timeout,
-        )?;
+            transport::establish(&config, device_key),
+        )
+        .await
+        .map_err(|_| MobileClientError::ConnectionTimeout)??;
+        let peer = RpcPeer::open(stream, config.max_message_bytes(), config.request_timeout)?;
         Ok(Self {
-            _endpoint: endpoint,
-            connection,
+            session: StdMutex::new(Some(session)),
             peer,
-            host,
+            host: ConnectedHost {
+                version: host_protocol::CURRENT_PROTOCOL_VERSION,
+                subsystem: SSH_SUBSYSTEM.to_owned(),
+            },
         })
     }
 
@@ -126,8 +121,8 @@ impl MobileClient {
         self.peer.subscribe_notifications()
     }
 
-    /// Subscribes to requests initiated by the Host. The request's ID may be
-    /// either an integer or a string, matching the wire protocol.
+    /// Subscribes to raw requests initiated by the Host. The request includes
+    /// its original JSON `id`, which must be supplied unchanged when replying.
     pub fn subscribe_server_requests(&self) -> broadcast::Receiver<ServerRequest> {
         self.peer.subscribe_server_requests()
     }
@@ -140,18 +135,57 @@ impl MobileClient {
         self.peer.request(method.into(), params).await
     }
 
-    /// Sends a successful response to a Host-initiated request.
-    pub async fn respond_result(&self, id: RpcId, result: Value) -> Result<(), MobileClientError> {
-        self.peer.respond(id, RpcOutcome::Success { result }).await
+    /// Sends a request while retaining the caller's raw JSON params text.
+    /// This is useful to wrappers that already have Codex JSONL and avoids a
+    /// needless params deserialize/re-serialize cycle at the mobile boundary.
+    pub async fn request_raw(
+        &self,
+        method: impl Into<String>,
+        params: impl Into<String>,
+    ) -> Result<Value, MobileClientError> {
+        self.peer.request_raw(method.into(), params.into()).await
     }
 
-    /// Sends a structured error response to a Host-initiated request.
-    pub async fn respond_error(&self, id: RpcId, error: RpcError) -> Result<(), MobileClientError> {
-        self.peer.respond(id, RpcOutcome::Failure { error }).await
+    /// Sends a successful response to a Host-initiated request.
+    pub async fn respond_result(
+        &self,
+        id: impl Into<String>,
+        result: Value,
+    ) -> Result<(), MobileClientError> {
+        self.peer.respond_result(id.into(), result).await
+    }
+
+    /// Sends a response whose `error` member is already represented as JSON.
+    /// The error object is not decoded into a fixed DTO.
+    pub async fn respond_error(
+        &self,
+        id: impl Into<String>,
+        error: Value,
+    ) -> Result<(), MobileClientError> {
+        self.peer.respond_error(id.into(), error).await
+    }
+
+    /// Sends a response while retaining the caller's raw JSON result/error.
+    /// This is the preferred seam for mobile wrappers that receive Codex JSON
+    /// as text and should not deserialize/re-serialize it.
+    pub async fn respond_raw(
+        &self,
+        id: impl Into<String>,
+        field: &'static str,
+        payload: impl Into<String>,
+    ) -> Result<(), MobileClientError> {
+        self.peer
+            .respond_raw(id.into(), field, payload.into())
+            .await
     }
 
     pub fn close(&self) {
-        self.connection.close(0_u32.into(), b"mobile client closed");
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        drop(session);
     }
 }
 
@@ -161,30 +195,22 @@ pub enum MobileClientError {
     InvalidConfig(&'static str),
     #[error("device secure-storage key is not an Ed25519 PKCS#8 document")]
     InvalidDeviceKey,
-    #[error("failed to create QUIC endpoint: {0}")]
-    Endpoint(#[source] std::io::Error),
-    #[error("failed to start QUIC connection: {0}")]
-    Connect(#[source] quinn::ConnectError),
-    #[error("QUIC connection failed: {0}")]
-    Connection(#[source] quinn::ConnectionError),
-    #[error("TLS configuration failed: {0}")]
-    Tls(String),
-    #[error("secure random generation failed")]
-    Random,
-    #[error("RPC framing failed: {0}")]
-    Frame(#[from] host_protocol::FrameError),
-    #[error("invalid Host handshake: {0}")]
-    InvalidHandshake(&'static str),
-    #[error("pinned Host identity does not match ServerHello")]
-    HostIdentityMismatch,
-    #[error("ServerHello does not bind the certificate observed in the QUIC TLS handshake")]
-    TransportCertificateMismatch,
-    #[error("QUIC TLS handshake did not expose a transport certificate")]
-    MissingTransportCertificate,
-    #[error("Host ServerHello signature is invalid")]
-    InvalidHostProof,
-    #[error("Host rejected device pairing or authentication")]
+    #[error("SSH connection failed: {0}")]
+    Ssh(#[source] russh::Error),
+    #[error("SSH connection did not complete before the deadline")]
+    ConnectionTimeout,
+    #[error("SSH authentication was rejected by the Host")]
     AuthenticationRejected,
+    #[error("Host rejected the remote-agent SSH subsystem")]
+    SubsystemRejected,
+    #[error("Host did not confirm the remote-agent SSH subsystem before the deadline")]
+    SubsystemTimeout,
+    #[error("pinned Host SSH public key does not match")]
+    HostKeyMismatch,
+    #[error("JSONL transport failed: {0}")]
+    Jsonl(#[from] host_protocol::JsonlError),
+    #[error("invalid Codex JSONL message: {0}")]
+    Message(#[from] host_protocol::RpcMessageError),
     #[error("Host disconnected: {0}")]
     Disconnected(String),
     #[error("RPC protocol violation: {0}")]
@@ -193,22 +219,14 @@ pub enum MobileClientError {
     RequestIdExhausted,
     #[error("RPC request {id} timed out")]
     RequestTimeout { id: u64 },
-    #[error("Host rejected RPC request ({code}): {message}")]
-    Remote {
-        code: Value,
-        message: String,
-        data: Option<Value>,
-        extensions: serde_json::Map<String, Value>,
-    },
+    #[error("Host returned an RPC error: {error}")]
+    Remote { error: String },
+    #[error("failed to encode JSON: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
-impl From<RpcError> for MobileClientError {
-    fn from(error: RpcError) -> Self {
-        Self::Remote {
-            code: error.code,
-            message: error.message,
-            data: error.data,
-            extensions: error.extensions,
-        }
+impl From<russh::Error> for MobileClientError {
+    fn from(error: russh::Error) -> Self {
+        Self::Ssh(error)
     }
 }

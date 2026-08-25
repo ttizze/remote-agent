@@ -1,12 +1,10 @@
 mod executable;
 mod peer;
 mod schema;
-mod wire;
-
-pub use wire::{RawResponse, RequestId, ServerEvent, ServerResponse};
 
 use std::{collections::HashSet, env, io, path::PathBuf, process::Stdio, time::Duration};
 
+use host_protocol::{RpcMessageKind, classify_message, raw_object};
 use peer::RpcPeer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -89,6 +87,8 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error("invalid Codex App Server JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid Codex App Server JSONL message: {0}")]
+    InvalidMessage(String),
     #[error("Codex App Server connection closed: {0}")]
     ConnectionClosed(String),
     #[error("Codex App Server request {method} timed out")]
@@ -148,10 +148,13 @@ impl CodexAppServer {
         let stdin = child.stdin.take().ok_or(Error::MissingPipe("stdin"))?;
         let stdout = child.stdout.take().ok_or(Error::MissingPipe("stdout"))?;
         let peer = RpcPeer::open(stdout, stdin, config.request_timeout);
-        let initialize_response = peer
-            .request("initialize", initialize_params(&config.client))
+        let initialize_response = parse_initialize_response(
+            &peer
+                .request_raw(&initialize_request(&config.client))
+                .await?,
+        )?;
+        peer.send_raw(r#"{"method":"initialized","params":{}}"#)
             .await?;
-        peer.notify("initialized", json!({})).await?;
 
         Ok(Self {
             child,
@@ -169,53 +172,44 @@ impl CodexAppServer {
         self.supported_methods.iter().map(String::as_str)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+    /// Receives raw Codex-originated notification and request lines. The
+    /// trailing JSONL delimiter is removed by the reader, but the JSON text
+    /// itself is otherwise unchanged.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
         self.peer.subscribe()
     }
 
-    /// Sends an arbitrary Codex request without imposing a local result schema.
-    pub async fn request_json(
-        &self,
-        method: &str,
-        params: Value,
-        extensions: Map<String, Value>,
-    ) -> Result<Value, Error> {
-        self.request_json_with_extensions(method, params, extensions)
-            .await
-            .map(|response| response.result)
+    /// Sends one raw JSON-RPC request to Codex. The request's original id is
+    /// restored on the raw response returned to the caller.
+    pub async fn request_raw(&self, line: &str) -> Result<String, Error> {
+        let message =
+            classify_message(line).map_err(|error| Error::InvalidMessage(error.to_string()))?;
+        if let Some(method) = message.method() {
+            ensure_public_method(method)?;
+        }
+        self.peer.request_raw(line).await
     }
 
-    /// Sends an arbitrary Codex request while retaining unknown members at
-    /// the top level of the upstream JSON-RPC response.
-    pub async fn request_json_with_extensions(
-        &self,
-        method: &str,
-        params: Value,
-        extensions: Map<String, Value>,
-    ) -> Result<RawResponse, Error> {
-        ensure_public_method(method)?;
-        self.peer
-            .request_json_with_extensions(method, params, extensions)
-            .await
+    /// Alias for callers that treat the App Server as a raw JSONL request
+    /// peer rather than a typed RPC client.
+    pub async fn request(&self, line: &str) -> Result<String, Error> {
+        self.request_raw(line).await
     }
 
-    pub async fn notify_json(
-        &self,
-        method: &str,
-        params: Value,
-        extensions: Map<String, Value>,
-    ) -> Result<(), Error> {
-        ensure_public_method(method)?;
-        self.peer.notify_json(method, params, extensions).await
+    /// Sends a raw Codex notification or response exactly as supplied after
+    /// validating its JSON-RPC envelope. Raw requests must use
+    /// [`Self::request_raw`] so their ids can be correlated.
+    pub async fn send_raw(&self, line: &str) -> Result<(), Error> {
+        ensure_public_send_method(line)?;
+        self.peer.send_raw(line).await
     }
 
-    pub async fn respond_json(
-        &self,
-        id: RequestId,
-        response: ServerResponse,
-        extensions: Map<String, Value>,
-    ) -> Result<(), Error> {
-        self.peer.respond_json(id, response, extensions).await
+    pub async fn notify_raw(&self, line: &str) -> Result<(), Error> {
+        self.send_raw(line).await
+    }
+
+    pub async fn respond_raw(&self, line: &str) -> Result<(), Error> {
+        self.send_raw(line).await
     }
 
     pub async fn shutdown(mut self) -> Result<(), Error> {
@@ -241,6 +235,90 @@ fn ensure_public_method(method: &str) -> Result<(), Error> {
         });
     }
     Ok(())
+}
+
+fn ensure_public_send_method(line: &str) -> Result<(), Error> {
+    let message =
+        classify_message(line).map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    if let Some(method) = message.method() {
+        ensure_public_method(method)?;
+    }
+    Ok(())
+}
+
+fn initialize_request(client: &ClientInfo) -> String {
+    serde_json::to_string(&json!({
+        "id": 0,
+        "method": "initialize",
+        "params": initialize_params(client),
+    }))
+    .expect("initialize request contains only serializable values")
+}
+
+fn parse_initialize_response(line: &str) -> Result<InitializeResponse, Error> {
+    let message = classify_message(line).map_err(|error| Error::UnexpectedResponse {
+        method: "initialize".to_owned(),
+        reason: error.to_string(),
+    })?;
+    if message.kind() != RpcMessageKind::Response {
+        return Err(Error::UnexpectedResponse {
+            method: "initialize".to_owned(),
+            reason: "message was not a response".to_owned(),
+        });
+    }
+    let object = raw_object(line).map_err(|error| Error::UnexpectedResponse {
+        method: "initialize".to_owned(),
+        reason: error.to_string(),
+    })?;
+    if let Some(error) = object.get("error") {
+        let error: Value = serde_json::from_str(error.get())?;
+        let (code, message, data, additional_fields) = remote_error_fields(&error);
+        return Err(Error::Remote {
+            method: "initialize".to_owned(),
+            detail: Box::new(RemoteError {
+                code,
+                message,
+                data,
+                additional_fields,
+                response_extensions: Map::new(),
+            }),
+        });
+    }
+    let Some(result) = object.get("result") else {
+        return Err(Error::UnexpectedResponse {
+            method: "initialize".to_owned(),
+            reason: "response had neither result nor error".to_owned(),
+        });
+    };
+    serde_json::from_str(result.get()).map_err(|error| Error::UnexpectedResponse {
+        method: "initialize".to_owned(),
+        reason: error.to_string(),
+    })
+}
+
+fn remote_error_fields(error: &Value) -> (Value, String, Option<Value>, Map<String, Value>) {
+    let Some(object) = error.as_object() else {
+        return (
+            json!(-1),
+            "unknown App Server error".to_owned(),
+            None,
+            Map::from_iter([(String::from("raw"), error.clone())]),
+        );
+    };
+
+    let code = object.get("code").cloned().unwrap_or_else(|| json!(-1));
+    let message = object
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown App Server error")
+        .to_owned();
+    let data = object.get("data").cloned();
+    let additional_fields = object
+        .iter()
+        .filter(|(key, _)| !matches!(key.as_str(), "code" | "message" | "data"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    (code, message, data, additional_fields)
 }
 
 #[cfg(test)]

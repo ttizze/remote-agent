@@ -40,7 +40,7 @@ A requested file change performed by Codex as part of a Turn rather than saved d
 _Avoid_: Manual edit, direct save
 
 **PC Host Identity**:
-The long-lived cryptographic identity pinned during pairing and used to authenticate replaceable QUIC transport certificates.
+The long-lived SSH Host public key pinned during pairing and verified on every Mobile Client connection.
 _Avoid_: Address, transport certificate, pairing ticket
 
 **PC Host Profile**:
