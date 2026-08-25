@@ -1,7 +1,5 @@
 package dev.remoteagent.mobile
 
-import kotlinx.serialization.json.JsonObject
-
 /** Limits are local-device bounds, never a statement about Codex history retention. */
 data class MobileCacheLimits(
     val maxThreads: Int = 64,
@@ -86,20 +84,6 @@ fun retainRawMessage(
     cache.profile(hostIdentity).copy(rawMessages = (cache.profile(hostIdentity).rawMessages + message).takeLast(128)),
 ).bounded(limits)
 
-fun approximateCacheBytes(cache: MobileCache): Int = cache.profiles.entries.sumOf { (hostIdentity, profile) ->
-    approximateProfileBytes(hostIdentity, profile)
-}
-
-private fun approximateProfileBytes(hostIdentity: String, profile: ProfileMobileCache): Int =
-    hostIdentity.approximateBytes() + profile.projects.sumOf { it.approximateBytes() } +
-        profile.threadList.sumOf { it.approximateBytes() } +
-        profile.snapshots.values.sumOf { it.approximateBytes() } +
-        profile.unknownEvents.sumOf {
-            it.threadId.approximateBytes() + it.turnId.approximateBytes() +
-                it.method.approximateBytes() + it.raw.approximateBytes() + it.extensions.approximateBytes()
-        } +
-        profile.rawMessages.sumOf { it.approximateBytes() }
-
 private fun MobileCache.replaceProfile(hostIdentity: String, profile: ProfileMobileCache): MobileCache =
     copy(profiles = profiles + (hostIdentity to profile))
 
@@ -128,35 +112,8 @@ private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
 
 private fun MobileCache.bounded(limits: MobileCacheLimits): MobileCache {
     return MobileCache(
-        profiles = profiles.mapValues { (hostIdentity, profile) ->
-            profile.bounded(limits).boundedBytes(hostIdentity, limits.maxApproximateBytes)
-        },
+        profiles = profiles.mapValues { (_, profile) -> profile.bounded(limits) },
     )
-}
-
-/**
- * Keep each Host's cache independent. A large or busy Host must not evict a
- * different Host's display copy merely because both are paired on one device.
- */
-private fun ProfileMobileCache.boundedBytes(
-    hostIdentity: String,
-    maxApproximateBytes: Int,
-): ProfileMobileCache {
-    var result = this
-    while (approximateProfileBytes(hostIdentity, result) > maxApproximateBytes) {
-        result = when {
-            result.snapshots.isNotEmpty() -> {
-                val oldest = result.snapshots.values.minByOrNull { it.summary.updatedAtMs }
-                if (oldest == null) result else result.copy(snapshots = result.snapshots - oldest.summary.id)
-            }
-            result.threadList.isNotEmpty() -> result.copy(threadList = result.threadList.drop(1))
-            result.projects.isNotEmpty() -> result.copy(projects = result.projects.dropLast(1))
-            result.unknownEvents.isNotEmpty() -> result.copy(unknownEvents = result.unknownEvents.drop(1))
-            result.rawMessages.isNotEmpty() -> result.copy(rawMessages = result.rawMessages.drop(1))
-            else -> return result
-        }
-    }
-    return result
 }
 
 private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobileCache {
@@ -221,35 +178,3 @@ private fun List<ThreadSummary>.replaceById(id: String, value: ThreadSummary): L
     replaceById(id, value) { it.id }
 
 private fun String.truncated(max: Int): String = if (length <= max) this else take(max - 1) + "…"
-private fun String.approximateBytes(): Int = length * 2 + 8
-private fun JsonObject.approximateBytes(): Int = toString().approximateBytes()
-
-private fun RawCodexMessage.approximateBytes(): Int = when (this) {
-    is RawCodexMessage.Notification -> method.approximateBytes() + params.toString().approximateBytes() + extensions.approximateBytes()
-    is RawCodexMessage.ServerRequest -> id.toString().approximateBytes() + method.approximateBytes() +
-        params.toString().approximateBytes() + extensions.approximateBytes()
-}
-
-private fun ThreadSummary.approximateBytes(): Int = id.approximateBytes() + (name?.approximateBytes() ?: 0) +
-    preview.approximateBytes() + workingDirectory.path.approximateBytes() + (projectId?.approximateBytes() ?: 0) +
-    24 + status.approximateBytes() +
-    (raw?.approximateBytes() ?: 0)
-private fun CodexProject.approximateBytes(): Int = id.approximateBytes() + name.approximateBytes() +
-    roots.sumOf { it.path.approximateBytes() } + 24 + (raw?.approximateBytes() ?: 0)
-private fun ThreadSnapshot.approximateBytes(): Int = summary.approximateBytes() + turns.sumOf { it.approximateBytes() } +
-    (raw?.approximateBytes() ?: 0)
-private fun CodexTurn.approximateBytes(): Int = id.approximateBytes() + 8 + items.sumOf { it.approximateBytes() } +
-    (raw?.approximateBytes() ?: 0)
-private fun ThreadStatus.approximateBytes(): Int = when (this) {
-    is ThreadStatus.Active -> activeFlags.sumOf { it.approximateBytes() } + 4
-    ThreadStatus.NotLoaded, ThreadStatus.Idle, ThreadStatus.SystemError -> 4
-}
-private fun CodexItem.approximateBytes(): Int = when (this) {
-    is CodexItem.UserMessage -> id.approximateBytes() + text.approximateBytes()
-    is CodexItem.AgentMessage -> id.approximateBytes() + text.approximateBytes()
-    is CodexItem.Reasoning -> id.approximateBytes() + summary.approximateBytes()
-    is CodexItem.CommandExecution -> id.approximateBytes() + command.approximateBytes() +
-        (cwd?.approximateBytes() ?: 0) + output.approximateBytes() + 8
-    is CodexItem.FileChange -> id.approximateBytes() + changes.sumOf { it.path.approximateBytes() + it.diff.approximateBytes() + 4 }
-    is CodexItem.Unknown -> id.approximateBytes() + codexType.approximateBytes() + raw.toString().approximateBytes()
-}

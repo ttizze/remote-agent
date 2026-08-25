@@ -70,6 +70,51 @@ final class BexLaunchUITests: XCTestCase {
         )
     }
 
+    func testOpeningTaskAndReturningShowsTaskList() {
+        let app = XCUIApplication()
+        app.terminate()
+        app.launch()
+
+        let connectButton = app.buttons["connect.start"]
+        XCTAssertTrue(connectButton.waitForExistence(timeout: 30), "Connect button did not appear")
+        connectButton.tap()
+
+        let taskList = app.descendants(matching: .any)["tasks.list"]
+        let backButton = app.buttons["task.back"]
+        if !taskList.waitForExistence(timeout: 3) {
+            XCTAssertTrue(
+                backButton.waitForExistence(timeout: 30),
+                "Neither the task list nor the persisted task detail appeared after connecting",
+            )
+            backButton.tap()
+        }
+        XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Task list did not appear after connecting")
+
+        let firstTask = app
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row."))
+            .firstMatch
+        XCTAssertTrue(firstTask.waitForExistence(timeout: 30), "No task row appeared in the task list")
+        firstTask.tap()
+
+        let loadingText = app.staticTexts["タスクを読み込み中…"]
+        let loadingFinished = expectation(
+            for: NSPredicate(format: "exists == false"),
+            evaluatedWith: loadingText,
+        )
+        let loadingResult = XCTWaiter.wait(for: [loadingFinished], timeout: 30)
+        XCTAssertEqual(
+            loadingResult,
+            .completed,
+            "Task detail remained on the loading screen",
+        )
+
+        XCTAssertTrue(backButton.waitForExistence(timeout: 30), "Task back button did not appear")
+        backButton.tap()
+
+        XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Task list did not reappear after returning")
+    }
+
     private func allowFirstSystemPermissionIfPresent() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let alert = springboard.alerts.firstMatch

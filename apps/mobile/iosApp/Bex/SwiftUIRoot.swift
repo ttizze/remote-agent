@@ -241,16 +241,30 @@ private struct ThreadsScreen: View {
         List {
             if state.threadLoadState == .loading || state.projectLoadState == .loading {
                 Section { ProgressView("プロジェクトとタスクを読み込み中…")
-                    .accessibilityIdentifier("tasks.loading") }
+                    .accessibilityIdentifier("tasks.loading")
+                    .taskListRowStyle()
+                }
+                .listSectionSeparator(.hidden)
             }
             if state.threadLoadState == .failed || state.projectLoadState == .failed {
                 Section {
-                    if let error = state.projectLoadError ?? state.threadLoadError { BexNotice(text: error) }
+                    if let error = state.projectLoadError ?? state.threadLoadError {
+                        BexNotice(text: error)
+                            .taskListRowStyle()
+                    }
                     Button("再試行") { model.refreshTaskList() }
                         .accessibilityIdentifier("tasks.retry")
+                        .taskListRowStyle()
                 }
+                .listSectionSeparator(.hidden)
             }
-            if let notice = state.notice { Section { BexNotice(text: notice) } }
+            if let notice = state.notice {
+                Section {
+                    BexNotice(text: notice)
+                        .taskListRowStyle()
+                }
+                .listSectionSeparator(.hidden)
+            }
 
             Section {
                 Text("プロジェクト")
@@ -258,7 +272,9 @@ private struct ThreadsScreen: View {
                     .textCase(nil)
                     .foregroundColor(.primary)
                     .accessibilityIdentifier("tasks.projects")
+                    .taskListRowStyle()
             }
+            .listSectionSeparator(.hidden)
 
             ForEach(state.projects, id: \.id) { project in
                 Section {
@@ -268,6 +284,7 @@ private struct ThreadsScreen: View {
                             Text("タスクはまだありません")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
+                                .taskListRowStyle()
                         } else {
                             ForEach(threads, id: \.id) { thread in
                                 ThreadListRow(thread: thread) { model.openThread(thread.id) }
@@ -282,6 +299,7 @@ private struct ThreadsScreen: View {
                         compose: { newTask = NewTaskContext(project: project) }
                     )
                 }
+                .listSectionSeparator(.hidden)
             }
 
             if state.projectLoadState == .ready && state.projects.isEmpty {
@@ -289,7 +307,9 @@ private struct ThreadsScreen: View {
                     Text("Codexに登録されたプロジェクトはありません")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
+                        .taskListRowStyle()
                 }
+                .listSectionSeparator(.hidden)
             }
 
             Section {
@@ -302,6 +322,7 @@ private struct ThreadsScreen: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                         .accessibilityIdentifier("tasks.empty")
+                        .taskListRowStyle()
                 } else {
                     ForEach(threads, id: \.id) { thread in
                         ThreadListRow(thread: thread) { model.openThread(thread.id) }
@@ -319,9 +340,12 @@ private struct ThreadsScreen: View {
                     .accessibilityLabel("プロジェクトなしで新しいタスク")
                     .accessibilityIdentifier("tasks.new.chat")
                 }
+                .taskListRowStyle()
             }
+            .listSectionSeparator(.hidden)
         }
         .listStyle(.plain)
+        .background(Color(UIColor.systemBackground))
         .accessibilityIdentifier("tasks.list")
         .searchable(text: $search, prompt: "チャットを検索")
         .sheet(item: $newTask) { context in
@@ -371,6 +395,13 @@ private struct ThreadsScreen: View {
     }
 }
 
+private extension View {
+    func taskListRowStyle() -> some View {
+        listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+    }
+}
+
 private struct ProjectHeader: View {
     let project: IosProjectView
     let isCollapsed: Bool
@@ -395,6 +426,7 @@ private struct ProjectHeader: View {
                 .accessibilityIdentifier("tasks.new.project.\(project.id)")
         }
         .padding(.vertical, 4)
+        .taskListRowStyle()
     }
 }
 
@@ -405,18 +437,14 @@ private struct ThreadListRow: View {
     var body: some View {
         Button(action: open) {
             HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(thread.title).font(.body).foregroundColor(.primary).lineLimit(2)
-                    if !thread.preview.isEmpty && thread.preview != thread.title {
-                        Text(thread.preview).font(.caption).foregroundColor(.secondary).lineLimit(1)
-                    }
-                }
+                Text(thread.title).font(.body).foregroundColor(.primary).lineLimit(2)
                 Spacer()
                 if thread.isActive { ProgressView().controlSize(.small) }
             }
             .padding(.vertical, 3)
         }
         .accessibilityIdentifier("tasks.row.\(thread.id)")
+        .taskListRowStyle()
     }
 }
 

@@ -1,6 +1,7 @@
 package dev.remoteagent.mobile
 
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -9,11 +10,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -309,7 +312,7 @@ private fun ThreadListScreen(
                 }
             }
             items(threads.filter { it.projectId == project.id }, key = { it.id }) { thread ->
-                ThreadSummaryCard(thread, onSelect)
+                ThreadSummaryRow(thread, onSelect)
             }
         }
         item(key = "unassigned-header") {
@@ -320,7 +323,7 @@ private fun ThreadListScreen(
             }
         }
         items(unassigned, key = { it.id }) { thread ->
-            ThreadSummaryCard(thread, onSelect)
+            ThreadSummaryRow(thread, onSelect)
         }
         if (view.threadList == LoadPhase.Ready && threads.isEmpty()) {
             item { Text("タスクがありません。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -339,19 +342,23 @@ private fun ThreadListScreen(
 }
 
 @Composable
-private fun ThreadSummaryCard(thread: ThreadSummary, onSelect: (String) -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth(), onClick = { onSelect(thread.id) }) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Text(thread.name ?: thread.preview.ifBlank { "無題のタスク" })
-                if (thread.status is ThreadStatus.Active) {
-                    Spacer(Modifier.weight(1f))
-                    Text("実行中", style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            if (thread.preview.isNotBlank() && thread.preview != thread.name) {
-                Text(thread.preview, maxLines = 1, style = MaterialTheme.typography.bodySmall)
-            }
+private fun ThreadSummaryRow(thread: ThreadSummary, onSelect: (String) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = { onSelect(thread.id) })
+            .padding(vertical = 8.dp),
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+    ) {
+        Text(
+            thread.name ?: thread.preview.ifBlank { "無題のタスク" },
+            modifier = Modifier.weight(1f),
+        )
+        if (thread.status is ThreadStatus.Active) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+            )
         }
     }
 }

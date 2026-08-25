@@ -3,8 +3,10 @@ package dev.remoteagent.mobile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 class MobileCacheTest {
     private val limits = MobileCacheLimits(maxThreads = 2, maxItemsPerThread = 2, maxTextCharacters = 20, maxApproximateBytes = 1_024)
@@ -49,7 +51,7 @@ class MobileCacheTest {
     }
 
     @Test
-    fun cache_is_profile_isolated_and_enforces_thread_item_and_byte_bounds() {
+    fun cache_is_profile_isolated_and_enforces_thread_and_item_bounds() {
         val large = "x".repeat(500)
         val first = ThreadSnapshot(
             summary("one", 1),
@@ -58,6 +60,12 @@ class MobileCacheTest {
             ))),
         )
         var cache = reconcileThreadRead(MobileCache(), "host-a", ThreadReadResult(first, emptyList()), limits)
+        assertEquals(2, cache.snapshot("host-a", "one")!!.turns.single().items.size)
+        assertTrue(
+            cache.snapshot("host-a", "one")!!.turns.single().items.all {
+                (it as CodexItem.AgentMessage).text.length <= limits.maxTextCharacters
+            },
+        )
         cache = reconcileThreadList(cache, "host-a", listOf(summary("one", 1), summary("two", 2), summary("three", 3)), limits)
         cache = reconcileThreadRead(cache, "host-b", ThreadReadResult(ThreadSnapshot(summary("other"), emptyList()), emptyList()), limits)
 
@@ -65,11 +73,7 @@ class MobileCacheTest {
         assertEquals(listOf("two", "three"), hostA.threadList.map { it.id })
         assertFalse("one" in hostA.snapshots)
         assertEquals(listOf("other"), cache.profile("host-b").threadList.map { it.id })
-        assertTrue(approximateCacheBytes(MobileCache(mapOf("host-a" to hostA))) <= limits.maxApproximateBytes)
-        assertTrue(
-            approximateCacheBytes(MobileCache(mapOf("host-b" to cache.profile("host-b")))) <=
-                limits.maxApproximateBytes,
-        )
+        assertEquals(setOf("other"), cache.profile("host-b").snapshots.keys)
     }
 
     @Test
@@ -90,14 +94,40 @@ class MobileCacheTest {
     }
 
     @Test
-    fun raw_codex_payloads_count_toward_the_cache_bound() {
+    fun raw_codex_payloads_are_retained_without_byte_eviction() {
         val raw = RawCodexMessage.Notification(
             method = "future/notification",
             params = Json.parseToJsonElement("\"${"x".repeat(2_000)}\""),
         )
         val cache = retainRawMessage(MobileCache(), "host-1", raw, limits)
 
-        assertTrue(approximateCacheBytes(cache) <= limits.maxApproximateBytes)
+        assertEquals(listOf(raw), cache.profile("host-1").rawMessages)
+    }
+
+    @Test
+    fun read_keeps_an_oversized_raw_snapshot_and_its_typed_content() {
+        val raw = Json.parseToJsonElement("{\"payload\":\"${"x".repeat(2_000)}\"}").jsonObject
+        val summary = summary("oversized").copy(raw = raw)
+        val turn = CodexTurn(
+            id = "turn-oversized",
+            status = TurnStatus.Completed,
+            items = listOf(CodexItem.AgentMessage("item-1", "visible")),
+            raw = raw,
+        )
+        val snapshot = ThreadSnapshot(summary = summary, turns = listOf(turn), raw = raw)
+
+        val cache = reconcileThreadRead(
+            MobileCache(),
+            "host-1",
+            ThreadReadResult(snapshot, emptyList()),
+            limits.copy(maxApproximateBytes = 64),
+        )
+
+        val cached = assertNotNull(cache.snapshot("host-1", "oversized"))
+        assertEquals(raw, cached.raw)
+        assertEquals(raw, cached.summary.raw)
+        assertEquals(raw, cached.turns.single().raw)
+        assertEquals("visible", (cached.turns.single().items.single() as CodexItem.AgentMessage).text)
     }
 
     @Test
