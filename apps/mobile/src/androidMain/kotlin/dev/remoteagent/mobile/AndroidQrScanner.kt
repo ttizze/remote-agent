@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.ExecutorService
@@ -88,7 +89,10 @@ private fun bindCamera(
     val providerFuture = ProcessCameraProvider.getInstance(activity)
     providerFuture.addListener({
         val provider = runCatching { providerFuture.get() }.getOrNull() ?: return@addListener
-        val scanner = BarcodeScanning.getClient()
+        val scannerOptions = BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .build()
+        val scanner = BarcodeScanning.getClient(scannerOptions)
         val analysis = ImageAnalysis.Builder().build().also { useCase ->
             useCase.setAnalyzer(executor) { imageProxy ->
                 val mediaImage = imageProxy.image

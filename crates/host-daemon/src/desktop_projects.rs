@@ -4,6 +4,7 @@ use std::{
 };
 
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 
 mod state;
 
@@ -51,19 +52,27 @@ impl DesktopProjectStore {
     }
 
     async fn load(&self) -> Result<state::Snapshot, DesktopProjectError> {
-        let metadata = match tokio::fs::metadata(&self.path).await {
-            Ok(metadata) => metadata,
+        let file = match tokio::fs::File::open(&self.path).await {
+            Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(state::Snapshot::default());
             }
             Err(error) => return Err(DesktopProjectError::Read(error)),
         };
+        let metadata = file.metadata().await.map_err(DesktopProjectError::Read)?;
         if metadata.len() > MAX_STATE_BYTES {
             return Err(DesktopProjectError::TooLarge(metadata.len()));
         }
-        let bytes = tokio::fs::read(&self.path)
+
+        let mut bytes = Vec::new();
+        let bytes_read = file
+            .take(MAX_STATE_BYTES + 1)
+            .read_to_end(&mut bytes)
             .await
             .map_err(DesktopProjectError::Read)?;
+        if bytes_read > MAX_STATE_BYTES as usize {
+            return Err(DesktopProjectError::TooLarge(bytes_read as u64));
+        }
         state::Snapshot::parse(&bytes).map_err(map_state_error)
     }
 
@@ -95,7 +104,24 @@ pub enum DesktopProjectError {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
+    use serde_json::json;
+
+    fn temporary_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "remote-agent-desktop-projects-{name}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn maps_state_errors_to_public_errors() {
@@ -108,6 +134,36 @@ mod tests {
         assert!(matches!(
             map_state_error(state::Error::Invalid(error)),
             DesktopProjectError::Invalid(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_state_file_returns_an_empty_snapshot() {
+        let path = temporary_path("missing");
+        let snapshot = DesktopProjectStore::new(path).load().await.unwrap();
+
+        assert_eq!(
+            snapshot.project_list(&Value::Null).unwrap(),
+            json!({
+                "data": [],
+                "nextCursor": null,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_state_file_reports_its_size() {
+        let path = temporary_path("too-large");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_STATE_BYTES + 2).unwrap();
+        drop(file);
+
+        let error = DesktopProjectStore::new(&path).load().await.unwrap_err();
+        let _ = std::fs::remove_file(path);
+
+        assert!(matches!(
+            error,
+            DesktopProjectError::TooLarge(bytes) if bytes == MAX_STATE_BYTES + 2
         ));
     }
 }

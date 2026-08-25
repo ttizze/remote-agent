@@ -313,12 +313,8 @@ fn response_object(
 }
 
 fn raw_value(value: Value) -> Result<Box<RawValue>, DispatchError> {
-    serde_json::to_string(&value)
+    serde_json::value::to_raw_value(&value)
         .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
-        .and_then(|value| {
-            serde_json::from_str(&value)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
-        })
 }
 
 fn retain_recent_thread_turns(mut result: Value, maximum: usize) -> Value {

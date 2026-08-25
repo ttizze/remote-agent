@@ -13,7 +13,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 private const val DefaultMaxFrameBytes = 256 * 1024 * 1024
 
@@ -267,14 +268,15 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         var closed: Boolean = false,
     )
 
-    private fun config(address: String, identity: String, ticket: String?): String = buildString {
-        append("{\"address\":").append(quote(address)).append(",\"serverName\":\"remote-agent\",\"hostIdentity\":")
-        append(quote(identity)).append(",\"deviceName\":").append(quote(Build.MODEL))
-        append(",\"maxFrameBytes\":").append(DefaultMaxFrameBytes)
-            .append(",\"requestTimeoutMs\":30000")
-        if (ticket != null) append(",\"pairingTicket\":").append(quote(ticket))
-        append('}')
-    }
+    private fun config(address: String, identity: String, ticket: String?): String = buildJsonObject {
+        put("address", address)
+        put("serverName", "remote-agent")
+        put("hostIdentity", identity)
+        put("deviceName", Build.MODEL)
+        put("maxFrameBytes", DefaultMaxFrameBytes)
+        put("requestTimeoutMs", 30_000)
+        ticket?.let { put("pairingTicket", it) }
+    }.toString()
 
     private suspend fun <T> invoke(block: () -> T): GatewayResult<T> = withContext(Dispatchers.IO) {
         try {
@@ -297,7 +299,6 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         }
     }
 
-    private fun quote(value: String) = json.encodeToJsonElement(value).toString()
     private fun decodeKey(value: String) = Base64.getUrlDecoder().decode(value)
     private fun encodeKey(value: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(value)
 

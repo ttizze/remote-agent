@@ -17,6 +17,7 @@ import kotlinx.cinterop.toKString
 import kotlinx.cinterop.toCValues
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
+import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
@@ -99,13 +100,13 @@ object IosLifecycleBridge {
 
 /** Bonjour answers are hints only; Rust still pins and verifies Host identity. */
 object IosBonjourBridge {
-    private var addresses: List<String> = emptyList()
+    private val addresses = atomic<List<String>>(emptyList())
 
     fun update(addresses: List<String>) {
-        this.addresses = addresses
+        this.addresses.value = addresses.toList()
     }
 
-    fun candidates(): List<String> = addresses
+    fun candidates(): List<String> = addresses.value
 }
 
 /**
