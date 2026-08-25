@@ -208,7 +208,7 @@ impl CodexRpcService {
             Ok(response) => response,
             Err(error) => return response_with_error(line, "codex_unavailable", &error),
         };
-        let object = raw_object(&response)
+        let mut object = raw_object(&response)
             .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
         let Some(raw_result) = object.get("result") else {
             // Error responses and future response shapes remain untouched.
@@ -227,7 +227,9 @@ impl CodexRpcService {
         } else {
             result
         };
-        replace_result(&response, result)
+        object.insert("result".to_owned(), raw_value(result)?);
+        serde_json::to_string(&object)
+            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
     }
 
     fn start_event_pump(&self) {
@@ -308,13 +310,6 @@ fn response_object(
     object.remove("result");
     object.remove("error");
     Ok(object)
-}
-
-fn replace_result(line: &str, result: Value) -> Result<String, DispatchError> {
-    let mut object =
-        raw_object(line).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-    object.insert("result".to_owned(), raw_value(result)?);
-    serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()))
 }
 
 fn raw_value(value: Value) -> Result<Box<RawValue>, DispatchError> {

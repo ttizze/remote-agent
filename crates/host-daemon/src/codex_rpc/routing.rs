@@ -35,7 +35,7 @@ pub(crate) enum RouteError {
 /// A live authenticated session's bounded outbound queue.
 pub struct CodexSession {
     id: SessionId,
-    receiver: Option<mpsc::Receiver<String>>,
+    receiver: mpsc::Receiver<String>,
     state: Weak<Mutex<State>>,
 }
 
@@ -45,11 +45,7 @@ impl CodexSession {
     }
 
     pub async fn recv(&mut self) -> Option<String> {
-        self.receiver
-            .as_mut()
-            .expect("session receiver was already taken")
-            .recv()
-            .await
+        self.receiver.recv().await
     }
 }
 
@@ -149,7 +145,7 @@ impl SessionRouter {
 
         CodexSession {
             id,
-            receiver: Some(receiver),
+            receiver,
             state: Arc::downgrade(&self.state),
         }
     }

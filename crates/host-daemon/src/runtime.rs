@@ -13,7 +13,7 @@ use host_protocol::{
     SSH_SUBSYSTEM, classify_message,
 };
 use russh::{
-    Channel, ChannelId, ChannelOpenFailure, MethodKind, MethodSet, Sig,
+    Channel, ChannelId, MethodKind, MethodSet, Sig,
     keys::{Algorithm, PublicKey},
     server::{self, Auth, ChannelOpenHandle, Handler, Msg, Server, Session},
 };
@@ -75,7 +75,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), StartupError> {
         "Bex Host reading Codex Desktop projects from {}",
         desktop_projects.path().display()
     );
-    let service = Arc::new(CodexRpcService::new(app_server.clone(), desktop_projects));
+    let service = CodexRpcService::new(app_server.clone(), desktop_projects);
     service.start();
 
     let listener = TcpListener::bind(config.listen)
@@ -143,7 +143,7 @@ pub(crate) async fn run(_config: StartupConfig) -> Result<(), StartupError> {
 struct GatewayServer {
     host_identity: Arc<HostIdentity>,
     authentication: Arc<Mutex<DeviceAuthenticationState>>,
-    service: Arc<CodexRpcService>,
+    service: CodexRpcService,
     session_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -169,7 +169,7 @@ impl Server for GatewayServer {
 struct GatewayHandler {
     host_identity: Arc<HostIdentity>,
     authentication: Arc<Mutex<DeviceAuthenticationState>>,
-    service: Arc<CodexRpcService>,
+    service: CodexRpcService,
     session_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     identity: Option<Ed25519PublicKey>,
     channels: HashMap<ChannelId, Channel<Msg>>,
@@ -246,10 +246,10 @@ impl Handler for GatewayHandler {
             session.channel_failure(channel)?;
             return Ok(());
         };
-        let Some(identity) = self.identity else {
+        if self.identity.is_none() {
             session.channel_failure(channel)?;
             return Ok(());
-        };
+        }
         if !is_supported_subsystem(name) {
             session.channel_failure(channel)?;
             return Ok(());
@@ -257,7 +257,7 @@ impl Handler for GatewayHandler {
         session.channel_success(channel)?;
         let service = self.service.clone();
         let task = tokio::spawn(async move {
-            if let Err(error) = serve_jsonl_session(channel_stream, identity, service).await {
+            if let Err(error) = serve_jsonl_session(channel_stream, service).await {
                 eprintln!("SSH JSONL session closed: {error}");
             }
         });
@@ -356,89 +356,11 @@ impl Handler for GatewayHandler {
         session.channel_failure(channel)?;
         Ok(false)
     }
-
-    async fn channel_open_x11(
-        &mut self,
-        _channel: Channel<Msg>,
-        _originator_address: &str,
-        _originator_port: u32,
-        reply: ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        reply
-            .reject(ChannelOpenFailure::AdministrativelyProhibited)
-            .await;
-        Ok(())
-    }
-
-    async fn channel_open_direct_tcpip(
-        &mut self,
-        _channel: Channel<Msg>,
-        _host_to_connect: &str,
-        _port_to_connect: u32,
-        _originator_address: &str,
-        _originator_port: u32,
-        reply: ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        reply
-            .reject(ChannelOpenFailure::AdministrativelyProhibited)
-            .await;
-        Ok(())
-    }
-
-    async fn channel_open_forwarded_tcpip(
-        &mut self,
-        _channel: Channel<Msg>,
-        _host_to_connect: &str,
-        _port_to_connect: u32,
-        _originator_address: &str,
-        _originator_port: u32,
-        reply: ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        reply
-            .reject(ChannelOpenFailure::AdministrativelyProhibited)
-            .await;
-        Ok(())
-    }
-
-    async fn channel_open_direct_streamlocal(
-        &mut self,
-        _channel: Channel<Msg>,
-        _socket_path: &str,
-        reply: ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        reply
-            .reject(ChannelOpenFailure::AdministrativelyProhibited)
-            .await;
-        Ok(())
-    }
-
-    async fn tcpip_forward(
-        &mut self,
-        _address: &str,
-        _port: &mut u32,
-        _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        Ok(false)
-    }
-
-    async fn cancel_tcpip_forward(
-        &mut self,
-        _address: &str,
-        _port: u32,
-        _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        Ok(false)
-    }
 }
 
 async fn serve_jsonl_session(
     channel: Channel<Msg>,
-    _identity: Ed25519PublicKey,
-    service: Arc<CodexRpcService>,
+    service: CodexRpcService,
 ) -> Result<(), String> {
     let session = service.open_session(SESSION_QUEUE_CAPACITY);
     let session_id = session.id();
@@ -509,14 +431,12 @@ async fn serve_jsonl_session(
                     break Err("session outbound queue closed".to_owned());
                 };
                 writer.write_line(&line).await.map_err(|error| error.to_string())?;
-                writer.flush().await.map_err(|error| error.to_string())?;
             }
         }
     };
 
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    service.close_session(session_id);
     result
 }
 

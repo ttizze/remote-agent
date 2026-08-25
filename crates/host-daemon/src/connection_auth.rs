@@ -64,22 +64,15 @@ impl DeviceAuthenticationState {
         now_ms: u64,
     ) -> Result<AcceptedDevice, ConnectionAuthenticationError> {
         if username == RECONNECT_USERNAME {
-            if self
+            if let Some(device) = self
                 .settings
                 .paired_devices
                 .iter()
-                .any(|device| device.identity == device_identity)
+                .find(|device| device.identity == device_identity)
             {
-                let name = self
-                    .settings
-                    .paired_devices
-                    .iter()
-                    .find(|device| device.identity == device_identity)
-                    .map(|device| device.name.clone())
-                    .unwrap_or_else(|| "device".to_owned());
                 return Ok(AcceptedDevice {
                     identity: device_identity,
-                    name,
+                    name: device.name.clone(),
                 });
             }
             return Err(ConnectionAuthenticationError::DeviceNotPaired);
@@ -216,5 +209,20 @@ mod tests {
             Err(ConnectionAuthenticationError::Settings(_))
         ));
         assert_eq!(state.pairing_tickets.len(), 1);
+    }
+
+    #[test]
+    fn unpaired_reconnect_is_rejected() {
+        let mut state = DeviceAuthenticationState::new(HostSettings::default(), temp_path());
+
+        assert!(matches!(
+            state.authenticate(
+                RECONNECT_USERNAME,
+                Ed25519PublicKey::from_bytes([2; 32]),
+                Ed25519PublicKey::from_bytes([1; 32]),
+                99,
+            ),
+            Err(ConnectionAuthenticationError::DeviceNotPaired)
+        ));
     }
 }
