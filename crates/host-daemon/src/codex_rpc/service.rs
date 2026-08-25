@@ -6,11 +6,15 @@ use codex_app_server::{
 use host_protocol::{
     RpcError, RpcId, RpcMessage, RpcNotification, RpcOutcome, RpcRequest, RpcResponse,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
 
 use super::routing::{
     CodexSession, ResponseDisposition, ResponseRoute, RouteError, SessionId, SessionRouter,
+};
+use crate::{
+    DesktopProjectError, DesktopProjectStore, HOST_PROJECT_LIST_METHOD, HOST_THREAD_LIST_METHOD,
+    HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
 };
 
 /// Errors produced by the gateway itself. Errors from Codex are encoded as a
@@ -39,7 +43,8 @@ impl From<RouteError> for DispatchError {
     }
 }
 
-/// Routes raw Codex RPC messages to authenticated mobile sessions.
+/// Routes raw Codex RPC messages and explicit Host read projections to
+/// authenticated mobile sessions.
 #[derive(Clone)]
 pub struct CodexRpcService {
     inner: Arc<ServiceInner>,
@@ -47,15 +52,17 @@ pub struct CodexRpcService {
 
 struct ServiceInner {
     app_server: Arc<CodexAppServer>,
+    desktop_projects: DesktopProjectStore,
     router: SessionRouter,
     event_pump_started: OnceLock<()>,
 }
 
 impl CodexRpcService {
-    pub fn new(app_server: Arc<CodexAppServer>) -> Self {
+    pub fn new(app_server: Arc<CodexAppServer>, desktop_projects: DesktopProjectStore) -> Self {
         Self {
             inner: Arc::new(ServiceInner {
                 app_server,
+                desktop_projects,
                 router: SessionRouter::new(),
                 event_pump_started: OnceLock::new(),
             }),
@@ -78,7 +85,8 @@ impl CodexRpcService {
     }
 
     /// Forward a mobile request to Codex, preserving raw response and error
-    /// extensions. Lifecycle methods remain daemon-owned.
+    /// extensions. Lifecycle and `host/*` projection methods remain
+    /// daemon-owned.
     pub async fn dispatch_request(
         &self,
         session: SessionId,
@@ -92,24 +100,10 @@ impl CodexRpcService {
             extensions,
             ..
         } = request;
-        if is_daemon_lifecycle(&method) {
-            return self.send_response(session, daemon_owned_response(id, &method, extensions));
-        }
-
-        let (outcome, response_extensions) = app_server_response(
-            self.inner
-                .app_server
-                .request_json_with_extensions(&method, params, extensions)
-                .await,
-        );
-        self.send_response(
-            session,
-            RpcResponse {
-                id,
-                outcome,
-                extensions: response_extensions,
-            },
-        )
+        let response = self
+            .build_request_response(id, &method, params, extensions)
+            .await;
+        self.send_response(session, response)
     }
 
     /// Forward a mobile notification to Codex. Lifecycle notifications are
@@ -180,6 +174,83 @@ impl CodexRpcService {
             .map_err(Into::into)
     }
 
+    async fn build_request_response(
+        &self,
+        id: RpcId,
+        method: &str,
+        params: Value,
+        extensions: Map<String, Value>,
+    ) -> RpcResponse {
+        match classify_request(method) {
+            RequestRoute::DaemonLifecycle => daemon_owned_response(id, method, extensions),
+            RequestRoute::DesktopProjectList => {
+                self.desktop_project_response(id, params, extensions).await
+            }
+            RequestRoute::Upstream {
+                method: upstream_method,
+                enrich_threads,
+            } => {
+                self.upstream_response(id, upstream_method, params, extensions, enrich_threads)
+                    .await
+            }
+        }
+    }
+
+    async fn desktop_project_response(
+        &self,
+        id: RpcId,
+        params: Value,
+        extensions: Map<String, Value>,
+    ) -> RpcResponse {
+        let outcome = match self.inner.desktop_projects.project_list(&params).await {
+            Ok(result) => RpcOutcome::Success { result },
+            Err(error) => desktop_project_failure(error),
+        };
+        RpcResponse {
+            id,
+            outcome,
+            extensions,
+        }
+    }
+
+    async fn upstream_response(
+        &self,
+        id: RpcId,
+        method: &str,
+        params: Value,
+        extensions: Map<String, Value>,
+        enrich_threads: bool,
+    ) -> RpcResponse {
+        let (outcome, response_extensions) = app_server_response(
+            self.inner
+                .app_server
+                .request_json_with_extensions(method, params, extensions)
+                .await,
+        );
+        let outcome = if enrich_threads {
+            self.enrich_thread_outcome(outcome).await
+        } else {
+            outcome
+        };
+        RpcResponse {
+            id,
+            outcome,
+            extensions: response_extensions,
+        }
+    }
+
+    async fn enrich_thread_outcome(&self, outcome: RpcOutcome) -> RpcOutcome {
+        match outcome {
+            RpcOutcome::Success { result } => {
+                match self.inner.desktop_projects.enrich_threads(result).await {
+                    Ok(enriched) => RpcOutcome::Success { result: enriched },
+                    Err(error) => desktop_project_failure(error),
+                }
+            }
+            failure => failure,
+        }
+    }
+
     fn start_event_pump(&self) {
         if self.inner.event_pump_started.set(()).is_err() {
             return;
@@ -218,12 +289,52 @@ fn is_daemon_lifecycle(method: &str) -> bool {
     matches!(method, "initialize" | "initialized")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestRoute<'a> {
+    DaemonLifecycle,
+    DesktopProjectList,
+    Upstream {
+        method: &'a str,
+        enrich_threads: bool,
+    },
+}
+
+fn classify_request(method: &str) -> RequestRoute<'_> {
+    if is_daemon_lifecycle(method) {
+        return RequestRoute::DaemonLifecycle;
+    }
+    if method == HOST_PROJECT_LIST_METHOD {
+        return RequestRoute::DesktopProjectList;
+    }
+    let (method, enrich_threads) = match method {
+        HOST_THREAD_LIST_METHOD => ("thread/list", true),
+        HOST_THREAD_READ_METHOD => ("thread/read", true),
+        HOST_THREAD_START_METHOD => ("thread/start", true),
+        method => (method, false),
+    };
+    RequestRoute::Upstream {
+        method,
+        enrich_threads,
+    }
+}
+
 fn daemon_owned_error(method: &str) -> RpcError {
     RpcError {
         code: json!("daemon_owned_method"),
         message: format!("{method} is handled by the Host daemon"),
         data: None,
         extensions: Map::new(),
+    }
+}
+
+fn desktop_project_failure(error: DesktopProjectError) -> RpcOutcome {
+    RpcOutcome::Failure {
+        error: RpcError {
+            code: json!("desktop_project_state_unavailable"),
+            message: error.to_string(),
+            data: None,
+            extensions: Map::new(),
+        },
     }
 }
 
@@ -307,10 +418,61 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn lifecycle_methods_are_owned_by_the_daemon() {
-        assert!(is_daemon_lifecycle("initialize"));
-        assert!(is_daemon_lifecycle("initialized"));
-        assert!(!is_daemon_lifecycle("thread/list"));
+    fn request_classifier_covers_daemon_host_aliases_and_passthrough() {
+        let cases = [
+            ("initialize", RequestRoute::DaemonLifecycle),
+            ("initialized", RequestRoute::DaemonLifecycle),
+            (HOST_PROJECT_LIST_METHOD, RequestRoute::DesktopProjectList),
+            (
+                HOST_THREAD_LIST_METHOD,
+                RequestRoute::Upstream {
+                    method: "thread/list",
+                    enrich_threads: true,
+                },
+            ),
+            (
+                HOST_THREAD_READ_METHOD,
+                RequestRoute::Upstream {
+                    method: "thread/read",
+                    enrich_threads: true,
+                },
+            ),
+            (
+                HOST_THREAD_START_METHOD,
+                RequestRoute::Upstream {
+                    method: "thread/start",
+                    enrich_threads: true,
+                },
+            ),
+            (
+                "thread/list",
+                RequestRoute::Upstream {
+                    method: "thread/list",
+                    enrich_threads: false,
+                },
+            ),
+            (
+                "future/method",
+                RequestRoute::Upstream {
+                    method: "future/method",
+                    enrich_threads: false,
+                },
+            ),
+        ];
+
+        for (method, expected) in cases {
+            assert_eq!(classify_request(method), expected, "method: {method}");
+        }
+    }
+
+    #[test]
+    fn desktop_project_errors_use_a_stable_host_error_code() {
+        let RpcOutcome::Failure { error } =
+            desktop_project_failure(DesktopProjectError::InvalidCursor)
+        else {
+            panic!("expected failure")
+        };
+        assert_eq!(error.code, json!("desktop_project_state_unavailable"));
     }
 
     #[test]

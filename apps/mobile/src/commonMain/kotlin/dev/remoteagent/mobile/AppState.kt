@@ -28,6 +28,7 @@ sealed interface LoadPhase {
 data class ProfileViewState(
     val connection: ConnectionPhase = ConnectionPhase.Disconnected,
     val workingDirectoryPath: String = "",
+    val projectList: LoadPhase = LoadPhase.Idle,
     val threadList: LoadPhase = LoadPhase.Idle,
     val selectedThreadId: String? = null,
     val threadDetail: LoadPhase = LoadPhase.Idle,
@@ -66,6 +67,9 @@ sealed interface AppAction {
     data class ConnectSucceeded(val hostIdentity: String) : AppAction
     data class ConnectFailed(val hostIdentity: String, val message: String) : AppAction
     data class WorkingDirectoryChanged(val hostIdentity: String, val path: String) : AppAction
+    data class ProjectListLoading(val hostIdentity: String) : AppAction
+    data class ProjectListLoaded(val hostIdentity: String, val projects: List<CodexProject>) : AppAction
+    data class ProjectListFailed(val hostIdentity: String, val message: String) : AppAction
     data class ThreadListLoading(val hostIdentity: String) : AppAction
     data class ThreadListLoaded(val hostIdentity: String, val threads: List<ThreadSummary>) : AppAction
     data class ThreadListFailed(val hostIdentity: String, val message: String) : AppAction
@@ -127,6 +131,7 @@ fun reduce(
     is AppAction.ConnectSucceeded -> state.updateView(action.hostIdentity) {
         it.copy(
             connection = ConnectionPhase.Connected,
+            projectList = LoadPhase.Idle,
             threadList = LoadPhase.Idle,
             threadDetail = LoadPhase.Idle,
             notice = null,
@@ -144,6 +149,19 @@ fun reduce(
             selectedThreadId = null,
             threadDetail = LoadPhase.Idle,
         )
+    }
+
+    is AppAction.ProjectListLoading -> state.updateViewIfConnected(action.hostIdentity) {
+        it.copy(projectList = LoadPhase.Loading, notice = null)
+    }
+
+    is AppAction.ProjectListLoaded -> if (state.isConnected(action.hostIdentity)) {
+        state.copy(cache = reconcileProjectList(state.cache, action.hostIdentity, action.projects, cacheLimits))
+            .updateView(action.hostIdentity) { it.copy(projectList = LoadPhase.Ready) }
+    } else state
+
+    is AppAction.ProjectListFailed -> state.updateViewIfConnected(action.hostIdentity) {
+        it.copy(projectList = LoadPhase.Failed(action.message), notice = action.message)
     }
 
     is AppAction.ThreadListLoading -> state.updateViewIfConnected(action.hostIdentity) {
@@ -223,6 +241,7 @@ fun reduce(
     is AppAction.Disconnected -> state.updateView(action.hostIdentity) {
         it.copy(
             connection = ConnectionPhase.Disconnected,
+            projectList = LoadPhase.Idle,
             threadList = LoadPhase.Idle,
             threadDetail = LoadPhase.Idle,
             interruptingTurnId = null,

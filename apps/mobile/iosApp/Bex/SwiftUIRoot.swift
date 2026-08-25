@@ -32,14 +32,9 @@ final class BexAppViewModel: ObservableObject {
     func pair(_ contents: String) { controller.pair(contents: contents, nowMs: Int64(Date().timeIntervalSince1970 * 1_000)) }
     func discover() { controller.discover() }
     func connect() { controller.connect() }
-    func applyWorkingDirectory(_ path: String) {
-        controller.updateWorkingDirectory(path: path)
-        controller.listThreads()
-    }
-    func listThreads() { controller.listThreads() }
-    func startThread(_ workingDirectory: String) {
-        controller.updateWorkingDirectory(path: workingDirectory)
-        controller.startThread()
+    func refreshTaskList() { controller.refreshTaskList() }
+    func startTask(projectId: String?, cwd: String, prompt: String) {
+        controller.startTask(projectId: projectId, cwd: cwd, firstPrompt: prompt)
     }
     func openThread(_ id: String) { controller.openThread(threadId: id) }
     func showThreadList() { controller.showThreadList() }
@@ -238,75 +233,264 @@ private struct ConnectingScreen: View {
 private struct ThreadsScreen: View {
     let state: IosAppViewState
     @ObservedObject var model: BexAppViewModel
-    @State private var filter = ""
+    @State private var search = ""
+    @State private var collapsedProjectIds = Set<String>()
+    @State private var newTask: NewTaskContext?
 
     var body: some View {
         List {
-            Section(header: Text("作業ディレクトリで絞り込み（任意）")) {
-                TextField("空欄で全タスク", text: $filter)
-                    .textInputAutocapitalization(.never)
-                    .disableAutocorrection(true)
-                    .accessibilityIdentifier("tasks.filter")
-                Button("適用・更新") { model.applyWorkingDirectory(filter) }
-                    .disabled(state.threadLoadState == .loading)
-                    .accessibilityIdentifier("tasks.apply")
-            }
-
-            if state.threadLoadState == .loading {
-                Section { ProgressView("タスクを読み込み中…")
+            if state.threadLoadState == .loading || state.projectLoadState == .loading {
+                Section { ProgressView("プロジェクトとタスクを読み込み中…")
                     .accessibilityIdentifier("tasks.loading") }
             }
-            if state.threadLoadState == .failed {
+            if state.threadLoadState == .failed || state.projectLoadState == .failed {
                 Section {
-                    if let error = state.threadLoadError { BexNotice(text: error) }
-                    Button("再試行") { model.listThreads() }
+                    if let error = state.projectLoadError ?? state.threadLoadError { BexNotice(text: error) }
+                    Button("再試行") { model.refreshTaskList() }
                         .accessibilityIdentifier("tasks.retry")
-                }
-            }
-            if state.threadLoadState == .idle {
-                Section {
-                    Text("タスクを表示するには「更新」を押してください")
-                        .foregroundColor(.secondary)
                 }
             }
             if let notice = state.notice { Section { BexNotice(text: notice) } }
 
             Section {
-                let hasWorkingDirectory = !filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                Button("新しいタスク") { model.startThread(filter) }
-                    .disabled(!hasWorkingDirectory || state.threadLoadState == .loading)
-                    .accessibilityIdentifier("tasks.start")
-                if !hasWorkingDirectory {
-                    Text("新しいタスクを作成するには作業ディレクトリを指定してください")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .accessibilityIdentifier("tasks.start.explanation")
+                Text("プロジェクト")
+                    .font(.title2.weight(.bold))
+                    .textCase(nil)
+                    .foregroundColor(.primary)
+                    .accessibilityIdentifier("tasks.projects")
+            }
+
+            ForEach(state.projects, id: \.id) { project in
+                Section {
+                    if !collapsedProjectIds.contains(project.id) {
+                        let threads = visibleThreads.filter { $0.projectId == project.id }
+                        if threads.isEmpty {
+                            Text("タスクはまだありません")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        } else {
+                            ForEach(threads, id: \.id) { thread in
+                                ThreadListRow(thread: thread) { model.openThread(thread.id) }
+                            }
+                        }
+                    }
+                } header: {
+                    ProjectHeader(
+                        project: project,
+                        isCollapsed: collapsedProjectIds.contains(project.id),
+                        toggle: { toggle(project.id) },
+                        compose: { newTask = NewTaskContext(project: project) }
+                    )
                 }
             }
 
-            Section(header: Text("タスク")) {
-                if state.threadLoadState == .ready && state.threads.isEmpty {
-                    Text("タスクがありません")
+            if state.projectLoadState == .ready && state.projects.isEmpty {
+                Section {
+                    Text("Codexに登録されたプロジェクトはありません")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Section {
+                let threads = visibleThreads.filter { thread in
+                    guard let projectId = thread.projectId else { return true }
+                    return !knownProjectIds.contains(projectId)
+                }
+                if state.threadLoadState == .ready && threads.isEmpty {
+                    Text("プロジェクトに属さないチャットはありません")
+                        .font(.subheadline)
                         .foregroundColor(.secondary)
                         .accessibilityIdentifier("tasks.empty")
-                }
-                ForEach(state.threads, id: \.id) { thread in
-                    Button { model.openThread(thread.id) } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(thread.title).font(.headline)
-                            Text(thread.preview).lineLimit(2).foregroundColor(.secondary)
-                            Text(thread.workingDirectory).font(.caption2).foregroundColor(.secondary)
-                        }
+                } else {
+                    ForEach(threads, id: \.id) { thread in
+                        ThreadListRow(thread: thread) { model.openThread(thread.id) }
                     }
-                    .accessibilityIdentifier("tasks.row.\(thread.id)")
+                }
+            } header: {
+                HStack {
+                    Text("チャット")
+                        .font(.title3.weight(.semibold))
+                        .textCase(nil)
+                    Spacer()
+                    Button { newTask = NewTaskContext(project: nil) } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .accessibilityLabel("プロジェクトなしで新しいタスク")
+                    .accessibilityIdentifier("tasks.new.chat")
                 }
             }
         }
-        .onAppear { filter = state.workingDirectory }
-        .onChange(of: state.workingDirectory) { path in
-            filter = path
+        .listStyle(.plain)
+        .accessibilityIdentifier("tasks.list")
+        .searchable(text: $search, prompt: "チャットを検索")
+        .sheet(item: $newTask) { context in
+            NewTaskSheet(context: context, model: model)
         }
-        .navigationTitle(state.selectedProfileName ?? "タスク")
+        .navigationTitle("リモート")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button { model.showProfiles() } label: { Image(systemName: "line.3.horizontal") }
+                    .accessibilityLabel("PC一覧")
+            }
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text("リモート").font(.headline)
+                    Text(state.selectedProfileName ?? "PC Host")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { model.refreshTaskList() } label: { Image(systemName: "arrow.clockwise") }
+                    .disabled(state.threadLoadState == .loading || state.projectLoadState == .loading)
+                    .accessibilityLabel("更新")
+                    .accessibilityIdentifier("tasks.refresh")
+            }
+        }
+    }
+
+    private var knownProjectIds: Set<String> { Set(state.projects.map(\.id)) }
+
+    private var visibleThreads: [IosThreadSummaryView] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return state.threads }
+        return state.threads.filter {
+            $0.title.localizedCaseInsensitiveContains(query) ||
+                $0.preview.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private func toggle(_ projectId: String) {
+        if collapsedProjectIds.contains(projectId) {
+            collapsedProjectIds.remove(projectId)
+        } else {
+            collapsedProjectIds.insert(projectId)
+        }
+    }
+}
+
+private struct ProjectHeader: View {
+    let project: IosProjectView
+    let isCollapsed: Bool
+    let toggle: () -> Void
+    let compose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: toggle) {
+                HStack(spacing: 10) {
+                    Image(systemName: "folder")
+                    Text(project.name).font(.title3.weight(.semibold)).textCase(nil)
+                    Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                }
+                .foregroundColor(.primary)
+            }
+            .accessibilityIdentifier("tasks.project.\(project.id)")
+            Spacer()
+            Button(action: compose) { Image(systemName: "square.and.pencil") }
+                .accessibilityLabel("\(project.name)で新しいタスク")
+                .accessibilityIdentifier("tasks.new.project.\(project.id)")
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct ThreadListRow: View {
+    let thread: IosThreadSummaryView
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(thread.title).font(.body).foregroundColor(.primary).lineLimit(2)
+                    if !thread.preview.isEmpty && thread.preview != thread.title {
+                        Text(thread.preview).font(.caption).foregroundColor(.secondary).lineLimit(1)
+                    }
+                }
+                Spacer()
+                if thread.isActive { ProgressView().controlSize(.small) }
+            }
+            .padding(.vertical, 3)
+        }
+        .accessibilityIdentifier("tasks.row.\(thread.id)")
+    }
+}
+
+private struct NewTaskContext: Identifiable {
+    let project: IosProjectView?
+    let id = UUID()
+}
+
+private struct NewTaskSheet: View {
+    let context: NewTaskContext
+    @ObservedObject var model: BexAppViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var workingDirectory: String
+    @State private var prompt = ""
+
+    init(context: NewTaskContext, model: BexAppViewModel) {
+        self.context = context
+        self.model = model
+        _workingDirectory = State(initialValue: context.project?.roots.first ?? "")
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("開始先") {
+                    if let project = context.project {
+                        Label(project.name, systemImage: "folder")
+                        if project.roots.count > 1 {
+                            Picker("作業ディレクトリ", selection: $workingDirectory) {
+                                ForEach(project.roots, id: \.self) { Text($0).tag($0) }
+                            }
+                        } else if let root = project.roots.first {
+                            Text(root).font(.caption).foregroundColor(.secondary)
+                        } else {
+                            TextField("作業ディレクトリ", text: $workingDirectory)
+                                .textInputAutocapitalization(.never)
+                                .disableAutocorrection(true)
+                                .accessibilityIdentifier("new-task.cwd")
+                        }
+                    } else {
+                        Text("プロジェクトなし")
+                        TextField("作業ディレクトリ", text: $workingDirectory)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                            .accessibilityIdentifier("new-task.cwd")
+                    }
+                }
+                Section("最初のメッセージ") {
+                    TextEditor(text: $prompt)
+                        .frame(minHeight: 140)
+                        .accessibilityIdentifier("new-task.prompt")
+                }
+            }
+            .navigationTitle("新しいタスク")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("キャンセル") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("開始") {
+                        model.startTask(
+                            projectId: context.project?.id,
+                            cwd: workingDirectory,
+                            prompt: prompt
+                        )
+                        dismiss()
+                    }
+                    .disabled(workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                              prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("new-task.start")
+                }
+            }
+        }
     }
 }
 

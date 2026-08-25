@@ -18,6 +18,7 @@ data class MobileCacheLimits(
 }
 
 data class ProfileMobileCache(
+    val projects: List<CodexProject> = emptyList(),
     val threadList: List<ThreadSummary> = emptyList(),
     val snapshots: Map<String, ThreadSnapshot> = emptyMap(),
     val unknownEvents: List<ThreadEvent.Unknown> = emptyList(),
@@ -36,6 +37,13 @@ fun reconcileThreadList(
     threads: List<ThreadSummary>,
     limits: MobileCacheLimits,
 ): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(threadList = threads)).bounded(limits)
+
+fun reconcileProjectList(
+    cache: MobileCache,
+    hostIdentity: String,
+    projects: List<CodexProject>,
+    limits: MobileCacheLimits,
+): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(projects = projects)).bounded(limits)
 
 /**
  * A ThreadReadResult is one atomic UI reconciliation transition: replace the
@@ -79,14 +87,18 @@ fun retainRawMessage(
 ).bounded(limits)
 
 fun approximateCacheBytes(cache: MobileCache): Int = cache.profiles.entries.sumOf { (hostIdentity, profile) ->
-    hostIdentity.approximateBytes() + profile.threadList.sumOf { it.approximateBytes() } +
+    approximateProfileBytes(hostIdentity, profile)
+}
+
+private fun approximateProfileBytes(hostIdentity: String, profile: ProfileMobileCache): Int =
+    hostIdentity.approximateBytes() + profile.projects.sumOf { it.approximateBytes() } +
+        profile.threadList.sumOf { it.approximateBytes() } +
         profile.snapshots.values.sumOf { it.approximateBytes() } +
         profile.unknownEvents.sumOf {
             it.threadId.approximateBytes() + it.turnId.approximateBytes() +
                 it.method.approximateBytes() + it.raw.approximateBytes() + it.extensions.approximateBytes()
         } +
         profile.rawMessages.sumOf { it.approximateBytes() }
-}
 
 private fun MobileCache.replaceProfile(hostIdentity: String, profile: ProfileMobileCache): MobileCache =
     copy(profiles = profiles + (hostIdentity to profile))
@@ -106,7 +118,7 @@ private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
         is ThreadEvent.CommandOutputDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.CommandOutput)
         is ThreadEvent.FileChangeOutputDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.FileChangeOutput)
         is ThreadEvent.ItemCompleted -> existing.upsertItem(event.turnId, event.item)
-            is ThreadEvent.Unknown -> existing
+        is ThreadEvent.Unknown -> existing
     }
     return copy(
         threadList = threadList.replaceById(updated.summary.id, updated.summary),
@@ -115,31 +127,40 @@ private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
 }
 
 private fun MobileCache.bounded(limits: MobileCacheLimits): MobileCache {
-    var profiles = profiles.mapValues { (_, profile) -> profile.bounded(limits) }
-    var result = MobileCache(profiles)
-    while (approximateCacheBytes(result) > limits.maxApproximateBytes && profiles.isNotEmpty()) {
-        val snapshotToDrop = profiles.entries
-            .flatMap { (host, profile) -> profile.snapshots.values.map { host to it } }
-            .minByOrNull { (_, snapshot) -> snapshot.summary.updatedAtMs }
-        if (snapshotToDrop != null) {
-            val (host, snapshot) = snapshotToDrop
-            val profile = profiles.getValue(host)
-            profiles = profiles + (host to profile.copy(snapshots = profile.snapshots - snapshot.summary.id))
-        } else {
-            val host = profiles.keys.first()
-            val profile = profiles.getValue(host)
-            profiles = if (profile.threadList.isEmpty()) {
-                profiles - host
-            } else {
-                profiles + (host to profile.copy(threadList = profile.threadList.drop(1)))
+    return MobileCache(
+        profiles = profiles.mapValues { (hostIdentity, profile) ->
+            profile.bounded(limits).boundedBytes(hostIdentity, limits.maxApproximateBytes)
+        },
+    )
+}
+
+/**
+ * Keep each Host's cache independent. A large or busy Host must not evict a
+ * different Host's display copy merely because both are paired on one device.
+ */
+private fun ProfileMobileCache.boundedBytes(
+    hostIdentity: String,
+    maxApproximateBytes: Int,
+): ProfileMobileCache {
+    var result = this
+    while (approximateProfileBytes(hostIdentity, result) > maxApproximateBytes) {
+        result = when {
+            result.snapshots.isNotEmpty() -> {
+                val oldest = result.snapshots.values.minByOrNull { it.summary.updatedAtMs }
+                if (oldest == null) result else result.copy(snapshots = result.snapshots - oldest.summary.id)
             }
+            result.threadList.isNotEmpty() -> result.copy(threadList = result.threadList.drop(1))
+            result.projects.isNotEmpty() -> result.copy(projects = result.projects.dropLast(1))
+            result.unknownEvents.isNotEmpty() -> result.copy(unknownEvents = result.unknownEvents.drop(1))
+            result.rawMessages.isNotEmpty() -> result.copy(rawMessages = result.rawMessages.drop(1))
+            else -> return result
         }
-        result = MobileCache(profiles)
     }
     return result
 }
 
 private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobileCache {
+    val projects = projects.distinctBy { it.id }.sortedBy { it.position }.map { it.bounded(limits.maxTextCharacters) }
     val list = threadList.asReversed().distinctBy { it.id }.take(limits.maxThreads).asReversed().map {
         it.bounded(limits.maxTextCharacters)
     }
@@ -148,8 +169,19 @@ private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobile
         .sortedByDescending { it.summary.updatedAtMs }
         .take(limits.maxThreads)
         .associate { it.summary.id to it.bounded(limits) }
-    return ProfileMobileCache(list, snapshots, unknownEvents.takeLast(128), rawMessages.takeLast(128))
+    return ProfileMobileCache(
+        projects = projects,
+        threadList = list,
+        snapshots = snapshots,
+        unknownEvents = unknownEvents.takeLast(128),
+        rawMessages = rawMessages.takeLast(128),
+    )
 }
+
+private fun CodexProject.bounded(max: Int): CodexProject = copy(
+    name = name.truncated(max),
+    roots = roots.map { it.copy(path = it.path.truncated(max)) },
+)
 
 private fun ThreadSnapshot.bounded(limits: MobileCacheLimits): ThreadSnapshot {
     val retained = turns.flatMap { turn -> turn.items.map { turn.id to it.id } }.takeLast(limits.maxItemsPerThread).toSet()
@@ -199,8 +231,11 @@ private fun RawCodexMessage.approximateBytes(): Int = when (this) {
 }
 
 private fun ThreadSummary.approximateBytes(): Int = id.approximateBytes() + (name?.approximateBytes() ?: 0) +
-    preview.approximateBytes() + workingDirectory.path.approximateBytes() + 24 + status.approximateBytes() +
+    preview.approximateBytes() + workingDirectory.path.approximateBytes() + (projectId?.approximateBytes() ?: 0) +
+    24 + status.approximateBytes() +
     (raw?.approximateBytes() ?: 0)
+private fun CodexProject.approximateBytes(): Int = id.approximateBytes() + name.approximateBytes() +
+    roots.sumOf { it.path.approximateBytes() } + 24 + (raw?.approximateBytes() ?: 0)
 private fun ThreadSnapshot.approximateBytes(): Int = summary.approximateBytes() + turns.sumOf { it.approximateBytes() } +
     (raw?.approximateBytes() ?: 0)
 private fun CodexTurn.approximateBytes(): Int = id.approximateBytes() + 8 + items.sumOf { it.approximateBytes() } +

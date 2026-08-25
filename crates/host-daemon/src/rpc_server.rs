@@ -19,7 +19,8 @@ use crate::{RpcChannel, RpcServerConfig, TransportError};
 /// hint sent during the handshake.  It is deliberately not enforced here:
 /// the installed Codex App Server remains the authority for which methods are
 /// valid, and newer methods must be able to pass through without a Host
-/// update.
+/// update. Explicit `host/*` methods are handled by the daemon before they
+/// reach the App Server.
 ///
 /// Requests from the peer are handled concurrently with bounded timeout and
 /// semaphore limits. Responses from the peer are delivered separately; this

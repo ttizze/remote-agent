@@ -52,8 +52,8 @@ final class BexLaunchUITests: XCTestCase {
 
         connectButton.tap()
 
-        let taskFilter = app.textFields["tasks.filter"]
-        XCTAssertTrue(taskFilter.waitForExistence(timeout: 30), "Task list did not appear after connecting")
+        let taskList = app.descendants(matching: .any)["tasks.list"]
+        XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Task list did not appear after connecting")
 
         let taskOutcome = app
             .descendants(matching: .any)

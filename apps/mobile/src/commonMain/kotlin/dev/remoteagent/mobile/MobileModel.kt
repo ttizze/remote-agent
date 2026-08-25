@@ -8,6 +8,18 @@ import kotlinx.serialization.json.JsonObject
 @Serializable
 data class WorkingDirectory(val path: String)
 
+/** Read-only projection of a local Codex Desktop Project. */
+@Serializable
+data class CodexProject(
+    val id: String,
+    val name: String,
+    val roots: List<WorkingDirectory>,
+    val position: Long,
+    val createdAtMs: Long,
+    val updatedAtMs: Long,
+    val raw: JsonObject? = null,
+)
+
 @Serializable
 sealed interface ThreadStatus {
     @Serializable @SerialName("notLoaded") data object NotLoaded : ThreadStatus
@@ -56,6 +68,8 @@ data class ThreadSummary(
     val name: String? = null,
     val preview: String,
     val workingDirectory: WorkingDirectory,
+    /** Desktop-explicit assignment, or App Server assignment when Desktop has no opinion. */
+    val projectId: String? = null,
     val createdAtMs: Long,
     val updatedAtMs: Long,
     val status: ThreadStatus,
@@ -71,6 +85,8 @@ data class ThreadSnapshot(
 
 @Serializable
 data class ThreadReadResult(val thread: ThreadSnapshot, val bufferedEvents: List<ThreadEvent>)
+
+data class ThreadStartResult(val thread: ThreadSnapshot, val turnId: String)
 
 @Serializable
 data class CodexTurn(

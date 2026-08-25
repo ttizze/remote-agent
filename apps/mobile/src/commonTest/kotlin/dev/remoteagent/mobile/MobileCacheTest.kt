@@ -65,7 +65,11 @@ class MobileCacheTest {
         assertEquals(listOf("two", "three"), hostA.threadList.map { it.id })
         assertFalse("one" in hostA.snapshots)
         assertEquals(listOf("other"), cache.profile("host-b").threadList.map { it.id })
-        assertTrue(approximateCacheBytes(cache) <= limits.maxApproximateBytes)
+        assertTrue(approximateCacheBytes(MobileCache(mapOf("host-a" to hostA))) <= limits.maxApproximateBytes)
+        assertTrue(
+            approximateCacheBytes(MobileCache(mapOf("host-b" to cache.profile("host-b")))) <=
+                limits.maxApproximateBytes,
+        )
     }
 
     @Test
@@ -95,6 +99,27 @@ class MobileCacheTest {
 
         assertTrue(approximateCacheBytes(cache) <= limits.maxApproximateBytes)
     }
+
+    @Test
+    fun projects_keep_codex_position_order_without_deriving_membership_from_cwd() {
+        val cache = reconcileProjectList(
+            MobileCache(),
+            "host-1",
+            listOf(project("second", 20), project("first", 10)),
+            limits,
+        )
+
+        assertEquals(listOf("first", "second"), cache.profile("host-1").projects.map { it.id })
+    }
+
+    private fun project(id: String, position: Long) = CodexProject(
+        id = id,
+        name = id,
+        roots = listOf(WorkingDirectory("/workspace/$id")),
+        position = position,
+        createdAtMs = 1,
+        updatedAtMs = 1,
+    )
 
     private fun summary(id: String, updatedAtMs: Long = 1) = ThreadSummary(
         id = id,

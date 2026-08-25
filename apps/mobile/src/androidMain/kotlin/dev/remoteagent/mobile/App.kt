@@ -5,17 +5,21 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -195,23 +199,23 @@ private fun HostFlowScreen(
         )
 
         ConnectionPhase.Connected -> {
-            // A connection always opens on the task surface. The working
-            // directory is only a list filter, so an empty value means all
-            // tasks rather than a separate navigation gate.
+            // A connection opens on the Host's Desktop Project/App Server
+            // Thread projection. Membership still arrives as Thread.projectId.
             val selectedThreadId = view.selectedThreadId
             if (selectedThreadId == null) {
                 ThreadListScreen(
                     profile = profile,
                     view = view,
+                    projects = cache.projects,
                     threads = cache.threadList,
-                    onFilterApply = { path ->
-                        controller.dispatch(AppAction.WorkingDirectoryChanged(profile.hostIdentity, path))
-                        scope.launch { controller.listThreads(profile) }
+                    onRefresh = {
+                        scope.launch {
+                            controller.listProjects(profile)
+                            controller.listThreads(profile)
+                        }
                     },
-                    onRefresh = { scope.launch { controller.listThreads(profile) } },
-                    onStart = { path ->
-                        controller.dispatch(AppAction.WorkingDirectoryChanged(profile.hostIdentity, path))
-                        scope.launch { controller.startThread(profile) }
+                    onStart = { projectId, cwd, prompt ->
+                        scope.launch { controller.startThread(profile, projectId, cwd, prompt) }
                     },
                     onSelect = { threadId -> scope.launch { controller.readThread(profile, threadId) } },
                     modifier = modifier,
@@ -222,6 +226,7 @@ private fun HostFlowScreen(
                     view = view,
                     snapshot = cache.snapshots[selectedThreadId],
                     onBack = { controller.dispatch(AppAction.ThreadListOpened(profile.hostIdentity)) },
+                    onRetry = { scope.launch { controller.readThread(profile, selectedThreadId) } },
                     onSend = { text -> scope.launch { controller.startTurn(profile, selectedThreadId, text) } },
                     onStop = { turnId -> scope.launch { controller.interrupt(profile, selectedThreadId, turnId) } },
                     modifier = modifier,
@@ -256,15 +261,22 @@ private fun ConnectScreen(
 private fun ThreadListScreen(
     profile: HostProfile,
     view: ProfileViewState,
+    projects: List<CodexProject>,
     threads: List<ThreadSummary>,
-    onFilterApply: (String) -> Unit,
     onRefresh: () -> Unit,
-    onStart: (String) -> Unit,
+    onStart: (String?, String, String) -> Unit,
     onSelect: (String) -> Unit,
     modifier: Modifier,
 ) {
-    var filter by remember(profile.hostIdentity, view.workingDirectoryPath) {
-        mutableStateOf(view.workingDirectoryPath)
+    var newTaskTarget by remember(profile.hostIdentity) { mutableStateOf<NewTaskTarget?>(null) }
+    val knownProjectIds = projects.mapTo(mutableSetOf()) { it.id }
+    val unassigned = threads.filter { it.projectId == null || it.projectId !in knownProjectIds }
+    val listPhase = when {
+        view.projectList is LoadPhase.Failed -> view.projectList
+        view.threadList is LoadPhase.Failed -> view.threadList
+        view.projectList == LoadPhase.Loading || view.threadList == LoadPhase.Loading -> LoadPhase.Loading
+        view.projectList == LoadPhase.Idle || view.threadList == LoadPhase.Idle -> LoadPhase.Idle
+        else -> LoadPhase.Ready
     }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -272,49 +284,128 @@ private fun ThreadListScreen(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
-            Text("タスク", style = MaterialTheme.typography.headlineSmall)
+            Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
             Text(profile.name, style = MaterialTheme.typography.bodyMedium)
-            OutlinedTextField(
-                value = filter,
-                onValueChange = { filter = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("作業ディレクトリ（任意の絞り込み）") },
-                placeholder = { Text("/Users/name/project") },
-                singleLine = true,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onFilterApply(filter.trim()) }, enabled = view.threadList != LoadPhase.Loading) {
-                    Text("適用")
-                }
-                Button(onClick = onRefresh, enabled = view.threadList != LoadPhase.Loading) { Text("更新") }
-            }
             Button(
-                onClick = { onStart(filter.trim()) },
-                enabled = filter.isNotBlank() && view.threadList != LoadPhase.Loading,
-            ) { Text("新しいタスク") }
-            if (filter.isBlank()) {
-                Text("作業ディレクトリ未指定では、すべてのタスクを表示します。")
-                Text("新しいタスクを作成するには作業ディレクトリを入力してください。")
-            }
-            when (val phase = view.threadList) {
-                LoadPhase.Idle -> Text("適用を押してタスクを読み込みます。")
-                LoadPhase.Loading -> Text("タスクを読み込み中…")
-                LoadPhase.Ready -> if (threads.isEmpty()) Text("タスクがありません。")
+                onClick = onRefresh,
+                enabled = view.threadList != LoadPhase.Loading && view.projectList != LoadPhase.Loading,
+            ) { Text("更新") }
+            view.notice?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            when (val phase = listPhase) {
+                LoadPhase.Idle -> Text("Codexのプロジェクトとタスクを読み込みます。")
+                LoadPhase.Loading -> Text("プロジェクトとタスクを読み込み中…")
+                LoadPhase.Ready -> Unit
                 is LoadPhase.Failed -> {
                     Text(phase.message, color = MaterialTheme.colorScheme.error)
                     Button(onClick = onRefresh) { Text("再試行") }
                 }
             }
         }
-        items(threads, key = { it.id }) { thread ->
-            Card(modifier = Modifier.fillMaxWidth(), onClick = { onSelect(thread.id) }) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(thread.name ?: thread.preview.ifBlank { "無題のタスク" })
-                    Text(thread.workingDirectory.path, style = MaterialTheme.typography.bodySmall)
+        projects.forEach { project ->
+            item(key = "project-${project.id}") {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("📁 ${project.name}", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { newTaskTarget = NewTaskTarget(project) }) { Text("新規") }
                 }
+            }
+            items(threads.filter { it.projectId == project.id }, key = { it.id }) { thread ->
+                ThreadSummaryCard(thread, onSelect)
+            }
+        }
+        item(key = "unassigned-header") {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("チャット", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = { newTaskTarget = NewTaskTarget(null) }) { Text("新規") }
+            }
+        }
+        items(unassigned, key = { it.id }) { thread ->
+            ThreadSummaryCard(thread, onSelect)
+        }
+        if (view.threadList == LoadPhase.Ready && threads.isEmpty()) {
+            item { Text("タスクがありません。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+    }
+    newTaskTarget?.let { target ->
+        NewTaskDialog(
+            target = target,
+            onDismiss = { newTaskTarget = null },
+            onStart = { cwd, prompt ->
+                newTaskTarget = null
+                onStart(target.project?.id, cwd, prompt)
+            },
+        )
+    }
+}
+
+@Composable
+private fun ThreadSummaryCard(thread: ThreadSummary, onSelect: (String) -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth(), onClick = { onSelect(thread.id) }) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Text(thread.name ?: thread.preview.ifBlank { "無題のタスク" })
+                if (thread.status is ThreadStatus.Active) {
+                    Spacer(Modifier.weight(1f))
+                    Text("実行中", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            if (thread.preview.isNotBlank() && thread.preview != thread.name) {
+                Text(thread.preview, maxLines = 1, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
+}
+
+private data class NewTaskTarget(val project: CodexProject?)
+
+@Composable
+private fun NewTaskDialog(
+    target: NewTaskTarget,
+    onDismiss: () -> Unit,
+    onStart: (String, String) -> Unit,
+) {
+    var cwd by remember(target) { mutableStateOf(target.project?.roots?.firstOrNull()?.path.orEmpty()) }
+    var prompt by remember(target) { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新しいタスク") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(target.project?.name ?: "プロジェクトなし")
+                if (target.project?.roots.orEmpty().size > 1) {
+                    target.project?.roots.orEmpty().forEach { root ->
+                        TextButton(onClick = { cwd = root.path }) {
+                            Text(if (cwd == root.path) "✓ ${root.path}" else root.path)
+                        }
+                    }
+                } else if (target.project?.roots.isNullOrEmpty()) {
+                    OutlinedTextField(
+                        value = cwd,
+                        onValueChange = { cwd = it },
+                        label = { Text("作業ディレクトリ") },
+                        singleLine = true,
+                    )
+                } else {
+                    Text(cwd, style = MaterialTheme.typography.bodySmall)
+                }
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("最初のメッセージ") },
+                    minLines = 4,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onStart(cwd.trim(), prompt.trim()) },
+                enabled = cwd.isNotBlank() && prompt.isNotBlank(),
+            ) { Text("開始") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } },
+    )
 }
 
 @Composable
@@ -323,6 +414,7 @@ private fun ThreadDetailScreen(
     view: ProfileViewState,
     snapshot: ThreadSnapshot?,
     onBack: () -> Unit,
+    onRetry: () -> Unit,
     onSend: (String) -> Unit,
     onStop: (String) -> Unit,
     modifier: Modifier,
@@ -336,7 +428,10 @@ private fun ThreadDetailScreen(
         item {
             Button(onClick = onBack) { Text("タスク一覧") }
             Text(snapshot?.summary?.name ?: snapshot?.summary?.preview ?: "タスクを読み込み中…", style = MaterialTheme.typography.headlineSmall)
-            if (view.threadDetail is LoadPhase.Failed) Text(view.threadDetail.message, color = MaterialTheme.colorScheme.error)
+            if (view.threadDetail is LoadPhase.Failed) {
+                Text(view.threadDetail.message, color = MaterialTheme.colorScheme.error)
+                Button(onClick = onRetry) { Text("再試行") }
+            }
         }
         snapshot?.turns?.forEach { turn ->
             item(key = turn.id) {

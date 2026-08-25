@@ -5,8 +5,9 @@ use std::{
 
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{
-    CodexRpcService, DeviceAuthenticationState, HostIdentity, MdnsAdvertisement, RpcServerConfig,
-    accept_rpc_channel, authenticate_incoming_channel, load_or_create_host_identity, load_settings,
+    CodexRpcService, DesktopProjectStore, DeviceAuthenticationState, HOST_PROJECT_METHODS,
+    HostIdentity, MdnsAdvertisement, RpcServerConfig, accept_rpc_channel,
+    authenticate_incoming_channel, load_or_create_host_identity, load_settings,
     serve_gateway_messages,
 };
 use host_protocol::{
@@ -74,8 +75,22 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), StartupError> {
         .await
         .map_err(|error| StartupError::Codex(error.to_string()))?,
     );
-    let service = Arc::new(CodexRpcService::new(app_server.clone()));
-    let supported_methods = app_server.supported_methods().map(str::to_owned).collect();
+    let desktop_projects = DesktopProjectStore::from_environment()
+        .map_err(|error| StartupError::DesktopProjects(error.to_string()))?;
+    eprintln!(
+        "Bex Host reading Codex Desktop projects from {}",
+        desktop_projects.path().display()
+    );
+    let service = Arc::new(CodexRpcService::new(app_server.clone(), desktop_projects));
+    let mut supported_methods = app_server
+        .supported_methods()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    supported_methods.extend(
+        HOST_PROJECT_METHODS
+            .iter()
+            .map(|method| (*method).to_owned()),
+    );
     let rpc_config = Arc::new(rpc_server_config(
         transport_certificate_hash,
         supported_methods,
@@ -327,6 +342,8 @@ pub(crate) enum StartupError {
     Listen(#[source] std::io::Error),
     #[error("failed to start Codex App Server: {0}")]
     Codex(String),
+    #[error("failed to locate Codex Desktop project state: {0}")]
+    DesktopProjects(String),
     #[error("failed to advertise Host over mDNS: {0}")]
     Mdns(String),
     #[error("mobile connection failed: {0}")]

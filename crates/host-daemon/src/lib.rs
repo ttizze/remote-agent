@@ -1,5 +1,6 @@
 mod codex_rpc;
 mod connection_auth;
+mod desktop_projects;
 mod host_identity;
 mod mdns;
 mod pairing;
@@ -11,6 +12,10 @@ pub use codex_rpc::{CodexRpcService, CodexSession, DispatchError, ResponseDispos
 pub use connection_auth::{
     ConnectionAuthenticationError, DeviceAuthenticationState, authenticate_incoming_channel,
     authenticate_outgoing_channel, pair_outgoing_channel,
+};
+pub use desktop_projects::{
+    DesktopProjectError, DesktopProjectStore, HOST_PROJECT_LIST_METHOD, HOST_PROJECT_METHODS,
+    HOST_THREAD_LIST_METHOD, HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
 };
 #[cfg(target_os = "macos")]
 pub use host_identity::MacOsKeychainHostIdentityStore;

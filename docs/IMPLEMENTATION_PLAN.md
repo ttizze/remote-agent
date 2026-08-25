@@ -5,8 +5,8 @@
 - Milestone 1 is implemented: the Rust workspace, Codex App Server lifecycle, installed-binary Schema preflight, raw JSONL operations, deterministic tests, and a live read-only Codex check.
 - Milestone 2 is implemented: version 2 length-prefixed Mobile RPC, arbitrary Codex methods, bidirectional requests, bounded QUIC handling, deadlines, cancellation, and loopback tests.
 - Milestone 3 Host work is implemented: expiring one-use pairing tickets, pinned Host proofs, device challenge authentication, atomic settings, and macOS Keychain Host identity storage. QR camera UI remains part of the mobile work.
-- Milestone 4 implementation is complete: Android Jetpack Compose and iOS SwiftUI use the same Kotlin application state and raw Codex boundary with local UI projections; both platforms provide QR capture, per-Host secure device identity, Rust/Quinn transport bindings, authenticated mDNS rediscovery, isolated Host Profiles, and the canonical thread/turn flow.
-- Milestone 4 verification covers the full Rust workspace, the shared iOS tests, a headless XCUITest that launches the native SwiftUI application in iOS Simulator and verifies that the initial pairing screen remains alive, and signed installation/launch on a physical iPhone. Android emulator and end-to-end Host pairing on physical devices remain to be run where the required SDKs and Host process are available.
+- Milestone 4 implementation is complete: Android Jetpack Compose and iOS SwiftUI use the same Kotlin application state and raw Codex boundary with local UI projections; both platforms provide QR capture, per-Host secure device identity, Rust/Quinn transport bindings, authenticated mDNS rediscovery, isolated Host Profiles, and the Project/Thread/Turn flow. The Host reads the current Codex Desktop Project index without persisting a copy, overlays its explicit Thread assignments on App Server results, and starts each new task with its first prompt.
+- Milestone 4 verification covers the Rust workspace unit/integration targets, shared Kotlin/iOS Simulator tests, the installed Codex Desktop global-state schema, live read-only App Server probes, and a headless XCUITest build/run in iOS Simulator. Populated real-data grouping on the revised physical-device build and the Android build/emulator flow remain unverified.
 
 ## Outcome
 
@@ -17,9 +17,13 @@ The first implementation supports Codex only. A common agent adapter interface w
 ## Product invariants
 
 - Codex is the source of truth for threads, turns, items, history, and current thread status.
+- Codex Desktop's `.codex-global-state.json` is the read-only source for local Projects, Project order, explicit Thread assignment, and explicit projectless status. The Host reloads it for each Project-aware request and does not persist a second Project index.
+- Codex App Server remains the source for Threads. The Host applies Desktop's explicit assignment first, explicit projectless status second, and otherwise retains App Server's `Thread.projectId`; it never infers Project membership from `cwd`.
+- A Project task supplies the Desktop Project ID as `thread/start.projectId` and one of its roots as `cwd`. Remote Agent does not write Desktop global-state while this integration remains read-only.
 - A Codex Thread is identified only by its Codex `threadId`. Remote Agent does not mint a competing session ID or add a provider discriminator while Codex is the only provider.
 - The PC Host persists paired device public keys and PC Host settings.
 - The PC Host private key is stored in the operating system secure store.
+- macOS development and installed Host binaries use the stable `dev.remoteagent.host-daemon` code-signing identifier so rebuilding the Host does not create a new Keychain client identity.
 - Images and files use temporary Blob storage and are never stored in a Remote Agent database.
 - A Paired Device may select any working directory available to the PC Host account.
 - The built-in editor sends Manual Edits directly to the Host Daemon; an AI Edit is a distinct action that starts or steers a Codex Turn. Manual Edits remain available while Turns are active.
@@ -82,7 +86,7 @@ The module owns the process, initialization handshake, request correlation, JSON
 
 The implementation sends `initialize`, waits for the response, and then sends `initialized` before exposing the ready instance. Codex-generated JSON Schema is the compatibility reference. The module must not leak its internal request IDs into the Mobile RPC.
 
-At Host Daemon startup, Remote Agent resolves the Codex executable, preferring the Codex bundled with ChatGPT Desktop on macOS and falling back to `codex` on `PATH`; an explicit `--codex <PATH>` remains authoritative. It asks the exact resolved executable to write its embedded App Server JSON Schema into a private temporary directory, then spawns that same executable. Schema generation is a readiness preflight and capability advertisement, not a Host-side method allow-list. After the Host-owned `initialize`/`initialized` handshake, authenticated Mobile RPC forwards Codex-native methods and JSON without a second Codex object model.
+At Host Daemon startup, Remote Agent resolves the Codex executable, preferring the Codex bundled with ChatGPT Desktop on macOS and falling back to `codex` on `PATH`; an explicit `--codex <PATH>` remains authoritative. It asks the exact resolved executable to write its embedded App Server JSON Schema into a private temporary directory, then spawns that same executable. Schema generation is a readiness preflight and capability advertisement, not a Host-side method allow-list. After the Host-owned `initialize`/`initialized` handshake, authenticated Mobile RPC forwards Codex-native methods and JSON without a second Codex object model. The Project-aware `host/project/list` and `host/thread/{list,read,start}` methods form a separate Host-owned read projection over Desktop Project state and App Server Thread results.
 
 ## Mobile RPC
 
@@ -99,7 +103,7 @@ One client-initiated bidirectional QUIC stream carries all structured traffic. F
 }
 ```
 
-Responses contain the request `id` and either `result` or `error`. IDs may be JSON integers or strings. Notifications omit `id`. Codex-originated requests contain `id`, `method`, and `params`; a Mobile Client answers them with a response carrying the same connection-local proxy ID. Method names, params, results, errors, notifications, and extension fields cross the gateway without Host DTO translation.
+Responses contain the request `id` and either `result` or `error`. IDs may be JSON integers or strings. Notifications omit `id`. Codex-originated requests contain `id`, `method`, and `params`; a Mobile Client answers them with a response carrying the same connection-local proxy ID. Codex method names, params, results, errors, notifications, and extension fields cross the gateway without Host DTO translation. Host-owned Project methods are advertised separately in the same capability list and return the Mobile Project/Thread projection described above.
 
 RPC version negotiation, message size, queue length, request deadline, and the installed Codex method set are part of the connection handshake. The method set is a capability hint only. Unknown methods are forwarded so Codex itself decides whether they are valid.
 
@@ -133,7 +137,7 @@ The Mobile Client presents Manual Edit and AI Edit as distinct actions. A Manual
 
 ## Reconnection
 
-For a selected thread, the Mobile Client consumes the raw notification stream and uses native `thread/resume` followed by `thread/read` with `includeTurns`. It projects the returned Codex object into its UI cache while retaining unknown notifications and Item kinds as raw JSON. The Host Daemon does not synthesize a Snapshot RPC or translate events.
+For a selected thread, the Mobile Client consumes the raw notification stream and uses `host/thread/read` with `includeTurns` to obtain App Server history plus current Desktop Project membership without loading a writer. Immediately before starting a later Turn, it calls native `thread/resume` with that thread's working directory, followed by `turn/start`. It projects returned Codex objects into its UI cache while retaining unknown notifications and Item kinds as raw JSON. The Host Daemon does not synthesize a durable Snapshot or translate live events.
 
 No event cursor is persisted. A new transport connection always performs synchronization from Codex.
 
@@ -169,7 +173,11 @@ No event cursor is persisted. A new transport connection always performs synchro
 - Create the Android Compose and iOS SwiftUI applications over common Kotlin application state.
 - Implement QR capture and secure device identity on both platforms.
 - Support multiple isolated PC Host Profiles and authenticated mDNS rediscovery.
-- Connect, choose a working directory, list/read/start a thread, send a text turn, stream output, and interrupt it.
+- Connect and load the paginated Codex Desktop Project index and App Server Thread list through the Host-owned read projection.
+- Group Threads by Desktop's explicit assignment in Desktop Project order and show explicitly projectless, unassigned, and unknown-Project Threads in a final Chat section.
+- Start a task from a Project using `thread/start.projectId` and one of that Project's roots as `cwd`, then submit its first prompt in the same creation flow.
+- Start an unassigned task only after the user supplies its working directory and first prompt.
+- Read a thread, send later text turns, stream output, and interrupt an active turn.
 - Persist and render the bounded Mobile Cache, retaining unknown raw events/items, then reconcile it with a fresh native Codex read.
 - Verify the canonical flow on Android emulator, iOS simulator, and then physical devices.
 
@@ -207,6 +215,6 @@ No event cursor is persisted. A new transport connection always performs synchro
 
 ## Verification evidence
 
-Routine tests use deterministic in-process peers and temporary directories. They do not use a developer's saved Codex history or credentials. A live App Server handshake/list operation is a compatibility verification, not a routine test; running a model-backed Turn is a separate explicit smoke check.
+Routine tests use deterministic in-process peers and temporary directories. They do not use a developer's saved Codex history or credentials. A live App Server handshake/list operation and `cargo run -p host-daemon --example check_desktop_projects` are read-only compatibility verification, not routine tests; running a model-backed Turn is a separate explicit smoke check.
 
 Builds establish compilation and packaging only. Simulator tests do not establish physical-device behavior, local-network permissions, camera behavior, background lifecycle, or reachability through Tailscale/IPv6. Each milestone report must state those unverified surfaces explicitly.

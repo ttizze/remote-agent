@@ -56,9 +56,10 @@ class CodexProtocolTest {
     @Test
     fun thread_status_accepts_string_and_completed_status_prefers_nested_turn_status() {
         val summary = codexThreadSummary(json.parseToJsonElement("""
-            {"id":"thread-1","status":"active","cwd":"/workspace"}
+            {"id":"thread-1","status":"active","cwd":"/workspace","projectId":"project-1"}
         """))
         assertIs<ThreadStatus.Active>(summary.status)
+        assertEquals("project-1", summary.projectId)
 
         val event = codexThreadEvent(
             "turn/completed",
@@ -68,6 +69,19 @@ class CodexProtocolTest {
             """),
         )
         assertEquals(TurnStatus.Interrupted, assertIs<ThreadEvent.TurnCompleted>(event).status)
+    }
+
+    @Test
+    fun project_projection_uses_official_roots_and_position_fields() {
+        val project = codexProject(json.parseToJsonElement("""
+            {"id":"project-1","name":"remote-agent","roots":[{"path":"/workspace/remote-agent"}],
+             "metadata":{},"position":7,"createdAt":11,"updatedAt":13}
+        """))
+
+        assertEquals("project-1", project.id)
+        assertEquals("remote-agent", project.name)
+        assertEquals(listOf(WorkingDirectory("/workspace/remote-agent")), project.roots)
+        assertEquals(7, project.position)
     }
 
     @Test

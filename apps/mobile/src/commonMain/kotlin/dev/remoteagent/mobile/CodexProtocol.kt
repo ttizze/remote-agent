@@ -124,9 +124,25 @@ internal fun codexThreadSummary(value: JsonElement): ThreadSummary {
         name = raw.string("name"),
         preview = raw.string("preview").orEmpty(),
         workingDirectory = WorkingDirectory(raw.string("cwd") ?: raw.nestedString("workingDirectory", "path").orEmpty()),
+        projectId = raw.string("projectId"),
         createdAtMs = raw.long("createdAt") ?: raw.long("createdAtMs") ?: 0L,
         updatedAtMs = raw.long("updatedAt") ?: raw.long("updatedAtMs") ?: 0L,
         status = codexThreadStatus(raw["status"]),
+        raw = raw,
+    )
+}
+
+internal fun codexProject(value: JsonElement): CodexProject {
+    val raw = value.asObjectOrNull() ?: emptyJsonObject()
+    return CodexProject(
+        id = raw.string("id").orEmpty(),
+        name = raw.string("name").orEmpty(),
+        roots = raw.array("roots").orEmpty().mapNotNull { root ->
+            root.asObjectOrNull()?.string("path")?.let(::WorkingDirectory)
+        },
+        position = raw.long("position") ?: 0L,
+        createdAtMs = raw.long("createdAt") ?: 0L,
+        updatedAtMs = raw.long("updatedAt") ?: 0L,
         raw = raw,
     )
 }

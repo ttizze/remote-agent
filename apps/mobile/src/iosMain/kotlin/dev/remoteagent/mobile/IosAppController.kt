@@ -29,6 +29,14 @@ data class IosThreadSummaryView(
     val title: String,
     val preview: String,
     val workingDirectory: String,
+    val projectId: String?,
+    val isActive: Boolean,
+)
+
+data class IosProjectView(
+    val id: String,
+    val name: String,
+    val roots: List<String>,
 )
 
 data class IosItemView(
@@ -60,6 +68,9 @@ data class IosAppViewState(
     val pairingError: String?,
     val connectionError: String?,
     val workingDirectory: String,
+    val projectLoadState: IosLoadState,
+    val projectLoadError: String?,
+    val projects: List<IosProjectView>,
     val threadLoadState: IosLoadState,
     val threadLoadError: String?,
     val threads: List<IosThreadSummaryView>,
@@ -120,8 +131,14 @@ class IosAppController {
         controller.dispatch(AppAction.WorkingDirectoryChanged(profile.hostIdentity, path))
     }
 
-    fun listThreads() = withSelectedProfile { profile -> controller.listThreads(profile) }
-    fun startThread() = withSelectedProfile { profile -> controller.startThread(profile) }
+    fun refreshTaskList() = withSelectedProfile { profile ->
+        controller.listProjects(profile)
+        controller.listThreads(profile)
+    }
+
+    fun startTask(projectId: String?, cwd: String, firstPrompt: String) = withSelectedProfile { profile ->
+        controller.startThread(profile, projectId, cwd, firstPrompt)
+    }
 
     fun openThread(threadId: String) = withSelectedProfile { profile -> controller.readThread(profile, threadId) }
 
@@ -170,6 +187,11 @@ private fun AppState.toIosViewState(): IosAppViewState {
         pairingError = pairingError,
         connectionError = (view.connection as? ConnectionPhase.Failed)?.message,
         workingDirectory = view.workingDirectoryPath,
+        projectLoadState = view.projectList.toIosLoadState(),
+        projectLoadError = (view.projectList as? LoadPhase.Failed)?.message,
+        projects = profileCache?.projects.orEmpty().map { project ->
+            IosProjectView(project.id, project.name, project.roots.map(WorkingDirectory::path))
+        },
         threadLoadState = view.threadList.toIosLoadState(),
         threadLoadError = (view.threadList as? LoadPhase.Failed)?.message,
         threads = profileCache?.threadList.orEmpty().map { summary ->
@@ -178,6 +200,8 @@ private fun AppState.toIosViewState(): IosAppViewState {
                 title = summary.name ?: summary.preview.ifBlank { "無題のタスク" },
                 preview = summary.preview,
                 workingDirectory = summary.workingDirectory.path,
+                projectId = summary.projectId,
+                isActive = summary.status is ThreadStatus.Active,
             )
         },
         selectedThread = snapshot?.toIosThreadView(),

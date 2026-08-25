@@ -1,4 +1,4 @@
-//! Lossless gateway between authenticated mobile sessions and Codex App Server.
+//! Gateway between authenticated mobile sessions and Codex App Server.
 //!
 //! The daemon owns the transport and device authentication boundary. Once a
 //! session is authenticated, Codex owns the RPC vocabulary: this module does

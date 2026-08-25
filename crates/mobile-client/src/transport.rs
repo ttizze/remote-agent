@@ -1,6 +1,7 @@
 use std::{
     net::IpAddr,
     sync::{Arc, Mutex as StdMutex},
+    time::Duration,
 };
 
 use host_protocol::{
@@ -48,7 +49,11 @@ pub(crate) async fn establish(
     };
     let mut endpoint = Endpoint::client(bind).map_err(MobileClientError::Endpoint)?;
     let (tls, observed_certificate) = tls_client_config()?;
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(tls)));
+    let mut transport = quinn::TransportConfig::default();
+    transport.keep_alive_interval(Some(Duration::from_secs(10)));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(tls));
+    client_config.transport_config(Arc::new(transport));
+    endpoint.set_default_client_config(client_config);
     let connection = endpoint
         .connect(config.address, &config.server_name)
         .map_err(MobileClientError::Connect)?
