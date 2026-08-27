@@ -45,7 +45,9 @@
               gradle
               jdk21
               rustToolchain
+              cargo-tauri
               cargo-ndk
+              nodejs_22
               androidSdk
             ];
 

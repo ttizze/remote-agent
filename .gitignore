@@ -1,4 +1,5 @@
 /target/
+/apps/desktop/node_modules/
 /.gradle/
 /.idea/
 **/build/

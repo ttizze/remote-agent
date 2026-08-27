@@ -1,0 +1,11 @@
+{
+  "name": "remote-agent-desktop-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "happy-dom": "20.11.6"
+  }
+}

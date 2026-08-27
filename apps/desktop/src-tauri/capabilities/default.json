@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Local capabilities required by the Remote Agent main window.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:event:default"]
+}

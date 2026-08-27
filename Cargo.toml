@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/desktop/src-tauri",
     "crates/codex-app-server",
     "crates/host-daemon",
     "crates/host-protocol",

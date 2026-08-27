@@ -37,4 +37,37 @@ cargo install cargo-ndk --locked
 ./gradlew :apps:mobile:assembleDebug
 ```
 
+## Desktop app
+
+The Tauri desktop app runs Codex locally and reuses the same app-server and
+Codex Desktop project integration as the Host daemon. It does not use the
+mobile SSH or pairing path.
+
+Run it on macOS from the repository root:
+
+```sh
+nix develop . --command cargo run -p remote-agent-desktop
+```
+
+Build the macOS application bundle from the desktop directory:
+
+```sh
+nix develop .
+cd apps/desktop
+cargo tauri build
+```
+
+Run the deterministic desktop UI tests without launching a window:
+
+```sh
+npm ci
+npm test
+```
+
+The first launch starts the Codex bundled with ChatGPT Desktop when available,
+then falls back to `codex` on `PATH`. The desktop UI provides a collapsible
+Codex-style project/chat sidebar, responsive conversation layout, an independent
+change-review pane, chat creation, live conversation activity, approvals and
+user-input requests, follow-up messages, and turn interruption.
+
 See [the implementation plan](docs/IMPLEMENTATION_PLAN.md) for scope and milestones.
