@@ -347,10 +347,17 @@ export function createDesktopApp({ window, bridge = createTauriBridge(window) })
   }
 
   function activityTitle(item) {
-    switch (item.type) {
+    const type = item.type;
+    switch (type) {
       case "reasoning": return "Reasoning";
       case "commandExecution": return `$ ${firstLine(item.command) || "command"} · ${item.status ?? "completed"}`;
       case "fileChange": return `${item.changes?.length ?? 0} files changed · ${item.status ?? "completed"}`;
+      default: return activityTitleByType(item, type);
+    }
+  }
+
+  function activityTitleByType(item, type) {
+    switch (type) {
       case "plan": return "計画を更新しました";
       case "mcpToolCall": return [item.server, item.tool].filter(Boolean).join(" / ") || "MCPツールを実行しました";
       case "dynamicToolCall": return `${item.tool ?? "ツール"}を実行しました`;

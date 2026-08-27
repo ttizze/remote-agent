@@ -3,58 +3,105 @@ export function projectConversation(thread, pendingRequests) {
 }
 
 export function reduceConversationState(state, message) {
-  const next = {
+  const next = cloneConversationState(state);
+  const params = message?.params ?? {};
+  if (message?.method === "serverRequest/resolved") {
+    return resolveServerRequest(next, params);
+  }
+  if (message?.method && Object.prototype.hasOwnProperty.call(message, "id")) {
+    return upsertPendingRequest(next, message, params);
+  }
+  if (!next.thread || (params.threadId && params.threadId !== next.thread.id)) return next;
+
+  reduceThreadState(next.thread, message.method, params);
+  return next;
+}
+
+function cloneConversationState(state) {
+  return {
     ...state,
     thread: state.thread == null ? null : structuredClone(state.thread),
     pendingRequests: structuredClone(state.pendingRequests ?? []),
   };
-  const params = message?.params ?? {};
-  if (message?.method === "serverRequest/resolved") {
-    next.pendingRequests = next.pendingRequests.filter((request) => requestKey(request.id) !== requestKey(params.requestId));
-    return next;
-  }
-  if (message?.method && Object.prototype.hasOwnProperty.call(message, "id")) {
-    const request = { id: message.id, method: message.method, params };
-    const index = next.pendingRequests.findIndex((candidate) => requestKey(candidate.id) === requestKey(message.id));
-    if (index >= 0) next.pendingRequests[index] = request;
-    else next.pendingRequests.push(request);
-    return next;
-  }
-  if (!next.thread || (params.threadId && params.threadId !== next.thread.id)) return next;
+}
 
-  if (message.method === "turn/started") {
-    upsertTurn(next.thread, {
-      ...(params.turn ?? {}),
-      id: params.turn?.id ?? params.turnId,
-      status: "inProgress",
-      items: params.turn?.items ?? [],
-    });
-  } else if (message.method === "turn/completed") {
-    const incoming = params.turn ?? {};
-    const turn = ensureTurn(next.thread, incoming.id ?? params.turnId);
-    Object.assign(turn, incoming, { status: incoming.status ?? "completed" });
-  } else if (message.method === "item/started" || message.method === "item/completed") {
-    const turn = ensureTurn(next.thread, params.turnId);
-    upsertItem(turn, params.item ?? {});
-  } else if (message.method === "item/agentMessage/delta") {
-    const turn = ensureTurn(next.thread, params.turnId);
-    let item = turn.items.find((candidate) => candidate.id === params.itemId);
-    if (!item) {
-      item = { id: params.itemId, type: "agentMessage", text: "" };
-      turn.items.push(item);
-    }
-    item.text = `${item.text ?? ""}${params.delta ?? ""}`;
-  } else if (message.method === "item/reasoning/textDelta" || message.method === "item/reasoning/summaryTextDelta") {
-    appendDelta(next.thread, params, "summary", "reasoning");
-  } else if (message.method === "item/commandExecution/outputDelta") {
-    appendDelta(next.thread, params, "aggregatedOutput", "commandExecution");
-  } else if (message.method === "error") {
-    const turn = ensureTurn(next.thread, params.turnId);
-    turn.error = { ...(params.error ?? {}), willRetry: params.willRetry === true };
-  } else if (message.method === "thread/status/changed") {
-    next.thread.status = params.status;
+function resolveServerRequest(state, params) {
+  state.pendingRequests = state.pendingRequests.filter((request) => requestKey(request.id) !== requestKey(params.requestId));
+  return state;
+}
+
+function upsertPendingRequest(state, message, params) {
+  const request = { id: message.id, method: message.method, params };
+  const index = state.pendingRequests.findIndex((candidate) => requestKey(candidate.id) === requestKey(message.id));
+  if (index >= 0) state.pendingRequests[index] = request;
+  else state.pendingRequests.push(request);
+  return state;
+}
+
+function reduceThreadState(thread, method, params) {
+  switch (method) {
+    case "turn/started":
+      applyTurnStarted(thread, params);
+      break;
+    case "turn/completed":
+      applyTurnCompleted(thread, params);
+      break;
+    case "item/started":
+    case "item/completed":
+      applyItemChange(thread, params);
+      break;
+    case "item/agentMessage/delta":
+      applyAgentMessageDelta(thread, params);
+      break;
+    case "item/reasoning/textDelta":
+    case "item/reasoning/summaryTextDelta":
+      appendDelta(thread, params, "summary", "reasoning");
+      break;
+    case "item/commandExecution/outputDelta":
+      appendDelta(thread, params, "aggregatedOutput", "commandExecution");
+      break;
+    case "error":
+      applyError(thread, params);
+      break;
+    case "thread/status/changed":
+      thread.status = params.status;
+      break;
   }
-  return next;
+}
+
+function applyTurnStarted(thread, params) {
+  upsertTurn(thread, {
+    ...(params.turn ?? {}),
+    id: params.turn?.id ?? params.turnId,
+    status: "inProgress",
+    items: params.turn?.items ?? [],
+  });
+}
+
+function applyTurnCompleted(thread, params) {
+  const incoming = params.turn ?? {};
+  const turn = ensureTurn(thread, incoming.id ?? params.turnId);
+  Object.assign(turn, incoming, { status: incoming.status ?? "completed" });
+}
+
+function applyItemChange(thread, params) {
+  const turn = ensureTurn(thread, params.turnId);
+  upsertItem(turn, params.item ?? {});
+}
+
+function applyAgentMessageDelta(thread, params) {
+  const turn = ensureTurn(thread, params.turnId);
+  let item = turn.items.find((candidate) => candidate.id === params.itemId);
+  if (!item) {
+    item = { id: params.itemId, type: "agentMessage", text: "" };
+    turn.items.push(item);
+  }
+  item.text = `${item.text ?? ""}${params.delta ?? ""}`;
+}
+
+function applyError(thread, params) {
+  const turn = ensureTurn(thread, params.turnId);
+  turn.error = { ...(params.error ?? {}), willRetry: params.willRetry === true };
 }
 
 function requestKey(id) {
