@@ -182,3 +182,43 @@ test("ChatのGit変更をレビューpaneへ表示する", async () => {
   assert.match(pane.textContent, /apps\/desktop\/dist\/app\.js/);
   assert.ok(calls.some((call) => call.method === "workspace/review" && call.params.cwd === "/work/remote-agent"));
 });
+
+test("初回接続失敗後の再試行でlistenerとDOMイベントを重複登録しない", async () => {
+  const window = new Window({ url: "tauri://localhost" });
+  window.document.write(await readFile(new URL("../dist/index.html", import.meta.url), "utf8"));
+  const calls = [];
+  const notificationHandlers = [];
+  let connectCalls = 0;
+  const bridge = {
+    listen: async (handler) => {
+      notificationHandlers.push(handler);
+      return () => {};
+    },
+    connect: async () => {
+      connectCalls += 1;
+      if (connectCalls === 1) throw new Error("Codex unavailable");
+      return { platformOs: "macos", userAgent: "codex-test" };
+    },
+    request: async (method, params) => {
+      calls.push({ method, params });
+      return { data: [], nextCursor: null };
+    },
+    respond: async () => {},
+    respondError: async () => {},
+  };
+  const app = createDesktopApp({ window, bridge });
+
+  await app.start();
+  assert.equal(connectCalls, 1);
+  assert.equal(notificationHandlers.length, 1);
+
+  window.document.querySelector("#sidebar-state button").click();
+  await window.happyDOM.whenAsyncComplete();
+  assert.equal(connectCalls, 2);
+  assert.equal(notificationHandlers.length, 1);
+
+  calls.length = 0;
+  window.document.querySelector("#refresh-button").click();
+  await window.happyDOM.whenAsyncComplete();
+  assert.deepEqual(calls.map((call) => call.method), ["host/project/list", "host/thread/list"]);
+});

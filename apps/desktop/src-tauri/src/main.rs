@@ -1,4 +1,5 @@
 mod backend;
+mod backend_rpc;
 mod workspace_review;
 
 use std::sync::Arc;

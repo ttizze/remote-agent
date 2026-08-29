@@ -1,4 +1,5 @@
 import { projectConversation, reduceConversationState } from "./conversation-state.js";
+import { createTauriBridge } from "./tauri-bridge.js";
 
 export function createDesktopApp({ window, bridge = createTauriBridge(window) }) {
   const { document } = window;
@@ -14,6 +15,10 @@ export function createDesktopApp({ window, bridge = createTauriBridge(window) })
     sending: false,
     refreshTimer: null,
   };
+
+  let eventsBound = false;
+  let eventsListening = false;
+  let eventsListeningPromise = null;
 
   const dom = Object.fromEntries([
     "app", "refresh-button", "connection-dot", "sidebar-toggle", "review-toggle", "new-task-button", "thread-search",
@@ -45,7 +50,7 @@ export function createDesktopApp({ window, bridge = createTauriBridge(window) })
   async function initialize() {
     bindEvents();
     try {
-      await bridge.listen((payload) => handleCodexMessage(payload));
+      await listenForCodexEvents();
       const info = await bridge.connect();
       state.connection = "connected";
       dom.app.dataset.connection = "connected";
@@ -61,7 +66,22 @@ export function createDesktopApp({ window, bridge = createTauriBridge(window) })
     }
   }
 
+  async function listenForCodexEvents() {
+    if (eventsListening) return;
+    if (!eventsListeningPromise) {
+      eventsListeningPromise = (async () => {
+        await bridge.listen((payload) => handleCodexMessage(payload));
+        eventsListening = true;
+      })().finally(() => {
+        eventsListeningPromise = null;
+      });
+    }
+    await eventsListeningPromise;
+  }
+
   function bindEvents() {
+    if (eventsBound) return;
+    eventsBound = true;
     dom.sidebarToggle.addEventListener("click", () => {
       const sidebar = document.getElementById("app-sidebar");
       const open = !sidebar.hidden;
@@ -741,29 +761,6 @@ export function createDesktopApp({ window, bridge = createTauriBridge(window) })
   }
 
   return { start: initialize };
-}
-
-function createTauriBridge(window) {
-  const tauri = window.__TAURI__;
-  const invoke = tauri?.core?.invoke;
-  const listen = tauri?.event?.listen;
-  if (!invoke || !listen) {
-    return {
-      listen: async () => {},
-      connect: async () => { throw new Error("この画面はTauriアプリ内で開いてください"); },
-      request: async () => { throw new Error("Tauri runtime is unavailable"); },
-      respond: async () => { throw new Error("Tauri runtime is unavailable"); },
-      respondError: async () => { throw new Error("Tauri runtime is unavailable"); },
-    };
-  }
-  return {
-    listen: (handler) => listen("codex-message", ({ payload }) => handler(payload)),
-    connect: () => invoke("connect_codex"),
-    request: (method, params) => invoke("codex_request", { method, params }),
-    review: (cwd) => invoke("workspace_review", { cwd }),
-    respond: (id, result) => invoke("codex_respond", { id, result }),
-    respondError: (id, error) => invoke("codex_respond_error", { id, error }),
-  };
 }
 
 if (typeof window !== "undefined") {

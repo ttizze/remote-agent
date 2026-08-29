@@ -4,13 +4,12 @@ use std::{
 };
 
 use codex_app_server::{AppServerConfig, ClientInfo, CodexAppServer};
-use host_daemon::{
-    DesktopProjectStore, HOST_PROJECT_LIST_METHOD, HOST_THREAD_LIST_METHOD,
-    HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
-};
+use host_daemon::DesktopProjectStore;
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use tokio::sync::broadcast;
+
+use crate::backend_rpc::{self, RequestRoute, ResponseKind};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -68,7 +67,8 @@ impl DesktopBackend {
 
     pub(crate) async fn request(&self, method: String, params: Value) -> Result<Value, String> {
         let id = self.next_request_id()?;
-        if method == HOST_PROJECT_LIST_METHOD {
+        let route = RequestRoute::for_method(&method);
+        if route.is_project_list() {
             return self
                 .projects
                 .project_list(&params)
@@ -76,21 +76,15 @@ impl DesktopBackend {
                 .map_err(|error| error.to_string());
         }
 
-        let upstream_method = desktop_upstream_method(&method);
-        let line = serde_json::to_string(&json!({
-            "id": id,
-            "method": upstream_method.unwrap_or(&method),
-            "params": params,
-        }))
-        .map_err(|error| error.to_string())?;
+        let line = backend_rpc::request_line(id, route.upstream_method(&method), &params)?;
         let response = self
             .app_server
             .request_raw(&line)
             .await
             .map_err(|error| error.to_string())?;
-        let result = response_result(&response)?;
+        let result = backend_rpc::response_result(&response)?;
 
-        if upstream_method.is_some() {
+        if route.enriches_threads() {
             return self
                 .projects
                 .enrich_threads(result)
@@ -101,11 +95,11 @@ impl DesktopBackend {
     }
 
     pub(crate) async fn respond(&self, id: Value, result: Value) -> Result<(), String> {
-        self.send_response(id, "result", result).await
+        self.send_response(id, ResponseKind::Result, result).await
     }
 
     pub(crate) async fn respond_error(&self, id: Value, error: Value) -> Result<(), String> {
-        self.send_response(id, "error", error).await
+        self.send_response(id, ResponseKind::Error, error).await
     }
 
     fn next_request_id(&self) -> Result<u64, String> {
@@ -118,72 +112,16 @@ impl DesktopBackend {
         Ok(previous_id + 1)
     }
 
-    async fn send_response(&self, id: Value, field: &str, payload: Value) -> Result<(), String> {
-        let mut response = Map::from_iter([("id".to_owned(), id)]);
-        response.insert(field.to_owned(), payload);
-        let line = serde_json::to_string(&response).map_err(|error| error.to_string())?;
+    async fn send_response(
+        &self,
+        id: Value,
+        kind: ResponseKind,
+        payload: Value,
+    ) -> Result<(), String> {
+        let line = backend_rpc::response_line(id, kind, payload)?;
         self.app_server
             .send_raw(&line)
             .await
             .map_err(|error| error.to_string())
-    }
-}
-
-fn desktop_upstream_method(method: &str) -> Option<&'static str> {
-    match method {
-        HOST_THREAD_LIST_METHOD => Some("thread/list"),
-        HOST_THREAD_READ_METHOD => Some("thread/read"),
-        HOST_THREAD_START_METHOD => Some("thread/start"),
-        _ => None,
-    }
-}
-
-fn response_result(line: &str) -> Result<Value, String> {
-    let response: Map<String, Value> =
-        serde_json::from_str(line).map_err(|error| format!("invalid Codex response: {error}"))?;
-    if let Some(error) = response.get("error") {
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("Codex rejected the request");
-        return Err(message.to_owned());
-    }
-    response
-        .get("result")
-        .cloned()
-        .ok_or_else(|| "Codex response is missing result".to_owned())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_only_desktop_thread_methods() {
-        assert_eq!(
-            desktop_upstream_method(HOST_THREAD_LIST_METHOD),
-            Some("thread/list")
-        );
-        assert_eq!(
-            desktop_upstream_method(HOST_THREAD_READ_METHOD),
-            Some("thread/read")
-        );
-        assert_eq!(
-            desktop_upstream_method(HOST_THREAD_START_METHOD),
-            Some("thread/start")
-        );
-        assert_eq!(desktop_upstream_method("turn/start"), None);
-    }
-
-    #[test]
-    fn extracts_result_and_remote_error() {
-        assert_eq!(
-            response_result(r#"{"id":1,"result":{"value":7}}"#).unwrap(),
-            json!({"value": 7})
-        );
-        assert_eq!(
-            response_result(r#"{"id":1,"error":{"code":-1,"message":"nope"}}"#).unwrap_err(),
-            "nope"
-        );
     }
 }
