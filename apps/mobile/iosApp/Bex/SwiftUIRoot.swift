@@ -1368,7 +1368,7 @@ private struct ThreadActivityHeader: View {
 
 private struct ThreadRequestRow: View {
     let request: IosTurnRequestView
-    @ObservedObject var model: BexAppViewModel
+    let model: BexAppViewModel
     @State private var answers: [String: String] = [:]
     @State private var rawResponse = "{}"
     @State private var busy = false
@@ -1478,7 +1478,7 @@ private struct ThreadErrorRow: View {
 private struct ThreadMessageRow: View {
     let item: IosItemView
     let isUser: Bool
-    @ObservedObject var model: BexAppViewModel
+    let model: BexAppViewModel
     @State private var sharing = false
     @State private var expanded = false
     @State private var copied = false
@@ -1537,7 +1537,7 @@ private struct ResponseShareSheet: UIViewControllerRepresentable {
 
 private struct ThreadItemRow: View {
     let item: IosItemView
-    @ObservedObject var model: BexAppViewModel
+    let model: BexAppViewModel
     let isExpanded: Bool
     let toggleExpanded: () -> Void
     let loadDetails: () async -> (String?, String?)
@@ -1693,7 +1693,7 @@ private struct ConversationImage: View {
 /// Foundation parses block structure and inline Markdown; no HTML/web view is involved.
 private struct ConversationMarkdown: View {
     let text: String
-    @ObservedObject var model: BexAppViewModel
+    let model: BexAppViewModel
     @State private var blocks: [Block] = []
     private struct Block: Identifiable {
         let id: Int

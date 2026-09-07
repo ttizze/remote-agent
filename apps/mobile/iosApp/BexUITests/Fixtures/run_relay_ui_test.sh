@@ -94,6 +94,7 @@ if [ "$#" -eq 0 ]; then
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
         testSimulatorKeepsInterruptedWorkCollapsed \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
+        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorReopensCompletedHistoryCollapsed \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
         testSimulatorCanSteerAndStopAnActiveTurn \

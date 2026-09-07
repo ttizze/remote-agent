@@ -93,9 +93,13 @@ internal class IosMobileDependencies {
 object IosLifecycleBridge {
     /** Installed by the one live iOS application controller. */
     internal var onRestoreAfterForeground: (() -> Unit)? = null
+    internal var onPersistBeforeBackground: ((() -> Unit) -> Unit)? = null
 
     fun restoreAfterForeground() = onRestoreAfterForeground?.invoke()
-    fun didEnterBackground() = Unit
+    fun didEnterBackground(completion: () -> Unit) {
+        val persist = onPersistBeforeBackground
+        if (persist == null) completion() else persist(completion)
+    }
 }
 
 /**
@@ -208,9 +212,6 @@ internal class IosHostGateway : HostGateway {
         requestId: JsonElement,
         error: JsonElement,
     ): GatewayResult<Unit> = respond(profile, requestId, error, isError = true)
-
-    override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription =
-        subscribeRaw(profile, onMessage) {}
 
     override fun subscribeRaw(
         profile: HostProfile,

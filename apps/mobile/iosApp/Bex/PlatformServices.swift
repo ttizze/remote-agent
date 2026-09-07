@@ -6,7 +6,15 @@ import UIKit
 @MainActor
 final class BexPlatformBridge {
     func didEnterBackground() {
-        IosLifecycleBridge.shared.didEnterBackground()
+        let application = UIApplication.shared
+        var task: UIBackgroundTaskIdentifier = .invalid
+        let finish: @MainActor @Sendable () -> Void = {
+            guard task != .invalid else { return }
+            application.endBackgroundTask(task)
+            task = .invalid
+        }
+        task = application.beginBackgroundTask(withName: "Save conversation state", expirationHandler: finish)
+        IosLifecycleBridge.shared.didEnterBackground { Task { @MainActor in finish() } }
     }
 
     /// iOS may stop the process while backgrounded. Recovery always obtains a

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Install iPhone build 31. Preserve earlier AI responses when turn IDs are missing or repeated; accept legacy `turnId` when `id` is blank. Reduce streaming work by updating raw and typed state together, bounding only the affected Host cache, coalescing persistence off the UI thread, and removing redundant row observers and unused gateway defaults.
+
 - Prepare iPhone build 30: separate display conversion from the controller and reuse unchanged turn projections while streaming. Release projections on history eviction and conversation/Host changes; preserve accepted inputs and same-length content updates. Remove the unused iOS directory-selection API and unreachable directory screen state.
 
 - Install and launch iPhone build 29 with the new-chat context selectors and attachment-directory fix; rebuild the Release Kotlin framework for the physical-device archive.

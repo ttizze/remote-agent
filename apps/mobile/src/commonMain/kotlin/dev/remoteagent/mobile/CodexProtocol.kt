@@ -151,7 +151,8 @@ internal fun codexThreadFromResponse(value: JsonElement): ThreadSnapshot =
 internal fun codexTurn(value: JsonElement): CodexTurn {
     val raw = value.asObjectOrNull() ?: emptyJsonObject()
     return CodexTurn(
-        id = raw.string("id").orEmpty(),
+        id = raw.string("id")?.takeIf(String::isNotBlank)
+            ?: raw.string("turnId").orEmpty(),
         status = codexTurnStatus(raw.string("status")),
         items = raw.array("items").orEmpty().map(::codexItem),
         raw = raw,

@@ -8,7 +8,9 @@ Mobile opens paginated histories with the latest five native turns and a 500-ite
 
 The iPhone loads activity headers before large command outputs, diffs, reasoning or tool results. Expand an activity to fetch its full details from the Host; failures remain visible with a reload action. This requires the updated mobile app and Host. The Mac client retains its existing inline-history read. Paging uses the documented [App Server history APIs](https://learn.chatgpt.com/docs/app-server).
 
-The iPhone controller delegates display conversion to `IosViewStateProjector`. It reuses unchanged immutable turn projections during streaming and drops them when switching conversations or Hosts. Accepted inputs invalidate the affected turn until their native echo arrives; persistence and history retention are unchanged.
+The iPhone controller delegates display conversion to `IosViewStateProjector`. It reuses unchanged immutable turn projections during streaming and drops them when switching conversations or Hosts. Projections preserve source order even when turn IDs are missing or repeated. Accepted inputs invalidate the affected turn until their native echo arrives.
+
+Mobile applies each incoming message's raw and typed state together. Streaming updates avoid sorting unrelated cached histories, and persistence coalesces changes over a 200 ms window before serializing off the UI thread. Backgrounding flushes pending state; history retention is unchanged.
 
 The Mac UI is a native Rust executable built with GPUI Kit. Its bundle contains no React, Bun, or Node runtime. Existing message, attachment and file drafts remain in `desktop-drafts.json`; the Host IPC and pairing protocol are unchanged.
 

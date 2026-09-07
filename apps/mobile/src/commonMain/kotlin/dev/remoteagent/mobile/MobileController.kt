@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
@@ -12,6 +13,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -22,7 +25,8 @@ import kotlinx.serialization.json.put
  */
 internal class MobileController(
     private val gateway: HostGateway,
-    private val repository: MobileRepository,
+    repository: MobileRepository,
+    persistenceScope: CoroutineScope,
     private val cacheLimits: MobileCacheLimits = MobileCacheLimits(maxTurnsPerThread = Int.MAX_VALUE),
     private val deferHistoryItemDetails: Boolean = false,
     private val clientUserMessageIdGenerator: () -> String = { "${Random.Default.nextLong()}-${Random.Default.nextLong()}" },
@@ -32,6 +36,32 @@ internal class MobileController(
     /** Sanitized diagnostic only; persistence failures never become UI notices. */
     var lastPersistenceFailureType: String? = null
         private set
+    private var saveRevision = 0L
+    private val savedRevision = MutableStateFlow(0L)
+    private val saves = Channel<Pair<Long, AppState>>(Channel.CONFLATED)
+    private val saveJob = persistenceScope.launch {
+        for (first in saves) {
+            // Coalesce a fixed window; continuous streaming must not postpone saves forever.
+            delay(200)
+            val (revision, latest) = saves.tryReceive().getOrNull() ?: first
+            lastPersistenceFailureType = try {
+                withContext(Dispatchers.Default) { repository.save(latest) }
+                null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                failure::class.simpleName ?: "PersistenceFailure"
+            }
+            savedRevision.value = revision
+        }
+    }
+
+    suspend fun flushPersistence() {
+        val target = saveRevision
+        if (savedRevision.value >= target) return
+        check(saveJob.isActive) { "Persistence worker is not running" }
+        savedRevision.first { it >= target }
+    }
 
     private var reconnectJob: Job? = null
     private var reconnectHostId: String? = null
@@ -198,13 +228,10 @@ internal class MobileController(
     }
 
     private fun publish(action: AppAction) {
-        state = reduce(state, action, cacheLimits)
-        lastPersistenceFailureType = try {
-            repository.save(state)
-            null
-        } catch (failure: Exception) {
-            failure::class.simpleName ?: "PersistenceFailure"
-        }
+        val updated = reduce(state, action, cacheLimits)
+        if (updated === state) return
+        state = updated
+        saves.trySend(++saveRevision to state)
         observers.toList().forEach { it(state) }
     }
 
@@ -322,10 +349,9 @@ internal class MobileController(
                                                 // Keep raw and typed projections in one
                                                 // serialized transition. This preserves
                                                 // wire arrival order for live output.
-                                                dispatch(AppAction.RawMessageReceived(profile.id, message))
-                                                if (event != null && !buffered) {
-                                                    dispatch(AppAction.LiveEventReceived(profile.id, event))
-                                                }
+                                                dispatch(AppAction.HostMessageReceived(
+                                                    profile.id, message, event?.takeUnless { buffered },
+                                                ))
                                             }
                                         }
                                         if (sessions.isCurrent(profile.id, generation)) {

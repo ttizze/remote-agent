@@ -38,6 +38,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlin.time.Clock
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 /**
@@ -46,13 +49,14 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun RemoteAgentApp(
-    gateway: HostGateway = UnavailableHostGateway,
-    repository: MobileRepository = InMemoryMobileRepository(),
+    gateway: HostGateway,
+    repository: MobileRepository,
     requestQrScan: ((onContents: (String) -> Unit) -> Unit)? = null,
     nowMs: () -> Long = { Clock.System.now().toEpochMilliseconds() },
 ) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    val controller = remember(gateway, repository) { MobileController(gateway, repository) }
+    val persistenceScope = remember(gateway, repository) { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    val controller = remember(gateway, repository) { MobileController(gateway, repository, persistenceScope) }
     var state by remember(controller) { mutableStateOf(controller.state) }
     DisposableEffect(controller) {
         val observation = controller.observe { state = it }
@@ -61,6 +65,9 @@ fun RemoteAgentApp(
         onDispose {
             connectionObservation.cancel()
             observation.cancel()
+            persistenceScope.launch {
+                try { controller.flushPersistence() } finally { persistenceScope.cancel() }
+            }
         }
     }
     val activity = LocalContext.current as? ComponentActivity
@@ -70,7 +77,7 @@ fun RemoteAgentApp(
                 onForeground = { controller.openApp(scope) },
                 // Keep the authenticated transport alive while the Activity is
                 // backgrounded. Reconnect on the next foreground event.
-                onBackground = {},
+                onBackground = { persistenceScope.launch { controller.flushPersistence() } },
             )
             activity.lifecycle.addObserver(lifecycleObserver)
             onDispose { activity.lifecycle.removeObserver(lifecycleObserver) }

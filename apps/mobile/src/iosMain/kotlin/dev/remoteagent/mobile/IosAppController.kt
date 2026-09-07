@@ -19,13 +19,18 @@ import kotlinx.serialization.json.put
 class IosAppController {
     private val dependencies = IosMobileDependencies()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val controller = MobileController(dependencies.gateway, dependencies.repository, deferHistoryItemDetails = true)
+    private val controller = MobileController(dependencies.gateway, dependencies.repository, scope, deferHistoryItemDetails = true)
     private val viewProjector = IosViewStateProjector()
     private var observation: HostEventSubscription? = null
     private var connectionObservation: HostEventSubscription? = null
 
     init {
         IosLifecycleBridge.onRestoreAfterForeground = { restoreAfterForeground() }
+        IosLifecycleBridge.onPersistBeforeBackground = { completion ->
+            scope.launch {
+                try { controller.flushPersistence() } finally { completion() }
+            }
+        }
         controller.openApp(scope)
         connectionObservation = controller.maintainConnection(scope)
     }
@@ -43,7 +48,10 @@ class IosAppController {
         connectionObservation?.cancel()
         connectionObservation = null
         IosLifecycleBridge.onRestoreAfterForeground = null
-        scope.cancel()
+        IosLifecycleBridge.onPersistBeforeBackground = null
+        scope.launch {
+            try { controller.flushPersistence() } finally { scope.cancel() }
+        }
     }
 
     fun openPairing() = controller.dispatch(AppAction.PairingOpened)

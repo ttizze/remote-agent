@@ -121,7 +121,7 @@ internal class IosViewStateProjector {
     private var hostId: String? = null
     private var snapshot: ThreadSnapshot? = null
     private var thread: IosThreadView? = null
-    private var turns = emptyMap<String, ProjectedTurn>()
+    private var turns = emptyList<ProjectedTurn>()
 
     fun project(state: AppState): IosAppViewState {
         val selected = state.selectedProfile?.let { host ->
@@ -130,12 +130,12 @@ internal class IosViewStateProjector {
         if (hostId != state.selectedProfileId || snapshot?.summary?.id != selected?.summary?.id) {
             snapshot = null
             thread = null
-            turns = emptyMap()
+            turns = emptyList()
         }
         hostId = state.selectedProfileId
         if (selected !== snapshot) {
             thread = selected?.let(::projectThread)
-            if (selected == null) turns = emptyMap()
+            if (selected == null) turns = emptyList()
             snapshot = selected
         }
         return state.toIosViewState(thread)
@@ -143,19 +143,19 @@ internal class IosViewStateProjector {
 
     private fun projectThread(source: ThreadSnapshot): IosThreadView {
         val pending = source.submittedMessages.groupBy { it.turnId }
-        val updated = source.turns.associate { turn ->
+        val updated = source.turns.mapIndexed { index, turn ->
             val submissions = pending[turn.id].orEmpty()
-            val previous = turns[turn.id]
+            val previous = turns.getOrNull(index)
             // Immutable turns keep their identity through unrelated live updates.
             // Accepted inputs are a separate input until their native echo arrives.
-            turn.id to if (previous != null && previous.source === turn && previous.submissions == submissions) previous
+            if (previous != null && previous.source === turn && previous.submissions == submissions) previous
                 else ProjectedTurn(turn, submissions, turn.toIosTurnViews(submissions, source.summary))
         }
         turns = updated
         return IosThreadView(
             id = source.summary.id,
             title = source.summary.name ?: source.summary.preview.ifBlank { "タスク" },
-            turns = updated.values.flatMap { it.views },
+            turns = updated.flatMap { it.views },
             queuedMessages = pending[null].orEmpty().map {
                 CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources).toIosItemView()
             },

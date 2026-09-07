@@ -368,7 +368,8 @@ private fun List<FileUpdateChange>.appendOutput(delta: String): List<FileUpdateC
     else -> dropLast(1) + last().copy(diff = last().diff + delta)
 }
 
-private fun <T> List<T>.replaceById(id: String, value: T, idOf: (T) -> String): List<T> {
+private inline fun <T> List<T>.replaceById(id: String, value: T, idOf: (T) -> String): List<T> {
     val index = indexOfFirst { idOf(it) == id }
-    return if (index < 0) this + value else toMutableList().also { it[index] = value }
+    return if (index < 0) this + value else if (this[index] == value) this else
+        toMutableList().also { it[index] = value }
 }

@@ -353,6 +353,7 @@ class CommonCodexClientTest {
         override fun subscribeRaw(
             profile: HostProfile,
             onMessage: (RawCodexMessage) -> Unit,
+            onClosed: (String) -> Unit,
         ): HostEventSubscription = HostEventSubscription {}
 
         override suspend fun respondResult(

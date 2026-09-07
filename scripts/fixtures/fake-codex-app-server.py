@@ -181,7 +181,7 @@ def run_turn_scenario(thread: dict[str, object], turn: dict[str, object], inputs
     thread_id = str(thread["id"])
     turn_id = str(turn["id"])
     scenario = next(
-        (name for name in ("retry", "failed", "interrupted", "request", "approval", "items", "history")
+        (name for name in ("retry", "failed", "interrupted", "request", "approval", "items", "history", "duplicate")
          if f"[{name}]" in prompt.lower()),
         "success",
     )
@@ -334,6 +334,13 @@ def run_turn_scenario(thread: dict[str, object], turn: dict[str, object], inputs
     final_item["text"] = response_text
     complete_item(thread_id, turn, final_item)
     finish_turn(thread, turn, "completed")
+    if scenario == "duplicate":
+        thread["turns"].append({
+            "id": turn_id, "status": "completed", "items": [
+                {"id": "duplicate-history-old", "type": "agentMessage", "phase": "final_answer",
+                 "text": "Older AI response must remain visible."},
+            ],
+        })
 
 
 def run_server() -> int:

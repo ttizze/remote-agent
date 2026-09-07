@@ -792,6 +792,24 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(latest.isHittable)
     }
 
+    func testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory() throws {
+#if !targetEnvironment(simulator)
+        throw XCTSkip("Simulator-only repeated-turn history fixture")
+#endif
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[duplicate] Preserve both persisted responses")
+        let latest = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(latest.waitForExistence(timeout: 20))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
+        XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["task.detail"].waitForExistence(timeout: 30))
+        XCTAssertTrue(latest.waitForExistence(timeout: 20),
+                      "Reopening history must retain the latest AI response")
+        XCTAssertTrue(app.descendants(matching: .any)["item.duplicate-history-old"].waitForExistence(timeout: 20),
+                      "Opening history must retain the older AI response")
+    }
+
     func testSimulatorReopensCompletedHistoryCollapsed() throws {
 #if !targetEnvironment(simulator)
         throw XCTSkip("Simulator-only conversation display E2E")

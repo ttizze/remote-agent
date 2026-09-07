@@ -119,9 +119,6 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
      * One poller drains both native queues and fans every raw message out to
      * subscribers. No notification is decoded into a lossy allow-list here.
      */
-    override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription =
-        subscribeRaw(profile, onMessage) {}
-
     override fun subscribeRaw(
         profile: HostProfile,
         onMessage: (RawCodexMessage) -> Unit,

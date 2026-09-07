@@ -4,6 +4,7 @@ import kotlin.coroutines.Continuation
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -21,6 +22,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Runnable
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
@@ -30,6 +32,16 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 class MobileControllerTest {
+    private val persistenceScopes = mutableListOf<CoroutineScope>()
+
+    private fun persistenceScope(): CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Unconfined).also(persistenceScopes::add)
+
+    @AfterTest
+    fun cancelPersistenceWorkers() {
+        persistenceScopes.forEach(CoroutineScope::cancel)
+    }
+
     private val profile = HostProfile("runner-1", "Host", "wss://relay.example.test/socket/websocket", "runner-1", "device-key-ref")
     private val thread = snapshot("thread-1")
 
@@ -1118,9 +1130,59 @@ class MobileControllerTest {
     }
 
     @Test
-    fun persistence_failure_keeps_memory_and_observers_current_then_retries_on_next_transition() {
+    fun one_native_message_publishes_raw_and_typed_state_atomically() {
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            runSuspend { controller.connect(profile, scope) }
+            val observed = mutableListOf<AppState>()
+            controller.observe { observed += it }
+            gateway.emit(notification("item/agentMessage/delta",
+                """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":" new"}"""))
+            assertEquals(2, observed.size)
+            val cache = observed.last().cache.profile(profile.id)
+            assertEquals("item/agentMessage/delta", cache.rawMessages.last().method)
+            val reply = cache.snapshots["thread-1"]!!.turns.single().items.single() as CodexItem.AgentMessage
+            assertEquals("old new", reply.text)
+        } finally { scope.cancel() }
+    }
+
+    @Test
+    fun slow_storage_coalesces_updates_without_blocking_state_or_reordering_writes() = runBlocking {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val saved = mutableListOf<AppState>()
+        val repository = object : MobileRepository {
+            override fun load() = AppState(profiles = listOf(profile))
+            override fun save(state: AppState) {
+                if (saved.isEmpty()) {
+                    started.complete(Unit)
+                    runBlocking { withTimeout(5_000) { release.await() } }
+                }
+                saved += state
+            }
+        }
+        val controller = MobileController(FakeHostGateway(), repository, persistenceScope())
+        try {
+            controller.dispatch(AppAction.PairingOpened)
+            withTimeout(5_000) { started.await() }
+            repeat(100) { controller.dispatch(AppAction.PairingOpened) }
+            controller.dispatch(AppAction.PairingDismissed)
+            assertFalse(controller.state.showingPairing)
+            val flushed = async(start = CoroutineStart.UNDISPATCHED) { controller.flushPersistence() }
+            assertFalse(flushed.isCompleted)
+            release.complete(Unit)
+            withTimeout(5_000) { flushed.await() }
+            assertEquals(listOf(true, false), saved.map { it.showingPairing })
+            assertEquals(controller.state, saved.last())
+        } finally { release.complete(Unit) }
+    }
+
+    @Test
+    fun persistence_failure_keeps_memory_and_observers_current_then_retries_on_next_transition() = runBlocking {
         val repository = FailingOnceMobileRepository(AppState(profiles = listOf(profile)))
-        val controller = MobileController(FakeHostGateway(), repository)
+        val controller = MobileController(FakeHostGateway(), repository, persistenceScope())
         var observed: AppState? = null
         controller.observe { observed = it }
 
@@ -1128,10 +1190,12 @@ class MobileControllerTest {
 
         assertTrue(controller.state.showingPairing)
         assertTrue(requireNotNull(observed).showingPairing)
+        controller.flushPersistence()
         assertEquals("IllegalStateException", controller.lastPersistenceFailureType)
 
         controller.dispatch(AppAction.PairingDismissed)
 
+        controller.flushPersistence()
         assertEquals(2, repository.saveCalls)
         assertNull(controller.lastPersistenceFailureType)
         assertEquals(controller.state, repository.savedState)
@@ -1167,6 +1231,7 @@ class MobileControllerTest {
                     cache = initialCache,
                 ),
             ),
+            persistenceScope = persistenceScope(),
             cacheLimits = cacheLimits,
         )
     }
@@ -1304,20 +1369,17 @@ class MobileControllerTest {
             rawHook?.invoke(method, params)
             return GatewayResult.Success(JsonObject(emptyMap()))
         }
-        override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription {
-            callback = onMessage
-            return HostEventSubscription {
-                subscriptionCancelCount += 1
-                if (callback === onMessage) callback = null
-            }
-        }
         override fun subscribeRaw(
             profile: HostProfile,
             onMessage: (RawCodexMessage) -> Unit,
             onClosed: (String) -> Unit,
         ): HostEventSubscription {
             closeCallback = onClosed
-            return subscribeRaw(profile, onMessage)
+            callback = onMessage
+            return HostEventSubscription {
+                subscriptionCancelCount += 1
+                if (callback === onMessage) callback = null
+            }
         }
         override suspend fun respondResult(profile: HostProfile, requestId: JsonElement, result: JsonElement): GatewayResult<Unit> =
             GatewayResult.Success(Unit)
@@ -1378,5 +1440,13 @@ class MobileControllerTest {
             }
         })
         (completion ?: error("test coroutine suspended unexpectedly")).getOrThrow()
+    }
+}
+
+private class InMemoryMobileRepository(initial: AppState = AppState()) : MobileRepository {
+    private var state = initial
+    override fun load(): AppState = state
+    override fun save(state: AppState) {
+        this.state = state
     }
 }

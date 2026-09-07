@@ -47,6 +47,19 @@ class IosAppViewStateTest {
     }
 
     @Test
+    fun initial_projection_keeps_every_turn_when_ids_repeat() {
+        val projector = IosViewStateProjector()
+        val first = CodexTurn("", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer-1", "first")))
+        val second = CodexTurn("", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer-2", "second")))
+
+        val view = projector.project(state(listOf(first, second))).selectedThread!!
+
+        assertEquals(listOf("first", "second"), view.turns.flatMap { turn ->
+            turn.responses.map { it.expandedBody() }
+        })
+    }
+
+    @Test
     fun accepted_inputs_invalidate_their_turn_until_the_native_echo_arrives() {
         val projector = IosViewStateProjector()
         val turn = CodexTurn("live", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("answer", "reply")))

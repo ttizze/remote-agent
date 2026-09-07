@@ -36,14 +36,14 @@ fun reconcileThreadList(
     hostIdentity: String,
     threads: List<ThreadSummary>,
     limits: MobileCacheLimits,
-): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(threadList = threads)).bounded(limits)
+): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(threadList = threads).bounded(limits))
 
 fun reconcileProjectList(
     cache: MobileCache,
     hostIdentity: String,
     projects: List<CodexProject>,
     limits: MobileCacheLimits,
-): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(projects = projects)).bounded(limits)
+): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(projects = projects).bounded(limits))
 
 /** Retain accepted input until Codex echoes its client ID, including across reads. */
 fun acknowledgeMessage(
@@ -67,7 +67,7 @@ fun acknowledgeMessage(
     return cache.replaceProfile(hostIdentity, profile.copy(
         threadList = profile.threadList.replaceById(threadId, retained.summary, append = false),
         snapshots = profile.snapshots + (threadId to retained),
-    )).bounded(limits)
+    ).boundedEvent(limits))
 }
 
 /**
@@ -98,7 +98,7 @@ fun reconcileThreadRead(
         .asSequence()
         .filter { it.threadId == result.thread.summary.id }
         .forEach { event -> profile = profile.apply(event) }
-    return cache.replaceProfile(hostIdentity, profile).bounded(limits)
+    return cache.replaceProfile(hostIdentity, profile.bounded(limits))
 }
 
 /** Applies events only through the declared Thread/Turn/Item identifiers. */
@@ -107,20 +107,26 @@ fun applyLiveEvent(
     hostIdentity: String,
     event: ThreadEvent,
     limits: MobileCacheLimits,
-): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).apply(event)).bounded(limits)
+): MobileCache {
+    val profile = cache.profile(hostIdentity)
+    val updated = profile.apply(event)
+    return if (updated === profile) cache else cache.replaceProfile(hostIdentity, updated.boundedEvent(limits))
+}
 
 fun retainRawMessage(
     cache: MobileCache,
     hostIdentity: String,
     message: RawCodexMessage,
     limits: MobileCacheLimits,
-): MobileCache = cache.replaceProfile(
-    hostIdentity,
-    cache.profile(hostIdentity).copy(rawMessages = (cache.profile(hostIdentity).rawMessages + message).takeLast(128)),
-).bounded(limits)
+): MobileCache {
+    val profile = cache.profile(hostIdentity)
+    return cache.replaceProfile(hostIdentity, profile.copy(
+        rawMessages = (profile.rawMessages + message).takeLast(128),
+    ).boundedEvent(limits))
+}
 
 private fun MobileCache.replaceProfile(hostIdentity: String, profile: ProfileMobileCache): MobileCache =
-    copy(profiles = profiles + (hostIdentity to profile))
+    if (profiles[hostIdentity] === profile) this else copy(profiles = profiles + (hostIdentity to profile))
 
 private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
     if (event is ThreadEvent.Unknown) {
@@ -179,15 +185,11 @@ private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
     }?.clientId
     val reconciled = if (echoed == null || updated.submittedMessages.isEmpty()) updated else
         updated.copy(submittedMessages = updated.submittedMessages.filterNot { it.clientId == echoed })
+    val updatedList = if (updated.summary == existing.summary) threadList else
+        threadList.replaceById(updated.summary.id, updated.summary, append = false)
     return copy(
-        threadList = threadList.replaceById(updated.summary.id, updated.summary, append = false),
+        threadList = updatedList,
         snapshots = snapshots + (event.threadId to reconciled),
-    )
-}
-
-private fun MobileCache.bounded(limits: MobileCacheLimits): MobileCache {
-    return MobileCache(
-        profiles = profiles.mapValues { (_, profile) -> profile.bounded(limits) },
     )
 }
 
@@ -205,18 +207,19 @@ private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobile
         compareByDescending<CodexProject> { latestProjectActivity[it.id] ?: Long.MIN_VALUE }
             .thenBy { it.position },
     )
-    val snapshots = snapshots
-        .values
-        .toList()
-        .takeLast(limits.maxThreads)
-        .associate { it.summary.id to it.bounded(limits) }
     return ProfileMobileCache(
         projects = projects,
         threadList = list,
-        snapshots = snapshots,
+        snapshots = snapshots.values.toList().takeLast(limits.maxThreads).associate { it.summary.id to it.bounded(limits) },
         unknownEvents = unknownEvents.takeLast(128),
         rawMessages = rawMessages.takeLast(128),
     )
+}
+
+private fun ProfileMobileCache.boundedEvent(limits: MobileCacheLimits): ProfileMobileCache {
+    val snapshots = if (snapshots.size <= limits.maxThreads && snapshots.values.all { it.turns.size <= limits.maxTurnsPerThread }) snapshots
+    else snapshots.values.toList().takeLast(limits.maxThreads).associate { it.summary.id to it.bounded(limits) }
+    return copy(snapshots = snapshots, unknownEvents = unknownEvents.takeLast(128), rawMessages = rawMessages.takeLast(128))
 }
 
 private fun ThreadSnapshot.bounded(limits: MobileCacheLimits): ThreadSnapshot {
@@ -227,7 +230,7 @@ private fun List<ThreadSummary>.replaceById(id: String, value: ThreadSummary, ap
     val index = indexOfFirst { it.id == id }
     return if (index < 0) {
         if (append) this + value else this
-    } else toMutableList().also { it[index] = value }
+    } else if (this[index] == value) this else toMutableList().also { it[index] = value }
 }
 
 internal val ThreadSnapshot.olderTurnsCursor: String? get() = raw?.string("historyCursor")

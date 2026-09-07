@@ -97,8 +97,7 @@ sealed interface AppAction {
     data class TurnFailed(val hostIdentity: String, val message: String) : AppAction
     data class InterruptStarted(val hostIdentity: String, val turnId: String) : AppAction
     data class InterruptFinished(val hostIdentity: String) : AppAction
-    data class LiveEventReceived(val hostIdentity: String, val event: ThreadEvent) : AppAction
-    data class RawMessageReceived(val hostIdentity: String, val message: RawCodexMessage) : AppAction
+    data class HostMessageReceived(val hostIdentity: String, val message: RawCodexMessage, val event: ThreadEvent?) : AppAction
     data class Disconnected(val hostIdentity: String) : AppAction
 }
 
@@ -262,14 +261,11 @@ fun reduce(
         it.copy(interruptingTurnId = null)
     }
 
-    is AppAction.LiveEventReceived -> if (state.isConnected(action.hostIdentity)) {
-        state.copy(cache = applyLiveEvent(state.cache, action.hostIdentity, action.event, cacheLimits))
-    } else {
-        state
-    }
-
-    is AppAction.RawMessageReceived -> if (state.hasProfile(action.hostIdentity)) {
-        state.copy(cache = retainRawMessage(state.cache, action.hostIdentity, action.message, cacheLimits))
+    is AppAction.HostMessageReceived -> if (state.hasProfile(action.hostIdentity)) {
+        val retained = retainRawMessage(state.cache, action.hostIdentity, action.message, cacheLimits)
+        state.copy(cache = if (action.event != null && state.isConnected(action.hostIdentity)) {
+            applyLiveEvent(retained, action.hostIdentity, action.event, cacheLimits)
+        } else retained)
     } else {
         state
     }

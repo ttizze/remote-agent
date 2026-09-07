@@ -121,6 +121,15 @@ class CodexProtocolTest {
     }
 
     @Test
+    fun turn_id_alias_is_preserved_when_history_uses_turn_id() {
+        val snapshot = codexThreadSnapshot(json.parseToJsonElement("""
+            {"id":"thread-1","turns":[{"turnId":"turn-1","status":"completed","items":[]}]}
+        """))
+
+        assertEquals("turn-1", snapshot.turns.single().id)
+    }
+
+    @Test
     fun turn_events_keep_server_timing() {
         val started = assertIs<ThreadEvent.TurnStarted>(codexThreadEvent(
             "turn/started",
