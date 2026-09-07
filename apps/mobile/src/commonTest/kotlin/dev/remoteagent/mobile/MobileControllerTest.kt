@@ -16,6 +16,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -1145,6 +1146,38 @@ class MobileControllerTest {
             assertEquals("item/agentMessage/delta", cache.rawMessages.last().method)
             val reply = cache.snapshots["thread-1"]!!.turns.single().items.single() as CodexItem.AgentMessage
             assertEquals("old new", reply.text)
+        } finally { scope.cancel() }
+    }
+
+    @Test
+    fun streaming_is_persisted_at_completion_or_explicit_flush_without_losing_deltas() = runBlocking {
+        val writes = Channel<AppState>(Channel.UNLIMITED)
+        val repository = object : MobileRepository {
+            override fun load() = AppState(profiles = listOf(profile), selectedProfileId = profile.id,
+                profileViews = mapOf(profile.id to ProfileViewState(selectedThreadId = thread.summary.id)),
+                cache = MobileCache(mapOf(profile.id to ProfileMobileCache(snapshots = mapOf(thread.summary.id to thread)))))
+            override fun save(state: AppState) { writes.trySend(state) }
+        }
+        val gateway = FakeHostGateway()
+        val controller = MobileController(gateway, repository, persistenceScope())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            controller.connect(profile, scope)
+            controller.flushPersistence()
+            while (writes.tryReceive().isSuccess) { }
+            fun emit() = gateway.emit(notification("item/agentMessage/delta",
+                """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"x"}"""))
+            repeat(100) { emit() }
+            assertNull(withTimeoutOrNull(300) { writes.receive() })
+            controller.flushPersistence()
+            val flushed = withTimeout(5_000) { writes.receive() }
+            assertEquals("old" + "x".repeat(100),
+                (flushed.cache.snapshot(profile.id, "thread-1")!!.turns.single().items.single() as CodexItem.AgentMessage).text)
+            emit()
+            gateway.emit(notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}"""))
+            val completed = withTimeout(5_000) { writes.receive() }.cache.snapshot(profile.id, "thread-1")!!.turns.single()
+            assertEquals(TurnStatus.Completed, completed.status)
+            assertEquals("old" + "x".repeat(101), (completed.items.single() as CodexItem.AgentMessage).text)
         } finally { scope.cancel() }
     }
 

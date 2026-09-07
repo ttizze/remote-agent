@@ -96,7 +96,9 @@ if [ "$#" -eq 0 ]; then
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorReopensCompletedHistoryCollapsed \
+        testSimulatorKeepsEarlierAnswersBetweenFollowupsWhenReopening \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
         testSimulatorCanSteerAndStopAnActiveTurn \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorCanAttachDownloadAndPrepareAIEdit \

@@ -181,7 +181,7 @@ def run_turn_scenario(thread: dict[str, object], turn: dict[str, object], inputs
     thread_id = str(thread["id"])
     turn_id = str(turn["id"])
     scenario = next(
-        (name for name in ("retry", "failed", "interrupted", "request", "approval", "items", "history", "duplicate")
+        (name for name in ("retry", "failed", "interrupted", "request", "approval", "items", "history", "duplicate", "followups")
          if f"[{name}]" in prompt.lower()),
         "success",
     )
@@ -305,6 +305,15 @@ def run_turn_scenario(thread: dict[str, object], turn: dict[str, object], inputs
         finish_turn(thread, turn, "interrupted")
         return
 
+    if scenario == "followups":
+        for item in [
+            {"id": "history-answer-1", "type": "agentMessage", "text": "Earlier answer remains visible."},
+            {"id": "history-followup-1", "type": "userMessage", "content": [{"type": "text", "text": "Next question"}]},
+            {"id": "history-answer-2", "type": "agentMessage", "phase": "commentary", "text": "Reply before the next instruction."},
+            {"id": "history-followup-2", "type": "userMessage", "content": [{"type": "text", "text": "One more question"}]},
+        ]:
+            stream_item(thread_id, turn, item)
+            complete_item(thread_id, turn, item)
     final_item = {
         "id": f"fixture-final-{suffix}",
         "type": "agentMessage",

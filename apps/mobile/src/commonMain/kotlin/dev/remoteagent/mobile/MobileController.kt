@@ -37,11 +37,12 @@ internal class MobileController(
     var lastPersistenceFailureType: String? = null
         private set
     private var saveRevision = 0L
+    private var persistenceDirty = false
     private val savedRevision = MutableStateFlow(0L)
     private val saves = Channel<Pair<Long, AppState>>(Channel.CONFLATED)
     private val saveJob = persistenceScope.launch {
         for (first in saves) {
-            // Coalesce a fixed window; continuous streaming must not postpone saves forever.
+            // Coalesce durable checkpoints; streamed deltas remain in memory until a checkpoint or flush.
             delay(200)
             val (revision, latest) = saves.tryReceive().getOrNull() ?: first
             lastPersistenceFailureType = try {
@@ -57,6 +58,7 @@ internal class MobileController(
     }
 
     suspend fun flushPersistence() {
+        if (persistenceDirty) saveState()
         val target = saveRevision
         if (savedRevision.value >= target) return
         check(saveJob.isActive) { "Persistence worker is not running" }
@@ -231,8 +233,19 @@ internal class MobileController(
         val updated = reduce(state, action, cacheLimits)
         if (updated === state) return
         state = updated
-        saves.trySend(++saveRevision to state)
+        persistenceDirty = true
+        val checkpoint = when (action) {
+            is AppAction.HostMessageReceived -> action.event is ThreadEvent.TurnCompleted
+            is AppAction.SnapshotReceived -> action.result.thread.turns.none { it.status == TurnStatus.InProgress }
+            else -> true
+        }
+        if (checkpoint) saveState()
         observers.toList().forEach { it(state) }
+    }
+
+    private fun saveState() {
+        persistenceDirty = false
+        saves.trySend(++saveRevision to state)
     }
 
     suspend fun pair(contents: String, nowMs: Long) {

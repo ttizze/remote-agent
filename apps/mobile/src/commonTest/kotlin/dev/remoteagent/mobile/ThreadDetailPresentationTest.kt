@@ -103,9 +103,48 @@ class ThreadDetailPresentationTest {
             CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer),
         ), durationMs = 1_459_000).toThreadTurnPresentations()
         assertEquals(listOf("first", "additional"), sections.flatMap { it.userMessages }.map { it.id })
-        assertEquals(listOf("before", "after"), sections.flatMap { it.activityItems }.map { it.id })
-        assertEquals(listOf("answer"), sections.flatMap { it.responses }.map { it.id })
+        assertEquals(listOf("after"), sections.flatMap { it.activityItems }.map { it.id })
+        assertEquals(listOf("before", "answer"), sections.flatMap { it.responses }.map { it.id })
         assertEquals("24m 19s間作業しました", sections.last().activitySummary)
+    }
+
+    @Test
+    fun completed_history_keeps_answers_before_each_followup_outside_work() {
+        for (phase in listOf(AgentMessagePhase.FinalAnswer, null)) {
+            val sections = CodexTurn("turn", TurnStatus.Completed, listOf(
+                CodexItem.UserMessage("question-1", "First question"),
+                CodexItem.AgentMessage("progress", "Checking", AgentMessagePhase.Commentary),
+                CodexItem.AgentMessage("answer-1", "First answer", phase),
+                CodexItem.UserMessage("question-2", "Followup"),
+                CodexItem.AgentMessage("answer-2", "Second answer", phase),
+                CodexItem.UserMessage("question-3", "Another followup"),
+                CodexItem.AgentMessage("answer-3", "Last answer", phase),
+            )).toThreadTurnPresentations()
+            assertEquals(listOf(listOf("answer-1"), listOf("answer-2"), listOf("answer-3")),
+                sections.map { it.responses.map { response -> response.id } })
+            assertEquals(listOf("progress"), sections.flatMap { it.activityItems }.map { it.id })
+        }
+    }
+
+    @Test
+    fun completed_history_preserves_chronology_when_only_a_later_exchange_has_an_answer() {
+        val sections = CodexTurn("turn", TurnStatus.Completed, listOf(
+            CodexItem.UserMessage("question-1", "First question"),
+            CodexItem.AgentMessage("commentary-1", "Checking", AgentMessagePhase.Commentary),
+            CodexItem.CommandExecution("command", "rg task", output = "found", status = CommandExecutionStatus.Completed),
+            CodexItem.AgentMessage("commentary-2", "Still checking", AgentMessagePhase.Commentary),
+            CodexItem.UserMessage("question-2", "Followup"),
+            CodexItem.AgentMessage("answer-2", "Done", AgentMessagePhase.FinalAnswer),
+        )).toThreadTurnPresentations()
+
+        assertEquals(
+            listOf("question-1", "commentary-1", "command", "commentary-2", "question-2", "answer-2"),
+            sections.flatMap { it.userMessages + it.activityItems + it.responses }.map { it.id },
+        )
+        assertEquals(listOf(listOf("commentary-1"), listOf("commentary-2"), listOf("answer-2")),
+            sections.map { it.responses.map { response -> response.id } })
+        assertEquals(listOf(listOf<String>(), listOf("command"), listOf<String>()),
+            sections.map { it.activityItems.map { item -> item.id } })
     }
 
     @Test

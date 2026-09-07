@@ -110,7 +110,7 @@ data class IosAppViewState(
     val loadingHistory: Boolean,
     val moreProjectIds: Set<String>,
     val hasMoreChats: Boolean,
-    val selectedThread: IosThreadView?,
+    val selectedThreadId: String?,
     val isNewThread: Boolean,
     val notice: String?,
     val interruptingTurnId: String?,
@@ -120,8 +120,11 @@ data class IosAppViewState(
 internal class IosViewStateProjector {
     private var hostId: String? = null
     private var snapshot: ThreadSnapshot? = null
-    private var thread: IosThreadView? = null
+    var thread: IosThreadView? = null
+        private set
     private var turns = emptyList<ProjectedTurn>()
+    private var appSource: AppState? = null
+    private var app: IosAppViewState? = null
 
     fun project(state: AppState): IosAppViewState {
         val selected = state.selectedProfile?.let { host ->
@@ -138,7 +141,24 @@ internal class IosViewStateProjector {
             if (selected == null) turns = emptyList()
             snapshot = selected
         }
-        return state.toIosViewState(thread)
+        val previous = appSource
+        val previousApp = app
+        val view = state.selectedView
+        val profile = state.selectedProfileId?.let { state.cache.profile(it) }
+        val previousProfile = previous?.let { source -> source.selectedProfileId?.let { source.cache.profile(it) } }
+        val directory = view.newThreadCwd ?: selected?.summary?.workingDirectory?.path ?: view.workingDirectoryPath
+        appSource = state
+        // Body/raw-message changes must not rebuild or publish navigation and title lists.
+        if (previous != null && previousApp != null &&
+            state.profiles === previous.profiles && state.selectedProfileId == previous.selectedProfileId &&
+            state.showingPairing == previous.showingPairing && state.pairingError == previous.pairingError &&
+            view == previous.selectedView && directory == previousApp.workingDirectory &&
+            profile?.projects === previousProfile?.projects && profile?.threadList === previousProfile?.threadList
+        ) return previousApp
+        val updated = state.toIosViewState()
+        val published = if (previousApp != null && updated == previousApp) previousApp else updated
+        app = published
+        return published
     }
 
     private fun projectThread(source: ThreadSnapshot): IosThreadView {
@@ -170,7 +190,7 @@ internal class IosViewStateProjector {
     )
 }
 
-private fun AppState.toIosViewState(thread: IosThreadView?): IosAppViewState {
+private fun AppState.toIosViewState(): IosAppViewState {
     val profile = selectedProfile
     val view = selectedView
     val profileCache = profile?.let { cache.profile(it.id) }
@@ -212,7 +232,7 @@ private fun AppState.toIosViewState(thread: IosThreadView?): IosAppViewState {
         loadingHistory = view.loadingHistory,
         moreProjectIds = view.moreProjectIds,
         hasMoreChats = view.hasMoreChats,
-        selectedThread = thread,
+        selectedThreadId = view.selectedThreadId,
         isNewThread = view.newThreadCwd != null,
         notice = view.notice,
         interruptingTurnId = view.interruptingTurnId,

@@ -7,11 +7,19 @@ import UIKit
 import UniformTypeIdentifiers
 import RemoteAgentMobile
 
+@MainActor
+final class BexConversationModel: ObservableObject {
+    @Published var thread: IosThreadView?
+
+    init(thread: IosThreadView?) { self.thread = thread }
+}
+
 /// Native presentation only: state transitions, cache reconciliation, and RPC
 /// orchestration remain inside IosAppController.
 @MainActor
 final class BexAppViewModel: ObservableObject {
     @Published private(set) var state: IosAppViewState
+    let conversation: BexConversationModel
     @Published var isScanning = false
     @Published var transferError: String?
     @Published var transferring = false
@@ -71,27 +79,29 @@ final class BexAppViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(try? JSONEncoder().encode(staged), forKey: "bex.attachments.v4") }
     }
 
-    var draftKey: String { (state.selectedProfileId ?? "") + ":" + (state.selectedThread?.id ?? "new:\(state.workingDirectory)") }
+    var draftKey: String { (state.selectedProfileId ?? "") + ":" + (state.selectedThreadId ?? "new:\(state.workingDirectory)") }
     var draft: String {
         get { drafts[draftKey] ?? "" }
         set { drafts[draftKey] = newValue; UserDefaults.standard.set(drafts, forKey: "bex.drafts.v4") }
     }
     var attachments: [StagedAttachment] { staged[draftKey] ?? [] }
-    var cwd: String { state.threads.first { $0.id == state.selectedThread?.id }?.workingDirectory ?? state.workingDirectory }
+    var cwd: String { state.threads.first { $0.id == state.selectedThreadId }?.workingDirectory ?? state.workingDirectory }
 
 
     private let controller = IosAppController()
 
     init() {
         state = controller.currentState()
+        conversation = BexConversationModel(thread: controller.currentThread())
         applyTurnOptions()
         if state.isConnected { loadModels() }
-        controller.observe { [weak self] state in
+        controller.observe { [weak self] state, thread in
             DispatchQueue.main.async {
                 guard let self else { return }
                 let changedHost = self.state.selectedProfileId != state.selectedProfileId
                 let connected = !self.state.isConnected && state.isConnected
-                self.state = state
+                if self.state !== state { self.state = state }
+                if self.conversation.thread !== thread { self.conversation.thread = thread }
                 if changedHost {
                     self.models = []
                     self.loadingModels = false
@@ -300,7 +310,7 @@ private struct BexScreen: View {
                     get: { state.screen == .thread },
                     set: { if !$0 && model.state.screen == .thread { model.showThreadList() } }
                 )) {
-                    ThreadScreen(state: state, model: model)
+                    ThreadScreen(state: state, model: model, conversation: model.conversation)
                         .safeAreaInset(edge: .top, spacing: 0) { connectionErrorBanner }
                 } label: { EmptyView() }
             )
@@ -681,7 +691,7 @@ private struct ModelSettingsSheet: View {
             Form {
                 Section {
                     NavigationLink {
-                        Form { TurnOptionsPicker(model: model) }
+                        Form { TurnOptionsPicker(model: model, conversation: model.conversation) }
                             .navigationTitle("モデルの詳細設定")
                             .navigationBarTitleDisplayMode(.inline)
                             .toolbar { ToolbarItem(placement: .confirmationAction) { doneButton } }
@@ -723,6 +733,7 @@ private struct ModelSettingsSheet: View {
 
 private struct TurnOptionsPicker: View {
     @ObservedObject var model: BexAppViewModel
+    @ObservedObject var conversation: BexConversationModel
 
     var body: some View {
         Group {
@@ -748,7 +759,7 @@ private struct TurnOptionsPicker: View {
                     Button("再読込") { model.loadModels() }
                 }
             }
-            if model.state.selectedThread?.turns.contains(where: { $0.isInProgress }) == true {
+            if conversation.thread?.turns.contains(where: { $0.isInProgress }) == true {
                 Text("実行中の追加入力には現在の設定が使われます")
                     .font(.caption2).foregroundColor(.secondary)
             }
@@ -759,6 +770,7 @@ private struct TurnOptionsPicker: View {
 private struct ThreadScreen: View {
     let state: IosAppViewState
     @ObservedObject var model: BexAppViewModel
+    @ObservedObject var conversation: BexConversationModel
     @StateObject private var dictation = DictationRecorder()
     @State private var sendRecordedText = false
     @State private var importing = false
@@ -780,7 +792,7 @@ private struct ThreadScreen: View {
     @FocusState private var composerFocused: Bool
 
     private var reviewVersion: String {
-        model.cwd + (state.selectedThread?.turns.map { "\($0.id):\($0.status)" }.joined(separator: ",") ?? "")
+        model.cwd + (conversation.thread?.turns.map { "\($0.id):\($0.status)" }.joined(separator: ",") ?? "")
     }
     private var project: IosProjectView? {
         state.projects.first { $0.roots.contains(model.cwd) }
@@ -846,7 +858,7 @@ private struct ThreadScreen: View {
                     if expandedItemIds.contains(item.id) { expandedItemIds.remove(item.id) }
                     else { expandedItemIds.insert(item.id) }
                 },
-                loadDetails: { await model.readItemDetails(threadId: state.selectedThread?.id ?? "", turnId: turnId, itemId: item.id) })
+                loadDetails: { await model.readItemDetails(threadId: conversation.thread?.id ?? "", turnId: turnId, itemId: item.id) })
         case .request(let request): ThreadRequestRow(request: request, model: model)
         case .error(let error): ThreadErrorRow(error: error)
         case .queued(let item):
@@ -892,7 +904,7 @@ private struct ThreadScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             if let notice = state.notice { BexNotice(text: notice).padding(.horizontal).padding(.top, 8) }
-            if let thread = state.selectedThread {
+            if let thread = conversation.thread {
                 List {
                     ForEach(conversationRows(thread)) { row in
                         conversationRow(row)
@@ -1059,7 +1071,7 @@ private struct ThreadScreen: View {
     private var conversationTitle: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text(state.selectedThread?.title ?? (state.isNewThread ? "チャット" : "タスク"))
+                Text(conversation.thread?.title ?? (state.isNewThread ? "チャット" : "タスク"))
                     .font(.headline).lineLimit(1)
                 if state.isConnecting {
                     ProgressView().controlSize(.small)
@@ -1086,7 +1098,7 @@ private struct ThreadScreen: View {
                     Label("変更を表示", systemImage: "plus.forwardslash.minus")
                 }
                 Button {
-                    if let id = state.selectedThread?.id { model.openThread(id) }
+                    if let id = conversation.thread?.id { model.openThread(id) }
                     refreshReview()
                 } label: { Label("更新", systemImage: "arrow.clockwise") }
             } label: {
@@ -1239,10 +1251,10 @@ private struct ThreadScreen: View {
                                 .frame(width: 40, height: 40)
                         }
                     }
-                    .disabled(!state.isConnected || (!state.isNewThread && state.selectedThread == nil) || model.transcribing || dictation.requestingPermission || model.sending || model.transferring || preparingMedia)
+                    .disabled(!state.isConnected || (!state.isNewThread && conversation.thread == nil) || model.transcribing || dictation.requestingPermission || model.sending || model.transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if let running = state.selectedThread?.turns.last(where: { $0.isInProgress }),
+                    if let running = conversation.thread?.turns.last(where: { $0.isInProgress }),
                        !dictation.isRecording && !dictation.requestingPermission && !model.transcribing &&
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.attachments.isEmpty {
                         Button { model.interrupt(running.turnId) } label: {
@@ -1268,7 +1280,7 @@ private struct ThreadScreen: View {
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
                         .accessibilityLabel(dictation.isRecording ? "文字起こしして送信" : "送信")
-                        .disabled(!state.isConnected || (!state.isNewThread && state.selectedThread == nil) || model.sending || model.transferring || preparingMedia || dictation.requestingPermission || model.transcribing ||
+                        .disabled(!state.isConnected || (!state.isNewThread && conversation.thread == nil) || model.sending || model.transferring || preparingMedia || dictation.requestingPermission || model.transcribing ||
                                   (!dictation.isRecording && model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.attachments.isEmpty))
                         .accessibilityIdentifier("task.send")
                     }
@@ -1309,9 +1321,9 @@ private struct ThreadScreen: View {
 
     private func refreshReview() {
         let directory = model.cwd
-        guard !directory.isEmpty, let threadId = state.selectedThread?.id else { review = nil; return }
+        guard !directory.isEmpty, let threadId = conversation.thread?.id else { review = nil; return }
         model.workspace("host/workspace/review", ["cwd": directory]) { result, _ in
-            guard model.cwd == directory, model.state.selectedThread?.id == threadId else { return }
+            guard model.cwd == directory, model.state.selectedThreadId == threadId else { return }
             if let result, let files = result["files"] as? [[String: Any]],
                let additions = result["additions"] as? Int, let deletions = result["deletions"] as? Int {
                 review = (files.count, additions, deletions)
@@ -1738,17 +1750,36 @@ private struct ConversationMarkdown: View {
     private func parse() -> [Block] {
         guard let document = try? AttributedString(markdown: text) else { return [] }
         var result: [Block] = []
+        var start: AttributedString.Index?
+        var end: AttributedString.Index?
+        var paragraphID: Int?
+        var imageURL: URL?
+        var header: Int?
+        var marker: String?
+        var code = false
+        var quoted = false
         for run in document.runs {
             let components = run.presentationIntent?.components ?? []
             let identity = components.first?.identity ?? 0
-            let content = AttributedString(document[run.range])
-            if let last = result.indices.last, result[last].paragraphID == identity,
-               result[last].imageURL == run.imageURL {
-                result[last].content += content
+            if paragraphID == identity && imageURL == run.imageURL {
+                end = run.range.upperBound
                 continue
             }
-            var header: Int?, ordinal: Int?
-            var code = false, quoted = false, ordered = false
+            if let start, let end, let paragraphID {
+                result.append(Block(id: result.count, paragraphID: paragraphID,
+                                    content: AttributedString(document[start..<end]), header: header,
+                                    marker: marker, code: code, quoted: quoted, imageURL: imageURL))
+            }
+            start = run.range.lowerBound
+            end = run.range.upperBound
+            paragraphID = identity
+            imageURL = run.imageURL
+            header = nil
+            marker = nil
+            code = false
+            quoted = false
+            var ordinal: Int?
+            var ordered = false
             for component in components {
                 switch component.kind {
                 case .header(level: let level): header = level
@@ -1759,8 +1790,12 @@ private struct ConversationMarkdown: View {
                 default: break
                 }
             }
-            result.append(Block(id: result.count, paragraphID: identity, content: content, header: header,
-                                marker: ordinal.map { ordered ? "\($0)." : "•" }, code: code, quoted: quoted, imageURL: run.imageURL))
+            marker = ordinal.map { ordered ? "\($0)." : "•" }
+        }
+        if let start, let end, let paragraphID {
+            result.append(Block(id: result.count, paragraphID: paragraphID,
+                                content: AttributedString(document[start..<end]), header: header,
+                                marker: marker, code: code, quoted: quoted, imageURL: imageURL))
         }
         return result
     }
@@ -2262,7 +2297,9 @@ private final class ConversationScrollPosition: NSObject, ObservableObject {
             followsLatest = false
             onDirection?(gesture.translation(in: scrollView).y > 0)
         case .ended:
-            if let scroll = scrollView { followsLatest = isNearBottom(scroll) }
+            if let scroll = scrollView {
+                followsLatest = isNearBottom(scroll) && gesture.translation(in: scroll).y <= 0
+            }
         case .cancelled, .failed: onDirection?(false)
         default: break
         }

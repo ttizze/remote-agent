@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Install iPhone build 33. Separate navigation and conversation observation, project streamed state in 16 ms windows, and persist streams at completion or explicit flush. Keep small drags toward older messages detached from automatic bottom following.
+
+- Keep earlier AI replies visible when several user instructions share one completed native turn; fold work within each exchange. Avoid intermediate JSON trees during mobile persistence and repeated attributed-string copies while rendering Markdown paragraphs.
+
 - Install iPhone build 31. Preserve earlier AI responses when turn IDs are missing or repeated; accept legacy `turnId` when `id` is blank. Reduce streaming work by updating raw and typed state together, bounding only the affected Host cache, coalescing persistence off the UI thread, and removing redundant row observers and unused gateway defaults.
 
 - Prepare iPhone build 30: separate display conversion from the controller and reuse unchanged turn projections while streaming. Release projections on history eviction and conversation/Host changes; preserve accepted inputs and same-length content updates. Remove the unused iOS directory-selection API and unreachable directory screen state.

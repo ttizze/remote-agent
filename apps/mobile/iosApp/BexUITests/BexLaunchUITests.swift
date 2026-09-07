@@ -792,6 +792,71 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(latest.isHittable)
     }
 
+    func testSimulatorKeepsSmallOlderScrollDuringLiveUpdate() throws {
+#if !targetEnvironment(simulator)
+        throw XCTSkip("Simulator-only isolated scroll-position fixture")
+#endif
+        let app = try connectedSimulatorApp()
+        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
+        func fixture(_ path: String) throws {
+            let done = expectation(description: path)
+            var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
+            request.httpMethod = "POST"
+            URLSession.shared.dataTask(with: request) { _, response, error in
+                XCTAssertNil(error)
+                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
+                done.fulfill()
+            }.resume()
+            wait(for: [done], timeout: 10)
+        }
+        try fixture("long-conversation")
+        defer { try? fixture("list-fixture/reset") }
+        app.terminate(); app.launch()
+
+        let row = app.descendants(matching: .any)["tasks.row.fixture-long-history"]
+        XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
+        let detail = app.descendants(matching: .any)["task.detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any)["item.long-latest-message"].waitForExistence(timeout: 20))
+        let message = app.descendants(matching: .any)["task.message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 10))
+        message.tap(); message.typeText("[delayed-input] Keep the reading position")
+        let send = app.buttons["task.send"]
+        XCTAssertTrue(send.waitForExistence(timeout: 10)); send.tap()
+        let keyboardHidden = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: app.keyboards.firstMatch)
+        wait(for: [keyboardHidden], timeout: 5)
+        XCTAssertTrue(prefixedButton(app, prefix: "turn.interrupt.").waitForExistence(timeout: 10))
+        let initialDetailValue = detail.value as? String ?? ""
+        XCTAssertFalse(initialDetailValue.isEmpty)
+
+        // A slow drag toward older content ends less than 80pt from the bottom.
+        // The subsequent turn update must leave the reader detached at that point.
+        let latestButton = app.buttons["task.latest"]
+        if latestButton.exists { latestButton.tap() }
+        let atBottom = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: latestButton)
+        wait(for: [atBottom], timeout: 5)
+        let anchor = app.descendants(matching: .any)["item.long-latest-message"]
+        let beforeDrag = anchor.frame.minY
+        let start = detail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
+        start.press(forDuration: 0.4, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 25)),
+                    withVelocity: .slow, thenHoldForDuration: 0.5)
+        let readingPosition = anchor.frame.minY
+        XCTAssertGreaterThan(readingPosition - beforeDrag, 5)
+        XCTAssertLessThan(readingPosition - beforeDrag, 80)
+        XCTAssertFalse(latestButton.exists, "The small drag must stay within the near-bottom threshold")
+        try fixture("release-inputs")
+
+        let updated = expectation(for: NSPredicate(format: "value != %@", initialDetailValue), evaluatedWith: detail)
+        wait(for: [updated], timeout: 30)
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 20))
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Small older scroll remains detached after live update"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        XCTAssertEqual(anchor.frame.minY, readingPosition, accuracy: 3,
+                       "Receiving new items must preserve the visible message position")
+    }
+
     func testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory() throws {
 #if !targetEnvironment(simulator)
         throw XCTSkip("Simulator-only repeated-turn history fixture")
@@ -808,6 +873,26 @@ final class BexLaunchUITests: XCTestCase {
                       "Reopening history must retain the latest AI response")
         XCTAssertTrue(app.descendants(matching: .any)["item.duplicate-history-old"].waitForExistence(timeout: 20),
                       "Opening history must retain the older AI response")
+    }
+
+    func testSimulatorKeepsEarlierAnswersBetweenFollowupsWhenReopening() throws {
+#if !targetEnvironment(simulator)
+        throw XCTSkip("Simulator-only followup history fixture")
+#endif
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[followups] Keep earlier replies")
+        let latest = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(latest.waitForExistence(timeout: 20))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        XCTAssertTrue(latest.waitForExistence(timeout: 20))
+        for id in ["item.history-answer-1", "item.history-answer-2"] {
+            let answer = app.descendants(matching: .any)[id]
+            XCTAssertTrue(answer.waitForExistence(timeout: 10), "Earlier replies must remain outside collapsed work")
+        }
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Earlier answers between followups"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
 
     func testSimulatorReopensCompletedHistoryCollapsed() throws {

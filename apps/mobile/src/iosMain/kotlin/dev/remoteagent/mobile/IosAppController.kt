@@ -3,6 +3,9 @@ package dev.remoteagent.mobile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -23,6 +26,7 @@ class IosAppController {
     private val viewProjector = IosViewStateProjector()
     private var observation: HostEventSubscription? = null
     private var connectionObservation: HostEventSubscription? = null
+    private var rendering: Job? = null
 
     init {
         IosLifecycleBridge.onRestoreAfterForeground = { restoreAfterForeground() }
@@ -37,14 +41,38 @@ class IosAppController {
 
     fun currentState(): IosAppViewState = viewProjector.project(controller.state)
 
-    fun observe(observer: (IosAppViewState) -> Unit) {
+    fun currentThread(): IosThreadView? {
+        viewProjector.project(controller.state)
+        return viewProjector.thread
+    }
+
+    fun observe(observer: (IosAppViewState, IosThreadView?) -> Unit) {
         observation?.cancel()
-        observation = controller.observe { observer(viewProjector.project(it)) }
+        rendering?.cancel()
+        val updates = Channel<AppState>(Channel.CONFLATED)
+        observation = controller.observe { updates.trySend(it) }
+        rendering = scope.launch {
+            var previousApp: IosAppViewState? = null
+            var previousThread: IosThreadView? = null
+            for (first in updates) {
+                // Reconcile every event in common state; project only the latest frame.
+                delay(16)
+                val app = viewProjector.project(updates.tryReceive().getOrNull() ?: first)
+                val thread = viewProjector.thread
+                if (app !== previousApp || thread !== previousThread) {
+                    previousApp = app
+                    previousThread = thread
+                    observer(app, thread)
+                }
+            }
+        }
     }
 
     fun close() {
         observation?.cancel()
         observation = null
+        rendering?.cancel()
+        rendering = null
         connectionObservation?.cancel()
         connectionObservation = null
         IosLifecycleBridge.onRestoreAfterForeground = null

@@ -53,18 +53,28 @@ internal fun ThreadSnapshot.conversationSegments(): List<ThreadTurnPresentation>
     }
 }
 
-/** Live tools group between commentary; completed work folds behind the final answer. */
+/** Completed work folds within each user exchange, never across a later instruction. */
 internal fun CodexTurn.toThreadTurnPresentations(displayItems: List<CodexItem> = items): List<ThreadTurnPresentation> {
-    val finalAnswer = if (status == TurnStatus.Completed) {
-        displayItems.lastOrNull { it is CodexItem.AgentMessage && it.phase == AgentMessagePhase.FinalAnswer }
-            ?: displayItems.lastOrNull { it is CodexItem.AgentMessage && it.phase == null }
-    } else null
     val boundaries = buildList {
         add(0)
         var followsResponse = false
+        var exchangeEnd = 0
+        var exchangeHasAnswer = false
         displayItems.forEachIndexed { index, item ->
+            if (index == exchangeEnd) {
+                exchangeEnd = index
+                exchangeHasAnswer = false
+                while (exchangeEnd < displayItems.size) {
+                    val exchangeItem = displayItems[exchangeEnd]
+                    if (exchangeEnd > index && exchangeItem is CodexItem.UserMessage) break
+                    if (status == TurnStatus.Completed && exchangeItem is CodexItem.AgentMessage &&
+                        exchangeItem.phase != AgentMessagePhase.Commentary
+                    ) exchangeHasAnswer = true
+                    exchangeEnd++
+                }
+            }
             if (index > 0 && (item is CodexItem.UserMessage ||
-                    (finalAnswer == null && followsResponse && item !is CodexItem.AgentMessage && item.isVisibleInConversation()))) {
+                    (!exchangeHasAnswer && followsResponse && item !is CodexItem.AgentMessage && item.isVisibleInConversation()))) {
                 add(index)
                 followsResponse = false
             }
@@ -75,6 +85,15 @@ internal fun CodexTurn.toThreadTurnPresentations(displayItems: List<CodexItem> =
     return (0 until boundaries.lastIndex).map { section ->
         val start = boundaries[section]
         val end = boundaries[section + 1]
+        var finalAnswer: CodexItem.AgentMessage? = null
+        if (status == TurnStatus.Completed) for (index in end - 1 downTo start) {
+            val candidate = displayItems[index] as? CodexItem.AgentMessage ?: continue
+            if (candidate.phase == AgentMessagePhase.FinalAnswer) {
+                finalAnswer = candidate
+                break
+            }
+            if (finalAnswer == null && candidate.phase == null) finalAnswer = candidate
+        }
         val last = section == boundaries.lastIndex - 1
         val userMessages = mutableListOf<CodexItem.UserMessage>()
         val activityItems = mutableListOf<CodexItem>()

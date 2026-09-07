@@ -8,6 +8,25 @@ import kotlin.test.assertEquals
 
 class IosAppViewStateTest {
     @Test
+    fun streaming_body_does_not_invalidate_navigation_or_title_lists() {
+        val projector = IosViewStateProjector()
+        val turn = CodexTurn("live", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("answer", "before")))
+        val initial = state(listOf(turn))
+        val navigation = projector.project(initial)
+        val original = projector.thread!!
+        val profile = initial.cache.profile("host")
+        val snapshot = profile.snapshots.getValue("conversation")
+        val updated = initial.copy(cache = MobileCache(mapOf("host" to profile.copy(snapshots = mapOf(
+            "conversation" to snapshot.copy(turns = listOf(turn.copy(items = listOf(CodexItem.AgentMessage("answer", "after!"))))),
+        )))))
+        assertSame(navigation, projector.project(updated))
+        assertNotSame(original, projector.thread)
+        assertEquals("after!", projector.thread!!.turns.single().responses.single().expandedBody())
+        assertNotSame(navigation, projector.project(updated.copy(pairingError = "Pairing failed")))
+        assertEquals("conversation", projector.project(updated).selectedThreadId)
+    }
+
+    @Test
     fun open_conversation_keeps_its_upload_directory_when_recent_titles_drop_it() {
         val host = HostProfile("runner", "Mac", "wss://relay.example.test", "host", "device-ref")
         val summary = ThreadSummary(
@@ -36,13 +55,13 @@ class IosAppViewStateTest {
         val projector = IosViewStateProjector()
         val history = CodexTurn("old", TurnStatus.Completed, listOf(CodexItem.AgentMessage("old-answer", "history")))
         val live = CodexTurn("live", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("answer", "before")))
-        val first = projector.project(state(listOf(history, live))).selectedThread!!
+        val first = projector.conversation(state(listOf(history, live)))!!
         val changed = live.copy(items = listOf(CodexItem.AgentMessage("answer", "after!")))
-        val next = projector.project(state(listOf(history, changed))).selectedThread!!
+        val next = projector.conversation(state(listOf(history, changed)))!!
         assertSame(first.turns.first(), next.turns.first())
         assertEquals("after!", next.turns.last().responses.single().expandedBody())
         assertEquals("before", first.turns.last().responses.single().expandedBody())
-        val completed = projector.project(state(listOf(history, changed.copy(status = TurnStatus.Completed)))).selectedThread!!
+        val completed = projector.conversation(state(listOf(history, changed.copy(status = TurnStatus.Completed))))!!
         assertEquals(false, completed.turns.last().isInProgress)
     }
 
@@ -52,7 +71,7 @@ class IosAppViewStateTest {
         val first = CodexTurn("", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer-1", "first")))
         val second = CodexTurn("", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer-2", "second")))
 
-        val view = projector.project(state(listOf(first, second))).selectedThread!!
+        val view = projector.conversation(state(listOf(first, second)))!!
 
         assertEquals(listOf("first", "second"), view.turns.flatMap { turn ->
             turn.responses.map { it.expandedBody() }
@@ -65,12 +84,12 @@ class IosAppViewStateTest {
         val turn = CodexTurn("live", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("answer", "reply")))
         projector.project(state(listOf(turn)))
         val pending = SubmittedMessage("client", "additional", "live", "answer")
-        val accepted = projector.project(state(listOf(turn), listOf(pending))).selectedThread!!
+        val accepted = projector.conversation(state(listOf(turn), listOf(pending)))!!
         assertEquals(listOf("additional"), accepted.turns.flatMap { it.userMessages }.map { it.expandedBody() })
         val echoed = turn.copy(items = turn.items + CodexItem.UserMessage("native", "additional", "client"))
-        val reconciled = projector.project(state(listOf(echoed))).selectedThread!!
+        val reconciled = projector.conversation(state(listOf(echoed)))!!
         assertEquals(listOf("client"), reconciled.turns.flatMap { it.userMessages }.map { it.id })
-        val queued = projector.project(state(listOf(echoed), listOf(pending.copy(clientId = "queue", turnId = null)))).selectedThread!!
+        val queued = projector.conversation(state(listOf(echoed), listOf(pending.copy(clientId = "queue", turnId = null))))!!
         assertEquals(listOf("queue"), queued.queuedMessages.map { it.id })
     }
 
@@ -79,16 +98,21 @@ class IosAppViewStateTest {
         val projector = IosViewStateProjector()
         val turn = CodexTurn("old", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer", "history")))
         val initial = state(listOf(turn))
-        val first = projector.project(initial).selectedThread!!
-        assertSame(first, projector.project(initial.copy(pairingError = "notice")).selectedThread)
+        val first = projector.conversation(initial)!!
+        assertSame(first, projector.conversation(initial.copy(pairingError = "notice")))
         projector.project(state(emptyList()))
-        val restored = projector.project(initial).selectedThread!!
+        val restored = projector.conversation(initial)!!
         assertNotSame(first.turns.single(), restored.turns.single())
-        val otherHost = projector.project(state(listOf(turn), hostId = "other-host")).selectedThread!!
+        val otherHost = projector.conversation(state(listOf(turn), hostId = "other-host"))!!
         assertNotSame(restored.turns.single(), otherHost.turns.single())
         val list = initial.copy(profileViews = mapOf("host" to ProfileViewState()))
-        assertNull(projector.project(list).selectedThread)
-        assertNotSame(first.turns.single(), projector.project(initial).selectedThread!!.turns.single())
+        assertNull(projector.conversation(list))
+        assertNotSame(first.turns.single(), projector.conversation(initial)!!.turns.single())
+    }
+
+    private fun IosViewStateProjector.conversation(state: AppState): IosThreadView? {
+        project(state)
+        return thread
     }
 
     private fun state(

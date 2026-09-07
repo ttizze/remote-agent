@@ -8,7 +8,6 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.decodeFromJsonElement
-import kotlinx.serialization.json.encodeToJsonElement
 
 private val codecJson = Json {
     encodeDefaults = true
@@ -52,12 +51,9 @@ object MobileStateCodec {
 
     /** Navigation is durable even when the disposable display cache exceeds storage. */
     fun encode(state: AppState): ByteArray {
-        val payload = state.toPersisted()
-        val bytes = encodeEnvelope(AppStateKind, codecJson.encodeToJsonElement(PersistedAppState.serializer(), payload), enforceLimit = false)
+        val bytes = encodeEnvelope(AppStateKind, state.toPersisted(), enforceLimit = false)
         if (bytes.size <= MaxInputBytes) return bytes
-        return encodeEnvelope(AppStateKind, codecJson.encodeToJsonElement(
-            PersistedAppState.serializer(), state.copy(cache = MobileCache()).toPersisted(),
-        ))
+        return encodeEnvelope(AppStateKind, state.copy(cache = MobileCache()).toPersisted())
     }
 
     /** Encode only the display cache into the current envelope. */
@@ -65,7 +61,7 @@ object MobileStateCodec {
 
     fun encodeCache(cache: MobileCache): ByteArray = encodeEnvelope(
         kind = CacheKind,
-        payload = codecJson.encodeToJsonElement(PersistedMobileCache.serializer(), cache.toPersisted()),
+        payload = cache.toPersisted(),
     )
 
     /** Decode an application state and apply local cache limits after decode. */
@@ -111,7 +107,7 @@ object MobileStateCodec {
     private fun readEnvelope(
         bytes: ByteArray,
         expectedKind: String,
-    ): MobileStateDecodeResult<PersistedEnvelope> {
+    ): MobileStateDecodeResult<PersistedEnvelope<JsonObject>> {
         if (bytes.size > MaxInputBytes) {
             return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Oversize)
         }
@@ -135,7 +131,7 @@ object MobileStateCodec {
         }
 
         val envelope = try {
-            codecJson.decodeFromJsonElement<PersistedEnvelope>(root)
+            codecJson.decodeFromJsonElement<PersistedEnvelope<JsonObject>>(root)
         } catch (_: SerializationException) {
             return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
         } catch (_: IllegalArgumentException) {
@@ -150,13 +146,13 @@ object MobileStateCodec {
         return MobileStateDecodeResult.Success(envelope)
     }
 
-    private fun encodeEnvelope(kind: String, payload: JsonElement, enforceLimit: Boolean = true): ByteArray {
+    private inline fun <reified T> encodeEnvelope(kind: String, payload: T, enforceLimit: Boolean = true): ByteArray {
         val bytes = codecJson.encodeToString(
             PersistedEnvelope(
                 format = Format,
                 version = CurrentVersion,
                 kind = kind,
-                payload = payload as? JsonObject ?: error("State payload must be an object"),
+                payload = payload,
             ),
         ).encodeToByteArray()
         require(!enforceLimit || bytes.size <= MaxInputBytes) { "Mobile state exceeds the $MaxInputBytes-byte storage limit" }
@@ -171,11 +167,11 @@ object MobileStateCodec {
 
 /** A small explicit envelope keeps the persisted schema independent of model DTOs. */
 @Serializable
-private data class PersistedEnvelope(
+private data class PersistedEnvelope<T>(
     val format: String,
     val version: Int,
     val kind: String,
-    val payload: JsonObject,
+    val payload: T,
 )
 
 @Serializable
@@ -200,6 +196,7 @@ private data class PersistedHostProfile(
 private data class PersistedProfileViewState(
     val workingDirectoryPath: String = "",
     val selectedThreadId: String? = null,
+    val unreadCompletedThreadIds: Set<String> = emptySet(),
 )
 
 @Serializable
@@ -237,6 +234,7 @@ private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
         PersistedProfileViewState(
             workingDirectoryPath = view.workingDirectoryPath,
             selectedThreadId = view.selectedThreadId,
+            unreadCompletedThreadIds = view.unreadCompletedThreadIds,
         )
     },
     cache = cache.toPersisted(),
@@ -267,6 +265,7 @@ private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppSta
                 workingDirectoryPath = view.workingDirectoryPath,
                 threadList = LoadPhase.Idle,
                 selectedThreadId = view.selectedThreadId,
+                unreadCompletedThreadIds = view.unreadCompletedThreadIds,
                 threadDetail = LoadPhase.Idle,
                 interruptingTurnId = null,
                 notice = null,
