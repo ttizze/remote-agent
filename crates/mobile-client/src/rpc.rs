@@ -10,10 +10,9 @@ use std::{
 use host_protocol::{
     JsonlReader, JsonlWriter, RpcMessage, RpcMessageKind, classify_message, raw_object,
 };
-use russh::{ChannelStream, client::Msg};
 use serde_json::{Value, value::RawValue};
 use tokio::{
-    io::AsyncWrite,
+    io::{AsyncRead, AsyncWrite},
     sync::{Semaphore, broadcast, mpsc, oneshot},
     time::timeout,
 };
@@ -31,10 +30,12 @@ struct PeerState {
     terminal: Option<String>,
     notifications: Option<broadcast::Sender<Notification>>,
     server_requests: Option<broadcast::Sender<ServerRequest>>,
+    initial_notifications: Option<broadcast::Receiver<Notification>>,
+    initial_requests: Option<broadcast::Receiver<ServerRequest>>,
 }
 
-/// Correlates bidirectional Codex JSONL traffic on one authenticated SSH
-/// subsystem stream.
+/// Correlates bidirectional Codex JSONL traffic on one authenticated relay
+/// stream.
 ///
 /// The transport never deserializes params, result, error, or extension data.
 /// It only classifies top-level routing keys. Requests made through the Rust
@@ -49,11 +50,14 @@ pub(crate) struct RpcPeer {
 }
 
 impl RpcPeer {
-    pub(crate) fn open(
-        stream: ChannelStream<Msg>,
+    pub(crate) fn open<S>(
+        stream: S,
         max_message_bytes: usize,
         request_timeout: Duration,
-    ) -> Result<Self, MobileClientError> {
+    ) -> Result<Self, MobileClientError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         if max_message_bytes == 0 {
             return Err(MobileClientError::InvalidConfig(
                 "max_message_bytes must be positive",
@@ -61,13 +65,15 @@ impl RpcPeer {
         }
 
         let (outbound, outbound_rx) = mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
-        let (notifications, _) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
-        let (server_requests, _) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        let (notifications, initial_notifications) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        let (server_requests, initial_requests) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
         let state = Arc::new(StdMutex::new(PeerState {
             pending: HashMap::new(),
             terminal: None,
             notifications: Some(notifications),
             server_requests: Some(server_requests),
+            initial_notifications: Some(initial_notifications),
+            initial_requests: Some(initial_requests),
         }));
         let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
         let (reader, writer) = tokio::io::split(stream);
@@ -209,7 +215,8 @@ fn lock_state(state: &SharedState) -> MutexGuard<'_, PeerState> {
 }
 
 fn notification_receiver(state: &SharedState) -> broadcast::Receiver<Notification> {
-    let state = lock_state(state);
+    let mut state = lock_state(state);
+    if let Some(receiver) = state.initial_notifications.take() { return receiver; }
     state
         .notifications
         .as_ref()
@@ -218,7 +225,8 @@ fn notification_receiver(state: &SharedState) -> broadcast::Receiver<Notificatio
 }
 
 fn server_request_receiver(state: &SharedState) -> broadcast::Receiver<ServerRequest> {
-    let state = lock_state(state);
+    let mut state = lock_state(state);
+    if let Some(receiver) = state.initial_requests.take() { return receiver; }
     state
         .server_requests
         .as_ref()
@@ -311,7 +319,7 @@ async fn write_loop<W>(
     permits: Arc<Semaphore>,
     max_message_bytes: usize,
 ) where
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
 {
     let mut writer = JsonlWriter::with_max_message_bytes(writer, max_message_bytes);
     while let Some(line) = outbound.recv().await {
@@ -329,7 +337,7 @@ async fn read_loop<R>(
     permits: Arc<Semaphore>,
     max_message_bytes: usize,
 ) where
-    R: tokio::io::AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
 {
     let mut reader = JsonlReader::with_max_message_bytes(reader, max_message_bytes);
     loop {
@@ -340,7 +348,7 @@ async fn read_loop<R>(
                 return;
             }
         }) else {
-            terminate(&state, &permits, "SSH channel closed".to_owned());
+            terminate(&state, &permits, "relay channel closed".to_owned());
             return;
         };
 

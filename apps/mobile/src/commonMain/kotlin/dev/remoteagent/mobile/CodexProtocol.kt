@@ -166,7 +166,7 @@ internal fun codexItem(value: JsonElement): CodexItem {
     val raw = value.asObjectOrNull() ?: JsonObject(mapOf("value" to value))
     val id = raw.string("id").orEmpty()
     return when (raw.string("type")) {
-        "userMessage" -> CodexItem.UserMessage(id, raw.textLike())
+        "userMessage" -> CodexItem.UserMessage(id, raw.userMessageText(), raw.string("clientId"), raw.userMessageImages())
         "agentMessage" -> CodexItem.AgentMessage(id, raw.textLike(), agentMessagePhase(raw.string("phase")))
         "reasoning" -> CodexItem.Reasoning(id, raw.textLike())
         "commandExecution" -> CodexItem.CommandExecution(
@@ -187,6 +187,28 @@ internal fun codexItem(value: JsonElement): CodexItem {
             codexType = raw.string("type") ?: "unknown",
             raw = raw,
         )
+    }
+}
+
+private fun JsonObject.userMessageImages(): List<String> = array("content").orEmpty().mapNotNull { value ->
+    val part = value as? JsonObject ?: return@mapNotNull null
+    when (part.string("type")) {
+        "localImage" -> part.string("path")
+        "image" -> part.string("url")
+        else -> null
+    }?.takeIf { it.isNotBlank() }
+}
+
+private fun JsonObject.userMessageText(): String = buildString {
+    append(textLike())
+    array("content").orEmpty().forEach { value ->
+        val part = value as? JsonObject ?: return@forEach
+        val label = when (part.string("type")) {
+            "mention" -> attachmentMessageLabel(false, part.string("path").orEmpty(), part.string("name").orEmpty())
+            else -> return@forEach
+        }
+        if (isNotEmpty()) append('\n')
+        append(label)
     }
 }
 
@@ -299,6 +321,7 @@ internal fun codexThreadEvent(message: RawCodexMessage): ThreadEvent = when (mes
                 id = message.id.stringOrNull() ?: message.id.toString(),
                 method = message.method,
                 params = params,
+                wireId = message.id,
             ),
         )
     }
@@ -357,3 +380,6 @@ private fun codexFileChangeStatus(status: String?): FileChangeStatus = when (sta
     "declined" -> FileChangeStatus.Declined
     else -> FileChangeStatus.Completed
 }
+
+internal fun attachmentMessageLabel(isImage: Boolean, path: String, name: String): String =
+    if (isImage) "画像: $path" else "添付: $name ($path)"

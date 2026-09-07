@@ -22,7 +22,7 @@ char *mobile_client_generate_device_key(char **error_out);
 
 /*
  * config_json uses camelCase fields:
- * address, hostIdentity, deviceName, pairingTicket (optional),
+ * relayUrl, relayToken, runnerId, hostIdentity, deviceName, pairingTicket (optional),
  * requestTimeoutMs. hostIdentity and pairingTicket are the
  * host-protocol base64url values. device_pkcs8 is secure-storage output.
  */
@@ -64,6 +64,11 @@ int mobile_client_respond_error(
     const char *request_id_json,
     const char *error_json,
     char **error_out);
+
+/* params: {direction:"upload",source,directory,fileName} or
+ * {direction:"download",source,destination}. Download never overwrites.
+ * Returns result JSON; file bytes use a separate SSH channel. */
+char *mobile_client_transfer(MobileClientHandle *handle, const char *params_json, char **error_out);
 
 /* Consumes handle; call exactly once after all request calls have returned. */
 void mobile_client_close(MobileClientHandle *handle);

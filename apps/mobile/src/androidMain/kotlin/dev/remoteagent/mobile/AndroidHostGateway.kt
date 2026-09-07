@@ -1,15 +1,8 @@
 package dev.remoteagent.mobile
 
 import android.content.Context
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-import java.util.Base64
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantReadWriteLock
-import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -24,66 +17,50 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     private val handles = mutableMapOf<String, NativeHandle>()
     private val subscriptions = mutableMapOf<String, MutableSet<(RawCodexMessage) -> Unit>>()
     private val pollers = mutableMapOf<String, Thread>()
-    private val discovery = AndroidMdnsDiscovery(context)
     private val commonCodexClient = CommonCodexClient(this)
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = invoke {
-        val keyStore = AndroidDeviceIdentityStore(context, payload.hostIdentity)
-        val key = keyStore.loadOrCreate {
-            decodeKey(NativeHostTransport.generateDeviceKey())
+        val reference = payload.hostIdentity
+        val key = AndroidCredentialStore(context, "key:$reference").loadOrCreate {
+            java.util.Base64.getUrlDecoder().decode(NativeHostTransport.generateDeviceKey())
         }
+        AndroidCredentialStore(context, "relay:$reference").save(payload.relayToken.encodeToByteArray())
+        val profile = HostProfile(payload.runnerId, payload.hostName, payload.relayUrl, payload.hostIdentity, reference)
         try {
-            closeNativeHandle(NativeHandle(openFirst(payload.addresses, payload.hostIdentity, payload.ticket, key)))
-        } finally {
-            key.fill(0)
-        }
-        HostProfile(payload.hostIdentity, payload.hostIdentity.take(12), payload.addresses, keyStore.deviceIdentityReference())
+            closeNativeHandle(NativeHandle(open(profile, payload.relayToken, key, payload.ticket)))
+        } finally { key.fill(0) }
+        profile
     }
 
-    override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = suspendCancellableCoroutine { continuation ->
-        val finished = AtomicBoolean(false)
-        val timeout = Runnable { finishDiscovery(profile, emptyList(), finished, continuation) }
-        val handler = Handler(Looper.getMainLooper())
-        discovery.start(
-            onEndpoint = { endpoint ->
-                finishDiscovery(profile, listOf(endpoint), finished, continuation)
-                handler.removeCallbacks(timeout)
-            },
-            onError = {
-                finishDiscovery(profile, emptyList(), finished, continuation)
-                handler.removeCallbacks(timeout)
-            },
-        )
-        handler.postDelayed(timeout, DiscoveryTimeoutMs)
-        continuation.invokeOnCancellation { handler.removeCallbacks(timeout); discovery.stop() }
-    }
+    override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> =
+        GatewayResult.Success(listOf(profile.relayUrl))
 
     override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = invoke {
-        val key = AndroidDeviceIdentityStore(context, profile.hostIdentity).load()
-            ?: error("Device identity is unavailable")
-        try {
-            val old = synchronized(stateLock) {
-                val oldHandle = handles.remove(profile.hostIdentity)
-                subscriptions.remove(profile.hostIdentity)
-                pollers.remove(profile.hostIdentity) to oldHandle
-            }
-            old.first?.interrupt()
-            old.second?.let(::closeNativeHandle)
-            val handle = NativeHandle(openFirst(profile.addresses, profile.hostIdentity, null, key))
-            synchronized(stateLock) { handles[profile.hostIdentity] = handle }
-        } finally {
-            key.fill(0)
+        val old = synchronized(stateLock) {
+            val oldHandle = handles.remove(profile.id)
+            subscriptions.remove(profile.id)
+            pollers.remove(profile.id) to oldHandle
         }
+        old.first?.interrupt()
+        old.second?.let(::closeNativeHandle)
+        val key = AndroidCredentialStore(context, "key:${profile.deviceIdentityReference}").load() ?: error("Device key is unavailable; pair again")
+        val token = AndroidCredentialStore(context, "relay:${profile.deviceIdentityReference}").load() ?: error("Relay credential is unavailable; pair again")
+        val handle = try { NativeHandle(open(profile, token.decodeToString(), key, null)) } finally { key.fill(0); token.fill(0) }
+        synchronized(stateLock) { handles[profile.id] = handle }
     }
 
     override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = invoke {
         val (poller, handle) = synchronized(stateLock) {
-            val currentHandle = handles.remove(profile.hostIdentity)
-            subscriptions.remove(profile.hostIdentity)
-            pollers.remove(profile.hostIdentity) to currentHandle
+            val currentHandle = handles.remove(profile.id)
+            subscriptions.remove(profile.id)
+            pollers.remove(profile.id) to currentHandle
         }
         poller?.interrupt()
         handle?.let(::closeNativeHandle)
+    }
+
+    override suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement> = invoke {
+        json.parseToJsonElement(withNativeHandle(profile) { NativeHostTransport.transfer(it, params.toString()) })
     }
 
     override suspend fun rawRequest(
@@ -97,11 +74,8 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         json.parseToJsonElement(raw)
     }
 
-    override suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> =
-        commonCodexClient.listProjects(profile)
-
-    override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> =
-        commonCodexClient.listThreads(profile, cwd)
+    override suspend fun listThreads(profile: HostProfile, query: ThreadListQuery): GatewayResult<ThreadListPage> =
+        commonCodexClient.listThreads(profile, query)
 
     override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> =
         commonCodexClient.readThread(profile, threadId)
@@ -109,20 +83,14 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> =
         commonCodexClient.startThread(profile, cwd)
 
-    override suspend fun startThread(
-        profile: HostProfile,
-        cwd: String,
-        firstPrompt: String,
-    ): GatewayResult<ThreadStartResult> = commonCodexClient.startThread(profile, cwd, firstPrompt)
+    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String, attachments: List<CodexAttachment>, resume: Boolean, clientUserMessageId: String): GatewayResult<String> =
+        commonCodexClient.startTurn(profile, threadId, cwd, text, attachments, resume, clientUserMessageId)
 
-    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> =
-        commonCodexClient.startTurn(profile, threadId, cwd, text)
+    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String, attachments: List<CodexAttachment>, clientUserMessageId: String): GatewayResult<Unit> =
+        commonCodexClient.steerTurn(profile, threadId, turnId, text, attachments, clientUserMessageId)
 
-    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit> =
-        commonCodexClient.steerTurn(profile, threadId, turnId, text)
-
-    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> =
-        commonCodexClient.queueTurn(profile, threadId, text)
+    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String, attachments: List<CodexAttachment>, clientUserMessageId: String): GatewayResult<String> =
+        commonCodexClient.queueTurn(profile, threadId, text, attachments, clientUserMessageId)
 
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
         commonCodexClient.interrupt(profile, threadId, turnId)
@@ -160,11 +128,11 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         onClosed: (String) -> Unit,
     ): HostEventSubscription {
         val subscribed = synchronized(stateLock) {
-            val handle = handles[profile.hostIdentity] ?: return@synchronized false
-            subscriptions.getOrPut(profile.hostIdentity) { linkedSetOf() }.add(onMessage)
-            if (pollers[profile.hostIdentity] == null) {
-                pollers[profile.hostIdentity] = Thread {
-                    pollLoop(profile.hostIdentity, handle, onClosed)
+            val handle = handles[profile.id] ?: return@synchronized false
+            subscriptions.getOrPut(profile.id) { linkedSetOf() }.add(onMessage)
+            if (pollers[profile.id] == null) {
+                pollers[profile.id] = Thread {
+                    pollLoop(profile.id, handle, onClosed)
                 }.apply {
                     isDaemon = true
                     start()
@@ -175,10 +143,10 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         if (!subscribed) return HostEventSubscription {}
         return HostEventSubscription {
             synchronized(stateLock) {
-                subscriptions[profile.hostIdentity]?.remove(onMessage)
-                if (subscriptions[profile.hostIdentity].isNullOrEmpty()) {
-                    subscriptions.remove(profile.hostIdentity)
-                    pollers.remove(profile.hostIdentity)?.interrupt()
+                subscriptions[profile.id]?.remove(onMessage)
+                if (subscriptions[profile.id].isNullOrEmpty()) {
+                    subscriptions.remove(profile.id)
+                    pollers.remove(profile.id)?.interrupt()
                 }
             }
         }
@@ -221,20 +189,11 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         }
     }
 
-    /** Rust validates the pinned Host identity during every connect attempt. */
-    private fun openFirst(addresses: List<String>, identity: String, ticket: String?, key: ByteArray): Long {
-        var lastFailure: Throwable? = null
-        val keyBase64 = encodeKey(key)
-        for (address in addresses.asSequence().map(String::trim).filter(String::isNotEmpty).distinct()) {
-            try {
-                val handle = NativeHostTransport.connect(config(address, identity, ticket), keyBase64)
-                if (handle != 0L) return handle
-                lastFailure = IllegalStateException("Native connect returned no handle")
-            } catch (failure: Throwable) {
-                lastFailure = failure
-            }
-        }
-        throw (lastFailure ?: IllegalStateException("No discovered host address"))
+    /** Opens the single configured Phoenix relay path. */
+    private fun open(profile: HostProfile, relayToken: String, key: ByteArray, ticket: String?): Long {
+        val handle = NativeHostTransport.connect(config(profile, relayToken, ticket), key)
+        check(handle != 0L) { "Native connect returned no handle" }
+        return handle
     }
 
     private fun closeNativeHandle(handle: NativeHandle) {
@@ -251,12 +210,12 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     }
 
     private fun <T> withNativeHandle(profile: HostProfile, block: (Long) -> T): T {
-        val handle = synchronized(stateLock) { handles[profile.hostIdentity] }
+        val handle = synchronized(stateLock) { handles[profile.id] }
             ?: error("Host is not connected")
         val readLock = handle.lifetime.readLock()
         readLock.lock()
         return try {
-            check(synchronized(stateLock) { handles[profile.hostIdentity] } === handle && !handle.closed) {
+            check(synchronized(stateLock) { handles[profile.id] } === handle && !handle.closed) {
                 "Host is not connected"
             }
             block(handle.pointer)
@@ -271,12 +230,14 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         var closed: Boolean = false,
     )
 
-    private fun config(address: String, identity: String, ticket: String?): String = buildJsonObject {
-        put("address", address)
-        put("hostIdentity", identity)
-        put("deviceName", Build.MODEL)
-        put("requestTimeoutMs", 30_000)
+    private fun config(profile: HostProfile, relayToken: String, ticket: String?): String = buildJsonObject {
+        put("relayUrl", profile.relayUrl)
+        put("runnerId", profile.runnerId)
+        put("hostIdentity", profile.hostIdentity)
+        put("deviceName", android.os.Build.MODEL)
+        put("relayToken", relayToken)
         ticket?.let { put("pairingTicket", it) }
+        put("requestTimeoutMs", 30_000)
     }.toString()
 
     private suspend fun <T> invoke(block: () -> T): GatewayResult<T> = withContext(Dispatchers.IO) {
@@ -288,23 +249,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         }
     }
 
-    private fun finishDiscovery(
-        profile: HostProfile,
-        discovered: List<String>,
-        finished: AtomicBoolean,
-        continuation: kotlinx.coroutines.CancellableContinuation<GatewayResult<List<String>>>,
-    ) {
-        if (finished.compareAndSet(false, true)) {
-            discovery.stop()
-            if (continuation.isActive) continuation.resume(GatewayResult.Success((discovered + profile.addresses).distinct()))
-        }
-    }
-
-    private fun decodeKey(value: String) = Base64.getUrlDecoder().decode(value)
-    private fun encodeKey(value: ByteArray) = Base64.getUrlEncoder().withoutPadding().encodeToString(value)
-
     private companion object {
-        const val DiscoveryTimeoutMs = 1_500L
         const val PollIntervalMs = 50L
     }
 }

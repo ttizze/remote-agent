@@ -23,7 +23,7 @@
       devShells = forEachSystem (pkgs:
         let
           rustToolchain = pkgs.rust-bin.stable.latest.minimal.override {
-            extensions = [ "clippy" "rustfmt" ];
+            extensions = [ "clippy" "rustfmt" "rust-analyzer" "rust-src" ];
             targets = [
               "aarch64-apple-ios"
               "aarch64-apple-ios-sim"
@@ -45,8 +45,12 @@
               gradle
               jdk21
               rustToolchain
-              cargo-tauri
               cargo-ndk
+              flyctl
+              beamPackages.elixir
+              beamPackages.elixir-ls
+              kotlin-language-server
+              python3
               nodejs_22
               androidSdk
             ];

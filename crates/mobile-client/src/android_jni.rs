@@ -207,3 +207,15 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_close(
         ffi::close_handle(handle as *mut ffi::Handle);
     }
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_transfer(mut env: JNIEnv<'_>, _class: JClass<'_>, handle: jlong, params_json: JString<'_>) -> jstring {
+    let result = (|| {
+        let params = string(&mut env, params_json)?;
+        ffi::transfer_json(borrowed_handle(handle)?, &params)
+    })();
+    match result {
+        Ok(response) => java_string(&mut env, response),
+        Err(error) => { exception(&mut env, error); ptr::null_mut() }
+    }
+}

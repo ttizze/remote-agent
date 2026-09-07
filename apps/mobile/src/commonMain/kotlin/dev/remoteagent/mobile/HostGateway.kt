@@ -2,25 +2,21 @@ package dev.remoteagent.mobile
 
 import kotlinx.serialization.json.JsonElement
 
+data class CodexAttachment(val path: String, val name: String, val isImage: Boolean)
+
 /** The only effect boundary used by common mobile presentation code. */
 interface HostGateway : RawCodexGateway {
     suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile>
     suspend fun discover(profile: HostProfile): GatewayResult<List<String>>
     suspend fun connect(profile: HostProfile): GatewayResult<Unit>
     suspend fun disconnect(profile: HostProfile): GatewayResult<Unit>
-    suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> =
-        GatewayResult.Failure("Codex Desktop projects are unavailable on this Host.")
-    suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>>
+    suspend fun listThreads(profile: HostProfile, query: ThreadListQuery = ThreadListQuery()): GatewayResult<ThreadListPage>
     suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult>
     suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot>
-    suspend fun startThread(
-        profile: HostProfile,
-        cwd: String,
-        firstPrompt: String,
-    ): GatewayResult<ThreadStartResult> = GatewayResult.Failure("Task creation is unavailable on this Host.")
-    suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String>
-    suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit>
-    suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String>
+    suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String, attachments: List<CodexAttachment> = emptyList(), resume: Boolean, clientUserMessageId: String): GatewayResult<String>
+    suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String, attachments: List<CodexAttachment> = emptyList(), clientUserMessageId: String): GatewayResult<Unit>
+    suspend fun queueTurn(profile: HostProfile, threadId: String, text: String, attachments: List<CodexAttachment> = emptyList(), clientUserMessageId: String): GatewayResult<String>
+    suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement>
     suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit>
 
     /**
@@ -86,16 +82,17 @@ internal fun <T, R> GatewayResult<T>.mapGateway(transform: (T) -> R): GatewayRes
 object UnavailableHostGateway : HostGateway {
     private fun <T> unavailable(): GatewayResult<T> = GatewayResult.Failure("PC Host connection is not configured on this device.")
 
+    override suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement> = unavailable()
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = unavailable()
     override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = unavailable()
     override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = unavailable()
     override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = unavailable()
-    override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> = unavailable()
+    override suspend fun listThreads(profile: HostProfile, query: ThreadListQuery): GatewayResult<ThreadListPage> = unavailable()
     override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> = unavailable()
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> = unavailable()
-    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> = unavailable()
-    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit> = unavailable()
-    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> = unavailable()
+    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String, attachments: List<CodexAttachment>, resume: Boolean, clientUserMessageId: String): GatewayResult<String> = unavailable()
+    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String, attachments: List<CodexAttachment>, clientUserMessageId: String): GatewayResult<Unit> = unavailable()
+    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String, attachments: List<CodexAttachment>, clientUserMessageId: String): GatewayResult<String> = unavailable()
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> = unavailable()
     override suspend fun rawRequest(profile: HostProfile, method: String, params: JsonElement): GatewayResult<JsonElement> = unavailable()
     override fun subscribeRaw(profile: HostProfile, onMessage: (RawCodexMessage) -> Unit): HostEventSubscription = HostEventSubscription {}

@@ -30,6 +30,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -55,19 +56,18 @@ fun RemoteAgentApp(
     var state by remember(controller) { mutableStateOf(controller.state) }
     DisposableEffect(controller) {
         val observation = controller.observe { state = it }
-        onDispose(observation::cancel)
+        controller.openApp(scope)
+        val connectionObservation = controller.maintainConnection(scope)
+        onDispose {
+            connectionObservation.cancel()
+            observation.cancel()
+        }
     }
     val activity = LocalContext.current as? ComponentActivity
     if (activity != null) {
         DisposableEffect(controller, activity) {
             val lifecycleObserver = AndroidConnectionLifecycle(
-                onForeground = {
-                    val current = controller.state
-                    val profile = current.selectedProfile
-                    if (profile != null && !current.showingPairing && current.connection != ConnectionPhase.Connecting) {
-                        scope.launch { controller.connect(profile, scope) }
-                    }
-                },
+                onForeground = { controller.openApp(scope) },
                 // Keep the authenticated transport alive while the Activity is
                 // backgrounded. Reconnect on the next foreground event.
                 onBackground = {},
@@ -163,11 +163,11 @@ private fun HostSelectionScreen(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item { Button(onClick = onAddProfile) { Text("PCを追加") } }
-        items(state.profiles, key = { it.hostIdentity }) { profile ->
-            Card(modifier = Modifier.fillMaxWidth(), onClick = { onSelect(profile.hostIdentity) }) {
+        items(state.profiles, key = { it.id }) { profile ->
+            Card(modifier = Modifier.fillMaxWidth(), onClick = { onSelect(profile.id) }) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(profile.name, style = MaterialTheme.typography.titleMedium)
-                    Text(profile.hostIdentity, style = MaterialTheme.typography.bodySmall)
+                    Text(profile.id, style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -183,7 +183,7 @@ private fun HostFlowScreen(
 ) {
     val profile = requireNotNull(state.selectedProfile)
     val view = state.selectedView
-    val cache = state.cache.profile(profile.hostIdentity)
+    val cache = state.cache.profile(profile.id)
     when (view.connection) {
         ConnectionPhase.Disconnected -> ConnectScreen(
             profile = profile,
@@ -207,7 +207,7 @@ private fun HostFlowScreen(
             // A connection opens on the Host's Desktop Project/App Server
             // Thread projection. Membership still arrives as Thread.projectId.
             val selectedThreadId = view.selectedThreadId
-            if (selectedThreadId == null) {
+            if (selectedThreadId == null && view.newThreadCwd == null) {
                 ThreadListScreen(
                     profile = profile,
                     view = view,
@@ -215,14 +215,12 @@ private fun HostFlowScreen(
                     threads = cache.threadList,
                     onRefresh = {
                         scope.launch {
-                            controller.listProjects(profile)
                             controller.listThreads(profile)
                         }
                     },
-                    onStart = { cwd, prompt ->
-                        scope.launch { controller.startThread(profile, cwd, prompt) }
-                    },
+                    onNew = { cwd -> controller.openNewThread(profile, cwd) },
                     onSelect = { threadId -> scope.launch { controller.readThread(profile, threadId) } },
+                    onExpand = { projects, projectId -> scope.launch { controller.expandTaskList(profile, projects, projectId) } },
                     modifier = modifier,
                 )
             } else {
@@ -230,10 +228,11 @@ private fun HostFlowScreen(
                     profile = profile,
                     view = view,
                     snapshot = cache.snapshots[selectedThreadId],
-                    onBack = { controller.dispatch(AppAction.ThreadListOpened(profile.hostIdentity)) },
-                    onRetry = { scope.launch { controller.readThread(profile, selectedThreadId) } },
-                    onSend = { text -> scope.launch { controller.startTurn(profile, selectedThreadId, text) } },
-                    onStop = { turnId -> scope.launch { controller.interrupt(profile, selectedThreadId, turnId) } },
+                    onBack = { scope.launch { controller.showThreadList(profile) } },
+                    onRetry = { selectedThreadId?.let { scope.launch { controller.readThread(profile, it) } } },
+                    onSend = { text -> controller.sendMessage(profile, text).accepted },
+                    onOlderHistory = { turnId -> scope.launch { controller.loadOlderHistory(profile, turnId) } },
+                    onStop = { turnId -> selectedThreadId?.let { scope.launch { controller.interrupt(profile, it, turnId) } } },
                     modifier = modifier,
                 )
             }
@@ -252,7 +251,7 @@ private fun ConnectScreen(
 ) {
     Column(modifier = modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(profile.name, style = MaterialTheme.typography.headlineMedium)
-        Text(if (profile.addresses.isEmpty()) "保存済みアドレスなし" else profile.addresses.joinToString())
+        Text(profile.relayUrl)
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onDiscover) { Text("検出") }
@@ -269,20 +268,14 @@ private fun ThreadListScreen(
     projects: List<CodexProject>,
     threads: List<ThreadSummary>,
     onRefresh: () -> Unit,
-    onStart: (String, String) -> Unit,
+    onNew: (String) -> Unit,
     onSelect: (String) -> Unit,
+    onExpand: (Boolean, String?) -> Unit,
     modifier: Modifier,
 ) {
-    var newTaskTarget by remember(profile.hostIdentity) { mutableStateOf<NewTaskTarget?>(null) }
     val knownProjectIds = projects.mapTo(mutableSetOf()) { it.id }
     val unassigned = threads.filter { it.projectId == null || it.projectId !in knownProjectIds }
-    val listPhase = when {
-        view.projectList is LoadPhase.Failed -> view.projectList
-        view.threadList is LoadPhase.Failed -> view.threadList
-        view.projectList == LoadPhase.Loading || view.threadList == LoadPhase.Loading -> LoadPhase.Loading
-        view.projectList == LoadPhase.Idle || view.threadList == LoadPhase.Idle -> LoadPhase.Idle
-        else -> LoadPhase.Ready
-    }
+    val listPhase = view.threadList
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -293,7 +286,7 @@ private fun ThreadListScreen(
             Text(profile.name, style = MaterialTheme.typography.bodyMedium)
             Button(
                 onClick = onRefresh,
-                enabled = view.threadList != LoadPhase.Loading && view.projectList != LoadPhase.Loading,
+                enabled = view.threadList != LoadPhase.Loading,
             ) { Text("更新") }
             view.notice?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             when (val phase = listPhase) {
@@ -306,42 +299,48 @@ private fun ThreadListScreen(
                 }
             }
         }
-        projects.forEach { project ->
+        projects.take(view.visibleProjectCount).forEach { project ->
             item(key = "project-${project.id}") {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("📁 ${project.name}", style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { newTaskTarget = NewTaskTarget(project) }) { Text("新規") }
+                    TextButton(onClick = { onNew(project.roots.firstOrNull()?.path.orEmpty()) }) { Text("新規") }
                 }
             }
             items(threads.filter { it.projectId == project.id }, key = { it.id }) { thread ->
                 ThreadSummaryRow(thread, onSelect)
+            }
+            if (project.id in view.moreProjectIds) {
+                item(key = "project-${project.id}-more") {
+                    TextButton(onClick = { onExpand(false, project.id) }, enabled = !view.loadingMoreThreads) { Text("もっと見る") }
+                }
+            }
+        }
+        if (view.hasMoreProjects) {
+            item(key = "projects-more") {
+                TextButton(onClick = { onExpand(true, null) }, enabled = !view.loadingMoreThreads) { Text("もっと見る") }
             }
         }
         item(key = "unassigned-header") {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("チャット", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.weight(1f))
-                TextButton(onClick = { newTaskTarget = NewTaskTarget(null) }) { Text("新規") }
+                TextButton(onClick = { onNew("") }) { Text("新規") }
             }
         }
         items(unassigned, key = { it.id }) { thread ->
             ThreadSummaryRow(thread, onSelect)
         }
+        if (view.hasMoreChats) {
+            item(key = "chats-more") {
+                TextButton(onClick = { onExpand(false, null) }, enabled = !view.loadingMoreThreads) { Text("もっと見る") }
+            }
+        }
         if (view.threadList == LoadPhase.Ready && threads.isEmpty()) {
             item { Text("タスクがありません。", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
-    newTaskTarget?.let { target ->
-        NewTaskDialog(
-            target = target,
-            onDismiss = { newTaskTarget = null },
-            onStart = { cwd, prompt ->
-                newTaskTarget = null
-                onStart(cwd, prompt)
-            },
-        )
-    }
+
 }
 
 @Composable
@@ -366,57 +365,6 @@ private fun ThreadSummaryRow(thread: ThreadSummary, onSelect: (String) -> Unit) 
     }
 }
 
-private data class NewTaskTarget(val project: CodexProject?)
-
-@Composable
-private fun NewTaskDialog(
-    target: NewTaskTarget,
-    onDismiss: () -> Unit,
-    onStart: (String, String) -> Unit,
-) {
-    var cwd by remember(target) { mutableStateOf(target.project?.roots?.firstOrNull()?.path.orEmpty()) }
-    var prompt by remember(target) { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("新しいタスク") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(target.project?.name ?: "プロジェクトなし")
-                if (target.project?.roots.orEmpty().size > 1) {
-                    target.project?.roots.orEmpty().forEach { root ->
-                        TextButton(onClick = { cwd = root.path }) {
-                            Text(if (cwd == root.path) "✓ ${root.path}" else root.path)
-                        }
-                    }
-                } else if (target.project?.roots.isNullOrEmpty()) {
-                    OutlinedTextField(
-                        value = cwd,
-                        onValueChange = { cwd = it },
-                        label = { Text("作業ディレクトリ") },
-                        singleLine = true,
-                    )
-                } else {
-                    Text(cwd, style = MaterialTheme.typography.bodySmall)
-                }
-                OutlinedTextField(
-                    value = prompt,
-                    onValueChange = { prompt = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("最初のメッセージ") },
-                    minLines = 4,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onStart(cwd.trim(), prompt.trim()) },
-                enabled = cwd.isNotBlank() && prompt.isNotBlank(),
-            ) { Text("開始") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } },
-    )
-}
-
 @Composable
 private fun ThreadDetailScreen(
     profile: HostProfile,
@@ -424,30 +372,42 @@ private fun ThreadDetailScreen(
     snapshot: ThreadSnapshot?,
     onBack: () -> Unit,
     onRetry: () -> Unit,
-    onSend: (String) -> Unit,
+    onSend: suspend (String) -> Boolean,
+    onOlderHistory: (String?) -> Unit,
     onStop: (String) -> Unit,
     modifier: Modifier,
 ) {
-    var composer by remember(profile.hostIdentity, view.selectedThreadId) { mutableStateOf("") }
+    var composer by remember(profile.id) { mutableStateOf("") }
+    var sending by remember { mutableStateOf(false) }
+    val composerScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
-    var followingLatest by remember(profile.hostIdentity, view.selectedThreadId) { mutableStateOf(true) }
-    var expandedItemIds by remember(profile.hostIdentity, view.selectedThreadId) {
+    var followingLatest by remember(profile.id, view.selectedThreadId) { mutableStateOf(true) }
+    var expandedItemIds by remember(profile.id, view.selectedThreadId) {
         mutableStateOf(emptySet<String>())
     }
-    var activityExpansionOverrides by remember(profile.hostIdentity, view.selectedThreadId) {
+    var activityExpansionOverrides by remember(profile.id, view.selectedThreadId) {
         mutableStateOf(emptyMap<String, Boolean>())
     }
-    val turnPresentations = snapshot?.turns?.map(CodexTurn::toThreadTurnPresentation).orEmpty()
+    val turnPresentations = snapshot?.conversationSegments().orEmpty()
+    val queuedMessages = snapshot?.submittedMessages.orEmpty().filter { it.turnId == null }
     val contentVersion = snapshot?.turns?.joinToString("|") { turn ->
         val items = turn.items.joinToString(",") { "${it.id}:${it.threadItemContentVersion()}" }
         val requests = turn.pendingRequests.joinToString(",") { "${it.id}:${it.method}:${it.params.hashCode()}" }
         "${turn.id}:${turn.status}:${turn.error?.hashCode()}:$requests:$items"
-    }.orEmpty()
-    val detailRowCount = turnPresentations.sumOf { turn ->
+    }.orEmpty() + snapshot?.submittedMessages.orEmpty().joinToString { it.clientId + ":" + it.text }
+    val openingMessages = buildMap {
+        for (turn in snapshot?.turns.orEmpty()) {
+            turn.raw?.get("openingUserMessage")?.let(::codexItem)
+                ?.takeUnless { item -> turn.items.any { it.id == item.id } }?.let { put(turn.id, it) }
+        }
+    }
+    val historyRows = openingMessages.size + (if (snapshot?.olderTurnsCursor != null) 1 else 0) + snapshot?.turns.orEmpty().count { it.hasOlderItems }
+    val detailRowCount = historyRows + queuedMessages.size + turnPresentations.sumOf { turn ->
         val activityExpanded = activityExpansionOverrides[turn.id] ?: turn.activityInitiallyExpanded
         turn.userMessages.size +
             (if (turn.activitySummary == null) 0 else 1) +
-            (if (activityExpanded) turn.activityItems.size + if (turn.status == TurnStatus.InProgress) 1 else 0 else 0) +
+            (if (activityExpanded) turn.activityItems.size else 0) +
+            (if (turn.isLastSegment && turn.status == TurnStatus.InProgress) 1 else 0) +
             turn.pendingRequests.size +
             (if (turn.error == null) 0 else 1) +
             turn.responses.size
@@ -461,8 +421,14 @@ private fun ThreadDetailScreen(
             if (isScrolling) followingLatest = isAtBottom
         }
     }
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.isScrollInProgress) {
+        if (listState.isScrollInProgress && !followingLatest && !view.loadingHistory) {
+            val key = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key as? String
+            if (key?.startsWith("history:") == true) onOlderHistory(key.removePrefix("history:").takeUnless { it == "turns" })
+        }
+    }
     LaunchedEffect(contentVersion) {
-        if (followingLatest) {
+        if (followingLatest && !view.loadingHistory) {
             listState.scrollToItem(detailRowCount + 1)
         }
     }
@@ -474,13 +440,26 @@ private fun ThreadDetailScreen(
     ) {
         item {
             Button(onClick = onBack) { Text("タスク一覧") }
-            Text(snapshot?.summary?.name ?: snapshot?.summary?.preview ?: "タスクを読み込み中…", style = MaterialTheme.typography.headlineSmall)
+            Text(snapshot?.summary?.name ?: snapshot?.summary?.preview ?: if (view.newThreadCwd != null) "チャット" else "タスクを読み込み中…", style = MaterialTheme.typography.headlineSmall)
             if (view.threadDetail is LoadPhase.Failed) {
                 Text(view.threadDetail.message, color = MaterialTheme.colorScheme.error)
                 Button(onClick = onRetry) { Text("再試行") }
             }
         }
+        if (snapshot?.olderTurnsCursor != null) {
+            item(key = "history:turns") {
+                Button(onClick = { onOlderHistory(null) }, enabled = !view.loadingHistory) { Text("以前の会話を読み込む") }
+            }
+        }
         turnPresentations.forEach { turn ->
+            if (turn.id == turn.turnId) openingMessages[turn.turnId]?.let { opening ->
+                item(key = "opening:${turn.turnId}") { ThreadMessageCard(item = opening, isUser = true) }
+            }
+            if (turn.id == turn.turnId && snapshot?.turns?.firstOrNull { it.id == turn.turnId }?.hasOlderItems == true) {
+                item(key = "history:${turn.turnId}") {
+                    Button(onClick = { onOlderHistory(turn.turnId) }, enabled = !view.loadingHistory) { Text("途中の履歴を読み込む") }
+                }
+            }
             items(turn.userMessages, key = { item -> "${turn.id}:user:${item.id}" }) { item ->
                 ThreadMessageCard(item = item, isUser = true)
             }
@@ -522,13 +501,13 @@ private fun ThreadDetailScreen(
                         },
                     )
                 }
-                if (turn.status == TurnStatus.InProgress) {
-                    item(key = "${turn.id}:stop") {
-                        Button(
-                            onClick = { onStop(turn.id) },
-                            enabled = view.interruptingTurnId != turn.id,
-                        ) { Text(if (view.interruptingTurnId == turn.id) "停止中…" else "停止") }
-                    }
+            }
+            if (turn.isLastSegment && turn.status == TurnStatus.InProgress) {
+                item(key = "${turn.id}:stop") {
+                    Button(
+                        onClick = { onStop(turn.turnId) },
+                        enabled = view.interruptingTurnId != turn.turnId,
+                    ) { Text(if (view.interruptingTurnId == turn.turnId) "停止中…" else "停止") }
                 }
             }
             items(turn.pendingRequests, key = { request -> "${turn.id}:request:${request.id}" }) { request ->
@@ -575,6 +554,12 @@ private fun ThreadDetailScreen(
                 ThreadMessageCard(item = item, isUser = false)
             }
         }
+        items(queuedMessages, key = { "queued:${it.clientId}" }) { message ->
+            Column {
+                Text("順番待ち", style = MaterialTheme.typography.labelSmall)
+                ThreadMessageCard(CodexItem.UserMessage(message.clientId, message.text, message.clientId, message.imageSources), isUser = true)
+            }
+        }
         item {
             OutlinedTextField(
                 value = composer,
@@ -584,8 +569,15 @@ private fun ThreadDetailScreen(
                 minLines = 3,
             )
             Button(
-                onClick = { onSend(composer); composer = "" },
-                enabled = composer.isNotBlank() && snapshot != null,
+                onClick = {
+                    val text = composer
+                    sending = true
+                    composerScope.launch {
+                        try { if (onSend(text) && composer == text) composer = "" }
+                        finally { sending = false }
+                    }
+                },
+                enabled = !sending && composer.isNotBlank() && (snapshot != null || view.newThreadCwd != null),
             ) { Text("送信") }
             view.notice?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
@@ -597,7 +589,14 @@ private fun ThreadMessageCard(item: CodexItem, isUser: Boolean) {
     val message = item.toThreadItemPresentation().collapsedBody
     if (isUser) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            Card { Text(message, modifier = Modifier.padding(12.dp)) }
+            Card {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(message)
+                    (item as? CodexItem.UserMessage)?.imageSources.orEmpty().forEach { source ->
+                        Text(attachmentMessageLabel(true, source, ""))
+                    }
+                }
+            }
         }
     } else {
         Text(message, modifier = Modifier.fillMaxWidth())

@@ -6,11 +6,29 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
 class CodexProtocolTest {
     private val json = Json.Default
+
+    @Test
+    fun user_message_history_keeps_attachment_names_and_paths() {
+        val item = assertIs<CodexItem.UserMessage>(codexItem(json.parseToJsonElement("""
+            {"type":"userMessage","id":"user-1","text":"Review these","content":[
+                {"type":"text","text":"Review these"},
+                {"type":"localImage","path":"/uploads/photo.png"},
+                {"type":"image","url":"data:image/png;base64,aW1hZ2U="},
+                {"type":"mention","name":"notes.txt","path":"/uploads/notes.txt"}
+            ]}
+        """)))
+        assertEquals(
+            json.parseToJsonElement("""["/uploads/photo.png","data:image/png;base64,aW1hZ2U="]"""),
+            json.encodeToJsonElement<CodexItem>(item).jsonObject["imageSources"],
+        )
+        assertEquals("Review these\n添付: notes.txt (/uploads/notes.txt)", item.text)
+    }
 
     @Test
     fun unknown_item_keeps_type_and_complete_raw_payload() {

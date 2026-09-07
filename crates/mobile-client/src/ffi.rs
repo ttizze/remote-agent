@@ -4,25 +4,24 @@
 
 use std::{
     ffi::{CStr, CString, c_char},
-    net::SocketAddr,
     panic::AssertUnwindSafe,
     ptr,
     sync::Mutex,
     time::Duration,
 };
 
-use host_protocol::{Ed25519PublicKey, PairingToken};
+use host_protocol::{Ed25519PublicKey, PairingToken, RelayEndpoint};
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde::Deserialize;
 use tokio::sync::broadcast;
-use zeroize::Zeroizing;
 
 use crate::{MobileClient, MobileClientConfig, MobileClientError, Notification, ServerRequest};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CConfig {
-    address: SocketAddr,
+    #[serde(flatten)]
+    relay: RelayEndpoint,
     host_identity: Ed25519PublicKey,
     device_name: String,
     #[serde(default)]
@@ -35,7 +34,7 @@ impl TryFrom<CConfig> for MobileClientConfig {
 
     fn try_from(value: CConfig) -> Result<Self, Self::Error> {
         Ok(Self {
-            address: value.address,
+            relay: value.relay,
             host_identity: value.host_identity,
             device_name: value.device_name,
             pairing_ticket: value.pairing_ticket,
@@ -238,8 +237,7 @@ pub unsafe extern "C" fn mobile_client_connect(
         }
         // SAFETY: caller promises a readable byte range for this call.
         let key = unsafe { std::slice::from_raw_parts(device_pkcs8, device_pkcs8_len) };
-        let key = Zeroizing::new(key.to_vec());
-        connect_handle(config, &key)
+        connect_handle(config, key)
     });
     match result {
         Ok(Ok(handle)) => handle,
@@ -463,5 +461,47 @@ pub unsafe extern "C" fn mobile_client_string_free(value: *mut c_char) {
     if !value.is_null() {
         // SAFETY: returned strings are allocated with CString::into_raw.
         drop(unsafe { CString::from_raw(value) });
+    }
+}
+
+pub(crate) fn transfer_json(handle: &Handle, params: &str) -> Result<String, String> {
+    use std::path::PathBuf;
+    #[derive(Deserialize)]
+    #[serde(tag="direction", rename_all="camelCase")]
+    enum Transfer {
+        Upload { source: PathBuf, directory: PathBuf, #[serde(rename="fileName")] file_name: String },
+        Download { source: PathBuf, destination: PathBuf },
+    }
+    let params: Transfer = serde_json::from_str(params).map_err(|_| "invalid transfer parameters")?;
+    let result = handle.runtime.block_on(async {
+        match params {
+            Transfer::Upload { source, directory, file_name } => handle.client.upload_file(&source, &directory, &file_name).await,
+            Transfer::Download { source, destination } => {
+                handle.client.download_file(&source, &destination).await?;
+                Ok(serde_json::json!({"path":destination}))
+            }
+        }
+    }).map_err(encode_mobile_error)?;
+    serde_json::to_string(&result).map_err(|_| "failed to encode transfer result".into())
+}
+
+/// Transfers a picked file over a dedicated encrypted channel.
+///
+/// # Safety
+/// The handle must remain live until this blocking call returns. Inputs must
+/// be NUL-terminated UTF-8 and error_out, if non-null, writable for one pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mobile_client_transfer(handle: *mut Handle, params_json: *const c_char, error_out: *mut *mut c_char) -> *mut c_char {
+    if !error_out.is_null() { unsafe { *error_out = ptr::null_mut(); } }
+    if handle.is_null() { set_error(error_out, "null mobile client handle"); return ptr::null_mut(); }
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<CString, String> {
+        let params = input_string(params_json)?;
+        let handle = unsafe { &*handle };
+        CString::new(transfer_json(handle, params)?).map_err(|_| "transfer result contains NUL".into())
+    }));
+    match result {
+        Ok(Ok(value)) => value.into_raw(),
+        Ok(Err(error)) => { set_error(error_out, error); ptr::null_mut() }
+        Err(_) => { set_error(error_out, "mobile client panicked"); ptr::null_mut() }
     }
 }

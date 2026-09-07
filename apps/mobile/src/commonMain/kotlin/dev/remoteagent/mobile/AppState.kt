@@ -1,13 +1,14 @@
 package dev.remoteagent.mobile
 
-/** The saved, non-secret state for one trusted PC Host. */
+/** Public connection metadata; device keys and relay tokens live in platform secure storage. */
 data class HostProfile(
-    val hostIdentity: String,
+    val runnerId: String,
     val name: String,
-    val addresses: List<String>,
+    val relayUrl: String,
+    val hostIdentity: String,
     val deviceIdentityReference: String,
 ) {
-    /** A PC Host Identity, rather than an address, is the stable profile key. */
+    /** The pinned host key is stable across relay route changes. */
     val id: String get() = hostIdentity
 }
 
@@ -28,10 +29,19 @@ sealed interface LoadPhase {
 data class ProfileViewState(
     val connection: ConnectionPhase = ConnectionPhase.Disconnected,
     val workingDirectoryPath: String = "",
-    val projectList: LoadPhase = LoadPhase.Idle,
     val threadList: LoadPhase = LoadPhase.Idle,
+    val loadingMoreThreads: Boolean = false,
+    val visibleProjectCount: Int = 5,
+    val visibleChatCount: Int = 5,
+    val projectThreadLimits: Map<String, Int> = emptyMap(),
+    val threadSearchTerm: String = "",
+    val moreProjectIds: Set<String> = emptySet(),
+    val hasMoreChats: Boolean = false,
+    val hasMoreProjects: Boolean = false,
     val selectedThreadId: String? = null,
+    val newThreadCwd: String? = null,
     val threadDetail: LoadPhase = LoadPhase.Idle,
+    val loadingHistory: Boolean = false,
     val interruptingTurnId: String? = null,
     val notice: String? = null,
 )
@@ -45,7 +55,7 @@ data class AppState(
     val pairingError: String? = null,
 ) {
     val selectedProfile: HostProfile?
-        get() = profiles.firstOrNull { it.hostIdentity == selectedProfileId }
+        get() = profiles.firstOrNull { it.id == selectedProfileId }
 
     val selectedView: ProfileViewState
         get() = selectedProfileId?.let { profileViews[it] } ?: ProfileViewState()
@@ -69,20 +79,21 @@ sealed interface AppAction {
     data class ConnectSucceeded(val hostIdentity: String) : AppAction
     data class ConnectFailed(val hostIdentity: String, val message: String) : AppAction
     data class WorkingDirectoryChanged(val hostIdentity: String, val path: String) : AppAction
-    data class ProjectListLoading(val hostIdentity: String) : AppAction
-    data class ProjectListLoaded(val hostIdentity: String, val projects: List<CodexProject>) : AppAction
-    data class ProjectListFailed(val hostIdentity: String, val message: String) : AppAction
-    data class ThreadListLoading(val hostIdentity: String) : AppAction
-    data class ThreadListLoaded(val hostIdentity: String, val threads: List<ThreadSummary>) : AppAction
+    data class ThreadListLoading(val hostIdentity: String, val append: Boolean = false) : AppAction
+    data class ThreadListLoaded(val hostIdentity: String, val threads: List<ThreadSummary>, val projects: List<CodexProject> = emptyList(), val moreProjectIds: Set<String> = emptySet(), val hasMoreChats: Boolean = false, val hasMoreProjects: Boolean = false) : AppAction
+    data class ThreadListExpanded(val hostIdentity: String, val projects: Boolean, val projectId: String? = null) : AppAction
+    data class ThreadListSearchChanged(val hostIdentity: String, val term: String) : AppAction
     data class ThreadListFailed(val hostIdentity: String, val message: String) : AppAction
+    data class NewThreadOpened(val hostIdentity: String, val cwd: String) : AppAction
     data class ThreadSelected(val hostIdentity: String, val threadId: String) : AppAction
     data class ThreadListOpened(val hostIdentity: String) : AppAction
     data class ThreadReadLoading(val hostIdentity: String, val threadId: String) : AppAction
-    data class SnapshotReceived(val hostIdentity: String, val result: ThreadReadResult) : AppAction
+    data class SnapshotReceived(val hostIdentity: String, val result: ThreadReadResult, val select: Boolean = true) : AppAction
+    data class HistoryLoading(val hostIdentity: String, val loading: Boolean, val error: String? = null) : AppAction
+    data class HistoryReceived(val hostIdentity: String, val thread: ThreadSnapshot) : AppAction
     data class ThreadReadFailed(val hostIdentity: String, val message: String) : AppAction
     data class ThreadStartFailed(val hostIdentity: String, val message: String) : AppAction
-    data class TurnStartAcknowledged(val hostIdentity: String, val threadId: String, val turnId: String) : AppAction
-    data class TurnQueued(val hostIdentity: String, val threadId: String, val queueId: String) : AppAction
+    data class MessageAccepted(val hostIdentity: String, val threadId: String, val submission: SubmittedMessage) : AppAction
     data class TurnFailed(val hostIdentity: String, val message: String) : AppAction
     data class InterruptStarted(val hostIdentity: String, val turnId: String) : AppAction
     data class InterruptFinished(val hostIdentity: String) : AppAction
@@ -103,11 +114,11 @@ fun reduce(
     AppAction.ProfileSelectionOpened -> state.copy(selectedProfileId = null, showingPairing = false)
 
     is AppAction.ProfilePaired -> {
-        val profiles = state.profiles.filterNot { it.hostIdentity == action.profile.hostIdentity } + action.profile
+        val profiles = state.profiles.filterNot { it.id == action.profile.id } + action.profile
         state.copy(
             profiles = profiles,
-            selectedProfileId = action.profile.hostIdentity,
-            profileViews = state.profileViews + (action.profile.hostIdentity to ProfileViewState()),
+            selectedProfileId = action.profile.id,
+            profileViews = state.profileViews + (action.profile.id to ProfileViewState()),
             showingPairing = false,
             pairingError = null,
         )
@@ -117,76 +128,84 @@ fun reduce(
 
     is AppAction.ProfileSelected -> if (state.hasProfile(action.hostIdentity)) {
         state.copy(selectedProfileId = action.hostIdentity, pairingError = null)
+            .updateView(action.hostIdentity) { it.copy(loadingHistory = false) }
     } else {
         state
     }
 
     is AppAction.AddressesDiscovered -> state.updateProfile(action.hostIdentity) { profile ->
         state.copy(profiles = state.profiles.map {
-            if (it.hostIdentity == profile.hostIdentity) profile.copy(addresses = action.addresses.distinct()) else it
+            if (it.id == profile.id) {
+                action.addresses.firstOrNull()?.let { relayUrl -> profile.copy(relayUrl = relayUrl) } ?: profile
+            } else it
         })
     }
 
     is AppAction.ConnectStarted -> state.updateView(action.hostIdentity) {
-        it.copy(connection = ConnectionPhase.Connecting, notice = null)
+        it.copy(connection = ConnectionPhase.Connecting, loadingHistory = false, notice = null)
     }
 
     is AppAction.ConnectSucceeded -> state.updateView(action.hostIdentity) {
         it.copy(
             connection = ConnectionPhase.Connected,
-            projectList = LoadPhase.Idle,
             threadList = LoadPhase.Idle,
-            selectedThreadId = null,
             threadDetail = LoadPhase.Idle,
             notice = null,
         )
     }
 
     is AppAction.ConnectFailed -> state.updateView(action.hostIdentity) {
-        it.copy(connection = ConnectionPhase.Failed(action.message), notice = action.message)
+        it.copy(connection = ConnectionPhase.Failed(action.message), loadingHistory = false, notice = action.message)
     }
 
     is AppAction.WorkingDirectoryChanged -> state.updateViewIfConnected(action.hostIdentity) {
         it.copy(
             workingDirectoryPath = action.path,
+            newThreadCwd = null,
             threadList = LoadPhase.Idle,
             selectedThreadId = null,
             threadDetail = LoadPhase.Idle,
         )
     }
 
-    is AppAction.ProjectListLoading -> state.updateViewIfConnected(action.hostIdentity) {
-        it.copy(projectList = LoadPhase.Loading, notice = null)
-    }
-
-    is AppAction.ProjectListLoaded -> if (state.isConnected(action.hostIdentity)) {
-        state.copy(cache = reconcileProjectList(state.cache, action.hostIdentity, action.projects, cacheLimits))
-            .updateView(action.hostIdentity) { it.copy(projectList = LoadPhase.Ready) }
-    } else state
-
-    is AppAction.ProjectListFailed -> state.updateViewIfConnected(action.hostIdentity) {
-        it.copy(projectList = LoadPhase.Failed(action.message), notice = action.message)
-    }
-
     is AppAction.ThreadListLoading -> state.updateViewIfConnected(action.hostIdentity) {
-        it.copy(threadList = LoadPhase.Loading, notice = null)
+        if (action.append) it.copy(loadingMoreThreads = true, notice = null)
+        else it.copy(threadList = LoadPhase.Loading, loadingMoreThreads = false, notice = null)
     }
 
     is AppAction.ThreadListLoaded -> if (state.isConnected(action.hostIdentity)) {
-        state.copy(cache = reconcileThreadList(state.cache, action.hostIdentity, action.threads, cacheLimits))
-            .updateView(action.hostIdentity) { it.copy(threadList = LoadPhase.Ready) }
+        val cache = reconcileProjectList(state.cache, action.hostIdentity, action.projects, cacheLimits)
+        state.copy(cache = reconcileThreadList(cache, action.hostIdentity, action.threads, cacheLimits))
+            .updateView(action.hostIdentity) { it.copy(
+                threadList = LoadPhase.Ready,
+                loadingMoreThreads = false, moreProjectIds = action.moreProjectIds, hasMoreChats = action.hasMoreChats, hasMoreProjects = action.hasMoreProjects,
+            ) }
     } else state
 
     is AppAction.ThreadListFailed -> state.updateViewIfConnected(action.hostIdentity) {
-        it.copy(threadList = LoadPhase.Failed(action.message), notice = action.message)
+        it.copy(threadList = LoadPhase.Failed(action.message), loadingMoreThreads = false, notice = action.message)
+    }
+
+    is AppAction.ThreadListExpanded -> state.updateView(action.hostIdentity) {
+        if (action.projectId != null) it.copy(projectThreadLimits = it.projectThreadLimits + (action.projectId to ((it.projectThreadLimits[action.projectId] ?: 5) + 10)))
+        else if (action.projects) it.copy(visibleProjectCount = it.visibleProjectCount + 10)
+        else it.copy(visibleChatCount = it.visibleChatCount + 10)
+    }
+
+    is AppAction.ThreadListSearchChanged -> state.updateView(action.hostIdentity) {
+        it.copy(threadSearchTerm = action.term, visibleProjectCount = 5, visibleChatCount = 5, projectThreadLimits = emptyMap())
+    }
+
+    is AppAction.NewThreadOpened -> state.updateView(action.hostIdentity) {
+        it.copy(loadingHistory = false, selectedThreadId = null, newThreadCwd = action.cwd.trim(), threadDetail = LoadPhase.Ready, notice = null)
     }
 
     is AppAction.ThreadSelected -> state.updateViewIfConnected(action.hostIdentity) {
-        it.copy(selectedThreadId = action.threadId, threadDetail = LoadPhase.Idle, notice = null)
+        it.copy(loadingHistory = false, selectedThreadId = action.threadId, newThreadCwd = null, threadDetail = LoadPhase.Idle, notice = null)
     }
 
-    is AppAction.ThreadListOpened -> state.updateViewIfConnected(action.hostIdentity) {
-        it.copy(selectedThreadId = null, threadDetail = LoadPhase.Idle, notice = null)
+    is AppAction.ThreadListOpened -> state.updateView(action.hostIdentity) {
+        it.copy(loadingHistory = false, selectedThreadId = null, newThreadCwd = null, threadDetail = LoadPhase.Idle, notice = null, visibleProjectCount = 5, visibleChatCount = 5, projectThreadLimits = emptyMap(), threadSearchTerm = "")
     }
 
     is AppAction.ThreadReadLoading -> state.updateViewIfConnected(action.hostIdentity) {
@@ -196,12 +215,23 @@ fun reduce(
     is AppAction.SnapshotReceived -> if (state.isConnected(action.hostIdentity)) {
         state.copy(cache = reconcileThreadRead(state.cache, action.hostIdentity, action.result, cacheLimits))
             .updateView(action.hostIdentity) {
-                it.copy(
+                if (!action.select) it else it.copy(
                     selectedThreadId = action.result.thread.summary.id,
+                    newThreadCwd = null,
                     threadDetail = LoadPhase.Ready,
                     notice = null,
                 )
             }
+    } else state
+
+    is AppAction.HistoryLoading -> state.updateViewIfConnected(action.hostIdentity) {
+        it.copy(loadingHistory = action.loading, notice = action.error)
+    }
+
+    is AppAction.HistoryReceived -> if (state.isConnected(action.hostIdentity)) {
+        val profile = state.cache.profile(action.hostIdentity)
+        state.copy(cache = state.cache.copy(profiles = state.cache.profiles + (action.hostIdentity to
+            profile.copy(snapshots = profile.snapshots + (action.thread.summary.id to action.thread)))))
     } else state
 
     is AppAction.ThreadReadFailed -> state.updateViewIfConnected(action.hostIdentity) {
@@ -209,26 +239,16 @@ fun reduce(
     }
 
     is AppAction.ThreadStartFailed -> state.updateViewIfConnected(action.hostIdentity) {
-        // Starting a thread is a detail action. Keep the already loaded list
-        // visible when it fails instead of sending the user back to cwd input.
+        // Keep the empty chat and its draft visible when creation fails.
         it.copy(notice = action.message)
     }
 
-    is AppAction.TurnStartAcknowledged -> if (state.isConnected(action.hostIdentity)) {
-        state.copy(
-            cache = acknowledgeTurnStart(
-                state.cache,
-                action.hostIdentity,
-                action.threadId,
-                action.turnId,
-                cacheLimits,
-            ),
-        ).updateView(action.hostIdentity) { it.copy(notice = null) }
+    is AppAction.MessageAccepted -> if (state.isConnected(action.hostIdentity)) {
+        state.copy(cache = acknowledgeMessage(state.cache, action.hostIdentity, action.threadId, action.submission, cacheLimits))
+            .updateView(action.hostIdentity) {
+                it.copy(notice = if (action.submission.turnId == null) QueuedTurnDeliveryNotice else null)
+            }
     } else state
-
-    is AppAction.TurnQueued -> state.updateViewIfConnected(action.hostIdentity) {
-        it.copy(notice = QueuedTurnDeliveryNotice)
-    }
 
     is AppAction.TurnFailed -> state.updateViewIfConnected(action.hostIdentity) {
         it.copy(notice = action.message)
@@ -257,7 +277,8 @@ fun reduce(
     is AppAction.Disconnected -> state.updateView(action.hostIdentity) {
         it.copy(
             connection = ConnectionPhase.Disconnected,
-            projectList = LoadPhase.Idle,
+            loadingHistory = false,
+            loadingMoreThreads = false,
             threadList = LoadPhase.Idle,
             threadDetail = LoadPhase.Idle,
             interruptingTurnId = null,
@@ -265,7 +286,7 @@ fun reduce(
     }
 }
 
-private fun AppState.hasProfile(hostIdentity: String): Boolean = profiles.any { it.hostIdentity == hostIdentity }
+private fun AppState.hasProfile(hostIdentity: String): Boolean = profiles.any { it.id == hostIdentity }
 
 private fun AppState.isConnected(hostIdentity: String): Boolean =
     profileViews[hostIdentity]?.connection == ConnectionPhase.Connected
@@ -287,4 +308,4 @@ private inline fun AppState.updateViewIfConnected(
 private inline fun AppState.updateProfile(
     hostIdentity: String,
     transform: (HostProfile) -> AppState,
-): AppState = profiles.firstOrNull { it.hostIdentity == hostIdentity }?.let(transform) ?: this
+): AppState = profiles.firstOrNull { it.id == hostIdentity }?.let(transform) ?: this

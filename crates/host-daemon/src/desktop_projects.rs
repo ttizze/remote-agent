@@ -6,7 +6,8 @@ use std::{
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
-mod state;
+pub(crate) mod state;
+pub(crate) mod titles;
 
 pub const HOST_PROJECT_LIST_METHOD: &str = "host/project/list";
 pub const HOST_THREAD_LIST_METHOD: &str = "host/thread/list";
@@ -51,7 +52,7 @@ impl DesktopProjectStore {
         Ok(snapshot.enrich_threads(result))
     }
 
-    async fn load(&self) -> Result<state::Snapshot, DesktopProjectError> {
+    pub(crate) async fn load(&self) -> Result<state::Snapshot, DesktopProjectError> {
         let file = match tokio::fs::File::open(&self.path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {

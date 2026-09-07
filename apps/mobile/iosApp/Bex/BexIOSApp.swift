@@ -1,33 +1,26 @@
 import SwiftUI
-import UIKit
 
 @main
 struct BexIOSApp: App {
-    @UIApplicationDelegateAdaptor(BexAppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var wasBackgrounded = false
+    private let platform = BexPlatformBridge()
 
     var body: some Scene {
         WindowGroup {
             BexSwiftUIRoot()
+                .onChange(of: scenePhase) { phase in
+                    switch phase {
+                    case .background:
+                        wasBackgrounded = true
+                        platform.didEnterBackground()
+                    case .active where wasBackgrounded:
+                        wasBackgrounded = false
+                        platform.restoreAfterForeground()
+                    default:
+                        break
+                    }
+                }
         }
-    }
-}
-
-final class BexAppDelegate: NSObject, UIApplicationDelegate {
-    let platform = BexPlatformBridge()
-
-    func application(
-        _ application: UIApplication,
-        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
-    ) -> Bool {
-        platform.start()
-        return true
-    }
-
-    func applicationWillEnterForeground(_ application: UIApplication) {
-        platform.restoreAfterForeground()
-    }
-
-    func applicationDidEnterBackground(_ application: UIApplication) {
-        platform.didEnterBackground()
     }
 }

@@ -1,10 +1,11 @@
 [workspace]
 members = [
-    "apps/desktop/src-tauri",
+    "apps/desktop",
     "crates/codex-app-server",
     "crates/host-daemon",
     "crates/host-protocol",
     "crates/mobile-client",
+    "crates/relay-transport",
 ]
 resolver = "2"
 
@@ -16,7 +17,6 @@ rust-version = "1.85"
 [workspace.dependencies]
 base64 = "0.23.1"
 futures-util = "0.3.31"
-mdns-sd = { version = "0.21.0", default-features = false }
 ring = "0.17.14"
 russh = { version = "=0.63.1", default-features = false, features = ["ring"] }
 security-framework = "3.7.0"
@@ -26,4 +26,5 @@ serde_json = "1.0.143"
 thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.16", features = ["codec"] }
+url = "2.5.4"
 zeroize = "1.8.1"

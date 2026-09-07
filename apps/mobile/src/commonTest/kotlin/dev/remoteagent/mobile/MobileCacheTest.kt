@@ -12,6 +12,52 @@ class MobileCacheTest {
     private val limits = MobileCacheLimits(maxThreads = 2, maxTurnsPerThread = 2, maxApproximateBytes = 1_024)
 
     @Test
+    fun an_unhydrated_turn_is_loadable_without_a_cursor_and_retains_its_status() {
+        val current = codexThreadFromResponse(Json.parseToJsonElement("""{"thread":{"id":"thread-1","turns":[
+            {"id":"turn","status":"interrupted","items":[],"itemsHasMore":true,"itemsNextCursor":null}
+        ]}}"""))
+        assertTrue(current.turns.single().hasOlderItems)
+        assertEquals(null, current.turns.single().olderItemsCursor)
+        val page = codexThreadFromResponse(Json.parseToJsonElement("""{"thread":{"id":"thread-1","turns":[
+            {"id":"turn","items":[{"id":"reply","type":"agentMessage","text":"older reply"}],"itemsHasMore":false,"itemsNextCursor":null}
+        ]}}"""))
+        val loaded = mergeOlderHistory(current, page, "turn").turns.single()
+        assertEquals(TurnStatus.Interrupted, loaded.status)
+        assertEquals(listOf("reply"), loaded.items.map { it.id })
+        assertFalse(loaded.hasOlderItems)
+    }
+
+    @Test
+    fun older_items_preserve_live_values_and_tail_refresh_keeps_the_loaded_prefix() {
+        fun page(items: String, cursor: String) = codexThreadFromResponse(Json.parseToJsonElement("""
+            {"thread":{"id":"thread-1","historyCursor":"turn-cursor","turns":[
+                {"id":"turn","status":"inProgress","itemsNextCursor":$cursor,"items":[$items]}
+            ]}}
+        """))
+        val current = page("""{"id":"b","type":"agentMessage","text":"live"}""", "\"items-cursor\"")
+        val older = page("""{"id":"a","type":"userMessage","content":[{"type":"text","text":"question"}]},{"id":"b","type":"agentMessage","text":"stale"}""", "null")
+        val merged = mergeOlderHistory(current, older, "turn")
+        assertEquals(listOf("a", "b"), merged.turns.single().items.map { it.id })
+        assertEquals("live", (merged.turns.single().items.last() as CodexItem.AgentMessage).text)
+        assertEquals(null, merged.turns.single().olderItemsCursor)
+        val initial = reconcileThreadRead(MobileCache(), "host", ThreadReadResult(merged, emptyList()), limits)
+        val fresh = page("""{"id":"b","type":"agentMessage","text":"finished"}""", "\"items-cursor\"")
+        val refreshed = reconcileThreadRead(initial, "host", ThreadReadResult(fresh, emptyList()), limits).snapshot("host", "thread-1")!!
+        assertEquals(listOf("a", "b"), refreshed.turns.single().items.map { it.id })
+        assertEquals("finished", (refreshed.turns.single().items.last() as CodexItem.AgentMessage).text)
+        assertEquals(null, refreshed.turns.single().olderItemsCursor)
+    }
+
+    @Test
+    fun older_turn_pages_deduplicate_and_replace_the_older_cursor() {
+        fun page(ids: List<String>, cursor: String?) = ThreadSnapshot(summary("thread-1"), ids.map { CodexTurn(it, TurnStatus.Completed) },
+            Json.parseToJsonElement("""{"historyCursor":${cursor?.let { "\"$it\"" } ?: "null"}}""").jsonObject)
+        val result = mergeOlderHistory(page(listOf("b", "c"), "opaque"), page(listOf("a", "b"), null), null)
+        assertEquals(listOf("a", "b", "c"), result.turns.map { it.id })
+        assertEquals(null, result.olderTurnsCursor)
+    }
+
+    @Test
     fun read_replaces_snapshot_then_applies_buffered_events_in_order() {
         val snapshot = ThreadSnapshot(
             summary = summary("thread-1"),
@@ -51,13 +97,28 @@ class MobileCacheTest {
     }
 
     @Test
-    fun default_limits_keep_the_latest_twenty_threads_in_newest_first_order() {
+    fun a_title_window_refresh_keeps_the_open_body_receiving_live_updates() {
+        val opened = ThreadSnapshot(summary("open"), listOf(
+            CodexTurn("turn", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("reply", "First"))),
+        ))
+        var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(opened, emptyList()), limits)
+        // A recent-title window can omit an older open thread, and a new
+        // in-memory thread has no persisted list entry until its first turn.
+        cache = reconcileThreadList(cache, "host-1", listOf(summary("other")), limits)
+        cache = applyLiveEvent(cache, "host-1", ThreadEvent.AgentMessageDelta("open", "turn", "reply", " second"), limits)
+        val body = assertNotNull(cache.snapshot("host-1", "open"))
+        assertEquals("First second", (body.turns.single().items.single() as CodexItem.AgentMessage).text)
+        assertEquals(listOf("other"), cache.profile("host-1").threadList.map { it.id })
+    }
+
+    @Test
+    fun snapshot_limit_does_not_truncate_the_newest_first_thread_list() {
         val summaries = (1..21).map { summary("thread-$it", updatedAtMs = it.toLong()) }
 
         val cache = reconcileThreadList(MobileCache(), "host-1", summaries, MobileCacheLimits())
 
         assertEquals(
-            (21 downTo 2).map { "thread-$it" },
+            (21 downTo 1).map { "thread-$it" },
             cache.profile("host-1").threadList.map { it.id },
         )
     }
@@ -147,8 +208,8 @@ class MobileCacheTest {
         cache = reconcileThreadRead(cache, "host-b", ThreadReadResult(ThreadSnapshot(summary("other"), emptyList()), emptyList()), limits)
 
         val hostA = cache.profile("host-a")
-        assertEquals(listOf("three", "two"), hostA.threadList.map { it.id })
-        assertFalse("one" in hostA.snapshots)
+        assertEquals(listOf("three", "two", "one"), hostA.threadList.map { it.id })
+        assertTrue("one" in hostA.snapshots)
         assertEquals(listOf("other"), cache.profile("host-b").threadList.map { it.id })
         assertEquals(setOf("other"), cache.profile("host-b").snapshots.keys)
     }
@@ -426,6 +487,40 @@ class MobileCacheTest {
         )
 
         assertEquals(listOf("first", "second"), cache.profile("host-1").projects.map { it.id })
+    }
+
+    @Test
+    fun projects_follow_latest_conversation_activity_then_catalog_order_for_empty_projects() {
+        var cache = reconcileProjectList(MobileCache(), "host-1", listOf(
+            project("empty-b", 2), project("older", 0), project("recent", 5), project("empty-a", 1),
+        ), limits)
+        cache = reconcileThreadList(cache, "host-1", listOf(
+            summary("recent", 10).copy(projectId = "recent"),
+            summary("stale-in-recent", 1).copy(projectId = "recent"),
+            summary("older", 8).copy(projectId = "older"),
+            summary("chat", 20),
+        ), limits)
+        assertEquals(listOf("recent", "older", "empty-a", "empty-b"), cache.profile("host-1").projects.map { it.id })
+        cache = reconcileThreadRead(cache, "host-1", ThreadReadResult(
+            ThreadSnapshot(summary("older", 30).copy(projectId = "older")), emptyList(),
+        ), limits)
+        assertEquals(listOf("older", "recent", "empty-a", "empty-b"), cache.profile("host-1").projects.map { it.id })
+    }
+
+    @Test
+    fun opening_an_old_conversation_keeps_its_body_with_a_full_snapshot_cache() {
+        var cache = MobileCache()
+        for (number in 1..3) {
+            cache = reconcileThreadRead(cache, "host-1", ThreadReadResult(
+                ThreadSnapshot(summary("thread-$number", number.toLong())), emptyList(),
+            ), limits)
+        }
+        cache = reconcileThreadRead(cache, "host-1", ThreadReadResult(
+            ThreadSnapshot(summary("old-thread", 0), listOf(CodexTurn("old-turn", TurnStatus.Completed))), emptyList(),
+        ), limits)
+        assertEquals(4, cache.profile("host-1").threadList.size)
+        assertEquals(2, cache.profile("host-1").snapshots.size)
+        assertEquals("old-turn", cache.snapshot("host-1", "old-thread")?.turns?.single()?.id)
     }
 
     private fun project(id: String, position: Long) = CodexProject(

@@ -80,6 +80,7 @@ struct State {
 }
 
 struct PendingServerRequest {
+    response_claimed: bool,
     line: String,
     proxies: HashMap<SessionId, String>,
 }
@@ -121,6 +122,7 @@ impl SessionRouter {
         let pending = state
             .pending
             .iter()
+            .filter(|(_, request)| !request.response_claimed)
             .map(|(upstream_id, request)| (upstream_id.clone(), request.line.clone()))
             .collect::<Vec<_>>();
         for (upstream_id, line) in pending {
@@ -219,8 +221,8 @@ impl SessionRouter {
         }
     }
 
-    /// First valid response wins. All aliases are removed before the caller
-    /// forwards the response to Codex.
+    /// First valid response wins. Retain aliases until Codex resolves the request
+    /// so every device receives its own proxy id, but stop accepting/replaying it.
     pub(crate) fn resolve_response(&self, session: SessionId, id: &str) -> ResponseRoute {
         let mut state = lock_state(&self.state);
         let Some(upstream_id) = state.proxy_to_upstream.remove(&ProxyKey {
@@ -229,13 +231,15 @@ impl SessionRouter {
         }) else {
             return ResponseRoute::Unknown;
         };
-        let Some(pending) = state.pending.remove(&upstream_id) else {
+        let State { pending, proxy_to_upstream, .. } = &mut *state;
+        let Some(request) = pending.get_mut(&upstream_id) else {
             return ResponseRoute::Unknown;
         };
-        for (alias_session, proxy_id) in pending.proxies {
-            state.proxy_to_upstream.remove(&ProxyKey {
-                session: alias_session,
-                id: proxy_id,
+        request.response_claimed = true;
+        for (alias_session, proxy_id) in &request.proxies {
+            proxy_to_upstream.remove(&ProxyKey {
+                session: *alias_session,
+                id: proxy_id.clone(),
             });
         }
         ResponseRoute::Forward(upstream_id)
@@ -247,6 +251,7 @@ fn fanout_request_locked(state: &mut State, upstream_id: &str, line: &str) {
         return;
     }
     let mut pending = PendingServerRequest {
+        response_claimed: false,
         line: line.to_owned(),
         proxies: HashMap::new(),
     };
@@ -468,6 +473,11 @@ mod tests {
             .raw_id()
             .unwrap()
             .to_owned();
+
+        assert_eq!(router.resolve_response(first.id(), &first_id), ResponseRoute::Forward(r#""codex-1""#.to_owned()));
+        assert_eq!(router.resolve_response(second.id(), &second_id), ResponseRoute::Unknown);
+        let mut after_answer = router.open_session(4);
+        assert!(after_answer.receiver.try_recv().is_err(), "an answered request must not be replayed while Codex resolves it");
 
         router.handle_server_line(
             r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#,

@@ -9,142 +9,113 @@ import kotlinx.serialization.json.jsonObject
 
 class ThreadDetailPresentationTest {
     @Test
-    fun completed_turn_collapses_work_and_keeps_the_final_answer_visible() {
-        val turn = CodexTurn(
-            id = "turn-1",
-            status = TurnStatus.Completed,
-            items = listOf(
-                CodexItem.UserMessage("user", "fix it"),
-                CodexItem.AgentMessage("commentary", "I am checking", AgentMessagePhase.Commentary),
-                CodexItem.Reasoning("reasoning", "private work"),
-                CodexItem.CommandExecution(
-                    id = "command",
-                    command = "./gradlew test",
-                    output = "ok",
-                    status = CommandExecutionStatus.Completed,
-                ),
-                CodexItem.AgentMessage("final", "Fixed.", AgentMessagePhase.FinalAnswer),
-            ),
-            startedAtMs = 1_000,
-            completedAtMs = 143_000,
-            durationMs = 142_000,
-        )
-
-        val presentation = turn.toThreadTurnPresentation()
-
-        assertEquals(listOf("user"), presentation.userMessages.map { it.id })
-        assertEquals(
-            listOf("commentary", "reasoning", "command"),
-            presentation.activityItems.map { it.id },
-        )
-        assertEquals(listOf("final"), presentation.responses.map { it.id })
-        assertEquals("2m 22s間作業しました", presentation.activitySummary)
-        assertFalse(presentation.activityInitiallyExpanded)
+    fun additional_input_stays_between_the_work_before_and_after_it() {
+        val turn = CodexTurn("turn", TurnStatus.InProgress, listOf(
+            CodexItem.UserMessage("first", "Start"),
+            CodexItem.Reasoning("before", "Existing work"),
+            CodexItem.UserMessage("additional", "Change direction"),
+            CodexItem.Reasoning("after", "New work"),
+        ))
+        val order = turn.toThreadTurnPresentations().flatMap { it.userMessages + it.activityItems + it.responses }.map { it.id }
+        assertEquals(listOf("first", "before", "additional", "after"), order)
     }
 
     @Test
-    fun active_turn_shows_work_and_terminal_states_use_distinct_summaries() {
+    fun commentary_separates_collapsed_command_groups_in_chronological_order() {
+        val turn = CodexTurn("turn", TurnStatus.InProgress, listOf(
+            CodexItem.UserMessage("user", "fix it"),
+            CodexItem.AgentMessage("intro", "Checking", AgentMessagePhase.Commentary),
+            CodexItem.CommandExecution("first", "rg task", output = "found", status = CommandExecutionStatus.Completed),
+            CodexItem.CommandExecution("second", "cat file", output = "text", status = CommandExecutionStatus.Completed),
+            CodexItem.AgentMessage("progress", "Fixing", AgentMessagePhase.Commentary),
+            CodexItem.CommandExecution("third", "test", output = "running", status = CommandExecutionStatus.InProgress),
+        ))
+        val sections = turn.toThreadTurnPresentations()
+        assertEquals(listOf("user", "intro", "first", "second", "progress", "third"),
+            sections.flatMap { it.userMessages + it.activityItems + it.responses }.map { it.id })
+        val groups = sections.filter { it.activityCanCollapse }
+        assertEquals(listOf("2件のコマンド", "1件のコマンド"), groups.map { it.activitySummary })
+        assertTrue(groups.all { !it.activityInitiallyExpanded })
+        assertEquals(listOf("turn:first", "turn:third"), groups.map { it.id })
+        assertEquals(listOf("intro", "progress"), sections.flatMap { it.responses }.map { it.id })
+    }
+
+    @Test
+    fun completion_folds_commentary_and_commands_behind_the_final_answer() {
+        val streaming = CodexTurn("turn", TurnStatus.InProgress, listOf(
+            CodexItem.AgentMessage("intro", "Checking", AgentMessagePhase.Commentary),
+            CodexItem.CommandExecution("command", "test", output = "running", status = CommandExecutionStatus.InProgress),
+        ))
+        val completed = streaming.copy(status = TurnStatus.Completed, items = listOf(
+            streaming.items[0],
+            (streaming.items[1] as CodexItem.CommandExecution).copy(output = "passed", status = CommandExecutionStatus.Completed),
+            CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer),
+        ))
+        val live = streaming.toThreadTurnPresentations().last()
+        val done = completed.toThreadTurnPresentations().last()
+        assertEquals("turn", done.id)
+        assertEquals(listOf("intro", "command"), done.activityItems.map { it.id })
+        assertEquals("作業しました", done.activitySummary)
+        assertTrue(live.activityCanCollapse && done.activityCanCollapse)
+        assertFalse(live.activityInitiallyExpanded)
+        assertFalse(done.activityInitiallyExpanded)
+        assertEquals("Done", done.responses.single().text)
+        assertEquals("passed", (done.activityItems.last() as CodexItem.CommandExecution).output)
+    }
+
+    @Test
+    fun interrupted_and_failed_groups_are_expandable_and_keep_status_visible() {
         val activity = listOf<CodexItem>(CodexItem.Reasoning("reasoning", "working"))
-
-        val active = CodexTurn("active", TurnStatus.InProgress, activity).toThreadTurnPresentation()
-        val interrupted = CodexTurn(
-            "interrupted",
-            TurnStatus.Interrupted,
-            activity,
-            durationMs = 12_000,
-        ).toThreadTurnPresentation()
-        val failed = CodexTurn(
-            "failed",
-            TurnStatus.Failed,
-            activity,
-            durationMs = 3_000,
-        ).toThreadTurnPresentation()
-
-        assertEquals("作業中…", active.activitySummary)
-        assertTrue(active.activityInitiallyExpanded)
-        assertFalse(active.activityCanCollapse)
-        assertEquals("12s間作業した後に中断しました", interrupted.activitySummary)
-        assertTrue(interrupted.activityInitiallyExpanded)
-        assertFalse(interrupted.activityCanCollapse)
-        assertEquals("3s間作業した後に失敗しました", failed.activitySummary)
-        assertTrue(failed.activityInitiallyExpanded)
-        assertFalse(failed.activityCanCollapse)
+        for ((status, summary) in listOf(
+            TurnStatus.Interrupted to "12s間作業した後に中断しました・思考",
+            TurnStatus.Failed to "12s間作業した後に失敗しました・思考",
+        )) {
+            val group = CodexTurn("turn", status, activity, durationMs = 12_000).toThreadTurnPresentations().single()
+            assertEquals(summary, group.activitySummary)
+            assertTrue(group.activityCanCollapse)
+            assertFalse(group.activityInitiallyExpanded)
+        }
     }
 
     @Test
-    fun the_same_streaming_turn_collapses_automatically_when_it_completes() {
-        val streaming = CodexTurn(
-            id = "turn-live",
-            status = TurnStatus.InProgress,
-            items = listOf(
-                CodexItem.UserMessage("user", "go"),
-                CodexItem.AgentMessage("commentary", "checking…", AgentMessagePhase.Commentary),
-                CodexItem.CommandExecution(
-                    id = "command",
-                    command = "test",
-                    output = "running",
-                    status = CommandExecutionStatus.InProgress,
-                ),
-                CodexItem.AgentMessage("answer", "", AgentMessagePhase.FinalAnswer),
-            ),
-            startedAtMs = 1_000,
-        )
-        val completed = streaming.copy(
-            status = TurnStatus.Completed,
-            items = streaming.items.map { item ->
-                when (item) {
-                    is CodexItem.CommandExecution -> item.copy(
-                        output = "passed",
-                        status = CommandExecutionStatus.Completed,
-                    )
-                    is CodexItem.AgentMessage -> if (item.phase == AgentMessagePhase.FinalAnswer) {
-                        item.copy(text = "Done.")
-                    } else {
-                        item.copy(text = "checked")
-                    }
-                    else -> item
-                }
-            },
-            completedAtMs = 6_000,
-            durationMs = 5_000,
-        )
-
-        val livePresentation = streaming.toThreadTurnPresentation()
-        val completedPresentation = completed.toThreadTurnPresentation()
-
-        assertTrue(livePresentation.activityInitiallyExpanded)
-        assertFalse(livePresentation.activityCanCollapse)
-        assertEquals("checking…", (livePresentation.activityItems.first() as CodexItem.AgentMessage).text)
-        assertFalse(completedPresentation.activityInitiallyExpanded)
-        assertTrue(completedPresentation.activityCanCollapse)
-        assertEquals("5s間作業しました", completedPresentation.activitySummary)
-        assertEquals("Done.", completedPresentation.responses.single().text)
-        assertEquals("passed", (completedPresentation.activityItems[1] as CodexItem.CommandExecution).output)
+    fun completed_phase_less_messages_keep_only_the_last_answer_outside_work() {
+        val sections = CodexTurn("turn", TurnStatus.Completed, listOf(
+            CodexItem.AgentMessage("intro", "Checking"),
+            CodexItem.Unknown("sleep", "sleep", Json.parseToJsonElement("{}").jsonObject),
+            CodexItem.Reasoning("reasoning", "working"),
+            CodexItem.Unknown("review", "enteredReviewMode", Json.parseToJsonElement("{}").jsonObject),
+            CodexItem.FileChange("file", listOf(FileUpdateChange("file.kt", FileUpdateKind.Update, "diff")), FileChangeStatus.Completed),
+            CodexItem.AgentMessage("answer", "Done"),
+        )).toThreadTurnPresentations()
+        assertEquals(listOf("intro", "reasoning", "file", "answer"),
+            sections.flatMap { it.userMessages + it.activityItems + it.responses }.map { it.id })
+        assertEquals("作業しました", sections.single().activitySummary)
+        assertEquals(listOf("answer"), sections.single().responses.map { it.id })
     }
 
     @Test
-    fun duration_falls_back_to_timestamps_and_phase_less_last_agent_message_is_the_response() {
-        val turn = CodexTurn(
-            id = "turn-legacy",
-            status = TurnStatus.Completed,
-            items = listOf(
-                CodexItem.AgentMessage("progress", "checking"),
-                CodexItem.Unknown(
-                    id = "tool",
-                    codexType = "webSearch",
-                    raw = Json.parseToJsonElement("""{"type":"webSearch","query":"Codex"}""").jsonObject,
-                ),
-                CodexItem.AgentMessage("answer", "done"),
-            ),
-            startedAtMs = 2_000,
-            completedAtMs = 67_000,
-        )
+    fun completed_work_preserves_additional_input_and_duration() {
+        val sections = CodexTurn("turn", TurnStatus.Completed, listOf(
+            CodexItem.UserMessage("first", "Start"),
+            CodexItem.AgentMessage("before", "Checking", AgentMessagePhase.Commentary),
+            CodexItem.UserMessage("additional", "Change direction"),
+            CodexItem.Reasoning("after", "New work"),
+            CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer),
+        ), durationMs = 1_459_000).toThreadTurnPresentations()
+        assertEquals(listOf("first", "additional"), sections.flatMap { it.userMessages }.map { it.id })
+        assertEquals(listOf("before", "after"), sections.flatMap { it.activityItems }.map { it.id })
+        assertEquals(listOf("answer"), sections.flatMap { it.responses }.map { it.id })
+        assertEquals("24m 19s間作業しました", sections.last().activitySummary)
+    }
 
-        val presentation = turn.toThreadTurnPresentation()
-
-        assertEquals(listOf("progress", "tool"), presentation.activityItems.map { it.id })
-        assertEquals(listOf("answer"), presentation.responses.map { it.id })
-        assertEquals("1m 5s間作業しました", presentation.activitySummary)
+    @Test
+    fun completed_turn_without_a_final_answer_keeps_commentary_visible() {
+        val sections = CodexTurn("turn", TurnStatus.Completed, listOf(
+            CodexItem.AgentMessage("commentary", "Still checking", AgentMessagePhase.Commentary),
+            CodexItem.Reasoning("reasoning", "Working"),
+        )).toThreadTurnPresentations()
+        assertEquals(listOf("commentary"), sections.flatMap { it.responses }.map { it.id })
+        assertEquals(listOf("reasoning"), sections.flatMap { it.activityItems }.map { it.id })
     }
 
     @Test
@@ -221,7 +192,7 @@ class ThreadDetailPresentationTest {
                 ),
                 willRetry = true,
             ),
-        ).toThreadTurnPresentation()
+        ).toThreadTurnPresentations().single()
         val failed = CodexTurn(
             id = "failed",
             status = TurnStatus.Failed,
@@ -229,18 +200,18 @@ class ThreadDetailPresentationTest {
                 message = "context is full",
                 codexErrorInfo = Json.parseToJsonElement("\"contextWindowExceeded\""),
             ),
-        ).toThreadTurnPresentation()
+        ).toThreadTurnPresentations().single()
 
         assertEquals("サーバーが混み合っています。再接続しています", retrying.error?.title)
         assertEquals("attempt 2/5", retrying.error?.details)
         assertTrue(retrying.error?.isReconnecting == true)
         assertEquals("context is full", failed.error?.message)
         assertFalse(failed.error?.isRetryable == true)
-        assertTrue(failed.activityInitiallyExpanded)
+        assertFalse(failed.activityInitiallyExpanded)
     }
 
     @Test
-    fun pending_requests_stay_visible_and_prevent_activity_auto_collapse() {
+    fun pending_requests_stay_visible_outside_collapsed_activity() {
         val methods = listOf(
             "item/commandExecution/requestApproval" to "コマンドの承認待ち",
             "item/fileChange/requestApproval" to "ファイル変更の承認待ち",
@@ -265,12 +236,12 @@ class ThreadDetailPresentationTest {
                     ).jsonObject,
                 )
             },
-        ).toThreadTurnPresentation()
+        ).toThreadTurnPresentations().single()
 
         assertEquals(methods.map { it.second }, turn.pendingRequests.map { it.title })
         assertTrue(turn.pendingRequests.all { it.body.isNotBlank() })
-        assertFalse(turn.activityCanCollapse)
-        assertTrue(turn.activityInitiallyExpanded)
+        assertTrue(turn.activityCanCollapse)
+        assertFalse(turn.activityInitiallyExpanded)
     }
 
     @Test
@@ -315,7 +286,7 @@ class ThreadDetailPresentationTest {
                 CodexItem.Unknown("compaction", "contextCompaction", Json.parseToJsonElement("{}" ).jsonObject),
                 CodexItem.AgentMessage("answer", "done", AgentMessagePhase.FinalAnswer),
             ),
-        ).toThreadTurnPresentation()
+        ).toThreadTurnPresentations().single()
 
         assertEquals(listOf("compaction"), turn.activityItems.map { it.id })
     }
@@ -350,7 +321,7 @@ class ThreadDetailPresentationTest {
                     message = "message",
                     codexErrorInfo = Json.parseToJsonElement("\"$kind\""),
                 ),
-            ).toThreadTurnPresentation().error
+            ).toThreadTurnPresentations().single().error
             assertEquals(title, error?.title, kind)
         }
     }

@@ -1,23 +1,16 @@
 package dev.remoteagent.mobile
 
 import kotlinx.cinterop.ByteVar
-import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.CPointerVar
-import kotlinx.cinterop.COpaquePointer
-import kotlinx.cinterop.COpaquePointerVar
-import kotlinx.cinterop.CValuesRef
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
-import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.toKString
-import kotlinx.cinterop.toCValues
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
-import kotlinx.atomicfu.atomic
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.CancellationException
@@ -35,31 +28,37 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import cnames.structs.MobileClientHandle
+import mobile_client.mobile_client_transfer
 import mobile_client.mobile_client_close
 import mobile_client.mobile_client_connect
-import mobile_client.mobile_client_generate_device_key
 import mobile_client.mobile_client_next_notification
 import mobile_client.mobile_client_next_server_request
 import mobile_client.mobile_client_request
 import mobile_client.mobile_client_respond_error
 import mobile_client.mobile_client_respond_result
 import mobile_client.mobile_client_string_free
-import platform.CoreFoundation.CFDictionaryRef
-import platform.CoreFoundation.CFDataCreate
-import platform.CoreFoundation.CFDataGetBytePtr
-import platform.CoreFoundation.CFDataGetLength
-import platform.CoreFoundation.CFDictionaryCreate
-import platform.CoreFoundation.CFTypeRefVar
 import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSHomeDirectory
 import platform.Foundation.dataWithBytes
 import platform.Foundation.dataWithContentsOfFile
 import platform.Foundation.writeToFile
+import kotlinx.cinterop.CPointed
+import kotlinx.cinterop.COpaquePointer
+import kotlinx.cinterop.COpaquePointerVar
+import kotlinx.cinterop.CValuesRef
+import kotlinx.cinterop.reinterpret
+import kotlinx.cinterop.toCValues
+import mobile_client.mobile_client_generate_device_key
+import platform.CoreFoundation.CFDictionaryRef
+import platform.CoreFoundation.CFDataCreate
+import platform.CoreFoundation.CFDataGetBytePtr
+import platform.CoreFoundation.CFDataGetLength
+import platform.CoreFoundation.CFDictionaryCreate
+import platform.CoreFoundation.CFTypeRefVar
 import platform.CoreFoundation.kCFBooleanTrue
 import platform.Security.SecItemAdd
 import platform.Security.SecItemCopyMatching
-import platform.Security.SecItemDelete
 import platform.Security.errSecItemNotFound
 import platform.Security.errSecSuccess
 import platform.Security.kSecAttrAccessible
@@ -72,8 +71,10 @@ import platform.Security.kSecReturnData
 import platform.Security.kSecValueData
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import platform.CoreFoundation.CFRelease
+import platform.Security.SecItemUpdate
+private const val DeviceKeyService = "app.bex.mobile.credentials.v4"
 
-private const val DeviceKeyService = "dev.remoteagent.mobile.pkcs8"
 private const val DefaultRequestTimeoutMs = 30_000L
 
 private val iosJson = Json {
@@ -97,36 +98,16 @@ object IosLifecycleBridge {
     fun didEnterBackground() = Unit
 }
 
-/** Bonjour answers are hints only; Rust still pins and verifies Host identity. */
-object IosBonjourBridge {
-    private val addresses = atomic<List<String>>(emptyList())
-
-    fun update(addresses: List<String>) {
-        this.addresses.value = addresses.toList()
-    }
-
-    fun candidates(): List<String> = addresses.value
-
-    suspend fun awaitCandidates(timeoutMs: Long = BonjourDiscoveryTimeoutMs): List<String> {
-        candidates().takeIf(List<String>::isNotEmpty)?.let { return it }
-        repeat((timeoutMs / BonjourDiscoveryPollMs).toInt()) {
-            delay(BonjourDiscoveryPollMs)
-            candidates().takeIf(List<String>::isNotEmpty)?.let { return it }
-        }
-        return emptyList()
-    }
-
-    private const val BonjourDiscoveryTimeoutMs = 1_500L
-    private const val BonjourDiscoveryPollMs = 50L
-}
-
 /**
  * All C calls are made on Dispatchers.Default. Handle leases keep a retired
  * native client alive until every concurrent request/poll/response finishes.
  */
-@OptIn(ExperimentalForeignApi::class, ExperimentalEncodingApi::class)
+@OptIn(ExperimentalForeignApi::class)
 internal class IosHostGateway : HostGateway {
-    private val codexClient = CommonCodexClient(this)
+    private val codexClient = CommonCodexClient(this, deferItemDetails = true)
+    fun setTurnOptions(hostIdentity: String, options: CodexTurnOptions) = codexClient.setTurnOptions(hostIdentity, options)
+    suspend fun listModels(profile: HostProfile): GatewayResult<List<CodexModel>> = codexClient.listModels(profile)
+
     /** Owns both handles and subscriptions so registration cannot cross a replacement. */
     private val handleLock = SynchronizedObject()
     private val handles = mutableMapOf<String, NativeHandle>()
@@ -134,45 +115,40 @@ internal class IosHostGateway : HostGateway {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = withContext(Dispatchers.Default) {
-        val identityReference = payload.hostIdentity
-        val addresses = connectionCandidates(payload.addresses)
-        val key = try {
-            IosPkcs8KeyStore.loadOrGenerate(identityReference) { generatedPkcs8() }
-        } catch (error: Throwable) {
-            return@withContext GatewayResult.Failure(error.message ?: "端末鍵を保存できませんでした")
-        }
         try {
-            when (val result = connect(addresses, payload.hostIdentity, payload.ticket, key)) {
-                is GatewayResult.Success -> GatewayResult.Success(HostProfile(
-                    hostIdentity = payload.hostIdentity,
-                    name = payload.hostIdentity.take(12),
-                    addresses = addresses,
-                    deviceIdentityReference = identityReference,
-                ))
+            val reference = payload.hostIdentity
+            val key = IosCredentialStore.loadOrGenerate("key:$reference") { generatedPkcs8() }
+            IosCredentialStore.save("relay:$reference", payload.relayToken.encodeToByteArray())
+            val profile = HostProfile(payload.runnerId, payload.hostName, payload.relayUrl, payload.hostIdentity, reference)
+            when (val result = connect(profile, payload.relayToken, key, payload.ticket)) {
+                is GatewayResult.Success -> GatewayResult.Success(profile)
                 is GatewayResult.Failure -> result
             }
-        } finally {
-            key.fill(0)
+        } catch (failure: Throwable) {
+            GatewayResult.Failure(failure.message ?: "Keychainへの保存に失敗しました")
         }
     }
 
-    override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> = withContext(Dispatchers.Default) {
-        val discovered = IosBonjourBridge.awaitCandidates()
-        GatewayResult.Success((discovered + profile.addresses).filter(String::isNotBlank).distinct())
-    }
+    override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> =
+        GatewayResult.Success(listOf(profile.relayUrl))
 
     override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = withContext(Dispatchers.Default) {
-        val key = try {
-            IosPkcs8KeyStore.load(profile.deviceIdentityReference)
-                ?: return@withContext GatewayResult.Failure("端末鍵が見つかりません。再ペアリングしてください。")
-        } catch (error: Throwable) {
-            return@withContext GatewayResult.Failure(error.message ?: "端末鍵を読み出せませんでした")
-        }
         try {
-            connect(connectionCandidates(profile.addresses), profile.hostIdentity, null, key)
-        } finally {
-            key.fill(0)
+            val key = IosCredentialStore.load("key:${profile.deviceIdentityReference}") ?: error("秘密鍵がありません。再ペアリングしてください")
+            val token = IosCredentialStore.load("relay:${profile.deviceIdentityReference}") ?: error("接続資格情報がありません。再ペアリングしてください")
+            connect(profile, token.decodeToString(), key, null)
+        } catch (failure: Throwable) {
+            GatewayResult.Failure(failure.message ?: "Keychainを読み出せません")
         }
+    }
+
+    override suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement> = withContext(Dispatchers.Default) {
+        withHandle(profile.id) { current -> memScoped {
+            val error = alloc<CPointerVar<ByteVar>>()
+            error.value = null
+            takeResult(mobile_client_transfer(current, params.toString(), error.ptr), error.value)
+                .mapGateway { iosJson.parseToJsonElement(it) }
+        } } ?: GatewayResult.Failure("PC Hostへ接続されていません")
     }
 
     override suspend fun rawRequest(
@@ -180,11 +156,11 @@ internal class IosHostGateway : HostGateway {
         method: String,
         params: JsonElement,
     ): GatewayResult<JsonElement> = withContext(Dispatchers.Default) {
-        request(profile.hostIdentity, method, params).mapGateway { response -> iosJson.parseToJsonElement(response) }
+        request(profile.id, method, params).mapGateway { response -> iosJson.parseToJsonElement(response) }
     }
 
     override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = withContext(Dispatchers.Default) {
-        val hostIdentity = profile.hostIdentity
+        val hostIdentity = profile.id
         val (jobs, retired) = synchronized(handleLock) {
             val jobs = subscriptions.remove(hostIdentity)?.toList().orEmpty()
             val pointer = handles.remove(hostIdentity)?.also { it.retired = true }?.let { handle ->
@@ -197,32 +173,26 @@ internal class IosHostGateway : HostGateway {
         GatewayResult.Success(Unit)
     }
 
-    override suspend fun listProjects(profile: HostProfile): GatewayResult<List<CodexProject>> =
-        codexClient.listProjects(profile)
+    override suspend fun listThreads(profile: HostProfile, query: ThreadListQuery): GatewayResult<ThreadListPage> =
+        withContext(Dispatchers.Default) { codexClient.listThreads(profile, query) }
 
-    override suspend fun listThreads(profile: HostProfile, cwd: String): GatewayResult<List<ThreadSummary>> =
-        codexClient.listThreads(profile, cwd)
+    suspend fun readItemDetails(profile: HostProfile, threadId: String, turnId: String, itemId: String): GatewayResult<String> =
+        withContext(Dispatchers.Default) { codexClient.readItemDetails(profile, threadId, turnId, itemId) }
 
     override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> =
-        codexClient.readThread(profile, threadId)
+        withContext(Dispatchers.Default) { codexClient.readThread(profile, threadId) }
 
     override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> =
         codexClient.startThread(profile, cwd)
 
-    override suspend fun startThread(
-        profile: HostProfile,
-        cwd: String,
-        firstPrompt: String,
-    ): GatewayResult<ThreadStartResult> = codexClient.startThread(profile, cwd, firstPrompt)
+    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String, attachments: List<CodexAttachment>, resume: Boolean, clientUserMessageId: String): GatewayResult<String> =
+        codexClient.startTurn(profile, threadId, cwd, text, attachments, resume, clientUserMessageId)
 
-    override suspend fun startTurn(profile: HostProfile, threadId: String, cwd: String, text: String): GatewayResult<String> =
-        codexClient.startTurn(profile, threadId, cwd, text)
+    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String, attachments: List<CodexAttachment>, clientUserMessageId: String): GatewayResult<Unit> =
+        codexClient.steerTurn(profile, threadId, turnId, text, attachments, clientUserMessageId)
 
-    override suspend fun steerTurn(profile: HostProfile, threadId: String, turnId: String, text: String): GatewayResult<Unit> =
-        codexClient.steerTurn(profile, threadId, turnId, text)
-
-    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String): GatewayResult<String> =
-        codexClient.queueTurn(profile, threadId, text)
+    override suspend fun queueTurn(profile: HostProfile, threadId: String, text: String, attachments: List<CodexAttachment>, clientUserMessageId: String): GatewayResult<String> =
+        codexClient.queueTurn(profile, threadId, text, attachments, clientUserMessageId)
 
     override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
         codexClient.interrupt(profile, threadId, turnId)
@@ -247,7 +217,7 @@ internal class IosHostGateway : HostGateway {
         onMessage: (RawCodexMessage) -> Unit,
         onClosed: (String) -> Unit,
     ): HostEventSubscription {
-        val hostIdentity = profile.hostIdentity
+        val hostIdentity = profile.id
         lateinit var job: Job
         val registered = synchronized(handleLock) {
             val subscribedHandle = handles[hostIdentity] ?: return@synchronized false
@@ -282,42 +252,37 @@ internal class IosHostGateway : HostGateway {
     }
 
     private suspend fun connect(
-        addresses: List<String>,
-        hostIdentity: String,
-        pairingTicket: String?,
+        profile: HostProfile,
+        relayToken: String,
         key: ByteArray,
+        ticket: String?,
     ): GatewayResult<Unit> {
-        var lastFailure = "接続先アドレスがありません"
-        for (address in addresses.filter(String::isNotBlank).distinct()) {
-            val config = buildJsonObject {
-                put("address", address)
-                put("hostIdentity", hostIdentity)
-                put("deviceName", "Bex iOS")
-                pairingTicket?.let { put("pairingTicket", it) }
-                put("requestTimeoutMs", DefaultRequestTimeoutMs)
-            }.toString()
-            when (val result = callConnect(config, key)) {
-                is GatewayResult.Success -> {
-                    val (jobs, retired) = synchronized(handleLock) {
-                        val jobs = subscriptions.remove(hostIdentity)?.toList().orEmpty()
-                        val previous = handles[hostIdentity]
-                        previous?.retired = true
-                        handles[hostIdentity] = NativeHandle(result.value)
-                        jobs to previous?.pointer?.takeIf { previous.borrowers == 0 }
-                    }
-                    jobs.forEach(Job::cancel)
-                    retired?.let { mobile_client_close(it) }
-                    return GatewayResult.Success(Unit)
+        val runnerId = profile.id
+        val config = buildJsonObject {
+            put("relayUrl", profile.relayUrl)
+            put("runnerId", profile.runnerId)
+            put("hostIdentity", profile.hostIdentity)
+            put("deviceName", platform.UIKit.UIDevice.currentDevice.name)
+            put("relayToken", relayToken)
+            ticket?.let { put("pairingTicket", it) }
+            put("requestTimeoutMs", DefaultRequestTimeoutMs)
+        }.toString()
+        return when (val result = callConnect(config, key)) {
+            is GatewayResult.Success -> {
+                val (jobs, retired) = synchronized(handleLock) {
+                    val jobs = subscriptions.remove(runnerId)?.toList().orEmpty()
+                    val previous = handles[runnerId]
+                    previous?.retired = true
+                    handles[runnerId] = NativeHandle(result.value)
+                    jobs to previous?.pointer?.takeIf { previous.borrowers == 0 }
                 }
-                is GatewayResult.Failure -> lastFailure = result.message
+                jobs.forEach(Job::cancel)
+                retired?.let { mobile_client_close(it) }
+                GatewayResult.Success(Unit)
             }
+            is GatewayResult.Failure -> result
         }
-        return GatewayResult.Failure(lastFailure)
     }
-
-    /** Fresh Bonjour answers precede persisted addresses, whose ports may be stale after Host restart. */
-    private fun connectionCandidates(configured: List<String>): List<String> =
-        (IosBonjourBridge.candidates() + configured).filter(String::isNotBlank).distinct()
 
     private suspend fun request(hostIdentity: String, method: String, params: JsonElement): GatewayResult<String> {
         return withHandle(hostIdentity) { current -> memScoped {
@@ -339,7 +304,7 @@ internal class IosHostGateway : HostGateway {
         payload: JsonElement,
         isError: Boolean,
     ): GatewayResult<Unit> {
-        return withHandle(profile.hostIdentity) { current -> memScoped {
+        return withHandle(profile.id) { current -> memScoped {
             val error = alloc<CPointerVar<ByteVar>>()
             error.value = null
             val success = if (isError) {
@@ -456,7 +421,7 @@ internal class IosHostGateway : HostGateway {
 
 /** Keychain owns opaque Rust PKCS#8 bytes, never a Swift CryptoKit key. */
 @OptIn(ExperimentalForeignApi::class)
-private object IosPkcs8KeyStore {
+private object IosCredentialStore {
     fun loadOrGenerate(reference: String, generate: () -> ByteArray): ByteArray = load(reference) ?: generate().also {
         save(reference, it)
     }
@@ -464,22 +429,33 @@ private object IosPkcs8KeyStore {
     fun load(reference: String): ByteArray? = memScoped {
         val result = alloc<CFTypeRefVar>()
         result.value = null
-        when (SecItemCopyMatching(query(reference, true), result.ptr)) {
-            errSecSuccess -> result.value?.reinterpret<CPointed>()?.toByteArray()
-            errSecItemNotFound -> null
-            else -> null
+        withQuery(reference, true, null) { query ->
+            when (val status = SecItemCopyMatching(query, result.ptr)) {
+                errSecSuccess -> {
+                    val data = requireNotNull(result.value)
+                    try { data.reinterpret<CPointed>().toByteArray() } finally { CFRelease(data) }
+                }
+                errSecItemNotFound -> null
+                else -> error("Keychain read failed ($status)")
+            }
         }
     }
 
-    private fun save(reference: String, key: ByteArray) {
-        withQuery(reference, returnsData = false, key = null) { SecItemDelete(it) }
-        withQuery(reference, returnsData = false, key = key) { attributes ->
-            check(SecItemAdd(attributes, null) == errSecSuccess) { "Keychain write failed" }
+    fun save(reference: String, key: ByteArray) {
+        withQuery(reference, false, null) { query ->
+            val data = key.toCFData()
+            try {
+                val attributes = CFDictionaryCreate(null,
+                    listOf<COpaquePointer?>(requireNotNull(kSecValueData).reinterpret<CPointed>()).toOpaqueCValues(),
+                    listOf<COpaquePointer?>(data.reinterpret<CPointed>()).toOpaqueCValues(), 1, null, null)
+                    ?: error("Keychain update could not be created")
+                val status = try { SecItemUpdate(query, attributes) } finally { CFRelease(attributes) }
+                if (status == errSecItemNotFound) {
+                    withQuery(reference, false, key) { check(SecItemAdd(it, null) == errSecSuccess) { "Keychain write failed" } }
+                } else check(status == errSecSuccess) { "Keychain update failed ($status)" }
+            } finally { CFRelease(data) }
         }
     }
-
-    private fun query(reference: String, returnsData: Boolean): CFDictionaryRef =
-        withQuery(reference, returnsData, null) { it }
 
     private fun <T> withQuery(
         reference: String,
@@ -512,7 +488,12 @@ private object IosPkcs8KeyStore {
         }
         val dictionary = CFDictionaryCreate(null, keys.toOpaqueCValues(), values.toOpaqueCValues(), keys.size.toLong(), null, null)
             ?: error("Keychain query could not be created")
-        block(dictionary)
+        try { block(dictionary) } finally {
+            CFRelease(dictionary)
+            keyData?.let { CFRelease(it) }
+            CFRelease(account)
+            CFRelease(service)
+        }
     }
 }
 
@@ -569,7 +550,12 @@ internal class IosMobileRepository : MobileRepository {
         val bytes = NSData.Companion.dataWithContentsOfFile(path)?.toByteArray() ?: return AppState()
         when (val result = MobileStateCodec.decode(bytes)) {
             is MobileStateDecodeResult.Success -> result.value
-            is MobileStateDecodeResult.Failure -> AppState()
+            is MobileStateDecodeResult.Failure -> AppState().also { empty ->
+                // The obsolete v1 file contained relay secrets. Replace it on migration.
+                if (result.reason == MobileStateDecodeReason.UnsupportedVersion) {
+                    check(MobileStateCodec.encode(empty).toNSData().writeToFile(path, atomically = true))
+                }
+            }
         }
     } catch (_: Throwable) {
         AppState()

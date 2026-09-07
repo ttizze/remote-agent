@@ -49,6 +49,7 @@ kotlin {
                 rootProject.file("Cargo.lock"),
             )
             inputs.dir(rootProject.file("crates/host-protocol"))
+            inputs.dir(rootProject.file("crates/relay-transport"))
             inputs.dir(rootProject.file("crates/mobile-client"))
             outputs.file(rootProject.file("target/$rustTarget/release/libmobile_client.a"))
         }
@@ -112,6 +113,7 @@ val buildMobileClientAndroid by tasks.registering(Exec::class) {
         rootProject.file("Cargo.lock"),
     )
     inputs.dir(rootProject.file("crates/host-protocol"))
+    inputs.dir(rootProject.file("crates/relay-transport"))
     inputs.dir(rootProject.file("crates/mobile-client"))
     outputs.files(
         project.file("src/androidMain/jniLibs/arm64-v8a/libmobile_client.so"),

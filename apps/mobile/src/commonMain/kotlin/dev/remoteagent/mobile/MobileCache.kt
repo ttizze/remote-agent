@@ -1,7 +1,11 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
+
 /** Limits are local-device bounds, never a statement about Codex history retention. */
 data class MobileCacheLimits(
+    /** Number of conversation bodies retained; summaries remain available for list expansion. */
     val maxThreads: Int = 20,
     val maxTurnsPerThread: Int = 10,
     val maxApproximateBytes: Int = 512 * 1024,
@@ -41,30 +45,29 @@ fun reconcileProjectList(
     limits: MobileCacheLimits,
 ): MobileCache = cache.replaceProfile(hostIdentity, cache.profile(hostIdentity).copy(projects = projects)).bounded(limits)
 
-/**
- * Records the turn id returned by a successful turn/start or turn/steer when
- * the corresponding turn/started notification was missed. An already-applied
- * terminal event remains authoritative when notifications are reordered.
- */
-fun acknowledgeTurnStart(
+/** Retain accepted input until Codex echoes its client ID, including across reads. */
+fun acknowledgeMessage(
     cache: MobileCache,
     hostIdentity: String,
     threadId: String,
-    turnId: String,
+    submission: SubmittedMessage,
     limits: MobileCacheLimits,
 ): MobileCache {
     val profile = cache.profile(hostIdentity)
     val snapshot = profile.snapshots[threadId] ?: return cache
-    val acknowledgedTurn = snapshot.turns.firstOrNull { it.id == turnId }
-        ?: CodexTurn(turnId, TurnStatus.InProgress)
-    val updated = snapshot.upsertTurn(acknowledgedTurn)
-    return cache.replaceProfile(
-        hostIdentity,
-        profile.copy(
-            threadList = profile.threadList.replaceById(updated.summary.id, updated.summary),
-            snapshots = profile.snapshots + (threadId to updated),
-        ),
-    ).bounded(limits)
+    val turnId = submission.turnId
+    val updated = if (turnId == null) snapshot else snapshot.upsertTurn(
+        snapshot.turns.firstOrNull { it.id == turnId } ?: CodexTurn(turnId, TurnStatus.InProgress),
+    )
+    val alreadyEchoed = updated.turns.any { turn ->
+        turn.items.any { it is CodexItem.UserMessage && it.clientId == submission.clientId }
+    }
+    val retained = if (alreadyEchoed || updated.submittedMessages.any { it.clientId == submission.clientId }) updated else
+        updated.copy(submittedMessages = updated.submittedMessages + submission)
+    return cache.replaceProfile(hostIdentity, profile.copy(
+        threadList = profile.threadList.replaceById(threadId, retained.summary, append = false),
+        snapshots = profile.snapshots + (threadId to retained),
+    )).bounded(limits)
 }
 
 /**
@@ -77,9 +80,17 @@ fun reconcileThreadRead(
     result: ThreadReadResult,
     limits: MobileCacheLimits,
 ): MobileCache {
+    val existing = cache.snapshot(hostIdentity, result.thread.summary.id)
+    val refreshed = mergeHistoryRefresh(existing, result.thread)
+    val pending = existing?.submittedMessages.orEmpty()
+    val thread = if (pending.isEmpty()) refreshed else {
+        val echoed = result.thread.turns.asSequence().flatMap { it.items.asSequence() }
+            .filterIsInstance<CodexItem.UserMessage>().mapNotNull { it.clientId }.toSet()
+        refreshed.copy(submittedMessages = pending.filterNot { it.clientId in echoed })
+    }
     var profile = cache.profile(hostIdentity).copy(
         threadList = cache.profile(hostIdentity).threadList.replaceById(result.thread.summary.id, result.thread.summary),
-        snapshots = cache.profile(hostIdentity).snapshots + (result.thread.summary.id to result.thread),
+        snapshots = cache.profile(hostIdentity).snapshots + (thread.summary.id to thread),
     )
     // A snapshot response is authoritative for exactly one thread. Do not
     // let a malformed or mixed buffered stream mutate another cached thread.
@@ -161,9 +172,16 @@ private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
         is ThreadEvent.ThreadStatusChanged -> existing
         is ThreadEvent.Unknown -> existing
     }
+    val echoed = when (event) {
+        is ThreadEvent.ItemStarted -> event.item as? CodexItem.UserMessage
+        is ThreadEvent.ItemCompleted -> event.item as? CodexItem.UserMessage
+        else -> null
+    }?.clientId
+    val reconciled = if (echoed == null || updated.submittedMessages.isEmpty()) updated else
+        updated.copy(submittedMessages = updated.submittedMessages.filterNot { it.clientId == echoed })
     return copy(
-        threadList = threadList.replaceById(updated.summary.id, updated.summary),
-        snapshots = snapshots + (event.threadId to updated),
+        threadList = threadList.replaceById(updated.summary.id, updated.summary, append = false),
+        snapshots = snapshots + (event.threadId to reconciled),
     )
 }
 
@@ -174,17 +192,23 @@ private fun MobileCache.bounded(limits: MobileCacheLimits): MobileCache {
 }
 
 private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobileCache {
-    val projects = projects.distinctBy { it.id }.sortedBy { it.position }
     val list = threadList
         .groupBy { it.id }
         .values
         .map { summaries -> summaries.maxBy { it.updatedAtMs } }
         .sortedByDescending { it.updatedAtMs }
-        .take(limits.maxThreads)
-    val allowed = list.mapTo(mutableSetOf()) { it.id }
+    val latestProjectActivity = mutableMapOf<String, Long>()
+    list.forEach { summary ->
+        summary.projectId?.let { latestProjectActivity.getOrPut(it) { summary.updatedAtMs } }
+    }
+    val projects = projects.distinctBy { it.id }.sortedWith(
+        compareByDescending<CodexProject> { latestProjectActivity[it.id] ?: Long.MIN_VALUE }
+            .thenBy { it.position },
+    )
     val snapshots = snapshots
-        .filterKeys { it in allowed }
         .values
+        .toList()
+        .takeLast(limits.maxThreads)
         .associate { it.summary.id to it.bounded(limits) }
     return ProfileMobileCache(
         projects = projects,
@@ -196,13 +220,72 @@ private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobile
 }
 
 private fun ThreadSnapshot.bounded(limits: MobileCacheLimits): ThreadSnapshot {
-    return copy(turns = turns.takeLast(limits.maxTurnsPerThread))
+    return if (turns.size <= limits.maxTurnsPerThread) this else copy(turns = turns.takeLast(limits.maxTurnsPerThread), raw = raw?.let { JsonObject(it - "historyCursor") })
 }
 
-private fun <T> List<T>.replaceById(id: String, value: T, idOf: (T) -> String): List<T> {
-    val index = indexOfFirst { idOf(it) == id }
-    return if (index < 0) this + value else toMutableList().also { it[index] = value }
+private fun List<ThreadSummary>.replaceById(id: String, value: ThreadSummary, append: Boolean = true): List<ThreadSummary> {
+    val index = indexOfFirst { it.id == id }
+    return if (index < 0) {
+        if (append) this + value else this
+    } else toMutableList().also { it[index] = value }
 }
 
-private fun List<ThreadSummary>.replaceById(id: String, value: ThreadSummary): List<ThreadSummary> =
-    replaceById(id, value) { it.id }
+internal val ThreadSnapshot.olderTurnsCursor: String? get() = raw?.string("historyCursor")
+internal val CodexTurn.olderItemsCursor: String? get() = raw?.string("itemsNextCursor")
+internal val CodexTurn.hasOlderItems: Boolean get() = raw?.boolean("itemsHasMore") ?: (olderItemsCursor != null)
+
+/** Older pages prepend; already observed live items win overlapping IDs. */
+internal fun mergeOlderHistory(current: ThreadSnapshot, page: ThreadSnapshot, turnId: String?): ThreadSnapshot {
+    if (turnId != null) {
+        val older = page.turns.single { it.id == turnId }
+        return current.copy(turns = current.turns.map { turn ->
+            if (turn.id != turnId) turn else turn.copy(
+                items = prependDistinctItems(older.items, turn.items),
+                raw = JsonObject(turn.raw.orEmpty() + older.raw.orEmpty().filterKeys { it == "openingUserMessage" } + mapOf(
+                    "itemsNextCursor" to (older.raw?.get("itemsNextCursor") ?: JsonNull),
+                    "itemsHasMore" to kotlinx.serialization.json.JsonPrimitive(older.hasOlderItems),
+                    "deferredItemIds" to mergeDeferredIds(older, turn),
+                )),
+            )
+        })
+    }
+    val known = current.turns.mapTo(mutableSetOf()) { it.id }
+    return current.copy(
+        turns = page.turns.filterNot { it.id in known } + current.turns,
+        raw = JsonObject(current.raw.orEmpty() + ("historyCursor" to (page.raw?.get("historyCursor") ?: JsonNull))),
+    )
+}
+
+private fun prependDistinctItems(older: List<CodexItem>, current: List<CodexItem>): List<CodexItem> {
+    val known = current.mapTo(mutableSetOf()) { it.id }
+    return older.filter { known.add(it.id) } + current
+}
+
+private fun mergeDeferredIds(a: CodexTurn, b: CodexTurn) = kotlinx.serialization.json.JsonArray(
+    ((a.raw?.get("deferredItemIds") as? kotlinx.serialization.json.JsonArray).orEmpty() +
+        (b.raw?.get("deferredItemIds") as? kotlinx.serialization.json.JsonArray).orEmpty()).distinct(),
+)
+
+/** Keep fetched prefixes only across an overlapping, authoritative tail read. */
+private fun mergeHistoryRefresh(previous: ThreadSnapshot?, fresh: ThreadSnapshot): ThreadSnapshot {
+    if (previous?.raw?.containsKey("historyCursor") != true || fresh.raw?.containsKey("historyCursor") != true || fresh.turns.isEmpty()) return fresh
+    val boundary = previous.turns.indexOfFirst { it.id == fresh.turns.first().id }
+    if (boundary < 0) return fresh
+    val oldTurns = previous.turns.associateBy { it.id }
+    val turns = fresh.turns.map { turn ->
+        val old = oldTurns[turn.id] ?: return@map turn
+        val first = turn.items.firstOrNull()?.id ?: return@map if (turn.hasOlderItems) turn.copy(items = old.items, raw = old.raw) else turn
+        val itemBoundary = old.items.indexOfFirst { it.id == first }
+        if (itemBoundary < 0) return@map turn
+        turn.copy(
+            items = old.items.take(itemBoundary) + turn.items,
+            raw = JsonObject(turn.raw.orEmpty() + mapOf(
+                "itemsNextCursor" to (old.raw?.get("itemsNextCursor") ?: JsonNull),
+                "itemsHasMore" to kotlinx.serialization.json.JsonPrimitive(old.hasOlderItems),
+                "deferredItemIds" to mergeDeferredIds(old, turn),
+            )),
+        )
+    }
+    return fresh.copy(turns = previous.turns.take(boundary) + turns,
+        raw = JsonObject(fresh.raw.orEmpty() + ("historyCursor" to (previous.raw?.get("historyCursor") ?: JsonNull))))
+}

@@ -38,21 +38,27 @@ enum class MobileStateDecodeReason {
 }
 
 /**
- * Versioned, platform-neutral persistence for the non-secret mobile state.
+ * Versioned, platform-neutral persistence for the mobile profile and cache
+ * state. Only secure-store references are retained; platform secure storage
+ * owns device keys and relay credentials.
  *
  * The codec intentionally accepts and returns ByteArray values.  Android and
  * iOS repositories therefore only need to own atomic file I/O; they do not
  * need to duplicate the model projection or JSON schema.
  */
 object MobileStateCodec {
-    const val CurrentVersion: Int = 1
+    const val CurrentVersion: Int = 2
     const val MaxInputBytes: Int = 1024 * 1024
 
-    /** Encode an entire application state into the current envelope. */
-    fun encode(state: AppState): ByteArray = encodeEnvelope(
-        kind = AppStateKind,
-        payload = codecJson.encodeToJsonElement(PersistedAppState.serializer(), state.toPersisted()),
-    )
+    /** Navigation is durable even when the disposable display cache exceeds storage. */
+    fun encode(state: AppState): ByteArray {
+        val payload = state.toPersisted()
+        val bytes = encodeEnvelope(AppStateKind, codecJson.encodeToJsonElement(PersistedAppState.serializer(), payload), enforceLimit = false)
+        if (bytes.size <= MaxInputBytes) return bytes
+        return encodeEnvelope(AppStateKind, codecJson.encodeToJsonElement(
+            PersistedAppState.serializer(), state.copy(cache = MobileCache()).toPersisted(),
+        ))
+    }
 
     /** Encode only the display cache into the current envelope. */
     fun encode(cache: MobileCache): ByteArray = encodeCache(cache)
@@ -144,7 +150,7 @@ object MobileStateCodec {
         return MobileStateDecodeResult.Success(envelope)
     }
 
-    private fun encodeEnvelope(kind: String, payload: JsonElement): ByteArray {
+    private fun encodeEnvelope(kind: String, payload: JsonElement, enforceLimit: Boolean = true): ByteArray {
         val bytes = codecJson.encodeToString(
             PersistedEnvelope(
                 format = Format,
@@ -153,7 +159,7 @@ object MobileStateCodec {
                 payload = payload as? JsonObject ?: error("State payload must be an object"),
             ),
         ).encodeToByteArray()
-        require(bytes.size <= MaxInputBytes) { "Mobile state exceeds the $MaxInputBytes-byte storage limit" }
+        require(!enforceLimit || bytes.size <= MaxInputBytes) { "Mobile state exceeds the $MaxInputBytes-byte storage limit" }
         return bytes
     }
 
@@ -182,9 +188,10 @@ private data class PersistedAppState(
 
 @Serializable
 private data class PersistedHostProfile(
-    val hostIdentity: String,
+    val runnerId: String,
     val name: String,
-    val addresses: List<String>,
+    val relayUrl: String,
+    val hostIdentity: String,
     val deviceIdentityReference: String,
 )
 
@@ -218,9 +225,10 @@ private data class PersistedRawNotification(
 private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
     profiles = profiles.map { profile ->
         PersistedHostProfile(
-            hostIdentity = profile.hostIdentity,
+            runnerId = profile.runnerId,
             name = profile.name,
-            addresses = profile.addresses,
+            relayUrl = profile.relayUrl,
+            hostIdentity = profile.hostIdentity,
             deviceIdentityReference = profile.deviceIdentityReference,
         )
     },
@@ -236,24 +244,25 @@ private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
 
 private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppState {
     val restoredProfiles = profiles.asSequence()
-        .filter { it.hostIdentity.isNotBlank() && it.deviceIdentityReference.isNotBlank() }
+        .filter { it.hostIdentity.isNotBlank() && it.runnerId.isNotBlank() && it.relayUrl.isNotBlank() && it.deviceIdentityReference.isNotBlank() }
         .map { profile ->
             HostProfile(
-                hostIdentity = profile.hostIdentity,
+                runnerId = profile.runnerId,
                 name = profile.name.ifBlank { profile.hostIdentity },
-                addresses = profile.addresses.filter(String::isNotBlank).distinct(),
-                deviceIdentityReference = profile.deviceIdentityReference,
+                relayUrl = profile.relayUrl,
+                hostIdentity = profile.hostIdentity,
+            deviceIdentityReference = profile.deviceIdentityReference,
             )
         }
-        .distinctBy { it.hostIdentity }
+        .distinctBy { it.id }
         .toList()
-    val restoredProfileIds = restoredProfiles.mapTo(mutableSetOf()) { it.hostIdentity }
+    val restoredProfileIds = restoredProfiles.mapTo(mutableSetOf()) { it.id }
     return AppState(
         profiles = restoredProfiles,
         selectedProfileId = selectedProfileId?.takeIf { it in restoredProfileIds },
         profileViews = restoredProfiles.associate { profile ->
-            val view = profileViews[profile.hostIdentity] ?: PersistedProfileViewState()
-            profile.hostIdentity to ProfileViewState(
+            val view = profileViews[profile.id] ?: PersistedProfileViewState()
+            profile.id to ProfileViewState(
                 connection = ConnectionPhase.Disconnected,
                 workingDirectoryPath = view.workingDirectoryPath,
                 threadList = LoadPhase.Idle,

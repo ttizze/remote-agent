@@ -5,14 +5,19 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
 class PairingQrTest {
-    private val fixed32Bytes = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    private val relayUrl = "wss://relay.example.test/socket/websocket"
+    private val runnerId = "runner-1"
+    private val relayToken = "relay-token-for-fixture"
 
     private val hostGeneratedPayload = """
         {
-          "protocolVersion": 3,
-          "hostIdentity": "$fixed32Bytes",
-          "addresses": ["192.0.2.1:49152"],
-          "ticket": "$fixed32Bytes",
+          "protocolVersion": 4,
+          "relayUrl": "$relayUrl",
+          "runnerId": "$runnerId",
+          "relayToken": "$relayToken",
+          "hostIdentity": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "hostName": "Mac",
+          "ticket": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
           "expiresAtMs": 200
         }
     """.trimIndent()
@@ -22,7 +27,9 @@ class PairingQrTest {
         val result = parsePairingQr(payload(expiresAtMs = 200), nowMs = 100)
 
         val valid = assertIs<PairingQrResult.Valid>(result)
-        assertEquals(listOf("192.0.2.1:49152"), valid.payload.addresses)
+        assertEquals(relayUrl, valid.payload.relayUrl)
+        assertEquals(runnerId, valid.payload.runnerId)
+        assertEquals(relayToken, valid.payload.relayToken)
     }
 
     @Test
@@ -45,28 +52,43 @@ class PairingQrTest {
     }
 
     @Test
-    fun rejects_wrong_key_lengths_and_missing_addresses() {
+    fun rejects_invalid_relay_url_runner_id_and_token() {
         assertEquals(
-            PairingQrResult.Invalid(PairingQrFailure.InvalidHostIdentity),
-            parsePairingQr(payload(expiresAtMs = 200, hostIdentity = "AA"), nowMs = 100),
+            PairingQrResult.Invalid(PairingQrFailure.InvalidRelayUrl),
+            parsePairingQr(payload(expiresAtMs = 200, relayUrl = "ssh://host:22"), nowMs = 100),
         )
         assertEquals(
-            PairingQrResult.Invalid(PairingQrFailure.InvalidAddresses),
-            parsePairingQr(payload(expiresAtMs = 200, addresses = ""), nowMs = 100),
+            PairingQrResult.Invalid(PairingQrFailure.InvalidRelayUrl),
+            parsePairingQr(
+                payload(expiresAtMs = 200, relayUrl = "wss://relay.example.test/socket#fragment"),
+                nowMs = 100,
+            ),
+        )
+        assertEquals(
+            PairingQrResult.Invalid(PairingQrFailure.InvalidRunnerId),
+            parsePairingQr(payload(expiresAtMs = 200, runnerId = " "), nowMs = 100),
+        )
+        assertEquals(
+            PairingQrResult.Invalid(PairingQrFailure.InvalidRelayToken),
+            parsePairingQr(payload(expiresAtMs = 200, relayToken = ""), nowMs = 100),
         )
     }
 
     private fun payload(
         expiresAtMs: Long,
-        protocolVersion: Int = 3,
-        hostIdentity: String = fixed32Bytes,
-        addresses: String = "\"192.0.2.1:49152\"",
+        protocolVersion: Int = 4,
+        relayUrl: String = this.relayUrl,
+        runnerId: String = this.runnerId,
+        relayToken: String = this.relayToken,
     ): String = """
         {
           "protocolVersion": $protocolVersion,
-          "hostIdentity": "$hostIdentity",
-          "addresses": [$addresses],
-          "ticket": "$fixed32Bytes",
+          "relayUrl": "$relayUrl",
+          "runnerId": "$runnerId",
+          "relayToken": "$relayToken",
+          "hostIdentity": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "hostName": "Mac",
+          "ticket": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
           "expiresAtMs": $expiresAtMs
         }
     """.trimIndent()

@@ -8,6 +8,8 @@ import kotlinx.serialization.json.jsonPrimitive
 
 internal data class ThreadTurnPresentation(
     val id: String,
+    val turnId: String,
+    val isLastSegment: Boolean,
     val status: TurnStatus,
     val userMessages: List<CodexItem.UserMessage>,
     val activityItems: List<CodexItem>,
@@ -34,42 +36,101 @@ internal data class ThreadRequestPresentation(
     val body: String,
 )
 
-internal fun CodexTurn.toThreadTurnPresentation(): ThreadTurnPresentation {
-    val explicitFinalExists = items.any {
-        it is CodexItem.AgentMessage && it.phase == AgentMessagePhase.FinalAnswer
-    }
-    val fallbackFinalIndex = if (explicitFinalExists) {
-        -1
-    } else {
-        items.indexOfLast { it is CodexItem.AgentMessage && it.phase == null }
-    }
-    val userMessages = mutableListOf<CodexItem.UserMessage>()
-    val activityItems = mutableListOf<CodexItem>()
-    val responses = mutableListOf<CodexItem.AgentMessage>()
-    items.forEachIndexed { index, item ->
-        when (item) {
-            is CodexItem.UserMessage -> userMessages += item
-            is CodexItem.AgentMessage -> when {
-                item.phase == AgentMessagePhase.FinalAnswer || index == fallbackFinalIndex -> responses += item
-                else -> activityItems += item
+/** Accepted inputs remain visible at their send position until the native echo arrives. */
+internal fun ThreadSnapshot.conversationSegments(): List<ThreadTurnPresentation> = turns.flatMap { turn ->
+    val pending = submittedMessages.filter { it.turnId == turn.id }
+    if (pending.isEmpty()) turn.toThreadTurnPresentations() else {
+        val anchors = turn.items.mapTo(mutableSetOf()) { it.id }
+        val grouped = pending.groupBy { it.afterItemId?.takeIf(anchors::contains) }
+        val displayItems = buildList {
+            turn.items.forEach { item ->
+                add(item)
+                grouped[item.id].orEmpty().forEach { add(CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources)) }
             }
-            else -> if (item.toThreadItemPresentation().isVisible) activityItems += item
+            grouped[null].orEmpty().forEach { add(CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources)) }
         }
+        turn.toThreadTurnPresentations(displayItems)
     }
-    val activityCanCollapse = status == TurnStatus.Completed &&
-        responses.isNotEmpty() && activityItems.isNotEmpty() && pendingRequests.isEmpty()
-    return ThreadTurnPresentation(
-        id = id,
-        status = status,
-        userMessages = userMessages,
-        activityItems = activityItems,
-        responses = responses,
-        activitySummary = if (activityItems.isNotEmpty() || status != TurnStatus.Completed) workSummary() else null,
-        activityInitiallyExpanded = !activityCanCollapse,
-        activityCanCollapse = activityCanCollapse,
-        error = error?.toThreadErrorPresentation(status),
-        pendingRequests = pendingRequests.map(CodexServerRequest::toThreadRequestPresentation),
-    )
+}
+
+/** Live tools group between commentary; completed work folds behind the final answer. */
+internal fun CodexTurn.toThreadTurnPresentations(displayItems: List<CodexItem> = items): List<ThreadTurnPresentation> {
+    val finalAnswer = if (status == TurnStatus.Completed) {
+        displayItems.lastOrNull { it is CodexItem.AgentMessage && it.phase == AgentMessagePhase.FinalAnswer }
+            ?: displayItems.lastOrNull { it is CodexItem.AgentMessage && it.phase == null }
+    } else null
+    val boundaries = buildList {
+        add(0)
+        var followsResponse = false
+        displayItems.forEachIndexed { index, item ->
+            if (index > 0 && (item is CodexItem.UserMessage ||
+                    (finalAnswer == null && followsResponse && item !is CodexItem.AgentMessage && item.isVisibleInConversation()))) {
+                add(index)
+                followsResponse = false
+            }
+            if (item is CodexItem.AgentMessage) followsResponse = true
+        }
+        add(displayItems.size)
+    }
+    return (0 until boundaries.lastIndex).map { section ->
+        val start = boundaries[section]
+        val end = boundaries[section + 1]
+        val last = section == boundaries.lastIndex - 1
+        val userMessages = mutableListOf<CodexItem.UserMessage>()
+        val activityItems = mutableListOf<CodexItem>()
+        val responses = mutableListOf<CodexItem.AgentMessage>()
+        for (index in start until end) {
+            when (val item = displayItems[index]) {
+                is CodexItem.UserMessage -> userMessages += item
+                is CodexItem.AgentMessage -> if (finalAnswer != null && item !== finalAnswer) activityItems += item else responses += item
+                else -> if (item.isVisibleInConversation()) activityItems += item
+            }
+        }
+        val canCollapse = activityItems.isNotEmpty()
+        val firstItem = displayItems.getOrNull(start)
+        val sectionId = if (section == 0) id else "$id:${(firstItem as? CodexItem.UserMessage)?.clientId ?: firstItem?.id}"
+        ThreadTurnPresentation(
+            id = sectionId,
+            turnId = id,
+            isLastSegment = last,
+            status = status,
+            userMessages = userMessages,
+            activityItems = activityItems,
+            responses = responses,
+            activitySummary = when {
+                canCollapse && finalAnswer != null -> if (last) workSummary() else "作業内容"
+                canCollapse -> activityItems.activitySummary().let { summary ->
+                    if (last && (status == TurnStatus.Interrupted || status == TurnStatus.Failed)) "${workSummary()}・$summary" else summary
+                }
+                last && status != TurnStatus.Completed -> workSummary()
+                else -> null
+            },
+            activityInitiallyExpanded = false,
+            activityCanCollapse = canCollapse,
+            error = if (last) error?.toThreadErrorPresentation(status) else null,
+            pendingRequests = if (last) pendingRequests.map(CodexServerRequest::toThreadRequestPresentation) else emptyList(),
+        )
+    }
+}
+
+private fun List<CodexItem>.activitySummary(): String {
+    var commands = 0
+    var files = 0
+    var reasoning = 0
+    var tools = 0
+    for (item in this) when (item) {
+        is CodexItem.CommandExecution -> commands++
+        is CodexItem.FileChange -> files += item.changes.size
+        is CodexItem.Reasoning -> reasoning++
+        else -> tools++
+    }
+    return buildList {
+        if (commands > 0) add("${commands}件のコマンド")
+        if (files > 0) add("${files}件のファイル変更")
+        if (tools > 0) add("${tools}件のツール操作")
+        if (reasoning > 0) add("思考")
+        if (isEmpty()) add("作業")
+    }.joinToString("、")
 }
 
 private fun CodexServerRequest.toThreadRequestPresentation(): ThreadRequestPresentation {
@@ -177,6 +238,11 @@ internal data class ThreadItemPresentation(
     val isVisible: Boolean = true,
 )
 
+private fun CodexItem.isVisibleInConversation(): Boolean = this !is CodexItem.Unknown || when (codexType) {
+    "sleep", "enteredReviewMode", "exitedReviewMode" -> false
+    else -> true
+}
+
 internal fun CodexItem.toThreadItemPresentation(): ThreadItemPresentation = when (this) {
     is CodexItem.UserMessage -> ThreadItemPresentation(
         id = id,
@@ -224,7 +290,7 @@ internal fun CodexItem.toThreadItemPresentation(): ThreadItemPresentation = when
         title = unknownItemTitle(),
         collapsedBody = raw.text("status") ?: "詳細を表示",
         isCollapsible = true,
-        isVisible = codexType !in setOf("sleep", "enteredReviewMode", "exitedReviewMode"),
+        isVisible = isVisibleInConversation(),
     )
 }
 
@@ -243,7 +309,7 @@ internal fun CodexItem.expandedThreadItemBody(): String = when (this) {
 }
 
 internal fun CodexItem.threadItemContentVersion(): String = when (this) {
-    is CodexItem.UserMessage -> "user:${text.length}"
+    is CodexItem.UserMessage -> "user:${text.length}:${imageSources.hashCode()}"
     is CodexItem.AgentMessage -> "agent:${text.length}"
     is CodexItem.Reasoning -> "reasoning:${summary.length}"
     is CodexItem.CommandExecution -> "command:${status.name}:${command.length}:${output.length}"

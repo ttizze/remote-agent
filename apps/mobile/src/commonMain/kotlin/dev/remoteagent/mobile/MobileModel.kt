@@ -84,16 +84,26 @@ data class ThreadSummary(
 )
 
 @Serializable
+data class SubmittedMessage(
+    val clientId: String,
+    val text: String,
+    val turnId: String?,
+    val afterItemId: String?,
+    val imageSources: List<String> = emptyList(),
+)
+
+@Serializable
 data class ThreadSnapshot(
     val summary: ThreadSummary,
     val turns: List<CodexTurn> = emptyList(),
     val raw: JsonObject? = null,
+    val submittedMessages: List<SubmittedMessage> = emptyList(),
 )
 
 @Serializable
 data class ThreadReadResult(val thread: ThreadSnapshot, val bufferedEvents: List<ThreadEvent>)
 
-data class ThreadStartResult(val thread: ThreadSnapshot, val turnId: String)
+data class MessageSendResult(val accepted: Boolean, val threadId: String?)
 
 @Serializable
 data class CodexTurn(
@@ -121,6 +131,7 @@ data class CodexServerRequest(
     val id: String,
     val method: String,
     val params: JsonObject,
+    val wireId: JsonElement = kotlinx.serialization.json.JsonPrimitive(id),
 )
 
 /** A typed, user-visible Codex item. */
@@ -129,7 +140,12 @@ sealed interface CodexItem {
     val id: String
 
     @Serializable @SerialName("userMessage")
-    data class UserMessage(override val id: String, val text: String) : CodexItem
+    data class UserMessage(
+        override val id: String,
+        val text: String,
+        val clientId: String? = null,
+        val imageSources: List<String> = emptyList(),
+    ) : CodexItem
 
     @Serializable @SerialName("agentMessage")
     data class AgentMessage(

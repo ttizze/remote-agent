@@ -24,14 +24,14 @@
     <true/>
     <key>LSRequiresIPhoneOS</key>
     <true/>
-    <key>NSBonjourServices</key>
-    <array>
-        <string>_bex._tcp</string>
-    </array>
     <key>NSCameraUsageDescription</key>
-    <string>Bex uses the camera only to scan a pairing QR code displayed by your PC.</string>
-    <key>NSLocalNetworkUsageDescription</key>
-    <string>Bex discovers paired Hosts on your local network.</string>
+    <string>PCのペアリング用QRコードの読み取りと、チャットに添付する写真・動画の撮影にカメラを使用します。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>音声入力の文字起こしと、チャットに添付する動画の音声を録音するためにマイクを使用します。</string>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UISupportedInterfaceOrientations</key>
