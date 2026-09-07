@@ -43,7 +43,7 @@ class CodexProtocolTest {
     }
 
     @Test
-    fun unknown_notification_is_retained_in_thread_event_and_cache() {
+    fun unknown_notification_does_not_change_display_cache() {
         val event = codexThreadEvent(
             "item/futureThing",
             json.parseToJsonElement("""
@@ -52,12 +52,13 @@ class CodexProtocolTest {
             JsonObject(mapOf("vendor" to json.parseToJsonElement("true"))),
         )
         val unknown = assertIs<ThreadEvent.Unknown>(event)
-        val cache = applyLiveEvent(MobileCache(), "host-1", unknown, MobileCacheLimits())
+        val cache = MobileCache()
+        val updated = applyLiveEvent(cache, "host-1", unknown, MobileCacheLimits())
 
         assertEquals("item/futureThing", unknown.method)
         assertEquals(42, unknown.raw["extra"]?.jsonObject?.get("value")?.toString()?.toInt())
         assertEquals("true", unknown.extensions["vendor"]?.toString())
-        assertEquals(listOf(unknown), cache.profile("host-1").unknownEvents)
+        kotlin.test.assertSame(cache, updated)
     }
 
     @Test

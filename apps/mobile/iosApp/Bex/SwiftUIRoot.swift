@@ -1707,10 +1707,11 @@ private struct ConversationMarkdown: View {
     let text: String
     let model: BexAppViewModel
     @State private var blocks: [Block] = []
-    private struct Block: Identifiable {
+    @State private var pendingText: String?
+    @State private var parsing: Task<Void, Never>?
+    private struct Block: Identifiable, Sendable {
         let id: Int
-        let paragraphID: Int
-        var content: AttributedString
+        let content: AttributedString
         let header: Int?
         let marker: String?
         let code: Bool
@@ -1744,10 +1745,32 @@ private struct ConversationMarkdown: View {
         }
         .font(.system(size: 18))
         .tint(.primary)
-        .task(id: text) { blocks = parse() }
+        .task(id: text) { enqueue(text) }
+        .onDisappear {
+            parsing?.cancel()
+            parsing = nil
+            pendingText = nil
+        }
     }
 
-    private func parse() -> [Block] {
+    private func enqueue(_ text: String) {
+        pendingText = text
+        guard parsing == nil else { return }
+        parsing = Task {
+            // One parser per visible message. New text replaces pending work,
+            // never starts another parser or delays an active parse indefinitely.
+            while !Task.isCancelled, let source = pendingText {
+                pendingText = nil
+                let rendered = await Task.detached(priority: .userInitiated) { Self.parse(source) }.value
+                guard !Task.isCancelled else { return }
+                blocks = rendered
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if !Task.isCancelled { parsing = nil }
+        }
+    }
+
+    nonisolated private static func parse(_ text: String) -> [Block] {
         guard let document = try? AttributedString(markdown: text) else { return [] }
         var result: [Block] = []
         var start: AttributedString.Index?
@@ -1765,8 +1788,8 @@ private struct ConversationMarkdown: View {
                 end = run.range.upperBound
                 continue
             }
-            if let start, let end, let paragraphID {
-                result.append(Block(id: result.count, paragraphID: paragraphID,
+            if let start, let end {
+                result.append(Block(id: result.count,
                                     content: AttributedString(document[start..<end]), header: header,
                                     marker: marker, code: code, quoted: quoted, imageURL: imageURL))
             }
@@ -1792,8 +1815,8 @@ private struct ConversationMarkdown: View {
             }
             marker = ordinal.map { ordered ? "\($0)." : "•" }
         }
-        if let start, let end, let paragraphID {
-            result.append(Block(id: result.count, paragraphID: paragraphID,
+        if let start, let end {
+            result.append(Block(id: result.count,
                                 content: AttributedString(document[start..<end]), header: header,
                                 marker: marker, code: code, quoted: quoted, imageURL: imageURL))
         }

@@ -6,11 +6,88 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 
 class MobileStateCodecTest {
+    @Test
+    fun version_two_cache_discards_duplicate_raw_bodies_and_obsolete_logs_on_load() {
+        val metadata = buildJsonObject {
+            put("turns", JsonArray(emptyList()))
+            put("path", JsonPrimitive("/fixture/rollout.jsonl"))
+        }
+        val summary = summary("thread-1").copy(raw = metadata)
+        val turn = CodexTurn("turn-1", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer", "retained")),
+            raw = buildJsonObject {
+                put("items", JsonArray(emptyList()))
+                put("itemsNextCursor", JsonPrimitive("older-items"))
+            })
+        val snapshot = ThreadSnapshot(summary, listOf(turn), raw = metadata)
+        val legacy = buildJsonObject {
+            put("format", JsonPrimitive("remote-agent-mobile-state"))
+            put("version", JsonPrimitive(2))
+            put("kind", JsonPrimitive("mobileCache"))
+            put("payload", buildJsonObject {
+                put("profiles", buildJsonObject {
+                    put("host", buildJsonObject {
+                        put("threadList", Json.encodeToJsonElement(listOf(summary)))
+                        put("snapshots", Json.encodeToJsonElement(mapOf(summary.id to snapshot)))
+                        put("rawNotifications", JsonArray(listOf(JsonPrimitive("obsolete"))))
+                        put("unknownEvents", JsonArray(listOf(JsonPrimitive("obsolete"))))
+                    })
+                })
+            })
+        }
+        val cache = success(MobileStateCodec.decodeCache(legacy.toString().encodeToByteArray()))
+        val restored = cache.snapshot("host", summary.id) ?: error("Legacy conversation must survive")
+        assertEquals("retained", (restored.turns.single().items.single() as CodexItem.AgentMessage).text)
+        assertNull(restored.summary.raw?.get("turns"))
+        assertNull(restored.raw?.get("turns"))
+        assertNull(restored.turns.single().raw?.get("items"))
+        assertEquals("older-items", restored.turns.single().olderItemsCursor)
+        assertEquals(JsonPrimitive("/fixture/rollout.jsonl"), restored.raw?.get("path"))
+    }
+
+    @Test
+    fun a_large_reply_is_saved_once_without_losing_paging_metadata() {
+        val body = "x".repeat(256 * 1024)
+        val raw = buildJsonObject {
+            put("id", JsonPrimitive("thread-1"))
+            put("cwd", JsonPrimitive("/fixture"))
+            put("path", JsonPrimitive("/fixture/rollout.jsonl"))
+            put("historyCursor", JsonPrimitive("older-turns"))
+            put("turns", JsonArray(listOf(buildJsonObject {
+                put("id", JsonPrimitive("turn-1"))
+                put("status", JsonPrimitive("completed"))
+                put("itemsNextCursor", JsonPrimitive("older-items"))
+                put("deferredItemIds", JsonArray(listOf(JsonPrimitive("tool-1"))))
+                put("items", JsonArray(listOf(buildJsonObject {
+                    put("id", JsonPrimitive("answer"))
+                    put("type", JsonPrimitive("agentMessage"))
+                    put("text", JsonPrimitive(body))
+                })))
+            })))
+        }
+        val snapshot = codexThreadSnapshot(raw)
+        val profile = HostProfile("runner", "Fixture", "wss://fixture.invalid", "host", "key-reference")
+        val state = AppState(profiles = listOf(profile), selectedProfileId = profile.id,
+            cache = MobileCache(mapOf(profile.id to ProfileMobileCache(
+                threadList = listOf(snapshot.summary), snapshots = mapOf(snapshot.summary.id to snapshot),
+            ))))
+        val bytes = MobileStateCodec.encode(state)
+        val restored = success(MobileStateCodec.decode(bytes)).cache.snapshot(profile.id, "thread-1")
+            ?: error("A 256 KiB reply must fit without discarding its conversation")
+        assertEquals(body, (restored.turns.single().items.single() as CodexItem.AgentMessage).text)
+        assertEquals(JsonPrimitive("/fixture/rollout.jsonl"), restored.raw?.get("path"))
+        assertEquals("older-turns", restored.olderTurnsCursor)
+        assertEquals("older-items", restored.turns.single().olderItemsCursor)
+        assertEquals(JsonArray(listOf(JsonPrimitive("tool-1"))), restored.turns.single().raw?.get("deferredItemIds"))
+        assertEquals(true, bytes.size < body.length + 8_192)
+    }
+
     @Test
     fun encoded_profile_excludes_secrets_and_retains_secure_store_reference() {
         val state = AppState(
@@ -65,34 +142,11 @@ class MobileStateCodecTest {
             ),
             raw = buildJsonObject { put("snapshotExtension", JsonPrimitive(true)) },
         )
-        val unknownEvent = ThreadEvent.Unknown(
-            threadId = "thread-1",
-            turnId = "turn-1",
-            method = "future/event",
-            raw = buildJsonObject {
-                put("futureValue", JsonPrimitive(42))
-                put("nested", buildJsonObject { put("preserve", JsonPrimitive(true)) })
-            },
-            extensions = buildJsonObject { put("vendorExtension", JsonPrimitive("yes")) },
-        )
-        val rawMessage = RawCodexMessage.ServerRequest(
-            id = JsonPrimitive(7),
-            method = "approval/request",
-            params = buildJsonObject { put("prompt", JsonPrimitive("Allow?")) },
-            extensions = buildJsonObject { put("vendorField", JsonPrimitive("kept")) },
-        )
-        val rawNotification = RawCodexMessage.Notification(
-            method = "future/notification",
-            params = buildJsonObject { put("futurePayload", JsonPrimitive(true)) },
-            extensions = buildJsonObject { put("notificationExtension", JsonPrimitive("kept")) },
-        )
         val cache = MobileCache(
             profiles = mapOf(
                 profile.id to ProfileMobileCache(
                     threadList = listOf(summary),
                     snapshots = mapOf(summary.id to snapshot),
-                    unknownEvents = listOf(unknownEvent),
-                    rawMessages = listOf(rawMessage, rawNotification),
                 ),
             ),
         )
@@ -131,10 +185,6 @@ class MobileStateCodecTest {
         )
         assertEquals(false, restored.showingPairing)
         assertNull(restored.pairingError)
-        assertEquals(unknownEvent, restored.cache.profile(profile.id).unknownEvents.single())
-        // Notifications remain durable, while server requests must never be
-        // actionable after process restart.
-        assertEquals(listOf(rawNotification), restored.cache.profile(profile.id).rawMessages)
         assertEquals(
             snapshot.copy(
                 turns = snapshot.turns.map { it.copy(error = null, pendingRequests = emptyList()) },
@@ -144,18 +194,13 @@ class MobileStateCodecTest {
     }
 
     @Test
-    fun cache_codec_round_trip_applies_limits_and_keeps_raw_notifications() {
+    fun cache_codec_round_trip_applies_limits() {
         val summaries = (1..3).map { summary("thread-$it", updatedAtMs = it.toLong()) }
-        val notification = RawCodexMessage.Notification(
-            method = "future/notification",
-            params = JsonPrimitive("payload"),
-        )
         val cache = MobileCache(
             profiles = mapOf(
                 "host-1" to ProfileMobileCache(
                     threadList = summaries,
                     snapshots = summaries.associate { it.id to ThreadSnapshot(it) },
-                    rawMessages = listOf(notification),
                 ),
             ),
         )
@@ -169,7 +214,6 @@ class MobileStateCodecTest {
 
         assertEquals(listOf("thread-3", "thread-2", "thread-1"), restored.profile("host-1").threadList.map { it.id })
         assertEquals(setOf("thread-3"), restored.profile("host-1").snapshots.keys)
-        assertEquals(listOf(notification), restored.profile("host-1").rawMessages)
     }
 
     @Test

@@ -5,8 +5,58 @@ import kotlin.test.assertNotSame
 import kotlin.test.assertSame
 import kotlin.test.assertNull
 import kotlin.test.assertEquals
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 class IosAppViewStateTest {
+    @Test
+    fun loading_deferred_details_invalidates_the_cached_item() {
+        val projector = IosViewStateProjector()
+        val command = CodexItem.CommandExecution("command", "pwd", output = "/fixture", status = CommandExecutionStatus.Completed)
+        val turn = CodexTurn("live", TurnStatus.InProgress, listOf(command), raw = buildJsonObject {
+            put("deferredItemIds", JsonArray(listOf(JsonPrimitive(command.id))))
+        })
+        val before = projector.conversation(state(listOf(turn)))!!.turns.single().activityItems.single()
+        val loaded = projector.conversation(state(listOf(turn.copy(raw = null))))!!.turns.single().activityItems.single()
+        assertEquals(true, before.isDeferred)
+        assertEquals(false, loaded.isDeferred)
+        assertNotSame(before, loaded)
+        assertEquals(before.expandedBody(), loaded.expandedBody())
+    }
+
+    @Test
+    fun changing_one_item_reuses_other_items_in_the_same_turn() {
+        val projector = IosViewStateProjector()
+        val history = CodexItem.AgentMessage("history", "unchanged")
+        val answer = CodexItem.AgentMessage("answer", "before")
+        val turn = CodexTurn("live", TurnStatus.InProgress, listOf(history, answer))
+        val first = projector.conversation(state(listOf(turn)))!!.turns.single().responses
+        val changed = turn.copy(items = listOf(history, answer.copy(text = "after!")))
+        val next = projector.conversation(state(listOf(changed)))!!.turns.single().responses
+        assertSame(first.first(), next.first())
+        assertNotSame(first.last(), next.last())
+        assertEquals("before", first.last().expandedBody())
+        assertEquals("after!", next.last().expandedBody())
+    }
+
+    @Test
+    fun item_reuse_preserves_repeated_ids_and_releases_removed_items() {
+        val projector = IosViewStateProjector()
+        val first = CodexItem.AgentMessage("duplicate", "first")
+        val second = CodexItem.AgentMessage("duplicate", "second")
+        val turn = CodexTurn("live", TurnStatus.InProgress, listOf(first, second))
+        val initial = projector.conversation(state(listOf(turn)))!!.turns.single().responses
+        assertEquals(listOf("first", "second"), initial.map { it.expandedBody() })
+        val changed = turn.copy(items = listOf(first, second.copy(text = "latest")))
+        val next = projector.conversation(state(listOf(changed)))!!.turns.single().responses
+        assertEquals(listOf("first", "latest"), next.map { it.expandedBody() })
+        projector.conversation(state(listOf(turn.copy(items = emptyList()))))
+        val restored = projector.conversation(state(listOf(turn)))!!.turns.single().responses
+        assertNotSame(initial.first(), restored.first())
+        assertNotSame(initial.last(), restored.last())
+    }
+
     @Test
     fun streaming_body_does_not_invalidate_navigation_or_title_lists() {
         val projector = IosViewStateProjector()

@@ -59,10 +59,6 @@ data class AppState(
 
     val selectedView: ProfileViewState
         get() = selectedProfileId?.let { profileViews[it] } ?: ProfileViewState()
-
-    // Kept as derived properties so the first vertical-slice callers remain simple.
-    val connection: ConnectionPhase get() = selectedView.connection
-    val workingDirectoryPath: String get() = selectedView.workingDirectoryPath
 }
 
 internal const val QueuedTurnDeliveryNotice = "現在の処理が完了した後にメッセージを送信します。"
@@ -97,7 +93,7 @@ sealed interface AppAction {
     data class TurnFailed(val hostIdentity: String, val message: String) : AppAction
     data class InterruptStarted(val hostIdentity: String, val turnId: String) : AppAction
     data class InterruptFinished(val hostIdentity: String) : AppAction
-    data class HostMessageReceived(val hostIdentity: String, val message: RawCodexMessage, val event: ThreadEvent?) : AppAction
+    data class HostEventReceived(val hostIdentity: String, val event: ThreadEvent) : AppAction
     data class Disconnected(val hostIdentity: String) : AppAction
 }
 
@@ -261,11 +257,9 @@ fun reduce(
         it.copy(interruptingTurnId = null)
     }
 
-    is AppAction.HostMessageReceived -> if (state.hasProfile(action.hostIdentity)) {
-        val retained = retainRawMessage(state.cache, action.hostIdentity, action.message, cacheLimits)
-        state.copy(cache = if (action.event != null && state.isConnected(action.hostIdentity)) {
-            applyLiveEvent(retained, action.hostIdentity, action.event, cacheLimits)
-        } else retained)
+    is AppAction.HostEventReceived -> if (state.isConnected(action.hostIdentity)) {
+        val cache = applyLiveEvent(state.cache, action.hostIdentity, action.event, cacheLimits)
+        if (cache === state.cache) state else state.copy(cache = cache)
     } else {
         state
     }

@@ -21,9 +21,6 @@ data class ProfileMobileCache(
     val projects: List<CodexProject> = emptyList(),
     val threadList: List<ThreadSummary> = emptyList(),
     val snapshots: Map<String, ThreadSnapshot> = emptyMap(),
-    val unknownEvents: List<ThreadEvent.Unknown> = emptyList(),
-    /** Bounded raw messages; durable codec excludes actionable server requests. */
-    val rawMessages: List<RawCodexMessage> = emptyList(),
 )
 
 data class MobileCache(val profiles: Map<String, ProfileMobileCache> = emptyMap()) {
@@ -113,25 +110,11 @@ fun applyLiveEvent(
     return if (updated === profile) cache else cache.replaceProfile(hostIdentity, updated.boundedEvent(limits))
 }
 
-fun retainRawMessage(
-    cache: MobileCache,
-    hostIdentity: String,
-    message: RawCodexMessage,
-    limits: MobileCacheLimits,
-): MobileCache {
-    val profile = cache.profile(hostIdentity)
-    return cache.replaceProfile(hostIdentity, profile.copy(
-        rawMessages = (profile.rawMessages + message).takeLast(128),
-    ).boundedEvent(limits))
-}
-
 private fun MobileCache.replaceProfile(hostIdentity: String, profile: ProfileMobileCache): MobileCache =
     if (profiles[hostIdentity] === profile) this else copy(profiles = profiles + (hostIdentity to profile))
 
 private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
-    if (event is ThreadEvent.Unknown) {
-        return copy(unknownEvents = (unknownEvents + event).takeLast(128))
-    }
+    if (event is ThreadEvent.Unknown) return this
     if (event is ThreadEvent.ThreadStatusChanged) {
         val updatedList = threadList.map { summary ->
             if (summary.id == event.threadId) summary.copy(status = event.status) else summary
@@ -211,15 +194,13 @@ private fun ProfileMobileCache.bounded(limits: MobileCacheLimits): ProfileMobile
         projects = projects,
         threadList = list,
         snapshots = snapshots.values.toList().takeLast(limits.maxThreads).associate { it.summary.id to it.bounded(limits) },
-        unknownEvents = unknownEvents.takeLast(128),
-        rawMessages = rawMessages.takeLast(128),
     )
 }
 
 private fun ProfileMobileCache.boundedEvent(limits: MobileCacheLimits): ProfileMobileCache {
     val snapshots = if (snapshots.size <= limits.maxThreads && snapshots.values.all { it.turns.size <= limits.maxTurnsPerThread }) snapshots
     else snapshots.values.toList().takeLast(limits.maxThreads).associate { it.summary.id to it.bounded(limits) }
-    return copy(snapshots = snapshots, unknownEvents = unknownEvents.takeLast(128), rawMessages = rawMessages.takeLast(128))
+    return if (snapshots === this.snapshots) this else copy(snapshots = snapshots)
 }
 
 private fun ThreadSnapshot.bounded(limits: MobileCacheLimits): ThreadSnapshot {

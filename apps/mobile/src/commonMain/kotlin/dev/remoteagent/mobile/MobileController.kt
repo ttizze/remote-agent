@@ -235,7 +235,7 @@ internal class MobileController(
         state = updated
         persistenceDirty = true
         val checkpoint = when (action) {
-            is AppAction.HostMessageReceived -> action.event is ThreadEvent.TurnCompleted
+            is AppAction.HostEventReceived -> action.event is ThreadEvent.TurnCompleted
             is AppAction.SnapshotReceived -> action.result.thread.turns.none { it.status == TurnStatus.InProgress }
             else -> true
         }
@@ -358,13 +358,8 @@ internal class MobileController(
                                     // inline on a native poller thread.
                                     scope.launch {
                                         eventMutex.withLock {
-                                            if (sessions.isCurrent(profile.id, generation)) {
-                                                // Keep raw and typed projections in one
-                                                // serialized transition. This preserves
-                                                // wire arrival order for live output.
-                                                dispatch(AppAction.HostMessageReceived(
-                                                    profile.id, message, event?.takeUnless { buffered },
-                                                ))
+                                            if (sessions.isCurrent(profile.id, generation) && event != null && !buffered) {
+                                                dispatch(AppAction.HostEventReceived(profile.id, event))
                                             }
                                         }
                                         if (sessions.isCurrent(profile.id, generation)) {

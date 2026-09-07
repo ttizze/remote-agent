@@ -895,6 +895,29 @@ final class BexLaunchUITests: XCTestCase {
         screenshot.name = "Earlier answers between followups"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
 
+    func testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText() throws {
+#if !targetEnvironment(simulator)
+        throw XCTSkip("Simulator-only isolated Markdown stream fixture")
+#endif
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[long-markdown] Render the complete stream")
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 20))
+        let message = app.descendants(matching: .any)["task.message"]
+        message.tap(); message.typeText("Keep this draft")
+        XCTAssertEqual(message.value as? String, "Keep this draft")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 20))
+        XCTAssertEqual(message.value as? String, "Keep this draft")
+        let completed = app.staticTexts.matching(NSPredicate(format: "label == %@", "MARKDOWN_STREAM_COMPLETE")).firstMatch
+        XCTAssertTrue(completed.waitForExistence(timeout: 30))
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Long Markdown stream completed with draft preserved"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
     func testSimulatorReopensCompletedHistoryCollapsed() throws {
 #if !targetEnvironment(simulator)
         throw XCTSkip("Simulator-only conversation display E2E")

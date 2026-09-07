@@ -441,17 +441,6 @@ class MobileCacheTest {
     }
 
     @Test
-    fun raw_codex_payloads_are_retained_without_byte_eviction() {
-        val raw = RawCodexMessage.Notification(
-            method = "future/notification",
-            params = Json.parseToJsonElement("\"${"x".repeat(2_000)}\""),
-        )
-        val cache = retainRawMessage(MobileCache(), "host-1", raw, limits)
-
-        assertEquals(listOf(raw), cache.profile("host-1").rawMessages)
-    }
-
-    @Test
     fun read_keeps_an_oversized_raw_snapshot_and_its_typed_content() {
         val raw = Json.parseToJsonElement("{\"payload\":\"${"x".repeat(2_000)}\"}").jsonObject
         val summary = summary("oversized").copy(raw = raw)

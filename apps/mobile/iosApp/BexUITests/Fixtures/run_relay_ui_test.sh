@@ -97,6 +97,7 @@ if [ "$#" -eq 0 ]; then
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorReopensCompletedHistoryCollapsed \
         testSimulatorKeepsEarlierAnswersBetweenFollowupsWhenReopening \
+        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
         testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
         testSimulatorCanSteerAndStopAnActiveTurn \

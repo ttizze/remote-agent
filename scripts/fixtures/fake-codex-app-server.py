@@ -331,6 +331,19 @@ def run_turn_scenario(thread: dict[str, object], turn: dict[str, object], inputs
     if image_path is not None:
         response_text = f"Hostの画像です。\n\n![Hostから読み込んだ画像](<{image_path}>)\n\nインライン画像です。\n\n![インライン画像]({image_url})"
     stream_item(thread_id, turn, final_item)
+    if "[long-markdown]" in prompt:
+        chunks = ["```text\n"] + ["Markdown stream fixture " * 80 + "\n" for _ in range(36)] + ["\n```\n\n**MARKDOWN_STREAM_COMPLETE**"]
+        for chunk in chunks:
+            if stop.wait(0.25):
+                return
+            final_item["text"] += chunk
+            notify("item/agentMessage/delta", {
+                "threadId": thread_id, "turnId": turn_id,
+                "itemId": final_item["id"], "delta": chunk,
+            })
+        complete_item(thread_id, turn, final_item)
+        finish_turn(thread, turn, "completed")
+        return
     notify(
         "item/agentMessage/delta",
         {

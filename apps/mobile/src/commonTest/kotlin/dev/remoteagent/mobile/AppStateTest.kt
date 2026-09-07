@@ -16,7 +16,7 @@ class AppStateTest {
 
         assertEquals(listOf(mac.copy(name = "MacBook")), replaced.profiles)
         assertEquals(mac.id, replaced.selectedProfileId)
-        assertIs<ConnectionPhase.Disconnected>(replaced.connection)
+        assertIs<ConnectionPhase.Disconnected>(replaced.selectedView.connection)
     }
 
     @Test
@@ -31,7 +31,7 @@ class AppStateTest {
         val linuxConnected = reduce(linuxSelected, AppAction.ConnectSucceeded(linux.id))
         val linuxCwd = reduce(linuxConnected, AppAction.WorkingDirectoryChanged(linux.id, "/linux/project"))
 
-        assertEquals("/linux/project", linuxCwd.workingDirectoryPath)
+        assertEquals("/linux/project", linuxCwd.selectedView.workingDirectoryPath)
         assertEquals("/mac/project", linuxCwd.profileViews.getValue(mac.id).workingDirectoryPath)
         assertEquals(listOf("mac-thread"), linuxCwd.cache.profile(mac.id).threadList.map { it.id })
         assertEquals(emptyList(), linuxCwd.cache.profile(linux.id).threadList)
@@ -42,7 +42,7 @@ class AppStateTest {
         val paired = reduce(AppState(), AppAction.ProfilePaired(mac))
         val ignored = reduce(paired, AppAction.WorkingDirectoryChanged(mac.id, "/any/directory"))
 
-        assertEquals("", ignored.workingDirectoryPath)
+        assertEquals("", ignored.selectedView.workingDirectoryPath)
     }
 
     @Test
@@ -56,7 +56,7 @@ class AppStateTest {
 
         val disconnected = reduce(connected, AppAction.Disconnected(mac.id))
 
-        assertIs<ConnectionPhase.Disconnected>(disconnected.connection)
+        assertIs<ConnectionPhase.Disconnected>(disconnected.selectedView.connection)
         assertNull(disconnected.selectedView.interruptingTurnId)
         assertEquals(listOf("thread-1"), disconnected.cache.profile(mac.id).threadList.map { it.id })
     }

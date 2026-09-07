@@ -384,15 +384,10 @@ class MobileControllerTest {
         val resultTurn = result.turns.single()
         assertEquals(TurnStatus.Completed, resultTurn.status)
         assertEquals("old new", (resultTurn.items.single() as CodexItem.AgentMessage).text)
-        assertEquals(3, controller.state.cache.profile(profile.id).rawMessages.size)
-        val rawIndex = transitions.indexOfFirst {
-            it.cache.profile(profile.id).rawMessages.isNotEmpty()
-        }
-        val snapshotIndex = transitions.indexOfFirst {
-            it.cache.snapshot(profile.id, "thread-1")?.turns?.single()?.items?.single() ==
-                CodexItem.AgentMessage("item-1", "old new")
-        }
-        assertTrue(rawIndex >= 0 && snapshotIndex > rawIndex)
+        val loaded = transitions.mapNotNull { it.cache.snapshot(profile.id, "thread-1")?.turns?.single() }
+            .filter { (it.items.single() as CodexItem.AgentMessage).text == "old new" }
+        assertTrue(loaded.isNotEmpty())
+        assertTrue(loaded.all { it.status == TurnStatus.Completed })
     }
 
     @Test
@@ -1119,19 +1114,21 @@ class MobileControllerTest {
         val controller = controller(gateway)
         controller.connect(profile, CoroutineScope(dispatcher))
 
-        gateway.emit(notification("future/notification", "{\"value\":true}"))
-        assertEquals(emptyList(), controller.state.cache.profile(profile.id).rawMessages)
+        val before = controller.state.cache.snapshot(profile.id, "thread-1")!!.turns.single().items.single()
+        gateway.emit(notification("item/agentMessage/delta",
+            """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":" stale"}"""))
+        assertEquals(before, controller.state.cache.snapshot(profile.id, "thread-1")!!.turns.single().items.single())
 
         controller.disconnect(profile)
         dispatcher.runAll()
 
-        assertEquals(emptyList(), controller.state.cache.profile(profile.id).rawMessages)
+        assertEquals(before, controller.state.cache.snapshot(profile.id, "thread-1")!!.turns.single().items.single())
         assertIs<ConnectionPhase.Disconnected>(controller.state.selectedView.connection)
         Unit
     }
 
     @Test
-    fun one_native_message_publishes_raw_and_typed_state_atomically() {
+    fun one_native_message_publishes_typed_state_once() {
         val gateway = FakeHostGateway()
         val controller = controller(gateway)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
@@ -1143,7 +1140,6 @@ class MobileControllerTest {
                 """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":" new"}"""))
             assertEquals(2, observed.size)
             val cache = observed.last().cache.profile(profile.id)
-            assertEquals("item/agentMessage/delta", cache.rawMessages.last().method)
             val reply = cache.snapshots["thread-1"]!!.turns.single().items.single() as CodexItem.AgentMessage
             assertEquals("old new", reply.text)
         } finally { scope.cancel() }

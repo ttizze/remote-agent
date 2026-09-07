@@ -42,9 +42,9 @@ class IosItemView internal constructor(
     val contentVersion: String,
     val isDeferred: Boolean,
     val imageSources: List<String>,
-    private val expandedBodyProvider: () -> String,
+    internal val source: CodexItem,
 ) {
-    fun expandedBody(): String = expandedBodyProvider()
+    fun expandedBody(): String = source.expandedThreadItemBody()
 }
 
 data class IosTurnView(
@@ -165,11 +165,26 @@ internal class IosViewStateProjector {
         val pending = source.submittedMessages.groupBy { it.turnId }
         val updated = source.turns.mapIndexed { index, turn ->
             val submissions = pending[turn.id].orEmpty()
-            val previous = turns.getOrNull(index)
+            val previous = turns.getOrNull(index)?.takeIf { it.source.id == turn.id }
             // Immutable turns keep their identity through unrelated live updates.
             // Accepted inputs are a separate input until their native echo arrives.
-            if (previous != null && previous.source === turn && previous.submissions == submissions) previous
-                else ProjectedTurn(turn, submissions, turn.toIosTurnViews(submissions, source.summary))
+            if (previous != null && previous.source === turn && previous.submissions == submissions) previous else {
+                val items = previous?.items ?: mutableMapOf()
+                if (previous != null && (previous.submissions != submissions ||
+                    previous.source.items.size != turn.items.size ||
+                    turn.items.indices.any { previous.source.items[it].id != turn.items[it].id }
+                )) {
+                    val retained = turn.items.mapTo(mutableSetOf()) { it.id }
+                    submissions.mapTo(retained) { it.clientId }
+                    items.keys.retainAll(retained)
+                }
+                val views = turn.toIosTurnViews(submissions, source.summary) { item, deferred ->
+                    val cached = items[item.id]
+                    if (cached != null && cached.source === item && cached.isDeferred == deferred) cached else
+                        item.toIosItemView(deferred).also { items[item.id] = it }
+                }
+                ProjectedTurn(turn, submissions, views, items)
+            }
         }
         turns = updated
         return IosThreadView(
@@ -187,6 +202,7 @@ internal class IosViewStateProjector {
         val source: CodexTurn,
         val submissions: List<SubmittedMessage>,
         val views: List<IosTurnView>,
+        val items: MutableMap<String, IosItemView>,
     )
 }
 
@@ -246,7 +262,11 @@ private fun LoadPhase.toIosLoadState(): IosLoadState = when (this) {
     is LoadPhase.Failed -> IosLoadState.Failed
 }
 
-private fun CodexTurn.toIosTurnViews(submissions: List<SubmittedMessage>, summary: ThreadSummary): List<IosTurnView> {
+private inline fun CodexTurn.toIosTurnViews(
+    submissions: List<SubmittedMessage>,
+    summary: ThreadSummary,
+    itemView: (CodexItem, Boolean) -> IosItemView,
+): List<IosTurnView> {
     val deferredIds = (raw?.get("deferredItemIds") as? JsonArray).orEmpty()
         .mapNotNull { (it as? JsonPrimitive)?.content }.toSet()
     val segments = if (submissions.isEmpty()) toThreadTurnPresentations() else
@@ -260,10 +280,10 @@ private fun CodexTurn.toIosTurnViews(submissions: List<SubmittedMessage>, summar
                 ?.let(::codexItem)?.takeUnless { item -> this.items.any { it.id == item.id } }?.toIosItemView() else null,
             status = this.status.name,
             isInProgress = presentation.isLastSegment && this.status == TurnStatus.InProgress,
-            userMessages = presentation.userMessages.map { it.toIosItemView() },
+            userMessages = presentation.userMessages.map { itemView(it, false) },
             activitySummary = presentation.activitySummary,
-            activityItems = presentation.activityItems.map { it.toIosItemView(it.id in deferredIds) },
-            responses = presentation.responses.map { it.toIosItemView() },
+            activityItems = presentation.activityItems.map { itemView(it, it.id in deferredIds) },
+            responses = presentation.responses.map { itemView(it, false) },
             activityInitiallyExpanded = presentation.activityInitiallyExpanded,
             activityCanCollapse = presentation.activityCanCollapse,
             error = presentation.error?.let { error ->
@@ -294,6 +314,6 @@ private fun CodexItem.toIosItemView(isDeferred: Boolean = false): IosItemView = 
         contentVersion = "${threadItemContentVersion()}:$isDeferred",
         isDeferred = isDeferred,
         imageSources = (this as? CodexItem.UserMessage)?.imageSources.orEmpty(),
-        expandedBodyProvider = { expandedThreadItemBody() },
+        source = this,
     )
 }

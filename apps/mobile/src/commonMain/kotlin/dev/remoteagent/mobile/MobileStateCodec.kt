@@ -4,7 +4,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -56,9 +55,6 @@ object MobileStateCodec {
         return encodeEnvelope(AppStateKind, state.copy(cache = MobileCache()).toPersisted())
     }
 
-    /** Encode only the display cache into the current envelope. */
-    fun encode(cache: MobileCache): ByteArray = encodeCache(cache)
-
     fun encodeCache(cache: MobileCache): ByteArray = encodeEnvelope(
         kind = CacheKind,
         payload = cache.toPersisted(),
@@ -66,11 +62,6 @@ object MobileStateCodec {
 
     /** Decode an application state and apply local cache limits after decode. */
     fun decode(
-        bytes: ByteArray,
-        cacheLimits: MobileCacheLimits = MobileCacheLimits(),
-    ): MobileStateDecodeResult<AppState> = decodeAppState(bytes, cacheLimits)
-
-    fun decodeAppState(
         bytes: ByteArray,
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
     ): MobileStateDecodeResult<AppState> = when (val envelope = readEnvelope(bytes, AppStateKind)) {
@@ -208,15 +199,6 @@ private data class PersistedMobileCache(
 private data class PersistedProfileMobileCache(
     val threadList: List<ThreadSummary> = emptyList(),
     val snapshots: Map<String, ThreadSnapshot> = emptyMap(),
-    val unknownEvents: List<ThreadEvent.Unknown> = emptyList(),
-    val rawNotifications: List<PersistedRawNotification> = emptyList(),
-)
-
-@Serializable
-private data class PersistedRawNotification(
-    val method: String,
-    val params: JsonElement,
-    val extensions: JsonObject = JsonObject(emptyMap()),
 )
 
 private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
@@ -282,21 +264,8 @@ private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppSta
 private fun MobileCache.toPersisted(): PersistedMobileCache = PersistedMobileCache(
     profiles = profiles.mapValues { (_, profile) ->
         PersistedProfileMobileCache(
-            threadList = profile.threadList,
-            snapshots = profile.snapshots.mapValues { (_, snapshot) ->
-                snapshot.copy(
-                    turns = snapshot.turns.map { turn ->
-                        turn.copy(
-                            error = turn.error?.takeUnless(CodexTurnError::willRetry),
-                            pendingRequests = emptyList(),
-                        )
-                    },
-                )
-            },
-            unknownEvents = profile.unknownEvents,
-            rawNotifications = profile.rawMessages
-                .filterIsInstance<RawCodexMessage.Notification>()
-                .map { PersistedRawNotification(it.method, it.params, it.extensions) },
+            threadList = profile.threadList.map { it.withoutRawBody() },
+            snapshots = profile.snapshots.mapValues { (_, snapshot) -> snapshot.forPersistence() },
         )
     },
 )
@@ -305,12 +274,9 @@ private fun PersistedMobileCache.toMobileCache(cacheLimits: MobileCacheLimits): 
     val decoded = MobileCache(
         profiles = profiles.mapValues { (_, profile) ->
             ProfileMobileCache(
-                threadList = profile.threadList,
-                snapshots = profile.snapshots,
-                unknownEvents = profile.unknownEvents,
-                rawMessages = profile.rawNotifications.map {
-                    RawCodexMessage.Notification(it.method, it.params, it.extensions)
-                },
+                threadList = profile.threadList.map { it.withoutRawBody() },
+                // Older version-2 files also contain nested raw bodies.
+                snapshots = profile.snapshots.mapValues { (_, snapshot) -> snapshot.forPersistence() },
             )
         },
     )
@@ -339,12 +305,27 @@ private fun MobileCache.applyCacheLimits(limits: MobileCacheLimits): MobileCache
                     )
                 }
             }
-        profile.unknownEvents.forEach { event ->
-            result = applyLiveEvent(result, hostIdentity, event, limits)
-        }
-        profile.rawMessages.forEach { message ->
-            result = retainRawMessage(result, hostIdentity, message, limits)
-        }
     }
     return result
+}
+
+private fun ThreadSummary.withoutRawBody(): ThreadSummary {
+    val metadata = raw?.without("turns")
+    return if (metadata === raw) this else copy(raw = metadata)
+}
+
+private fun ThreadSnapshot.forPersistence(): ThreadSnapshot {
+    val summary = summary.withoutRawBody()
+    val metadata = raw?.without("turns")
+    var updated: MutableList<CodexTurn>? = null
+    turns.forEachIndexed { index, turn ->
+        val turnMetadata = turn.raw?.without("items")
+        val error = turn.error?.takeUnless(CodexTurnError::willRetry)
+        if (turnMetadata !== turn.raw || error !== turn.error || turn.pendingRequests.isNotEmpty()) {
+            val destination = updated ?: turns.toMutableList().also { updated = it }
+            destination[index] = turn.copy(raw = turnMetadata, error = error, pendingRequests = emptyList())
+        }
+    }
+    return if (summary !== this.summary || metadata !== raw || updated != null)
+        copy(summary = summary, raw = metadata, turns = updated ?: turns) else this
 }

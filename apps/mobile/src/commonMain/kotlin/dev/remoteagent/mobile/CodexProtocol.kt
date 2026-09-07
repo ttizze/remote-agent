@@ -120,7 +120,7 @@ internal fun codexThreadSummary(value: JsonElement): ThreadSummary {
         createdAtMs = raw.long("createdAt") ?: 0L,
         updatedAtMs = raw.long("updatedAt") ?: 0L,
         status = codexThreadStatus(raw["status"]),
-        raw = raw,
+        raw = raw.without("turns"),
     )
 }
 
@@ -142,7 +142,8 @@ internal fun codexProject(value: JsonElement): CodexProject {
 internal fun codexThreadSnapshot(value: JsonElement): ThreadSnapshot {
     val raw = value.asObjectOrNull() ?: emptyJsonObject()
     val turns = raw.array("turns").orEmpty().map(::codexTurn)
-    return ThreadSnapshot(codexThreadSummary(raw), turns, raw)
+    val metadata = raw.without("turns")
+    return ThreadSnapshot(codexThreadSummary(metadata), turns, metadata)
 }
 
 internal fun codexThreadFromResponse(value: JsonElement): ThreadSnapshot =
@@ -155,7 +156,7 @@ internal fun codexTurn(value: JsonElement): CodexTurn {
             ?: raw.string("turnId").orEmpty(),
         status = codexTurnStatus(raw.string("status")),
         items = raw.array("items").orEmpty().map(::codexItem),
-        raw = raw,
+        raw = raw.without("items"),
         startedAtMs = unixSecondsToMilliseconds(raw.long("startedAt")),
         completedAtMs = unixSecondsToMilliseconds(raw.long("completedAt")),
         durationMs = nonNegative(raw.long("durationMs")),
@@ -384,3 +385,6 @@ private fun codexFileChangeStatus(status: String?): FileChangeStatus = when (sta
 
 internal fun attachmentMessageLabel(isImage: Boolean, path: String, name: String): String =
     if (isImage) "画像: $path" else "添付: $name ($path)"
+
+/** Keep metadata and unknown extensions without retaining an already typed collection. */
+internal fun JsonObject.without(key: String): JsonObject = if (key in this) JsonObject(this - key) else this
