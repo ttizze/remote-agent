@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Prepare iPhone build 34. Reuse unchanged item display objects within streamed turns and parse Markdown off the UI thread with coalesced updates. Remove duplicate raw bodies, unused notification logs, and obsolete mobile state APIs; retain paging metadata and normalize existing version 2 caches on load.
+- Install and launch iPhone build 34. Reuse unchanged item display objects within streamed turns and parse Markdown off the UI thread with coalesced updates. Remove duplicate raw bodies, unused notification logs, and obsolete mobile state APIs; retain paging metadata and normalize existing version 2 caches on load.
 - Install iPhone build 33. Separate navigation and conversation observation, project streamed state in 16 ms windows, and persist streams at completion or explicit flush. Keep small drags toward older messages detached from automatic bottom following.
 
 - Keep earlier AI replies visible when several user instructions share one completed native turn; fold work within each exchange. Avoid intermediate JSON trees during mobile persistence and repeated attributed-string copies while rendering Markdown paragraphs.
