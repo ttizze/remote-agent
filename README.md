@@ -8,6 +8,8 @@ Mobile opens paginated histories with the latest five native turns and a 500-ite
 
 The iPhone loads activity headers before large command outputs, diffs, reasoning or tool results. Expand an activity to fetch its full details from the Host; failures remain visible with a reload action. This requires the updated mobile app and Host. The Mac client retains its existing inline-history read. Paging uses the documented [App Server history APIs](https://learn.chatgpt.com/docs/app-server).
 
+The iPhone controller delegates display conversion to `IosViewStateProjector`. It reuses unchanged immutable turn projections during streaming and drops them when switching conversations or Hosts. Accepted inputs invalidate the affected turn until their native echo arrives; persistence and history retention are unchanged.
+
 The Mac UI is a native Rust executable built with GPUI Kit. Its bundle contains no React, Bun, or Node runtime. Existing message, attachment and file drafts remain in `desktop-drafts.json`; the Host IPC and pairing protocol are unchanged.
 
 The Mac uses standard GPUI sidebar, buttons, tabs, Markdown, editor and resizable panels. The conversation stays centered with a persistent composer. With the right panel closed, a compact workspace card shows changes and sources. Opening the panel presents Terminal, Side Chat, Browser and Files; tabs switch tools while retaining their state. Completed work expands into activity rows and command output.

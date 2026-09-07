@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prepare iPhone build 30: separate display conversion from the controller and reuse unchanged turn projections while streaming. Release projections on history eviction and conversation/Host changes; preserve accepted inputs and same-length content updates. Remove the unused iOS directory-selection API and unreachable directory screen state.
+
 - Install and launch iPhone build 29 with the new-chat context selectors and attachment-directory fix; rebuild the Release Kotlin framework for the physical-device archive.
 
 - Place environment and project-folder menus directly above the iPhone new-chat composer, with a blank conversation area and native back navigation. Preserve the open conversation's upload directory when refreshed recent titles omit it, preventing subsequent attachments from failing with an absolute-path error.
