@@ -244,6 +244,18 @@ class IosAppController {
         }
     }
 
+    fun worktreeSettings(hostIdentity: String, updateJson: String?, completion: (String?, String?) -> Unit) {
+        val profile = controller.state.selectedProfile?.takeIf { it.hostIdentity == hostIdentity }
+            ?: run { completion(null, "接続先が変更されました。設定を開き直してください。"); return }
+        scope.launch {
+            try {
+                val method = if (updateJson == null) "host/worktree/settings/read" else "host/worktree/settings/update"
+                val params = updateJson?.let(Json::parseToJsonElement) ?: JsonObject(emptyMap())
+                completeJson(dependencies.gateway.rawRequest(profile, method, params), completion)
+            } catch (failure: IllegalArgumentException) { completion(null, failure.message ?: "JSONが無効です") }
+        }
+    }
+
     fun transfer(paramsJson: String, completion: (String?, String?) -> Unit) {
         val profile = controller.state.selectedProfile ?: run { completion(null, "接続先が選択されていません"); return }
         scope.launch {

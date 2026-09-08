@@ -76,6 +76,7 @@ PY
 )
 if [ "$#" -eq 0 ]; then
     set -- testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject \
+        testSimulatorEditsHostWorktreeSettingsFromTaskMenu \
         testSimulatorLoadsLatestFiveTitlesPerProjectAndExpandsOneProject \
         testSimulatorPaginatesRecentProjectsAndUnassignedChats \
         testSimulatorShowsWorkspaceConversationInsideItsProject \

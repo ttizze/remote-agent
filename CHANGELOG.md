@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add iPhone worktree settings to the task list's top-right menu, with Host-backed loading/saving, cancel, and error handling. Let Mac and iPhone configure an absolute Host directory for new worktrees; an empty directory preserves the existing Git-directory default, and existing worktrees keep their locations and project membership.
+
 - Remove unused Rust dependencies and error variants, replace the manual JSON ID scanner with serde traversal, and borrow JSONL source lines and raw payloads. Move desktop RPC results without cloning, consolidate request cancellation cleanup, and remove temporary notification and disconnect collections.
 
 - Initialize the relay's TLS provider using the Host's existing ring selection pattern. Preserve an explicitly installed provider and prevent WSS connection panics when workspace dependencies enable both TLS backends.

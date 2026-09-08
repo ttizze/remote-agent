@@ -1716,6 +1716,10 @@ impl Desktop {
                         s.worktree_saved = false;
                         cx.notify();
                     })))
+                .child("ワークツリーの保存先")
+                .child(Input::new(&self.worktree_directory).aria_label("ワークツリーの保存先")
+                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0))
+                .child("指定フォルダ内にセッションごとのフォルダを作ります。空欄ならリポジトリのGit管理領域に保存します。既存のワークツリーは移動しません。")
                 .child(switch::Switch::new("worktree-copy")
                     .label("ワークツリー作成時にファイルをコピー")
                     .checked(self.worktree_settings["copyOnCreate"] == true)

@@ -9,6 +9,7 @@ struct Settings {
     create_on_new_session: bool,
     copy_on_create: bool,
     copy_paths: Vec<String>,
+    worktree_directory: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -36,6 +37,9 @@ impl Worktrees {
             if let Some(update) = update {
                 let settings: Settings = serde_json::from_value(update).map_err(|e| e.to_string())?;
                 for entry in &settings.copy_paths { relative_path(entry)?; }
+                if !settings.worktree_directory.is_empty() && !Path::new(&settings.worktree_directory).is_absolute() {
+                    return Err("worktree directory must be an absolute path on the Host, or empty for the default".into());
+                }
                 state.settings = settings;
                 save(&path, &state)?;
             }
@@ -53,9 +57,12 @@ impl Worktrees {
             let cwd = cwd.ok_or("worktree creation requires a working directory")?.canonicalize().map_err(|e| e.to_string())?;
             let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?).canonicalize().map_err(|e| e.to_string())?;
             let relative_cwd = cwd.strip_prefix(&root).map_err(|e| e.to_string())?;
-            let common = PathBuf::from(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
-            let parent = common.join("bex-worktrees");
+            let parent = if state.settings.worktree_directory.is_empty() {
+                PathBuf::from(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?).join("bex-worktrees")
+            } else { PathBuf::from(&state.settings.worktree_directory) };
             fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+            // Resolve aliases such as /tmp before checking copy destination ancestors.
+            let parent = parent.canonicalize().map_err(|e| e.to_string())?;
             let destination = tempfile::Builder::new().prefix("session-").permissions(fs::Permissions::from_mode(0o700)).tempdir_in(&parent).map_err(|e| e.to_string())?.keep();
             let branch = format!("bex/{}", destination.file_name().unwrap().to_string_lossy());
             let destination_text = destination.to_str().ok_or("worktree path is not UTF-8")?;
@@ -221,11 +228,12 @@ mod tests {
         fs::set_permissions(root.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir(root.join("local")).unwrap();
         fs::write(root.join("local/value"), "local data").unwrap();
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"]});
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":""});
         store.settings(Some(settings.clone())).await.unwrap();
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.settings(None).await.unwrap(), settings);
         let first = loaded.prepare(root.to_str()).await.unwrap().unwrap();
+        assert_eq!(first.parent().unwrap(), root.join(".git/bex-worktrees"));
         assert_eq!(fs::read_to_string(first.join("tracked.txt")).unwrap(), "committed\n");
         assert_eq!(fs::read_to_string(first.join("config.txt")).unwrap(), "local config\n");
         assert_eq!(fs::read(first.join(".env")).unwrap(), fs::read(root.join(".env")).unwrap());
@@ -269,13 +277,44 @@ mod tests {
     async fn invalid_settings_never_replace_saved_preferences() {
         let directory = repository();
         let store = Worktrees::new(&directory.path().join("projects.json"));
-        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"]});
+        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":""});
         store.settings(Some(valid.clone())).await.unwrap();
         for path in ["", "/tmp/private", "../secret", ".git", "a/../../secret", "a/.git/config"] {
             assert!(store.settings(Some(json!({"copyPaths":[path]}))).await.is_err());
             assert_eq!(store.settings(None).await.unwrap(), valid);
         }
         assert!(store.settings(Some(json!({"createOnNewSession":"yes"}))).await.is_err());
+        for path in ["relative/worktrees", "~/worktrees", "../worktrees"] {
+            assert!(store.settings(Some(json!({"worktreeDirectory":path}))).await.is_err());
+            assert_eq!(store.settings(None).await.unwrap(), valid);
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_directory_supports_symlinked_parents_and_preserves_existing_worktrees() {
+        let directory = repository();
+        let root = directory.path().canonicalize().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let real_parent = storage.path().canonicalize().unwrap();
+        symlink(&real_parent, root.join("storage")).unwrap();
+        fs::write(root.join(".env"), "FIXTURE_VALUE=isolated\n").unwrap();
+        let projects = root.join("projects.json");
+        let store = Worktrees::new(&projects);
+        let mut settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":root.join("storage/new folder")});
+        store.settings(Some(settings.clone())).await.unwrap();
+        let restarted = Worktrees::new(&projects);
+        let first = restarted.prepare(root.to_str()).await.unwrap().unwrap();
+        assert_eq!(first.parent().unwrap(), real_parent.join("new folder"));
+        assert_eq!(fs::read(first.join(".env")).unwrap(), fs::read(root.join(".env")).unwrap());
+        assert_eq!(fs::metadata(&first).unwrap().permissions().mode() & 0o777, 0o700);
+        settings["worktreeDirectory"] = json!(real_parent.join("second"));
+        store.settings(Some(settings)).await.unwrap();
+        let second = restarted.prepare(first.to_str()).await.unwrap().unwrap();
+        assert_eq!(second.parent().unwrap(), real_parent.join("second"));
+        assert!(first.join(".env").is_file());
+        let roots = workspace_roots(&projects).await.unwrap();
+        assert_eq!(roots[first.to_str().unwrap()], root.to_str().unwrap());
+        assert_eq!(roots[second.to_str().unwrap()], root.to_str().unwrap());
     }
 
     #[tokio::test]
