@@ -173,6 +173,40 @@ pub(super) async fn run(
         command["exitCode"] = 0.into();
     }
     complete(&context, &thread_id, &turn, command_index)?;
+    if prompt.contains("[workspace-edit]") {
+        let cwd = thread
+            .borrow()
+            .metadata
+            .get("readCwd")
+            .unwrap_or(&thread.borrow().metadata["cwd"])
+            .as_str()
+            .ok_or("workspace edit fixture requires a working directory")?
+            .to_owned();
+        fs::write(
+            Path::new(&cwd).join("tracked.txt"),
+            "Edited during the turn\n",
+        )?;
+        fs::write(
+            Path::new(&cwd).join("added.txt"),
+            "New first\nNew second\nNew third\n",
+        )?;
+        let index = turn.borrow()["items"].as_array().unwrap().len();
+        context.stream_item(
+            &thread_id,
+            &turn,
+            json!({
+                "id":format!("fixture-edit-{suffix}"),"type":"fileChange","status":"completed",
+                "changes":[{"path":"tracked.txt","kind":{"type":"update"},
+                    "diff":"-original\n+Edited during the turn\n"},
+                    {"path":"added.txt","kind":{"type":"add"},
+                    "diff":"+New first\n+New second\n+New third\n"}]
+            }),
+        )?;
+        complete(&context, &thread_id, &turn, index)?;
+        if !wait_for_release(&context.home, &stop).await {
+            return context.finish(&thread, &turn, "interrupted", None);
+        }
+    }
     if prompt.contains("[groups]") {
         context.stream_item(
             &thread_id,

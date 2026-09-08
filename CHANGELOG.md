@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Refresh the iPhone composer's file and line counts during active commands, tools, and file edits instead of waiting for the turn to finish. Coalesce activity notifications and discard canceled review responses. Verify live worktree edits on iOS Simulator while the turn remains running.
+
 - Keep only Copy and Branch beneath iPhone answers; remove Share and Expand along with their dedicated sheets.
 
 - Add iPhone Codex account and model selection with device-code login, Host-side credential refresh, and persisted account selection. Keep one shared App Server and conversation history across accounts; retain original Codex credentials and store added credentials through Codex's Keychain support. Keep history accessible if saved authentication needs renewal, and report generation errors until account selection succeeds.

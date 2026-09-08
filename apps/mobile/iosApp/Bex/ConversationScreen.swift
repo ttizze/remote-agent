@@ -28,7 +28,18 @@ struct ThreadScreen: View {
     @FocusState var composerFocused: Bool
 
     private var reviewVersion: String {
-        model.cwd + (conversation.thread?.turns.map { "\($0.id):\($0.status)" }.joined(separator: ",") ?? "")
+        var version = "\(state.selectedProfileId ?? ""):\(state.isConnected):\(model.cwd)"
+        version += ":\(conversation.thread?.id ?? "")"
+        for turn in conversation.thread?.turns ?? [] {
+            version += ":\(turn.id):\(turn.status)"
+            if turn.isInProgress {
+                // Commands and tools can edit files before the native turn finishes.
+                for item in turn.activityItems where item.kind != "reasoning" {
+                    version += ":\(item.id):\(item.contentVersion)"
+                }
+            }
+        }
+        return version
     }
 
     private var project: IosProjectView? {
@@ -136,9 +147,9 @@ struct ThreadScreen: View {
                 finishMediaImport(result)
             }.ignoresSafeArea()
         }
-        .sheet(isPresented: $showingFiles, onDismiss: refreshReview) {
+        .sheet(isPresented: $showingFiles, onDismiss: { Task { await refreshReview() } }, content: {
             WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
-        }
+        })
         .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model.modelSettings) }
         .onAppear {
             if state.isNewThread {
@@ -150,7 +161,10 @@ struct ThreadScreen: View {
                 composerFocused = true
             }
         }
-        .task(id: reviewVersion) { refreshReview() }
+        .task(id: reviewVersion) {
+            do { try await Task.sleep(nanoseconds: 200_000_000) } catch { return }
+            await refreshReview()
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -205,7 +219,7 @@ extension ThreadScreen {
                     if let id = conversation.thread?.id {
                         model.openThread(id)
                     }
-                    refreshReview()
+                    Task { await refreshReview() }
                 } label: { Label("更新", systemImage: "arrow.clockwise") }
             } label: {
                 Image(systemName: "ellipsis").font(.title2.weight(.semibold)).frame(width: 44, height: 44)

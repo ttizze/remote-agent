@@ -114,5 +114,22 @@ extension BexLaunchUITests {
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Open session worktree diff"
         screenshot.lifetime = .keepAlways; add(screenshot)
+        app.buttons["files.diff.close"].tap()
+        app.buttons["files.close"].tap()
+        let input = app.descendants(matching: .any)["task.message"]
+        input.tap(); input.typeText("[workspace-edit] Update the worktree while running")
+        app.buttons["task.send"].tap()
+        let running = prefixedButton(app, prefix: "turn.interrupt.")
+        XCTAssertTrue(running.waitForExistence(timeout: 10))
+        let updated = expectation(
+            for: NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@ AND label CONTAINS %@",
+                             "2件のファイル", "+4", "−1"),
+            evaluatedWith: changes
+        )
+        wait(for: [updated], timeout: 20)
+        XCTAssertTrue(running.exists, "Counts must update before the turn finishes")
+        captureScreen(app, named: "Live worktree counts before turn completion")
+        try simulatorFixture("release-inputs")
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 10))
     }
 }

@@ -175,17 +175,23 @@ extension ThreadScreen {
         }
     }
 
-    func refreshReview() {
+    func refreshReview() async {
         let directory = model.cwd
-        guard !directory.isEmpty, let threadId = conversation.thread?.id else { review = nil; return }
-        model.workspace("host/workspace/review", ["cwd": directory]) { result, _ in
-            guard model.cwd == directory, model.state.selectedThreadId == threadId else { return }
-            if let result, let files = result["files"] as? [[String: Any]],
-               let additions = result["additions"] as? Int, let deletions = result["deletions"] as? Int {
-                review = WorkspaceReviewSummary(files: files.count, additions: additions, deletions: deletions)
-            } else {
-                review = nil
+        let host = model.state.selectedProfileId
+        guard model.state.isConnected, !directory.isEmpty,
+              let threadId = conversation.thread?.id else { review = nil; return }
+        let result: [String: Any]? = await withCheckedContinuation { continuation in
+            model.workspace("host/workspace/review", ["cwd": directory]) { result, _ in
+                continuation.resume(returning: result)
             }
+        }
+        guard !Task.isCancelled, model.cwd == directory, model.state.selectedThreadId == threadId,
+              model.state.selectedProfileId == host else { return }
+        if let result, let files = result["files"] as? [[String: Any]],
+           let additions = result["additions"] as? Int, let deletions = result["deletions"] as? Int {
+            review = WorkspaceReviewSummary(files: files.count, additions: additions, deletions: deletions)
+        } else {
+            review = nil
         }
     }
 }

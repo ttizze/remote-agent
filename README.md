@@ -107,7 +107,7 @@ Chat attachments render as images on Mac and iPhone. Image references survive mo
 
 ## iPhone build and verification
 
-The iPhone conversation uses a dark native layout with expandable work rows, Markdown answers, copy and branch controls and a multiline composer. The `…` menu opens files and changes; a change-count pill above the composer shows the actual working-tree changes. Counts, diffs, and workspace files use the open session's current working directory, even when refreshed task titles refer to a different project directory. Outside voice recording, an empty composer shows Stop during active work; entering text switches it to additional input.
+The iPhone conversation uses a dark native layout with expandable work rows, Markdown answers, copy and branch controls and a multiline composer. The `…` menu opens files and changes; a change-count pill above the composer shows the actual working-tree changes. The file count and added/deleted line counts refresh as commands, tools, and file edits progress, without waiting for the turn to finish. Counts, diffs, and workspace files use the open session's current working directory, even when refreshed task titles refer to a different project directory. Outside voice recording, an empty composer shows Stop during active work; entering text switches it to additional input.
 
 New iPhone chats place the environment and folder menus directly above the composer. Choose a paired Host and one of its project folders, or **チャット** for an unassigned conversation. The folder menu can load more projects. Open conversations retain their own upload directory even when a refreshed recent-task list no longer includes their title, so subsequent attachments continue to use that conversation's workspace.
 
