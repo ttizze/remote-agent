@@ -94,6 +94,9 @@ pub(crate) struct Desktop {
     remote: String,
     hosts: Vec<Value>,
     status: Value,
+    worktree_settings: Value,
+    worktree_copy_paths: Entity<TextareaState>,
+    worktree_saved: bool,
     projects: Vec<Value>,
     threads: Vec<Value>,
     models: Vec<Value>,
@@ -198,6 +201,9 @@ impl Desktop {
                 .placeholder("相手の Mac で発行した招待を貼り付け")
                 .auto_grow(3, 6)
         });
+        let worktree_copy_paths = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder(".env\n.env.local\nconfig/local").auto_grow(3, 8)
+        });
         let invitation_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 6));
         let mut error = String::new();
         let cache = match std::fs::read(platform::state_dir().join(cache_file)) {
@@ -254,6 +260,9 @@ impl Desktop {
         })
         .detach();
         let subscriptions = vec![
+            cx.subscribe(&worktree_copy_paths, |s, _, event, cx| {
+                if matches!(event, InputEvent::Change) { s.worktree_saved = false; cx.notify(); }
+            }),
             cx.subscribe_in(&composer,window,|this,input,event,_,cx| {if matches!(event,InputEvent::Change){let key=this.draft_key();this.cache["messages"][key]=json!(input.read(cx).value().as_ref());this.persist();cx.notify();}}),
             cx.subscribe_in(&search,window,|this,input,event,_,cx| {if matches!(event,InputEvent::Change){this.query["searchTerm"]=json!(input.read(cx).value().as_ref());this.refresh_threads();}}),
             cx.subscribe_in(&editor_input,window,|this,input,event,_,cx| {if matches!(event,InputEvent::Change) && !this.editor.is_null(){let key=this.editor_key();this.cache["files"][key]=json!({"text":input.read(cx).value().as_ref(),"revision":this.editor["revision"]});this.persist();}}),
@@ -273,6 +282,9 @@ impl Desktop {
             remote,
             hosts: vec![],
             status: Value::Null,
+            worktree_settings: Value::Null,
+            worktree_copy_paths,
+            worktree_saved: false,
             projects: vec![],
             threads: vec![],
             models: vec![],
@@ -530,6 +542,7 @@ impl Desktop {
                                 self.conversation.requests.clear();
                                 self.refresh_threads();
                                 self.refresh_models();
+                                self.refresh_worktree_settings();
                                 if !self.selected.is_empty() {
                                     self.open_thread(self.selected.clone(), window, cx);
                                 }
@@ -583,6 +596,26 @@ impl Desktop {
                 || r["params"]["threadId"] == self.conversation.thread["id"]
         })
     }
+    fn refresh_worktree_settings(&mut self) {
+        if !self.connected { return; }
+        self.request(false, "host/worktree/settings/read", json!({}), false, |s, value, w, cx| {
+            let paths = array(&value["copyPaths"]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+            s.worktree_copy_paths.update(cx, |input, cx| input.set_value(paths, w, cx));
+            s.worktree_settings = value;
+            s.worktree_saved = false;
+        });
+    }
+
+    fn save_worktree_settings(&mut self, cx: &mut Context<Self>) {
+        let mut settings = self.worktree_settings.clone();
+        settings["copyPaths"] = json!(self.worktree_copy_paths.read(cx).value().lines()
+            .map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>());
+        self.request(false, "host/worktree/settings/update", settings, true, |s, value, _, _| {
+            s.worktree_settings = value;
+            s.worktree_saved = true;
+        });
+    }
+
     fn refresh_manager(&mut self) {
         self.request(true, "host/status", json!({}), false, |s, v, _, _| {
             s.status = v
@@ -732,6 +765,9 @@ impl Desktop {
         self.remote = id;
         self.rpc = Self::connect(&self.tx, self.epoch, false, &self.remote);
         self.connected = false;
+        self.worktree_settings = Value::Null;
+        self.worktree_saved = false;
+        self.worktree_copy_paths.update(cx, |input, cx| input.set_value("", window, cx));
         self.models.clear();
         self.model.clear();
         self.projects.clear();
@@ -777,6 +813,15 @@ impl Desktop {
                 s.persist();
                 if generation == s.load_generation {
                     s.selected = id.clone();
+                    s.cwd = text(&v["thread"], "cwd").to_owned();
+                    s.path.update(cx, |input, cx| input.set_value(s.cwd.clone(), w, cx));
+                    s.terminal = None;
+                    s.side_chat = None;
+                    s.entries.clear();
+                    s.editor = Value::Null;
+                    s.review = Value::Null;
+                    s.review_error.clear();
+                    s.refresh_review();
                     s.conversation.thread = v["thread"].clone();
                     s.restore_draft(w, cx);
                     s.sync_list(true);

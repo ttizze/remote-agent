@@ -677,12 +677,13 @@ impl Desktop {
                     })),
             );
         navigation = navigation.child(
-            SidebarMenuItem::new("接続・ペアリング")
+            SidebarMenuItem::new("設定")
                 .icon(IconName::Settings)
                 .active(self.tab == Tab::Settings)
                 .on_click(cx.listener(|s, _, _, cx| {
                     s.tab = Tab::Settings;
                     s.refresh_manager();
+                    s.refresh_worktree_settings();
                     cx.notify();
                 })),
         );
@@ -1165,8 +1166,40 @@ impl Desktop {
         let mut body = v_flex()
             .gap_4()
             .p_7()
-            .child(div().text_2xl().child("接続とペアリング"))
+            .child(div().text_2xl().child("設定"))
             .child(self.host_menu(cx));
+        body = body.child(
+            v_flex().gap_3()
+                .child(div().text_xl().child("ワークツリー"))
+                .child("選択中の Host に保存し、Mac・iPhone からの新規セッションに適用します。")
+                .child(switch::Switch::new("worktree-create")
+                    .label("新規セッションをワークツリーで開始")
+                    .checked(self.worktree_settings["createOnNewSession"] == true)
+                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0)
+                    .on_click(cx.listener(|s, checked, _, cx| {
+                        s.worktree_settings["createOnNewSession"] = json!(*checked);
+                        s.worktree_saved = false;
+                        cx.notify();
+                    })))
+                .child(switch::Switch::new("worktree-copy")
+                    .label("ワークツリー作成時にファイルをコピー")
+                    .checked(self.worktree_settings["copyOnCreate"] == true)
+                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0)
+                    .on_click(cx.listener(|s, checked, _, cx| {
+                        s.worktree_settings["copyOnCreate"] = json!(*checked);
+                        s.worktree_saved = false;
+                        cx.notify();
+                    })))
+                .child("コピー対象（リポジトリからの相対パスを1行に1つ）")
+                .child(Textarea::new(&self.worktree_copy_paths).aria_label("コピー対象")
+                    .readonly(!self.connected || self.worktree_settings.is_null() || self.busy > 0))
+                .child("例: .env、.env.local、config/local。存在しないパスはスキップします。指定したファイルはコピー元の内容で置き換えます。シンボリックリンクはコピーできません。")
+                .child("最初のメッセージ送信時に現在の HEAD から作成します。既存セッションを開き直しても作成・コピーしません。")
+                .child(h_flex().gap_3()
+                    .child(self.button("worktree-save", "ワークツリー設定を保存", cx, |s, _, cx| s.save_worktree_settings(cx))
+                        .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0))
+                    .when(self.worktree_saved, |row| row.child("保存しました")))
+        );
         if !self.manager_connected {
             body=body.child("この Mac の Host を起動").child(Input::new(&self.relay_url)).child(Input::new(&self.relay_token)).child(Input::new(&self.runner)).child(self.button("start-host","接続して起動",cx,|s,_,cx|{let endpoint=json!({"relayUrl":s.relay_url.read(cx).value().as_ref(),"relayToken":s.relay_token.read(cx).value().as_ref(),"runnerId":s.runner.read(cx).value().as_ref()});s.work(true,move||platform::start_host(Some(endpoint)).map(|_|Value::Null),|_,_,_,_|{});}));
         } else {
@@ -1612,7 +1645,7 @@ impl Render for Desktop {
         }
         let wide = window.viewport_size().width >= px(1080.);
         let title = if self.tab == Tab::Settings {
-            "接続・ペアリング"
+            "設定"
         } else {
             self.conversation.thread["name"]
                 .as_str()

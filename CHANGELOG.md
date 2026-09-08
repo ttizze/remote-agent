@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Host-persisted Mac settings for automatic worktrees on new sessions and optional file/directory copying, including `.env`. Apply both switches to Mac and iPhone session starts, keep worktree tasks in their original projects, and update the Mac workspace path and branch after creation. Defaults remain off; reopening existing sessions does not create or copy again.
+
 - Start iPhone task-list project folders collapsed; preserve manual expansion during refresh and conversation navigation.
 
 - Update and restart the signed Mac Host to activate `host/dictation/transcribe` instead of forwarding it to Codex. Remove the iPhone and Host 30-second voice-recording limit and the separate recording-cancel button. Keep Stop-to-draft and Send-directly behavior; verify longer recordings through the encrypted relay and iOS Simulator.

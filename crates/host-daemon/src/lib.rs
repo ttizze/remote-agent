@@ -8,6 +8,7 @@ mod ssh_gateway;
 mod host_runtime;
 mod remote_hosts;
 mod workspace_files;
+mod worktrees;
 mod workspace_review;
 pub use workspace_review::{WorkspaceReview, inspect_workspace};
 pub use remote_hosts::{RemoteCredentialStore, RemoteHosts, RemoteHostProfile};

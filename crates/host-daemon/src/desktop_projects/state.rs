@@ -20,6 +20,7 @@ pub(crate) struct Snapshot {
     assignments: HashMap<String, ProjectAssignment>,
     projectless_thread_ids: HashSet<String>,
     workspace_root_hints: HashMap<String, String>,
+    pub(super) worktree_roots: HashMap<String, String>,
 }
 
 impl Snapshot {
@@ -46,6 +47,7 @@ impl Snapshot {
             assignments: state.thread_project_assignments,
             projectless_thread_ids: state.projectless_thread_ids.into_iter().collect(),
             workspace_root_hints: state.thread_workspace_root_hints,
+            worktree_roots: HashMap::new(),
         })
     }
 
@@ -123,6 +125,11 @@ impl Snapshot {
 
     fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
         let workspace = Path::new(workspace);
+        let mapped = self.worktree_roots.iter()
+            .filter(|(root, _)| workspace.starts_with(root))
+            .max_by_key(|(root, _)| root.len())
+            .map(|(root, source)| Path::new(source).join(workspace.strip_prefix(root).unwrap()));
+        let workspace = mapped.as_deref().unwrap_or(workspace);
         if !workspace.is_absolute() { return None; }
         let mut matched: Option<(&str, usize)> = None;
         let mut ambiguous = false;
@@ -343,4 +350,21 @@ mod tests {
             Err(Error::InvalidCursor)
         ));
     }
+    #[test]
+    fn worktree_membership_preserves_nested_project_roots() {
+        let mut snapshot = Snapshot::parse(br#"{
+            "local-projects": {
+                "repo": {"id":"repo","name":"Repo","rootPaths":["/repo"]},
+                "app": {"id":"app","name":"App","rootPaths":["/repo/packages/app"]}
+            }
+        }"#).unwrap();
+        snapshot.worktree_roots.insert("/repo/.git/bex-worktrees/session-a".into(), "/repo".into());
+        let result = snapshot.enrich_threads(json!({"data":[
+            {"id":"nested","cwd":"/repo/.git/bex-worktrees/session-a/packages/app"},
+            {"id":"root","cwd":"/repo/.git/bex-worktrees/session-a"}
+        ]}));
+        assert_eq!(result["data"][0]["projectId"], "app");
+        assert_eq!(result["data"][1]["projectId"], "repo");
+    }
+
 }

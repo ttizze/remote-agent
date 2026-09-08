@@ -510,3 +510,76 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         relay_server.kill().await.unwrap(); relay_server.wait().await.unwrap();
     }).await.expect("title list loop exceeded deadline");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_worktree_settings_route_both_start_methods_and_preserve_project_membership() {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let workspace = root.join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&workspace).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
+        std::fs::write(workspace.join(".env"), "FIXTURE_VALUE=isolated\n").unwrap();
+        let project_state = root.join("projects.json");
+        std::fs::write(&project_state, serde_json::to_vec(&json!({
+            "local-projects":{"workspace":{"id":"workspace","name":"Workspace","rootPaths":[workspace]}}
+        })).unwrap()).unwrap();
+        let server = Arc::new(CodexAppServer::spawn(AppServerConfig { program: fixture_program(&root), ..Default::default() }).await.unwrap());
+        let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
+        let mut session = service.open_session(64);
+        async fn request(service: &CodexRpcService, session: &mut host_daemon::CodexSession, method: &str, params: Value) -> Value {
+            service.dispatch_request(session.id(), json!({"id":42,"method":method,"params":params}).to_string()).await.unwrap();
+            loop {
+                let response: Value = serde_json::from_str(&session.recv().await.unwrap()).unwrap();
+                if response["id"] == 42 {
+                    assert!(response.get("error").is_none(), "{response}");
+                    return response["result"].clone();
+                }
+            }
+        }
+        let initial = request(&service, &mut session, "thread/start", json!({"cwd":workspace})).await;
+        assert_eq!(initial["thread"]["cwd"], workspace.to_str().unwrap());
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"]});
+        assert_eq!(request(&service, &mut session, "host/worktree/settings/update", settings.clone()).await, settings);
+        let mut ids = Vec::new();
+        let mut paths = Vec::new();
+        for method in ["thread/start", "host/thread/start"] {
+            let started = request(&service, &mut session, method, json!({"cwd":workspace,"model":"fixture-model"})).await;
+            let thread = &started["thread"];
+            let cwd = std::path::PathBuf::from(thread["cwd"].as_str().unwrap());
+            assert_ne!(cwd, workspace);
+            assert_eq!(std::fs::read(cwd.join(".env")).unwrap(), std::fs::read(workspace.join(".env")).unwrap());
+            assert_eq!(thread["projectId"], "workspace");
+            assert_eq!(thread["model"], "fixture-model");
+            ids.push(thread["id"].clone());
+            paths.push(cwd);
+        }
+        assert_ne!(paths[0], paths[1]);
+        let before = std::process::Command::new("git").current_dir(&workspace).args(["worktree", "list", "--porcelain"]).output().unwrap().stdout;
+        for id in &ids {
+            let read = request(&service, &mut session, "host/thread/read", json!({"threadId":id,"includeTurns":false})).await;
+            assert_eq!(read["thread"]["projectId"], "workspace");
+        }
+        let restarted = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
+        let mut restarted_session = restarted.open_session(64);
+        assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
+        let listed = request(&restarted, &mut restarted_session, "host/thread/list", json!({"titleOnly":true})).await;
+        for id in &ids {
+            let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("worktree task must remain in the project list after restart");
+            assert_eq!(thread["projectId"], "workspace");
+        }
+        let after = std::process::Command::new("git").current_dir(&workspace).args(["worktree", "list", "--porcelain"]).output().unwrap().stdout;
+        assert_eq!(before, after, "opening and listing must not create worktrees");
+        service.close_session(session.id());
+        restarted.close_session(restarted_session.id());
+        drop(session); drop(restarted_session); drop(service); drop(restarted);
+        Arc::try_unwrap(server).ok().unwrap().shutdown().await.unwrap();
+    }).await.expect("worktree integration exceeded 40 seconds");
+}
