@@ -1,3 +1,4 @@
+mod codex_accounts;
 mod codex_rpc;
 mod desktop_projects;
 mod device_auth;

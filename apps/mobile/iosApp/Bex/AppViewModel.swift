@@ -14,62 +14,7 @@ final class BexAppViewModel: ObservableObject {
     @Published var transferring = false
     @Published var sending = false
     @Published private(set) var transcribing = false
-    @Published private(set) var models: [CodexModel] = []
-    @Published private(set) var modelError: String?
-    @Published private(set) var loadingModels = false
-    @Published private var modelChoices = UserDefaults.standard
-        .dictionary(forKey: "bex.models.v1") as? [String: String] ?? [:]
-    @Published private var effortChoices = UserDefaults.standard
-        .dictionary(forKey: "bex.efforts.v1") as? [String: String] ?? [:]
-    var selectedModel: String {
-        modelChoices[state.selectedProfileId ?? ""] ?? ""
-    }
-
-    var selectedEffort: String {
-        effortChoices[state.selectedProfileId ?? ""] ?? ""
-    }
-
-    var currentModel: CodexModel? {
-        models.first { $0.model == selectedModel }
-    }
-
-    func chooseModel(_ value: String) {
-        guard let host = state.selectedProfileId else { return }
-        modelChoices[host] = value
-        effortChoices[host] = models.first { $0.model == value }?.defaultReasoningEffort ?? ""
-        persistTurnOptions()
-    }
-
-    func chooseEffort(_ value: String) {
-        guard let host = state.selectedProfileId else { return }
-        effortChoices[host] = value.isEmpty ? (currentModel?.defaultReasoningEffort ?? "") : value
-        persistTurnOptions()
-    }
-
-    private func persistTurnOptions() {
-        UserDefaults.standard.set(modelChoices, forKey: "bex.models.v1")
-        UserDefaults.standard.set(effortChoices, forKey: "bex.efforts.v1")
-        applyTurnOptions()
-    }
-
-    private func applyTurnOptions() {
-        guard let host = state.selectedProfileId else { return }
-        controller.conversation.setTurnOptions(hostIdentity: host, model: selectedModel.isEmpty ? nil : selectedModel,
-                                               effort: selectedEffort.isEmpty ? currentModel?
-                                                   .defaultReasoningEffort : selectedEffort)
-    }
-
-    func loadModels() {
-        guard state.isConnected, let host = state.selectedProfileId, !loadingModels else { return }
-        loadingModels = true
-        modelError = nil
-        controller.conversation.listModels { [weak self] models, error in
-            guard let self, state.selectedProfileId == host else { return }
-            loadingModels = false
-            self.models = models ?? []
-            modelError = error
-        }
-    }
+    let modelSettings: CodexModelSettings
 
     @Published private var drafts = UserDefaults.standard
         .dictionary(forKey: "bex.drafts.v4") as? [String: String] ?? [:]
@@ -104,32 +49,20 @@ final class BexAppViewModel: ObservableObject {
     private let controller = IosAppController()
 
     init() {
+        modelSettings = CodexModelSettings(actions: controller.conversation)
         state = controller.currentState()
         conversation = BexConversationModel(thread: controller.currentThread())
-        applyTurnOptions()
-        if state.isConnected {
-            loadModels()
-        }
+        modelSettings.update(host: state.selectedProfileId, connected: state.isConnected)
         controller.observe { [weak self] state, thread in
             DispatchQueue.main.async {
                 guard let self else { return }
-                let changedHost = self.state.selectedProfileId != state.selectedProfileId
-                let connected = !self.state.isConnected && state.isConnected
                 if self.state !== state {
                     self.state = state
                 }
                 if self.conversation.thread !== thread {
                     self.conversation.thread = thread
                 }
-                if changedHost {
-                    self.models = []
-                    self.loadingModels = false
-                    self.modelError = nil
-                    self.applyTurnOptions()
-                }
-                if changedHost || connected {
-                    self.loadModels()
-                }
+                self.modelSettings.update(host: state.selectedProfileId, connected: state.isConnected)
             }
         }
     }
@@ -215,7 +148,7 @@ extension BexAppViewModel {
     }
 
     private func send(_ text: String, from submission: DraftSubmission, dictatedText: String? = nil) {
-        applyTurnOptions()
+        modelSettings.applyTurnOptions()
         sending = true
         controller.conversation.sendTurn(
             text: text,
@@ -348,6 +281,16 @@ extension BexAppViewModel {
                 completion(result.map(jsonObject), error)
             }
         } catch { completion(nil, error.localizedDescription) }
+    }
+
+    func forkThread(
+        _ threadId: String,
+        through turnId: String,
+        completion: @escaping ([String: Any]?, String?) -> Void
+    ) {
+        controller.conversation.forkThread(threadId: threadId, lastTurnId: turnId) { result, error in
+            completion(result.map(jsonObject), error)
+        }
     }
 
     func readItemDetails(threadId: String, turnId: String, itemId: String) async -> (String?, String?) {

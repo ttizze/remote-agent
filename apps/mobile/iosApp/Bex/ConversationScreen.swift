@@ -139,7 +139,7 @@ struct ThreadScreen: View {
         .sheet(isPresented: $showingFiles, onDismiss: refreshReview) {
             WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
         }
-        .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
+        .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model.modelSettings) }
         .onAppear {
             if state.isNewThread {
                 composerFocused = true

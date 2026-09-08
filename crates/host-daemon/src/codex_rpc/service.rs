@@ -44,6 +44,7 @@ pub struct CodexRpcService {
 }
 
 struct ServiceInner {
+    accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     app_server: Arc<CodexAppServer>,
     desktop_projects: DesktopProjectStore,
     router: SessionRouter,
@@ -57,6 +58,7 @@ impl CodexRpcService {
     pub fn new(app_server: Arc<CodexAppServer>, desktop_projects: DesktopProjectStore) -> Self {
         Self {
             inner: Arc::new(ServiceInner {
+                accounts: tokio::sync::Mutex::new(None),
                 app_server,
                 worktrees: crate::worktrees::Worktrees::new(desktop_projects.path()),
                 desktop_projects,
@@ -66,6 +68,18 @@ impl CodexRpcService {
                 thread_watches: super::thread_watch::ThreadWatches::default(),
             }),
         }
+    }
+
+    pub async fn enable_accounts(
+        &self,
+        directory: std::path::PathBuf,
+        config: codex_app_server::AppServerConfig,
+    ) -> Result<(), String> {
+        let accounts =
+            crate::codex_accounts::Accounts::load(directory, config, &self.inner.app_server)
+                .await?;
+        *self.inner.accounts.lock().await = Some(accounts);
+        Ok(())
     }
 
     pub fn open_session(&self, capacity: usize) -> CodexSession {
@@ -105,12 +119,48 @@ impl CodexRpcService {
             .ok_or_else(|| DispatchError::InvalidMessage("request has no method".to_owned()))?
             .to_owned();
 
+        if method == "turn/start" {
+            let accounts = self.inner.accounts.lock().await;
+            if let Some(error) = accounts
+                .as_ref()
+                .and_then(|accounts| accounts.restoration_error())
+            {
+                return self
+                    .inner
+                    .router
+                    .send_line(
+                        session,
+                        error_response(&line, "account_unavailable", error)?,
+                    )
+                    .map_err(Into::into);
+            }
+        }
+
         let response = match method.as_str() {
             "initialize" | "initialized" => error_response(
                 &line,
                 "daemon_owned_method",
                 &format!("{method} is managed by the Host daemon"),
             )?,
+            "host/account/list"
+            | "host/account/select"
+            | "host/account/login/start"
+            | "host/account/login/status"
+            | "host/account/login/cancel" => {
+                let mut accounts = self.inner.accounts.lock().await;
+                let result = match accounts.as_mut() {
+                    Some(accounts) => {
+                        accounts
+                            .request(&self.inner.app_server, &method, &parse_params(&line)?)
+                            .await
+                    }
+                    None => Err("このHostはアカウント切り替えに対応していません。".into()),
+                };
+                match result {
+                    Ok(result) => response_with_result(&line, result)?,
+                    Err(error) => response_with_error(&line, "account_operation_failed", &error)?,
+                }
+            }
             HOST_PROJECT_LIST_METHOD => self.host_project_list(&line).await?,
             HOST_THREAD_LIST_METHOD => {
                 if parse_params(&line)?.get("titleOnly") == Some(&Value::Bool(true)) {
@@ -716,10 +766,49 @@ impl CodexRpcService {
         let mut events = self.inner.app_server.subscribe();
         let router = self.inner.router.clone();
         let thread_watches = self.inner.thread_watches.clone();
+        let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
-                    Ok(line) => router.handle_server_line(&line),
+                    Ok(line) => {
+                        let request = classify_message(&line).ok();
+                        if request.as_ref().is_some_and(|request| {
+                            request.kind() == RpcMessageKind::Request
+                                && request.method() == Some("account/chatgptAuthTokens/refresh")
+                        }) {
+                            let Some(inner) = inner.upgrade() else {
+                                return;
+                            };
+                            tokio::spawn(async move {
+                                let Ok(mut request) = serde_json::from_str::<Value>(&line) else {
+                                    return;
+                                };
+                                let mut accounts = inner.accounts.lock().await;
+                                let result = match accounts.as_mut() {
+                                    Some(accounts) => {
+                                        accounts
+                                            .refresh(
+                                                request["params"]["previousAccountId"].as_str(),
+                                            )
+                                            .await
+                                    }
+                                    None => Err("アカウントを選択してください。".into()),
+                                };
+                                let response = match result {
+                                    Ok(result) => {
+                                        json!({"id":request["id"].take(),"result":result})
+                                    }
+                                    Err(error) => {
+                                        json!({"id":request["id"].take(),"error":{"code":-32000,"message":error}})
+                                    }
+                                };
+                                let line = zeroize::Zeroizing::new(response.to_string());
+                                let _ = inner.app_server.send_raw(&line).await;
+                            });
+                        } else {
+                            router.handle_server_line(&line);
+                        }
+                    }
                     Err(broadcast::error::RecvError::Closed)
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         thread_watches.clear_all();

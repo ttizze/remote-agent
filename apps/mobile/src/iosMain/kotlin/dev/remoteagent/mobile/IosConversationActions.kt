@@ -53,6 +53,66 @@ internal constructor(
         }
     }
 
+    fun accountRequest(method: String, paramsJson: String, completion: (String?, String?) -> Unit) {
+        val profile =
+            controller.state.selectedProfile
+                ?: run {
+                    completion(null, "接続先が選択されていません")
+                    return
+                }
+        if (
+            method !in
+                setOf(
+                    "host/account/list",
+                    "host/account/select",
+                    "host/account/login/start",
+                    "host/account/login/status",
+                    "host/account/login/cancel",
+                )
+        ) {
+            completion(null, "未対応のアカウント操作です")
+            return
+        }
+        scope.launch {
+            try {
+                when (
+                    val result = dependencies.gateway.rawRequest(profile, method, Json.parseToJsonElement(paramsJson))
+                ) {
+                    is GatewayResult.Success -> completion(result.value.toString(), null)
+                    is GatewayResult.Failure -> completion(null, result.message)
+                }
+            } catch (failure: IllegalArgumentException) {
+                completion(null, failure.message ?: "JSONが無効です")
+            }
+        }
+    }
+
+    fun forkThread(threadId: String, lastTurnId: String, completion: (String?, String?) -> Unit) {
+        val profile =
+            controller.state.selectedProfile
+                ?: run {
+                    completion(null, "接続先が選択されていません")
+                    return
+                }
+        scope.launch {
+            when (
+                val result =
+                    dependencies.gateway.rawRequest(
+                        profile,
+                        "thread/fork",
+                        buildJsonObject {
+                            put("threadId", threadId)
+                            put("lastTurnId", lastTurnId)
+                            put("excludeTurns", true)
+                        },
+                    )
+            ) {
+                is GatewayResult.Success -> completion(result.value.toString(), null)
+                is GatewayResult.Failure -> completion(null, result.message)
+            }
+        }
+    }
+
     fun readItemDetails(threadId: String, turnId: String, itemId: String, completion: (String?, String?) -> Unit) {
         val profile =
             controller.state.selectedProfile

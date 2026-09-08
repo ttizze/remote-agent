@@ -38,6 +38,8 @@
 		B07533A831C4029B21F39F66 /* BexDeviceNavigationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C019CF42F8F9FA5A861FC9 /* BexDeviceNavigationUITests.swift */; };
 		0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */; };
 		316AE30ED1CAB6B32EF98FFE /* BexWorktreeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */; };
+		C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* CodexModelSettings.swift */; };
+		C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000002 /* ModelSettingsSheet.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -76,6 +78,8 @@
 		62C019CF42F8F9FA5A861FC9 /* BexDeviceNavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexDeviceNavigationUITests.swift; sourceTree = "<group>"; };
 		25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeSettings.swift; sourceTree = "<group>"; };
 		04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexWorktreeUITests.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000001 /* CodexModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelSettings.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000002 /* ModelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsSheet.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -133,6 +137,8 @@
 				109E523F621AEB123226918A /* ConversationHistory.swift */,
 				2036041A039EEBAA78D55844 /* AppPresentationData.swift */,
 				1DBDDA3779489C57B929936E /* AppViewModel.swift */,
+				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
+				C0DE00000000000000000001 /* CodexModelSettings.swift */,
 				04926FF582DA33DFFF64E6C5 /* TaskList.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
 				613A5AAB450EC067108110F3 /* ConversationScreen.swift */,
@@ -261,6 +267,8 @@
 				556D7396D1777928A463D2DF /* ConversationHistory.swift in Sources */,
 				B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */,
 				FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */,
+				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
+				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
 				D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
 				FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */,
@@ -320,7 +328,7 @@
 			buildSettings = {
 				ARCHS = arm64;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 41;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/debugFramework";
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/debugFramework";
@@ -346,7 +354,7 @@
 			buildSettings = {
 				ARCHS = arm64;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 39;
+				CURRENT_PROJECT_VERSION = 41;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/releaseFramework";
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/releaseFramework";

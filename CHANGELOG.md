@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add iPhone Codex account and model selection with device-code login, Host-side credential refresh, and persisted account selection. Keep one shared App Server and conversation history across accounts; retain original Codex credentials and store added credentials through Codex's Keychain support. Keep history accessible if saved authentication needs renewal, and report generation errors until account selection succeeds.
+- Add a branch action beneath completed iPhone answers. Fork through the selected native turn into a new conversation, open its inherited history, and preserve later turns in the original conversation.
+- Use icon-only Save and Close controls in iPhone image previews while retaining accessible labels and the original image-saving behavior.
+
 - Add reproducible quality checks through `cargo xtask quality`: Clippy/rustfmt, strict Credo and Dialyxir, ktfmt and detekt over all Kotlin source sets, and SwiftLint/SwiftFormat over handwritten Swift. Pin tools through Nix, Gradle, and Mix; share local checks with a read-only GitHub Actions workflow. Resolve existing violations while preserving default thresholds, without baselines.
 
 - Split mobile controller, native transport ownership, conversation rendering, and UI tests by responsibility. Preserve state ownership, cancellation, history ordering, and stale-response guards. Route typed Codex calls through one client, propagate known transport failures, and handle Swift JSON serialization errors. Match the Android JNI connection key parameter to Kotlin’s byte array.

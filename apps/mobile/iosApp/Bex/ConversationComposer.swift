@@ -202,7 +202,7 @@ struct ThreadConversationRow: Identifiable {
     let content: Content
     enum Content {
         case olderTurns, olderItems(String)
-        case user(IosItemView), response(IosItemView), queued(IosItemView)
+        case user(IosItemView), response(IosItemView, String?), queued(IosItemView)
         case activityHeader(IosTurnView), activity(IosItemView, String)
         case request(IosTurnRequestView), error(IosTurnErrorView)
     }

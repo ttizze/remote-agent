@@ -22,8 +22,9 @@ extension ThreadScreen {
         if thread.hasOlderTurns {
             rows.append(.init(id: "history-older-turns", content: .olderTurns))
         }
-        for turn in thread.turns {
-            appendRows(for: turn, to: &rows)
+        for (index, turn) in thread.turns.enumerated() {
+            let endsNativeTurn = index + 1 == thread.turns.count || thread.turns[index + 1].turnId != turn.turnId
+            appendRows(for: turn, endsNativeTurn: endsNativeTurn, to: &rows)
         }
         for item in thread.queuedMessages {
             rows.append(.init(id: item.id, content: .queued(item)))
@@ -31,7 +32,7 @@ extension ThreadScreen {
         return rows
     }
 
-    func appendRows(for turn: IosTurnView, to rows: inout [ThreadConversationRow]) {
+    func appendRows(for turn: IosTurnView, endsNativeTurn: Bool, to rows: inout [ThreadConversationRow]) {
         if let opening = turn.openingUserMessage {
             rows.append(.init(
                 id: "opening:" + turn.id,
@@ -66,7 +67,9 @@ extension ThreadScreen {
             rows.append(.init(id: "history-error:" + turn.id, content: .error(error)))
         }
         for item in turn.responses {
-            rows.append(.init(id: "history-item:" + item.id, content: .response(item)))
+            let forkTurnId = !turn.isInProgress && endsNativeTurn && item.id == turn.responses.last?.id ? turn
+                .turnId : nil
+            rows.append(.init(id: "history-item:" + item.id, content: .response(item, forkTurnId)))
         }
     }
 
@@ -76,7 +79,7 @@ extension ThreadScreen {
         case .olderTurns: historyBoundary(nil)
         case let .olderItems(turnId): historyBoundary(turnId)
         case let .user(item): ThreadMessageRow(item: item, isUser: true, model: model).padding(.top, 16)
-        case let .response(item): ThreadMessageRow(item: item, isUser: false, model: model)
+        case let .response(item, turnId): ThreadMessageRow(item: item, isUser: false, model: model, forkTurnId: turnId)
         case let .activityHeader(turn): activityHeader(turn)
         case let .activity(item, turnId):
             ThreadItemRow(item: item, model: model, isExpanded: expandedItemIds.contains(item.id),

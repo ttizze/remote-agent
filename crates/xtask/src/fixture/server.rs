@@ -1,4 +1,4 @@
-use super::{Config, history, scenario};
+use super::{Config, accounts, history, scenario};
 use crate::Result;
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -80,7 +80,7 @@ impl Context {
         self.write(&Reply { id, result })
     }
 
-    fn error(&self, id: &Value, code: i32, message: &str) -> Result<()> {
+    pub(super) fn error(&self, id: &Value, code: i32, message: &str) -> Result<()> {
         self.write(&json!({"id":id,"error":{"code":code,"message":message}}))
     }
 
@@ -189,6 +189,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
     tokio::task::LocalSet::new().run_until(async move {
         let context = Rc::new(Context { home, config, output: RefCell::new(BufWriter::new(std::io::stdout())),
             pending: RefCell::new(HashMap::new()), controls: RefCell::new(HashMap::new()) });
+        let mut accounts = accounts::Accounts::load(&context.home)?;
         let mut threads = IndexMap::<String, SharedThread>::new();
         let mut saved_threads = None;
         let mut list_contents = None;
@@ -210,6 +211,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             match method {
                 "initialize" => context.respond(id, &json!({"userAgent":"remote-agent-simulator-fixture",
                     "platformFamily":"unix","platformOs":"macos","codexHome":context.home}))?,
+                "account/read" | "getAuthStatus" | "account/login/start" | "account/login/cancel" | "account/logout" | "fixture/account/current" | "fixture/account/refresh" => accounts.request(&context, id, method, params)?,
                 "model/list" => {
                     let path = context.home.join("models-fixture.json");
                     let models = if path.exists() { serde_json::from_slice(&fs::read(path)?)? } else {
@@ -279,6 +281,30 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     thread.metadata.insert("updatedAt".into(), next_thread.into());
                     #[derive(Serialize)] struct Started<'a> { thread: &'a Thread }
                     context.respond(id, &Started { thread: &thread })?;
+                    threads.insert(thread_id, Rc::new(RefCell::new(thread)));
+                }
+                "thread/fork" => {
+                    let Some(source) = threads.get(params["threadId"].as_str().unwrap_or("")).cloned() else {
+                        context.error(id, -32602, "thread not found")?; continue;
+                    };
+                    let source = source.borrow();
+                    let Some(boundary) = source.turns.iter().position(|turn| turn.borrow()["id"] == params["lastTurnId"]) else {
+                        context.error(id, -32602, "turn not found")?; continue;
+                    };
+                    if source.turns[boundary].borrow()["status"] == "inProgress" {
+                        context.error(id, -32602, "completed turn required")?; continue;
+                    }
+                    next_thread += 1;
+                    let thread_id = format!("fixture-thread-{next_thread}");
+                    let mut thread = Thread { metadata: source.metadata.clone(),
+                        turns: source.turns[..=boundary].iter().map(|turn| Rc::new(RefCell::new(turn.borrow().clone()))).collect() };
+                    thread.metadata.insert("id".into(), thread_id.clone().into());
+                    thread.metadata.insert("createdAt".into(), next_thread.into());
+                    thread.metadata.insert("updatedAt".into(), next_thread.into());
+                    thread.metadata.insert("status".into(), json!({"type":"idle"}));
+                    #[derive(Serialize)] struct Forked<'a> { thread: ThreadView<'a> }
+                    context.respond(id, &Forked { thread: ThreadView { metadata: &thread.metadata,
+                        turns: if params["excludeTurns"] == true { &[] } else { &thread.turns } } })?;
                     threads.insert(thread_id, Rc::new(RefCell::new(thread)));
                 }
                 "turn/start" => {

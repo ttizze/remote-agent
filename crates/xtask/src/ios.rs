@@ -21,6 +21,7 @@ const DEFAULT_TESTS: &[&str] = &[
     "testSimulatorUpdatesAnOpenConversationFromAnotherClient",
     "testSimulatorReviewsTheOpenSessionsWorktree",
     "testSimulatorStartsOnListAndPreservesDetailOnForeground",
+    "testSimulatorSwitchesCodexAccountsAndForksConversation",
     "testSimulatorReturnsToListWithNativeEdgeSwipeAndRetainsDrafts",
     "testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation",
     "testSimulatorUsesNativeHostNavigationAndPairingDismissal",

@@ -154,6 +154,9 @@ struct ThreadMessageRow: View {
     let item: IosItemView
     let isUser: Bool
     let model: BexAppViewModel
+    var forkTurnId: String?
+    @State private var forking = false
+    @State private var forkError: String?
     @State private var sharing = false
     @State private var expanded = false
     @State private var copied = false
@@ -196,9 +199,20 @@ struct ThreadMessageRow: View {
                         .accessibilityLabel("回答を共有")
                     Button { expanded = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
                         .accessibilityLabel("回答を広げて表示")
+                    if let forkTurnId {
+                        Button { fork(through: forkTurnId) } label: {
+                            Image(systemName: "arrow.triangle.branch")
+                        }
+                        .disabled(forking)
+                        .accessibilityLabel("ここから会話を分岐")
+                        .accessibilityIdentifier("response.fork." + item.id)
+                    }
                 }
                 .font(.system(size: 19)).foregroundColor(.secondary).buttonStyle(.plain)
                 .padding(.vertical, 4)
+                if let forkError {
+                    Text(forkError).font(.caption).foregroundColor(.red)
+                }
             }
         }
         .padding(.bottom, isUser ? 12 : 8)
@@ -209,6 +223,22 @@ struct ThreadMessageRow: View {
                     .navigationTitle("回答").navigationBarTitleDisplayMode(.inline)
                     .toolbar { Button("閉じる") { expanded = false } }
             }.preferredColorScheme(.dark)
+        }
+    }
+
+    private func fork(through turnId: String) {
+        guard !forking, let threadId = model.state.selectedThreadId,
+              let host = model.state.selectedProfileId else { return }
+        forking = true
+        forkError = nil
+        model.forkThread(threadId, through: turnId) { result, error in
+            forking = false
+            guard model.state.selectedProfileId == host, model.state.selectedThreadId == threadId else { return }
+            if let thread = result?["thread"] as? [String: Any], let id = thread["id"] as? String {
+                model.openThread(id)
+            } else {
+                forkError = error ?? "会話を分岐できませんでした。"
+            }
         }
     }
 }

@@ -79,15 +79,19 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     let authentication = DeviceAuthenticationState::load(directory.join("devices.json"))?;
     let desktop_projects =
         DesktopProjectStore::from_environment().map_err(|error| error.to_string())?;
+    let app_server_config = codex_app_server::AppServerConfig {
+        program: config.codex,
+        ..codex_app_server::AppServerConfig::default()
+    };
     let app_server = Arc::new(
-        codex_app_server::CodexAppServer::spawn(codex_app_server::AppServerConfig {
-            program: config.codex,
-            ..codex_app_server::AppServerConfig::default()
-        })
-        .await
-        .map_err(|error| error.to_string())?,
+        codex_app_server::CodexAppServer::spawn(app_server_config.clone())
+            .await
+            .map_err(|error| error.to_string())?,
     );
     let service = CodexRpcService::new(app_server.clone(), desktop_projects);
+    service
+        .enable_accounts(directory.join("codex-accounts"), app_server_config)
+        .await?;
     service.start();
     let remotes = RemoteHosts::load(Arc::new(KeychainRemoteStore::new(
         directory

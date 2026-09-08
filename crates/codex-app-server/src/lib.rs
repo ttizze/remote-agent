@@ -20,6 +20,8 @@ pub struct AppServerConfig {
     pub program: PathBuf,
     pub client: ClientInfo,
     pub request_timeout: Duration,
+    pub codex_home: Option<PathBuf>,
+    pub config_overrides: Vec<String>,
 }
 
 impl Default for AppServerConfig {
@@ -32,6 +34,8 @@ impl Default for AppServerConfig {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             },
             request_timeout: Duration::from_secs(30),
+            codex_home: None,
+            config_overrides: Vec::new(),
         }
     }
 }
@@ -134,7 +138,14 @@ impl CodexAppServer {
         let executable = executable::resolve(&config.program)?;
         let supported_methods =
             schema::generate_and_validate(&executable, config.request_timeout).await?;
-        let mut child = Command::new(&executable)
+        let mut command = Command::new(&executable);
+        if let Some(home) = &config.codex_home {
+            command.env("CODEX_HOME", home);
+        }
+        for value in &config.config_overrides {
+            command.arg("-c").arg(value);
+        }
+        let mut child = command
             .arg("app-server")
             .arg("--listen")
             .arg("stdio://")
