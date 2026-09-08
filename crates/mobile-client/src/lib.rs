@@ -11,7 +11,7 @@ mod transfers;
 
 pub mod ffi;
 
-#[cfg(target_os = "android")]
+#[cfg(feature = "jni")]
 mod android_jni;
 
 pub use client::{

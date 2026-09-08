@@ -2,6 +2,7 @@
 members = [
     "apps/desktop",
     "crates/codex-app-server",
+    "crates/conversation-presentation",
     "crates/host-daemon",
     "crates/host-protocol",
     "crates/mobile-client",

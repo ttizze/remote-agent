@@ -219,3 +219,15 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_transfer(
         Err(error) => { exception(&mut env, error); ptr::null_mut() }
     }
 }
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_presentConversation(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    request_json: JString<'_>,
+) -> jstring {
+    match string(&mut env, request_json).and_then(|request| conversation_presentation::present_json(&request)) {
+        Ok(result) => java_string(&mut env, result),
+        Err(error) => { exception(&mut env, error); ptr::null_mut() }
+    }
+}

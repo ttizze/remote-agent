@@ -2,16 +2,43 @@
 
 ## Unreleased
 
+- Preserve supported Mac model settings across reconnects, synchronize effort and speed when opening a different model or switching Hosts, and show standard speed only once. Consolidate model lookup and settings normalization; move model-catalog pages into UI state without copying their JSON bodies.
+
 - Add Host-persisted Mac settings for automatic worktrees on new sessions and optional file/directory copying, including `.env`. Apply both switches to Mac and iPhone session starts, keep worktree tasks in their original projects, and update the Mac workspace path and branch after creation. Defaults remain off; reopening existing sessions does not create or copy again.
 
 - Preserve mobile task-list pagination and search when returning from a conversation. Keep the current screen when returning from the background; open the task list only on a fresh app launch.
 
 - Start iPhone task-list project folders collapsed; preserve manual expansion during refresh and conversation navigation.
 
+- Add a left thumbnail rail to iPhone and Mac image viewers for all generated images in the current session, including older paginated history. Switch the main image by selecting a thumbnail; keep Save then Close at the top right. Save the selected original to Photos on iPhone or a chosen file on Mac. Keep uploaded attachments out of the generated-image list.
+
+- Open iPhone conversation images in a full-screen preview on tap. Place Save followed by Close at the top right, also in image file-link previews. Save original image data to Photos with add-only permission, prevent duplicate saves, and report errors.
+
+- Render generated images in Mac and iPhone conversations outside collapsed work, preserve complete image results in paginated history, and support saved Host paths and inline image data. Open Markdown file links on the selected Host; show iPhone files in a dismissible Quick Look sheet. Update and relaunch the signed Mac app; verify image rendering, file links, and reopened history on iOS Simulator.
+
+- Add compact, rounded Mac model controls with a blue stepped reasoning-effort slider, white draggable thumb, Japanese effort labels, and catalog-backed speed menu. Capture model, effort, and speed when submitting; apply them to new turns, and reset to supported defaults when changing models.
+
 - Update and restart the signed Mac Host to activate `host/dictation/transcribe` instead of forwarding it to Codex. Remove the iPhone and Host 30-second voice-recording limit and the separate recording-cancel button. Keep Stop-to-draft and Send-directly behavior; verify longer recordings through the encrypted relay and iOS Simulator.
 
+- Install and launch iPhone build 36 and update the signed Mac app. Share event classification and state-transition policy across PC and mobile, including denied automatic approval reviews and late lifecycle/retry events. Move owned desktop item bodies, remove history-sized echo reconciliation storage, cache turn projections and coalesce changed-row measurements. Add mobile-equivalent paginated Mac history, deferred activity details, stale-response guards and external-history watches. Preserve scroll position while adding history and expanding fetched output.
+
+- Install and launch iPhone build 35 and update the signed Mac app. Share conversation segmentation, activity summaries, visibility, titles, pending-input placement, and echo reconciliation in one Rust crate across PC and mobile. Keep bodies in their native owners and pass metadata through the C/JNI bridge; remove duplicated Kotlin/Swift/desktop rules.
+
+- Align Mac conversation activity grouping, chronological commentary, per-exchange answers, and completion folding with iPhone. Keep multiline commands out of fixed-height headers, show descriptive tool names, and retain full details on expansion. Project borrowed item slices instead of allocating separate message lists.
+
+- Display Mac chat submissions before Host acknowledgement, retain accepted input through delayed native echoes, and reconcile by client message ID. Preserve drafts on failure. Share draft-key and input construction, avoid attachment-extension allocations and pending-message render copies, and remove unreachable review-item rendering.
+
+- Show active-task spinners and white dots for unseen successful completions in the Mac sidebar. Clear dots after opening the conversation or restarting work; keep live status stable across in-flight list refreshes.
+
 - Install and launch iPhone build 34. Reuse unchanged item display objects within streamed turns and parse Markdown off the UI thread with coalesced updates. Remove duplicate raw bodies, unused notification logs, and obsolete mobile state APIs; retain paging metadata and normalize existing version 2 caches on load.
+
+- Support Ctrl+V alongside Command+V in Mac chat composers. Send on Enter only at the end of committed text without a selection; preserve Shift+Enter, mid-text newlines, and IME confirmation.
+
+- Restore image paste in the Mac chat and side-chat composers. Preserve selected draft text, reuse attachment uploads, convert clipboard TIFF/BMP images to PNG, and keep pasted files available across app restarts.
+
 - Install iPhone build 33. Separate navigation and conversation observation, project streamed state in 16 ms windows, and persist streams at completion or explicit flush. Keep small drags toward older messages detached from automatic bottom following.
+
+- Show a white dot on iPhone task rows for unseen successful completions. Keep the running spinner, preserve unread completions across relaunch, and clear the dot after the conversation loads. Existing idle tasks and completions already being viewed remain unmarked.
 
 - Keep earlier AI replies visible when several user instructions share one completed native turn; fold work within each exchange. Avoid intermediate JSON trees during mobile persistence and repeated attributed-string copies while rendering Markdown paragraphs.
 
@@ -25,7 +52,7 @@
 
 - Fix clipped corners in iPhone AI responses by rounding message backgrounds without clipping their content.
 
-- Add iPhone voice input through the Host's Codex dictation connection. Recording Stop returns the transcript to the composer; the adjacent Send button transcribes and sends directly. Preserve drafts on errors, keep failed sends editable, and remove temporary recordings on completion or cancellation.
+- Add iPhone voice input through the Host's Codex dictation connection. Recording Stop returns the transcript to the composer; the adjacent Send button transcribes and sends directly. Forward the App Server's User-Agent to fix native transcription requests being rejected by Cloudflare. Follow the desktop's recording-upload fallback when streaming fails, recognize session-closed events, and retain transcripts after nonfatal stream errors. Preserve drafts on errors, keep failed sends editable, and remove temporary recordings on completion or cancellation.
 
 - Show iPhone connection attempts with a header spinner on the task list and conversation; task-list loading uses the same spinner. Remove recovery and list-loading status banners; retain errors and manual retry.
 

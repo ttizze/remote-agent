@@ -4,6 +4,10 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /** UI projections of Codex data. Raw Codex values remain available on every projection. */
 @Serializable
@@ -281,95 +285,147 @@ internal fun ThreadSnapshot.upsertTurn(turn: CodexTurn): ThreadSnapshot = copy(
     turns = turns.replaceById(turn.id, turn) { it.id },
 )
 
-internal fun ThreadSnapshot.upsertItem(turnId: String, item: CodexItem): ThreadSnapshot = copy(
-    turns = turns.map { turn ->
-        if (turn.id == turnId) turn.copy(items = turn.items.replaceById(item.id, item) { it.id }) else turn
-    },
-)
-
-internal fun ThreadSnapshot.mergeTurnLifecycle(incoming: CodexTurn): ThreadSnapshot {
-    val current = turns.firstOrNull { it.id == incoming.id }
-    val merged = if (current == null) {
-        incoming
-    } else {
-        current.copy(
-            status = if (current.status != TurnStatus.InProgress && incoming.status == TurnStatus.InProgress) {
-                current.status
-            } else {
-                incoming.status
-            },
-            startedAtMs = incoming.startedAtMs ?: current.startedAtMs,
-            completedAtMs = incoming.completedAtMs ?: current.completedAtMs,
-            durationMs = incoming.durationMs ?: current.durationMs,
-            error = when {
-                incoming.error != null -> incoming.error
-                incoming.status == TurnStatus.Completed -> null
-                incoming.status != TurnStatus.InProgress && current.error?.willRetry == true -> null
-                else -> current.error
-            },
-            pendingRequests = if (incoming.pendingRequests.isEmpty()) current.pendingRequests else incoming.pendingRequests,
-            raw = incoming.raw ?: current.raw,
-        )
+/** Native body storage adapter; Rust decides the state transition. */
+internal fun ThreadSnapshot.applyConversationEvent(event: ThreadEvent): ThreadSnapshot {
+    val turnIndex = turns.indexOfLast { it.id == event.turnId }
+    val current = turns.getOrNull(turnIndex)
+    val itemId = when (event) {
+        is ThreadEvent.ItemStarted -> event.item.id
+        is ThreadEvent.ItemCompleted -> event.item.id
+        is ThreadEvent.AgentMessageDelta -> event.itemId
+        is ThreadEvent.ReasoningDelta -> event.itemId
+        is ThreadEvent.ReasoningSummaryDelta -> event.itemId
+        is ThreadEvent.CommandOutputDelta -> event.itemId
+        is ThreadEvent.FileChangeOutputDelta -> event.itemId
+        is ThreadEvent.GuardianReviewChanged -> event.reviewId
+        else -> null
     }
-    return upsertTurn(merged)
-}
-
-internal fun ThreadSnapshot.updateTurnError(turnId: String, error: CodexTurnError): ThreadSnapshot = copy(
-    turns = turns.map { turn ->
-        if (turn.id != turnId || error.willRetry && turn.status != TurnStatus.InProgress) {
-            turn
-        } else {
-            turn.copy(error = error)
+    val itemIndex = if (itemId == null) -1 else current?.items?.indexOfFirst { it.id == itemId } ?: -1
+    val delta = when (event) {
+        is ThreadEvent.AgentMessageDelta -> event.delta
+        is ThreadEvent.ReasoningDelta -> event.delta
+        is ThreadEvent.ReasoningSummaryDelta -> event.delta
+        is ThreadEvent.CommandOutputDelta -> event.delta
+        is ThreadEvent.FileChangeOutputDelta -> event.delta
+        else -> ""
+    }
+    val request = buildJsonObject {
+        put("operation", "transition")
+        put("event", buildJsonObject {
+            put("kind", event.conversationKind)
+            when (event) {
+                is ThreadEvent.TurnStarted -> put("status", "inProgress")
+                is ThreadEvent.TurnCompleted -> {
+                    put("status", Json.encodeToJsonElement(TurnStatus.serializer(), event.status))
+                    put("hasError", event.error != null)
+                }
+                is ThreadEvent.GuardianReviewChanged -> put("status", event.status)
+                is ThreadEvent.Error -> put("willRetry", event.error.willRetry)
+                else -> Unit
+            }
+            put("emptyDelta", delta.isEmpty())
+        })
+        put("current", buildJsonObject {
+            current?.let {
+                put("turnStatus", Json.encodeToJsonElement(TurnStatus.serializer(), it.status))
+                put("retryingError", it.error?.willRetry == true)
+                it.items.getOrNull(itemIndex)?.let { item -> put("itemType", item.conversationType) }
+            }
+        })
+    }
+    val decision = Json.decodeFromString<ConversationTransition>(nativeConversationPresentation(request.toString()))
+    when (decision.action) {
+        "ignore" -> return this
+        "threadStatus" -> return copy(summary = summary.copy(status = (event as ThreadEvent.ThreadStatusChanged).status))
+        "resolveRequest" -> {
+            val id = (event as ThreadEvent.RequestResolved).requestId
+            val updated = turns.map { turn ->
+                if (turn.pendingRequests.none { it.id == id }) turn
+                else turn.copy(pendingRequests = turn.pendingRequests.filterNot { it.id == id })
+            }
+            return if (updated.indices.all { updated[it] === turns[it] }) this else copy(turns = updated)
         }
-    },
-)
-
-internal fun ThreadSnapshot.addPendingRequest(turnId: String, request: CodexServerRequest): ThreadSnapshot = copy(
-    turns = turns.map { turn ->
-        if (turn.id == turnId) turn.copy(
-            pendingRequests = turn.pendingRequests.replaceById(request.id, request) { it.id },
-        ) else turn
-    },
-)
-
-internal fun ThreadSnapshot.removePendingRequest(requestId: String): ThreadSnapshot = copy(
-    turns = turns.map { turn -> turn.copy(pendingRequests = turn.pendingRequests.filterNot { it.id == requestId }) },
-)
-
-internal fun ThreadSnapshot.removeItem(turnId: String, itemId: String): ThreadSnapshot = copy(
-    turns = turns.map { turn ->
-        if (turn.id == turnId) turn.copy(items = turn.items.filterNot { it.id == itemId }) else turn
-    },
-)
-
-internal fun ThreadSnapshot.appendDelta(turnId: String, itemId: String, delta: String, kind: DeltaKind): ThreadSnapshot = copy(
-    turns = turns.map { turn ->
-        if (turn.id != turnId) turn else turn.copy(items = turn.items.map { item -> item.appendDelta(itemId, delta, kind) })
-    },
-)
-
-internal enum class DeltaKind { AgentMessage, Reasoning, CommandOutput, FileChangeOutput }
-
-private fun CodexItem.appendDelta(itemId: String, delta: String, kind: DeltaKind): CodexItem {
-    if (id != itemId) return this
-    return when (this) {
-        is CodexItem.AgentMessage -> if (kind == DeltaKind.AgentMessage) copy(text = text + delta) else this
-        is CodexItem.Reasoning -> if (kind == DeltaKind.Reasoning) copy(summary = summary + delta) else this
-        is CodexItem.CommandExecution -> if (kind == DeltaKind.CommandOutput) copy(output = output + delta) else this
-        is CodexItem.FileChange -> if (kind == DeltaKind.FileChangeOutput) copy(
-            changes = changes.appendOutput(delta),
-        ) else this
-        is CodexItem.UserMessage, is CodexItem.Unknown -> this
     }
+    val updated = if (decision.action == "turn") {
+        val incoming = when (event) {
+            is ThreadEvent.TurnStarted -> CodexTurn(event.turnId, event.status, startedAtMs = event.startedAtMs)
+            is ThreadEvent.TurnCompleted -> CodexTurn(event.turnId, event.status, startedAtMs = event.startedAtMs,
+                completedAtMs = event.completedAtMs, durationMs = event.durationMs, error = event.error)
+            else -> error("Lifecycle transition requires a turn event")
+        }
+        (current ?: incoming).copy(
+            status = Json.decodeFromJsonElement(TurnStatus.serializer(), JsonPrimitive(decision.status!!)),
+            startedAtMs = incoming.startedAtMs ?: current?.startedAtMs,
+            completedAtMs = incoming.completedAtMs ?: current?.completedAtMs,
+            durationMs = incoming.durationMs ?: current?.durationMs,
+            error = if (decision.clearError) null else incoming.error ?: current?.error,
+        )
+    } else {
+        if (current == null) return this
+        when (decision.action) {
+            "item" -> {
+                val item = when (event) {
+                    is ThreadEvent.ItemStarted -> event.item
+                    is ThreadEvent.ItemCompleted -> event.item
+                    is ThreadEvent.GuardianReviewChanged -> CodexItem.Unknown(event.reviewId, "automaticApprovalReview", event.raw)
+                    else -> error("Item transition requires an item event")
+                }
+                current.copy(items = if (itemIndex < 0) current.items + item else current.items.toMutableList().also { it[itemIndex] = item })
+            }
+            "removeItem" -> if (itemIndex < 0) return this else current.copy(items = current.items.toMutableList().also { it.removeAt(itemIndex) })
+            "append" -> current.copy(items = current.items.toMutableList().also { it[itemIndex] = it[itemIndex].appendConversationText(delta) })
+            "error" -> current.copy(error = (event as ThreadEvent.Error).error)
+            "request" -> {
+                val request = (event as ThreadEvent.RequestStarted).request
+                current.copy(pendingRequests = current.pendingRequests.replaceById(request.id, request) { it.id })
+            }
+            else -> error("Unknown conversation transition: ${decision.action}")
+        }
+    }
+    return if (updated == current) this else copy(turns = if (turnIndex < 0) turns + updated else turns.toMutableList().also { it[turnIndex] = updated })
 }
 
-private fun List<FileUpdateChange>.appendOutput(delta: String): List<FileUpdateChange> = when {
-    isEmpty() -> listOf(FileUpdateChange(path = "", kind = FileUpdateKind.Update, diff = delta))
-    else -> dropLast(1) + last().copy(diff = last().diff + delta)
+@Serializable
+private data class ConversationTransition(val action: String, val status: String?, val field: String?, val clearError: Boolean)
+
+// These mappings describe the native types, not event acceptance or precedence.
+internal val CodexItem.conversationType: String get() = when (this) {
+    is CodexItem.UserMessage -> "userMessage"
+    is CodexItem.AgentMessage -> "agentMessage"
+    is CodexItem.Reasoning -> "reasoning"
+    is CodexItem.CommandExecution -> "commandExecution"
+    is CodexItem.FileChange -> "fileChange"
+    is CodexItem.Unknown -> codexType
+}
+private val ThreadEvent.conversationKind: String get() = when (this) {
+    is ThreadEvent.TurnStarted -> "turnStarted"
+    is ThreadEvent.TurnCompleted -> "turnCompleted"
+    is ThreadEvent.ItemStarted -> "itemStarted"
+    is ThreadEvent.ItemCompleted -> "itemCompleted"
+    is ThreadEvent.AgentMessageDelta -> "agentMessageDelta"
+    is ThreadEvent.ReasoningDelta -> "reasoningDelta"
+    is ThreadEvent.ReasoningSummaryDelta -> "reasoningSummaryDelta"
+    is ThreadEvent.CommandOutputDelta -> "commandOutputDelta"
+    is ThreadEvent.FileChangeOutputDelta -> "fileChangeOutputDelta"
+    is ThreadEvent.Error -> "error"
+    is ThreadEvent.RequestStarted -> "requestStarted"
+    is ThreadEvent.RequestResolved -> "requestResolved"
+    is ThreadEvent.ThreadStatusChanged -> "threadStatusChanged"
+    is ThreadEvent.GuardianReviewChanged -> "guardianReviewChanged"
+    is ThreadEvent.Unknown -> "unknown"
+}
+private fun CodexItem.appendConversationText(delta: String): CodexItem = when (this) {
+    is CodexItem.AgentMessage -> copy(text = text + delta)
+    is CodexItem.Reasoning -> copy(summary = summary + delta)
+    is CodexItem.CommandExecution -> copy(output = output + delta)
+    is CodexItem.FileChange -> copy(changes = when {
+        changes.isEmpty() -> listOf(FileUpdateChange("", FileUpdateKind.Update, delta))
+        else -> changes.toMutableList().also { it[it.lastIndex] = it.last().copy(diff = it.last().diff + delta) }
+    })
+    else -> error("Shared transition selected an item without text storage")
 }
 
 private inline fun <T> List<T>.replaceById(id: String, value: T, idOf: (T) -> String): List<T> {
     val index = indexOfFirst { idOf(it) == id }
-    return if (index < 0) this + value else if (this[index] == value) this else
-        toMutableList().also { it[index] = value }
+    return if (index < 0) this + value else if (this[index] == value) this else toMutableList().also { it[index] = value }
 }

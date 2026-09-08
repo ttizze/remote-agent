@@ -59,7 +59,7 @@ class ThreadDetailPresentationTest {
         assertTrue(live.activityCanCollapse && done.activityCanCollapse)
         assertFalse(live.activityInitiallyExpanded)
         assertFalse(done.activityInitiallyExpanded)
-        assertEquals("Done", done.responses.single().text)
+        assertEquals("Done", done.responses.single().toThreadItemPresentation().collapsedBody)
         assertEquals("passed", (done.activityItems.last() as CodexItem.CommandExecution).output)
     }
 
@@ -67,8 +67,8 @@ class ThreadDetailPresentationTest {
     fun interrupted_and_failed_groups_are_expandable_and_keep_status_visible() {
         val activity = listOf<CodexItem>(CodexItem.Reasoning("reasoning", "working"))
         for ((status, summary) in listOf(
-            TurnStatus.Interrupted to "12s間作業した後に中断しました・思考",
-            TurnStatus.Failed to "12s間作業した後に失敗しました・思考",
+            TurnStatus.Interrupted to "12秒 作業した後に中断しました・思考",
+            TurnStatus.Failed to "12秒 作業した後に失敗しました・思考",
         )) {
             val group = CodexTurn("turn", status, activity, durationMs = 12_000).toThreadTurnPresentations().single()
             assertEquals(summary, group.activitySummary)
@@ -105,7 +105,7 @@ class ThreadDetailPresentationTest {
         assertEquals(listOf("first", "additional"), sections.flatMap { it.userMessages }.map { it.id })
         assertEquals(listOf("after"), sections.flatMap { it.activityItems }.map { it.id })
         assertEquals(listOf("before", "answer"), sections.flatMap { it.responses }.map { it.id })
-        assertEquals("24m 19s間作業しました", sections.last().activitySummary)
+        assertEquals("24分 19秒 作業しました", sections.last().activitySummary)
     }
 
     @Test
@@ -295,7 +295,7 @@ class ThreadDetailPresentationTest {
             Triple("webSearch", true, "Webを検索: Codex"),
             Triple("imageView", true, "画像を確認: /tmp/a.png"),
             Triple("sleep", false, "待機しました"),
-            Triple("imageGeneration", true, "画像を生成しました"),
+            Triple("imageGeneration", true, "画像を生成できませんでした"),
             Triple("enteredReviewMode", false, "レビューを開始しました"),
             Triple("exitedReviewMode", false, "レビューを終了しました"),
             Triple("contextCompaction", true, "コンテキストを圧縮しました"),

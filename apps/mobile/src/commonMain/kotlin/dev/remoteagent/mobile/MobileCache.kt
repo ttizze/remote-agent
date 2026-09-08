@@ -56,11 +56,11 @@ fun acknowledgeMessage(
     val updated = if (turnId == null) snapshot else snapshot.upsertTurn(
         snapshot.turns.firstOrNull { it.id == turnId } ?: CodexTurn(turnId, TurnStatus.InProgress),
     )
-    val alreadyEchoed = updated.turns.any { turn ->
-        turn.items.any { it is CodexItem.UserMessage && it.clientId == submission.clientId }
-    }
-    val retained = if (alreadyEchoed || updated.submittedMessages.any { it.clientId == submission.clientId }) updated else
-        updated.copy(submittedMessages = updated.submittedMessages + submission)
+    val retained = updated.copy(submittedMessages = retainPendingSubmissions(
+        updated.submittedMessages + submission,
+        updated.turns.asSequence().flatMap { it.items.asSequence() }
+            .filterIsInstance<CodexItem.UserMessage>().mapNotNull { it.clientId },
+    ))
     return cache.replaceProfile(hostIdentity, profile.copy(
         threadList = profile.threadList.replaceById(threadId, retained.summary, append = false),
         snapshots = profile.snapshots + (threadId to retained),
@@ -82,8 +82,8 @@ fun reconcileThreadRead(
     val pending = existing?.submittedMessages.orEmpty()
     val thread = if (pending.isEmpty()) refreshed else {
         val echoed = result.thread.turns.asSequence().flatMap { it.items.asSequence() }
-            .filterIsInstance<CodexItem.UserMessage>().mapNotNull { it.clientId }.toSet()
-        refreshed.copy(submittedMessages = pending.filterNot { it.clientId in echoed })
+            .filterIsInstance<CodexItem.UserMessage>().mapNotNull { it.clientId }
+        refreshed.copy(submittedMessages = retainPendingSubmissions(pending, echoed))
     }
     var profile = cache.profile(hostIdentity).copy(
         threadList = cache.profile(hostIdentity).threadList.replaceById(result.thread.summary.id, result.thread.summary),
@@ -126,48 +126,15 @@ private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache {
         return copy(threadList = updatedList, snapshots = updatedSnapshots)
     }
     val existing = snapshots[event.threadId] ?: return this
-    val updated = when (event) {
-        is ThreadEvent.TurnStarted -> existing.mergeTurnLifecycle(
-            CodexTurn(event.turnId, event.status, startedAtMs = event.startedAtMs),
-        )
-        is ThreadEvent.TurnCompleted -> existing.mergeTurnLifecycle(
-            CodexTurn(
-                id = event.turnId,
-                status = event.status,
-                startedAtMs = event.startedAtMs,
-                completedAtMs = event.completedAtMs,
-                durationMs = event.durationMs,
-                error = event.error,
-            ),
-        )
-        is ThreadEvent.ItemStarted -> existing.upsertItem(event.turnId, event.item)
-        is ThreadEvent.AgentMessageDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.AgentMessage)
-        is ThreadEvent.ReasoningDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.Reasoning)
-        is ThreadEvent.ReasoningSummaryDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.Reasoning)
-        is ThreadEvent.CommandOutputDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.CommandOutput)
-        is ThreadEvent.FileChangeOutputDelta -> existing.appendDelta(event.turnId, event.itemId, event.delta, DeltaKind.FileChangeOutput)
-        is ThreadEvent.Error -> existing.updateTurnError(event.turnId, event.error)
-        is ThreadEvent.RequestStarted -> existing.addPendingRequest(event.turnId, event.request)
-        is ThreadEvent.RequestResolved -> existing.removePendingRequest(event.requestId)
-        is ThreadEvent.GuardianReviewChanged -> if (event.status == "approved") {
-            existing.removeItem(event.turnId, event.reviewId)
-        } else {
-            existing.upsertItem(
-                event.turnId,
-                CodexItem.Unknown(event.reviewId, "automaticApprovalReview", event.raw),
-            )
-        }
-        is ThreadEvent.ItemCompleted -> existing.upsertItem(event.turnId, event.item)
-        is ThreadEvent.ThreadStatusChanged -> existing
-        is ThreadEvent.Unknown -> existing
-    }
+    val updated = existing.applyConversationEvent(event)
+    if (updated === existing) return this
     val echoed = when (event) {
         is ThreadEvent.ItemStarted -> event.item as? CodexItem.UserMessage
         is ThreadEvent.ItemCompleted -> event.item as? CodexItem.UserMessage
         else -> null
     }?.clientId
     val reconciled = if (echoed == null || updated.submittedMessages.isEmpty()) updated else
-        updated.copy(submittedMessages = updated.submittedMessages.filterNot { it.clientId == echoed })
+        updated.copy(submittedMessages = retainPendingSubmissions(updated.submittedMessages, sequenceOf(echoed)))
     val updatedList = if (updated.summary == existing.summary) threadList else
         threadList.replaceById(updated.summary.id, updated.summary, append = false)
     return copy(

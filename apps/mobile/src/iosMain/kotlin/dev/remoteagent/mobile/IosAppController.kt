@@ -9,6 +9,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -156,6 +158,59 @@ class IosAppController {
                 is GatewayResult.Success -> completion(result.value, null)
                 is GatewayResult.Failure -> completion(null, result.message)
             }
+        }
+    }
+
+    fun readSessionImages(threadId: String, completion: (List<String>?, String?) -> Unit) {
+        val profile = controller.state.selectedProfile ?: run { completion(null, "接続先が選択されていません"); return }
+        scope.launch {
+            try {
+                suspend fun read(method: String, params: JsonObject): JsonObject {
+                    return when (val result = dependencies.gateway.rawRequest(profile, method, params)) {
+                        is GatewayResult.Failure -> error(result.message)
+                        is GatewayResult.Success -> (result.value as? JsonObject)?.get("thread") as? JsonObject
+                            ?: error("画像一覧の履歴が無効です。")
+                    }
+                }
+                val sources = linkedSetOf<String>()
+                var page = read("host/thread/read", buildJsonObject {
+                    put("threadId", threadId); put("includeTurns", true)
+                    put("paginateHistory", true); put("deferItemDetails", true)
+                })
+                val turnCursors = mutableSetOf<String>()
+                while (true) {
+                    for (turn in (page["turns"] as? JsonArray ?: error("履歴のターンがありません。")).reversed()) {
+                        var itemPage = turn as? JsonObject ?: error("履歴のターンが無効です。")
+                        val turnId = (itemPage["id"] as? JsonPrimitive)?.contentOrNull ?: error("ターンIDがありません。")
+                        val itemCursors = mutableSetOf<String?>()
+                        while (true) {
+                            for (item in (itemPage["items"] as? JsonArray ?: error("履歴の項目がありません。")).reversed()) {
+                                val value = item as? JsonObject ?: continue
+                                if ((value["type"] as? JsonPrimitive)?.contentOrNull != "imageGeneration") continue
+                                val path = (value["savedPath"] as? JsonPrimitive)?.contentOrNull
+                                val inline = (value["result"] as? JsonPrimitive)?.contentOrNull
+                                if (!path.isNullOrBlank()) sources.add(path)
+                                else if (!inline.isNullOrBlank()) sources.add(if (inline.startsWith("data:")) inline else "data:image/png;base64,$inline")
+                            }
+                            if ((itemPage["itemsHasMore"] as? JsonPrimitive)?.contentOrNull != "true") break
+                            // A turn skipped by the initial item budget starts at a null cursor.
+                            val cursor = (itemPage["itemsNextCursor"] as? JsonPrimitive)?.contentOrNull
+                            check(itemCursors.add(cursor)) { "履歴カーソルが進みませんでした。" }
+                            val older = read("host/thread/items/list", buildJsonObject {
+                                put("threadId", threadId); put("turnId", turnId); put("cursor", cursor); put("deferItemDetails", true)
+                            })
+                            itemPage = (older["turns"] as? JsonArray)?.singleOrNull() as? JsonObject ?: error("履歴のターンがありません。")
+                        }
+                    }
+                    val cursor = (page["historyCursor"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() } ?: break
+                    check(turnCursors.add(cursor)) { "履歴カーソルが進みませんでした。" }
+                    page = read("host/thread/turns/list", buildJsonObject {
+                        put("threadId", threadId); put("cursor", cursor); put("deferItemDetails", true)
+                    })
+                }
+                completion(sources.toList().asReversed(), null)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (failure: IllegalStateException) { completion(null, failure.message) }
         }
     }
 

@@ -645,6 +645,35 @@ final class BexLaunchUITests: XCTestCase {
         screenshot.name = "New conversation fetched when returning to the list"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
 
+    func testSimulatorMarksUnseenCompletionUntilOpened() throws {
+#if !targetEnvironment(simulator)
+        throw XCTSkip("This test uses the isolated Simulator fixture")
+#endif
+        let app = try connectedSimulatorApp()
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "value == %@", "完了・未確認")).firstMatch.exists)
+        try startSimulatorConversation(app, promptText: "[success] Notify when this task finishes")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertEqual(row.value as? String, "実行中")
+        let running = XCTAttachment(screenshot: app.screenshot())
+        running.name = "Task running in list"; running.lifetime = .keepAlways; add(running)
+        let completed = expectation(for: NSPredicate(format: "value == %@", "完了・未確認"), evaluatedWith: row)
+        wait(for: [completed], timeout: 25)
+        let unread = XCTAttachment(screenshot: app.screenshot())
+        unread.name = "White dot for unseen completion"; unread.lifetime = .keepAlways; add(unread)
+        app.terminate(); app.launch()
+        XCTAssertTrue(row.waitForExistence(timeout: 20))
+        XCTAssertEqual(row.value as? String, "完了・未確認")
+        row.tap()
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 20))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        XCTAssertEqual(row.value as? String, "")
+        let read = XCTAttachment(screenshot: app.screenshot())
+        read.name = "Completion dot cleared after opening"; read.lifetime = .keepAlways; add(read)
+    }
+
     func testSimulatorCanStartAConversationInAProject() throws {
 #if !targetEnvironment(simulator)
         throw XCTSkip("This isolated conversation-start E2E runs only in the iOS Simulator")
@@ -1130,6 +1159,82 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertFalse(stop.exists)
     }
 
+    func testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[generated-images] Show generated images and links")
+        let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(finalAnswer.waitForExistence(timeout: 25))
+        let finalID = finalAnswer.identifier
+        func showGeneratedImage(_ name: String) {
+            let image = app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image.fixture-generated-\(name)-")).firstMatch
+            for _ in 0..<10 {
+                if image.exists && image.isHittable { break }
+                app.swipeDown()
+            }
+            XCTAssertTrue(image.waitForExistence(timeout: 10), "Generated image did not decode")
+            XCTAssertTrue(image.isHittable)
+        }
+        func openLink(_ label: String) {
+            let link = app.staticTexts[label]
+            for _ in 0..<12 {
+                if link.exists && link.isHittable { break }
+                app.swipeUp()
+            }
+            XCTAssertTrue(link.waitForExistence(timeout: 10)); link.tap()
+            let done = app.buttons["conversation.preview.close"]
+            XCTAssertTrue(done.waitForExistence(timeout: 15), "The Host file did not open in Quick Look")
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = label; screenshot.lifetime = .keepAlways; add(screenshot)
+            done.tap()
+        }
+        showGeneratedImage("inline")
+        showGeneratedImage("saved")
+        let image = XCTAttachment(screenshot: app.screenshot())
+        image.name = "Generated image outside collapsed work"; image.lifetime = .keepAlways; add(image)
+        openLink("生成画像を開く")
+        openLink("ファイルを開く")
+        app.terminate(); _ = try connectedSimulatorApp()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
+        let number = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
+        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        showGeneratedImage("inline")
+        showGeneratedImage("saved")
+        openLink("生成画像を開く")
+    }
+
+    func testSimulatorBrowsesAllSessionImagesAndSavesTheSelection() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[generated-images] [gallery] Browse all generated images")
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
+        let image = app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image.fixture-generated-inline-")).firstMatch
+        for _ in 0..<10 {
+            if image.exists && image.isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertTrue(image.waitForExistence(timeout: 10)); image.tap()
+        let position = app.staticTexts["conversation.preview.position"]
+        let complete = expectation(for: NSPredicate(format: "label == %@", "8 / 8"), evaluatedWith: position)
+        wait(for: [complete], timeout: 30)
+        let first = app.images["conversation.preview.thumbnail.0"]
+        XCTAssertTrue(first.waitForExistence(timeout: 10)); first.tap()
+        XCTAssertEqual(position.label, "1 / 8")
+        let save = app.buttons["conversation.preview.save"]
+        let ready = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: save)
+        wait(for: [ready], timeout: 15)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Session image gallery including older turns and item gaps"; screenshot.lifetime = .keepAlways; add(screenshot)
+        save.tap()
+        let saved = expectation(for: NSPredicate(format: "label == %@ AND enabled == false", "保存済み"), evaluatedWith: save)
+        wait(for: [saved], timeout: 20)
+        app.images["conversation.preview.thumbnail.1"].tap()
+        XCTAssertEqual(position.label, "2 / 8")
+        let next = expectation(for: NSPredicate(format: "label == %@ AND enabled == true", "保存"), evaluatedWith: save)
+        wait(for: [next], timeout: 15)
+        app.buttons["conversation.preview.close"].tap()
+        XCTAssertTrue(image.waitForExistence(timeout: 10))
+    }
+
     func testSimulatorDisplaysImagesInMessagesAndMarkdownAfterReopening() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[images] Display the attached images")
@@ -1148,13 +1253,27 @@ final class BexLaunchUITests: XCTestCase {
             XCTAssertTrue(image.isHittable)
         }
         show(inlineImage, upward: true)
+        inlineImage.tap()
+        let save = app.buttons["conversation.preview.save"]
+        let close = app.buttons["conversation.preview.close"]
+        XCTAssertTrue(close.waitForExistence(timeout: 10))
+        XCTAssertTrue(save.exists)
+        XCTAssertLessThan(save.frame.midX, close.frame.midX)
+        XCTAssertGreaterThan(save.frame.midX, app.frame.midX)
+        let preview = XCTAttachment(screenshot: app.screenshot())
+        preview.name = "Expanded image with Save and Close at top right"; preview.lifetime = .keepAlways; add(preview)
+        save.tap()
+        let saved = expectation(for: NSPredicate(format: "label == %@ AND enabled == false", "保存済み"), evaluatedWith: save)
+        wait(for: [saved], timeout: 20)
+        close.tap()
+        XCTAssertTrue(inlineImage.waitForExistence(timeout: 5))
         let response = XCTAttachment(screenshot: app.screenshot())
         response.name = "Markdown image decoded in the conversation"; response.lifetime = .keepAlways; add(response)
         show(hostImage, upward: false)
         show(messageImage, upward: false)
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = "Host attachment decoded in the user message"; attachment.lifetime = .keepAlways; add(attachment)
-        app.terminate(); app.launch()
+        app.terminate(); _ = try connectedSimulatorApp()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
         let threadNumber = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
         let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(threadNumber)"]

@@ -1,5 +1,7 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.Json
@@ -231,14 +233,17 @@ internal fun codexThreadEvent(
 ): ThreadEvent {
     val raw = params.asObjectOrNull() ?: JsonObject(mapOf("value" to params))
     val threadId = raw.string("threadId").orEmpty()
-    return when (method) {
-        "turn/started" -> ThreadEvent.TurnStarted(
+    val kind = Json.decodeFromString<String>(nativeConversationPresentation(buildJsonObject {
+        put("operation", "eventKind"); put("method", method)
+    }.toString()))
+    return when (kind) {
+        "turnStarted" -> ThreadEvent.TurnStarted(
             threadId,
             raw.childObject("turn")?.string("id").orEmpty(),
             TurnStatus.InProgress,
             unixSecondsToMilliseconds(raw.childObject("turn")?.long("startedAt")),
         )
-        "turn/completed" -> raw.childObject("turn").let { turn ->
+        "turnCompleted" -> raw.childObject("turn").let { turn ->
             ThreadEvent.TurnCompleted(
                 threadId,
                 turn?.string("id").orEmpty(),
@@ -249,41 +254,42 @@ internal fun codexThreadEvent(
                 turn?.childObject("error")?.let(::codexTurnError),
             )
         }
-        "item/started" -> ThreadEvent.ItemStarted(
+        "itemStarted" -> ThreadEvent.ItemStarted(
             threadId,
             raw.string("turnId").orEmpty(),
             codexItem(raw["item"] ?: emptyJsonObject()),
         )
-        "item/completed" -> ThreadEvent.ItemCompleted(
+        "itemCompleted" -> ThreadEvent.ItemCompleted(
             threadId,
             raw.string("turnId").orEmpty(),
             codexItem(raw["item"] ?: emptyJsonObject()),
         )
-        "item/agentMessage/delta" -> ThreadEvent.AgentMessageDelta(
+        "agentMessageDelta" -> ThreadEvent.AgentMessageDelta(
             threadId,
             raw.string("turnId").orEmpty(),
             eventItemId(raw),
             eventDelta(raw),
         )
-        "item/reasoning/textDelta" -> ThreadEvent.ReasoningDelta(
+        "reasoningDelta" -> ThreadEvent.ReasoningDelta(
             threadId,
             raw.string("turnId").orEmpty(),
             eventItemId(raw),
             eventDelta(raw),
         )
-        "item/reasoning/summaryTextDelta" ->
+        "reasoningSummaryDelta" ->
             ThreadEvent.ReasoningSummaryDelta(
                 threadId,
                 raw.string("turnId").orEmpty(),
                 eventItemId(raw),
                 eventDelta(raw),
             )
-        "item/commandExecution/outputDelta" -> ThreadEvent.CommandOutputDelta(
+        "commandOutputDelta" -> ThreadEvent.CommandOutputDelta(
             threadId,
             raw.string("turnId").orEmpty(),
             eventItemId(raw),
             eventDelta(raw),
         )
+        "fileChangeOutputDelta" -> ThreadEvent.FileChangeOutputDelta(threadId, raw.string("turnId").orEmpty(), eventItemId(raw), eventDelta(raw))
         "error" -> ThreadEvent.Error(
             threadId = threadId,
             turnId = raw.string("turnId").orEmpty(),
@@ -292,15 +298,15 @@ internal fun codexThreadEvent(
             ),
             willRetry = raw.boolean("willRetry") == true,
         )
-        "serverRequest/resolved" -> ThreadEvent.RequestResolved(
+        "requestResolved" -> ThreadEvent.RequestResolved(
             threadId = threadId,
             requestId = raw["requestId"]?.stringOrNull() ?: raw["requestId"].toString(),
         )
-        "thread/status/changed" -> ThreadEvent.ThreadStatusChanged(
+        "threadStatusChanged" -> ThreadEvent.ThreadStatusChanged(
             threadId = threadId,
             status = codexThreadStatus(raw["status"]),
         )
-        "item/autoApprovalReview/started", "item/autoApprovalReview/completed" ->
+        "guardianReviewChanged" ->
             ThreadEvent.GuardianReviewChanged(
                 threadId = threadId,
                 turnId = raw.string("turnId").orEmpty(),

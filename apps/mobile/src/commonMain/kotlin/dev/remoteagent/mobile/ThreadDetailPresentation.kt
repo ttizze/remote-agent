@@ -1,5 +1,10 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
@@ -13,7 +18,7 @@ internal data class ThreadTurnPresentation(
     val status: TurnStatus,
     val userMessages: List<CodexItem.UserMessage>,
     val activityItems: List<CodexItem>,
-    val responses: List<CodexItem.AgentMessage>,
+    val responses: List<CodexItem>,
     val activitySummary: String?,
     val activityInitiallyExpanded: Boolean,
     val activityCanCollapse: Boolean,
@@ -36,120 +41,49 @@ internal data class ThreadRequestPresentation(
     val body: String,
 )
 
-/** Accepted inputs remain visible at their send position until the native echo arrives. */
+/** Rust returns source indices; Kotlin keeps ownership of all message bodies. */
 internal fun ThreadSnapshot.conversationSegments(): List<ThreadTurnPresentation> = turns.flatMap { turn ->
-    val pending = submittedMessages.filter { it.turnId == turn.id }
-    if (pending.isEmpty()) turn.toThreadTurnPresentations() else {
-        val anchors = turn.items.mapTo(mutableSetOf()) { it.id }
-        val grouped = pending.groupBy { it.afterItemId?.takeIf(anchors::contains) }
-        val displayItems = buildList {
-            turn.items.forEach { item ->
-                add(item)
-                grouped[item.id].orEmpty().forEach { add(CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources)) }
-            }
-            grouped[null].orEmpty().forEach { add(CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources)) }
-        }
-        turn.toThreadTurnPresentations(displayItems)
-    }
+    turn.toThreadTurnPresentations(submittedMessages.filter { it.turnId == turn.id })
 }
 
-/** Completed work folds within each user exchange, never across a later instruction. */
-internal fun CodexTurn.toThreadTurnPresentations(displayItems: List<CodexItem> = items): List<ThreadTurnPresentation> {
-    val boundaries = buildList {
-        add(0)
-        var followsResponse = false
-        var exchangeEnd = 0
-        var exchangeHasAnswer = false
-        displayItems.forEachIndexed { index, item ->
-            if (index == exchangeEnd) {
-                exchangeEnd = index
-                exchangeHasAnswer = false
-                while (exchangeEnd < displayItems.size) {
-                    val exchangeItem = displayItems[exchangeEnd]
-                    if (exchangeEnd > index && exchangeItem is CodexItem.UserMessage) break
-                    if (status == TurnStatus.Completed && exchangeItem is CodexItem.AgentMessage &&
-                        exchangeItem.phase != AgentMessagePhase.Commentary
-                    ) exchangeHasAnswer = true
-                    exchangeEnd++
-                }
-            }
-            if (index > 0 && (item is CodexItem.UserMessage ||
-                    (!exchangeHasAnswer && followsResponse && item !is CodexItem.AgentMessage && item.isVisibleInConversation()))) {
-                add(index)
-                followsResponse = false
-            }
-            if (item is CodexItem.AgentMessage) followsResponse = true
-        }
-        add(displayItems.size)
+internal fun CodexTurn.toThreadTurnPresentations(submissions: List<SubmittedMessage> = emptyList()): List<ThreadTurnPresentation> {
+    val request = buildJsonObject {
+        put("operation", "turn")
+        put("turn", buildJsonObject {
+            put("id", id)
+            put("status", presentationJson.encodeToJsonElement(TurnStatus.serializer(), status))
+            durationMs?.let { put("durationMs", it) }
+            startedAtMs?.let { put("startedAtMs", it) }
+            completedAtMs?.let { put("completedAtMs", it) }
+            put("items", JsonArray(items.map { it.presentationMetadata() }))
+        })
+        put("pending", JsonArray(submissions.map { pending -> buildJsonObject {
+            pending.afterItemId?.let { put("afterItemId", it) }
+            put("item", buildJsonObject { put("id", pending.clientId); put("clientId", pending.clientId); put("type", "userMessage") })
+        } }))
     }
-    return (0 until boundaries.lastIndex).map { section ->
-        val start = boundaries[section]
-        val end = boundaries[section + 1]
-        var finalAnswer: CodexItem.AgentMessage? = null
-        if (status == TurnStatus.Completed) for (index in end - 1 downTo start) {
-            val candidate = displayItems[index] as? CodexItem.AgentMessage ?: continue
-            if (candidate.phase == AgentMessagePhase.FinalAnswer) {
-                finalAnswer = candidate
-                break
+    val segments = presentationJson.decodeFromString<List<NativeConversationSegment>>(nativeConversationPresentation(request.toString()))
+    return segments.map { segment ->
+        val users = mutableListOf<CodexItem.UserMessage>()
+        val activities = mutableListOf<CodexItem>()
+        val responses = mutableListOf<CodexItem>()
+        for (row in segment.rows) {
+            val item = if (row.source < items.size) items[row.source] else submissions[row.source - items.size].let {
+                CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources)
             }
-            if (finalAnswer == null && candidate.phase == null) finalAnswer = candidate
-        }
-        val last = section == boundaries.lastIndex - 1
-        val userMessages = mutableListOf<CodexItem.UserMessage>()
-        val activityItems = mutableListOf<CodexItem>()
-        val responses = mutableListOf<CodexItem.AgentMessage>()
-        for (index in start until end) {
-            when (val item = displayItems[index]) {
-                is CodexItem.UserMessage -> userMessages += item
-                is CodexItem.AgentMessage -> if (finalAnswer != null && item !== finalAnswer) activityItems += item else responses += item
-                else -> if (item.isVisibleInConversation()) activityItems += item
+            when (row.role) {
+                "user" -> users += item as CodexItem.UserMessage
+                "activity" -> activities += item
+                "response" -> responses += item
+                "hidden" -> Unit
+                else -> error("Unknown conversation row role: ${row.role}")
             }
         }
-        val canCollapse = activityItems.isNotEmpty()
-        val firstItem = displayItems.getOrNull(start)
-        val sectionId = if (section == 0) id else "$id:${(firstItem as? CodexItem.UserMessage)?.clientId ?: firstItem?.id}"
-        ThreadTurnPresentation(
-            id = sectionId,
-            turnId = id,
-            isLastSegment = last,
-            status = status,
-            userMessages = userMessages,
-            activityItems = activityItems,
-            responses = responses,
-            activitySummary = when {
-                canCollapse && finalAnswer != null -> if (last) workSummary() else "作業内容"
-                canCollapse -> activityItems.activitySummary().let { summary ->
-                    if (last && (status == TurnStatus.Interrupted || status == TurnStatus.Failed)) "${workSummary()}・$summary" else summary
-                }
-                last && status != TurnStatus.Completed -> workSummary()
-                else -> null
-            },
-            activityInitiallyExpanded = false,
-            activityCanCollapse = canCollapse,
-            error = if (last) error?.toThreadErrorPresentation(status) else null,
-            pendingRequests = if (last) pendingRequests.map(CodexServerRequest::toThreadRequestPresentation) else emptyList(),
-        )
+        ThreadTurnPresentation(segment.id, id, segment.last, status, users, activities, responses,
+            segment.label, segment.initiallyExpanded, segment.collapsible,
+            if (segment.last) error?.toThreadErrorPresentation(status) else null,
+            if (segment.last) pendingRequests.map(CodexServerRequest::toThreadRequestPresentation) else emptyList())
     }
-}
-
-private fun List<CodexItem>.activitySummary(): String {
-    var commands = 0
-    var files = 0
-    var reasoning = 0
-    var tools = 0
-    for (item in this) when (item) {
-        is CodexItem.CommandExecution -> commands++
-        is CodexItem.FileChange -> files += item.changes.size
-        is CodexItem.Reasoning -> reasoning++
-        else -> tools++
-    }
-    return buildList {
-        if (commands > 0) add("${commands}件のコマンド")
-        if (files > 0) add("${files}件のファイル変更")
-        if (tools > 0) add("${tools}件のツール操作")
-        if (reasoning > 0) add("思考")
-        if (isEmpty()) add("作業")
-    }.joinToString("、")
 }
 
 private fun CodexServerRequest.toThreadRequestPresentation(): ThreadRequestPresentation {
@@ -222,32 +156,6 @@ private fun CodexTurnError.toThreadErrorPresentation(status: TurnStatus): Thread
     )
 }
 
-private fun CodexTurn.workSummary(): String {
-    val duration = workDurationMs()?.formatWorkDuration()
-    return when (status) {
-        TurnStatus.InProgress -> "作業中…"
-        TurnStatus.Completed -> duration?.let { "${it}間作業しました" } ?: "作業しました"
-        TurnStatus.Interrupted -> duration?.let { "${it}間作業した後に中断しました" } ?: "作業を中断しました"
-        TurnStatus.Failed -> duration?.let { "${it}間作業した後に失敗しました" } ?: "作業に失敗しました"
-    }
-}
-
-private fun CodexTurn.workDurationMs(): Long? = durationMs?.takeIf { it >= 0 }
-    ?: startedAtMs?.let { start -> completedAtMs?.takeIf { it >= start }?.minus(start) }
-
-private fun Long.formatWorkDuration(): String {
-    if (this < 1_000) return "<1s"
-    val totalSeconds = this / 1_000
-    val hours = totalSeconds / 3_600
-    val minutes = (totalSeconds % 3_600) / 60
-    val seconds = totalSeconds % 60
-    return buildList {
-        if (hours > 0) add("${hours}h")
-        if (minutes > 0) add("${minutes}m")
-        if (seconds > 0 || isEmpty()) add("${seconds}s")
-    }.joinToString(" ")
-}
-
 internal data class ThreadItemPresentation(
     val id: String,
     val kind: String,
@@ -257,60 +165,18 @@ internal data class ThreadItemPresentation(
     val isVisible: Boolean = true,
 )
 
-private fun CodexItem.isVisibleInConversation(): Boolean = this !is CodexItem.Unknown || when (codexType) {
-    "sleep", "enteredReviewMode", "exitedReviewMode" -> false
-    else -> true
-}
-
-internal fun CodexItem.toThreadItemPresentation(): ThreadItemPresentation = when (this) {
-    is CodexItem.UserMessage -> ThreadItemPresentation(
-        id = id,
-        kind = "user",
-        title = "You",
-        collapsedBody = text,
-        isCollapsible = false,
-    )
-
-    is CodexItem.AgentMessage -> ThreadItemPresentation(
-        id = id,
-        kind = "agent",
-        title = "Codex",
-        collapsedBody = text,
-        isCollapsible = false,
-    )
-
-    is CodexItem.Reasoning -> ThreadItemPresentation(
-        id = id,
-        kind = "reasoning",
-        title = "Reasoning",
-        collapsedBody = "Tap to show details",
-        isCollapsible = true,
-    )
-
-    is CodexItem.CommandExecution -> ThreadItemPresentation(
-        id = id,
-        kind = "command",
-        title = "$ ${command.compactTitle()}",
-        collapsedBody = status.name,
-        isCollapsible = true,
-    )
-
-    is CodexItem.FileChange -> ThreadItemPresentation(
-        id = id,
-        kind = "fileChange",
-        title = "${changes.size} file${if (changes.size == 1) "" else "s"} changed",
-        collapsedBody = status.name,
-        isCollapsible = true,
-    )
-
-    is CodexItem.Unknown -> ThreadItemPresentation(
-        id = id,
-        kind = "unknown",
-        title = unknownItemTitle(),
-        collapsedBody = raw.text("status") ?: "詳細を表示",
-        isCollapsible = true,
-        isVisible = isVisibleInConversation(),
-    )
+internal fun CodexItem.toThreadItemPresentation(): ThreadItemPresentation {
+    val request = buildJsonObject { put("operation", "item"); put("item", presentationMetadata(title = true)) }
+    val native = presentationJson.decodeFromString<NativeItemPresentation>(nativeConversationPresentation(request.toString()))
+    val body = when (this) {
+        is CodexItem.UserMessage -> text
+        is CodexItem.AgentMessage -> text
+        is CodexItem.Reasoning -> "詳細を表示"
+        is CodexItem.CommandExecution -> status.name
+        is CodexItem.FileChange -> status.name
+        is CodexItem.Unknown -> if (codexType == "imageGeneration") native.title else raw.text("status") ?: "詳細を表示"
+    }
+    return ThreadItemPresentation(id, native.kind, native.title, body, native.collapsible, native.visible)
 }
 
 internal fun CodexItem.expandedThreadItemBody(): String = when (this) {
@@ -336,36 +202,52 @@ internal fun CodexItem.threadItemContentVersion(): String = when (this) {
     is CodexItem.Unknown -> "unknown:${raw.hashCode()}"
 }
 
-private fun String.compactTitle(maxLength: Int = 120): String {
-    val firstLine = lineSequence().firstOrNull().orEmpty().trim()
-    return if (firstLine.length <= maxLength) firstLine else firstLine.take(maxLength) + "…"
-}
-
-private fun CodexItem.Unknown.unknownItemTitle(): String = when (codexType) {
-    "hookPrompt" -> "追加指示"
-    "plan" -> "計画を更新しました"
-    "mcpToolCall" -> listOfNotNull(raw.text("server"), raw.text("tool")).joinToString(" / ")
-        .ifBlank { "MCPツールを実行しました" }
-    "dynamicToolCall" -> raw.text("tool")?.let { "${it.compactTitle()}を実行しました" }
-        ?: "ツールを実行しました"
-    "collabAgentToolCall" -> raw.text("tool")?.let { "サブエージェント: ${it.compactTitle()}" }
-        ?: "サブエージェントを操作しました"
-    "subAgentActivity" -> "サブエージェントが作業しました"
-    "webSearch" -> raw.text("query")?.let { "Webを検索: ${it.compactTitle()}" } ?: "Webを検索しました"
-    "imageView" -> raw.text("path")?.let { "画像を確認: ${it.compactTitle()}" } ?: "画像を確認しました"
-    "sleep" -> "待機しました"
-    "imageGeneration" -> "画像を生成しました"
-    "enteredReviewMode" -> "レビューを開始しました"
-    "exitedReviewMode" -> "レビューを終了しました"
-    "contextCompaction" -> "コンテキストを圧縮しました"
-    "automaticApprovalReview" -> when (raw.childObject("review")?.text("status")) {
-        "inProgress" -> "承認を自動確認中"
-        "denied" -> "自動確認で拒否されました"
-        "timedOut" -> "自動確認がタイムアウトしました"
-        "aborted" -> "自動確認を中止しました"
-        else -> "承認を自動確認しました"
-    }
-    else -> "Codex item (${codexType.compactTitle()})"
-}
-
 private fun JsonObject.text(name: String): String? = get(name)?.jsonPrimitive?.contentOrNull
+
+private val presentationJson = Json { ignoreUnknownKeys = true }
+internal expect fun nativeConversationPresentation(request: String): String
+
+@Serializable
+private data class NativeConversationRow(val source: Int, val role: String)
+@Serializable
+private data class NativeConversationSegment(
+    val id: String, val last: Boolean, val collapsible: Boolean,
+    val initiallyExpanded: Boolean, val label: String?, val rows: List<NativeConversationRow>,
+)
+@Serializable
+private data class NativeItemPresentation(val kind: String, val title: String, val collapsible: Boolean, val visible: Boolean)
+
+/** Only fields consumed by Rust presentation policy cross the language boundary. */
+private fun CodexItem.presentationMetadata(title: Boolean = false): JsonObject = buildJsonObject {
+    put("id", id)
+    when (val item = this@presentationMetadata) {
+        is CodexItem.UserMessage -> { put("type", "userMessage"); item.clientId?.let { put("clientId", it) } }
+        is CodexItem.AgentMessage -> {
+            put("type", "agentMessage")
+            item.phase?.let { put("phase", presentationJson.encodeToJsonElement(AgentMessagePhase.serializer(), it)) }
+        }
+        is CodexItem.Reasoning -> put("type", "reasoning")
+        is CodexItem.CommandExecution -> { put("type", "commandExecution"); if (title) put("command", item.command) }
+        is CodexItem.FileChange -> { put("type", "fileChange"); put("fileCount", item.changes.size) }
+        is CodexItem.Unknown -> {
+            put("type", item.codexType)
+            if (title) {
+                for (key in listOf("server", "tool", "query", "path", "status")) item.raw[key]?.let { put(key, it) }
+                (item.raw["review"] as? JsonObject)?.get("status")?.let { status ->
+                    put("review", buildJsonObject { put("status", status) })
+                }
+            }
+        }
+    }
+}
+
+internal fun retainPendingSubmissions(pending: List<SubmittedMessage>, echoed: Sequence<String>): List<SubmittedMessage> {
+    if (pending.isEmpty()) return pending
+    val request = buildJsonObject {
+        put("operation", "reconcile")
+        put("pending", JsonArray(pending.map { JsonPrimitive(it.clientId) }))
+        put("echoed", JsonArray(echoed.map { JsonPrimitive(it) }.toList()))
+    }
+    val retained = presentationJson.decodeFromString<List<Int>>(nativeConversationPresentation(request.toString()))
+    return if (retained.size == pending.size) pending else retained.map { pending[it] }
+}

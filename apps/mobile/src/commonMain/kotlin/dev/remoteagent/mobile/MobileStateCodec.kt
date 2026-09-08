@@ -187,6 +187,7 @@ private data class PersistedHostProfile(
 private data class PersistedProfileViewState(
     val workingDirectoryPath: String = "",
     val selectedThreadId: String? = null,
+    val unreadCompletedThreadIds: Set<String> = emptySet(),
 )
 
 @Serializable
@@ -215,6 +216,7 @@ private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
         PersistedProfileViewState(
             workingDirectoryPath = view.workingDirectoryPath,
             selectedThreadId = view.selectedThreadId,
+            unreadCompletedThreadIds = view.unreadCompletedThreadIds,
         )
     },
     cache = cache.toPersisted(),
@@ -245,6 +247,7 @@ private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppSta
                 workingDirectoryPath = view.workingDirectoryPath,
                 threadList = LoadPhase.Idle,
                 selectedThreadId = view.selectedThreadId,
+                unreadCompletedThreadIds = view.unreadCompletedThreadIds,
                 threadDetail = LoadPhase.Idle,
                 interruptingTurnId = null,
                 notice = null,

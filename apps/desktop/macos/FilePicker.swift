@@ -16,9 +16,9 @@ case "file", "folder":
     open.allowsMultipleSelection = false
     open.message = mode == "file" ? "添付するファイルを選択" : "作業フォルダを選択"
     panel = open
-case "download":
+case let value where value == "download" || value.hasPrefix("download:"):
     panel = NSSavePanel()
-    panel.nameFieldStringValue = "download"
+    panel.nameFieldStringValue = mode.hasPrefix("download:") ? String(mode.dropFirst("download:".count)) : "download"
     panel.message = "保存先を選択"
 default:
     exit(2)

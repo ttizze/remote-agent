@@ -48,6 +48,7 @@ kotlin {
                 rootProject.file("Cargo.toml"),
                 rootProject.file("Cargo.lock"),
             )
+            inputs.dir(rootProject.file("crates/conversation-presentation"))
             inputs.dir(rootProject.file("crates/host-protocol"))
             inputs.dir(rootProject.file("crates/relay-transport"))
             inputs.dir(rootProject.file("crates/mobile-client"))
@@ -60,6 +61,9 @@ kotlin {
         target.binaries.framework {
             baseName = "RemoteAgentMobile"
             isStatic = true
+        }
+        target.binaries.withType<org.jetbrains.kotlin.gradle.plugin.mpp.TestExecutable> {
+            linkerOpts(rootProject.file("target/$rustTarget/release/libmobile_client.a").absolutePath, "-framework", "Security", "-framework", "SystemConfiguration")
         }
         target.binaries.all {
             linkTaskProvider.configure {
@@ -107,11 +111,14 @@ val buildMobileClientAndroid by tasks.registering(Exec::class) {
         "--package",
         "mobile-client",
         "--release",
+        "--features",
+        "jni",
     )
     inputs.files(
         rootProject.file("Cargo.toml"),
         rootProject.file("Cargo.lock"),
     )
+    inputs.dir(rootProject.file("crates/conversation-presentation"))
     inputs.dir(rootProject.file("crates/host-protocol"))
     inputs.dir(rootProject.file("crates/relay-transport"))
     inputs.dir(rootProject.file("crates/mobile-client"))
@@ -143,4 +150,21 @@ android {
     }
 
     sourceSets.getByName("main").jniLibs.srcDir("src/androidMain/jniLibs")
+}
+
+// JVM unit tests execute the same JNI implementation as Android, using a host
+// library rather than a Kotlin copy of the presentation rules.
+val buildMobileClientJvmTests by tasks.registering(Exec::class) {
+    workingDir(rootProject.projectDir)
+    environment("RUSTC", mobileRustc.get())
+    commandLine(mobileCargo.get(), "build", "--package", "mobile-client", "--features", "jni", "--lib")
+    inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
+    for (crate in listOf("conversation-presentation", "host-protocol", "relay-transport", "mobile-client")) {
+        inputs.dir(rootProject.file("crates/$crate"))
+    }
+    outputs.file(rootProject.file("target/debug/" + System.mapLibraryName("mobile_client")))
+}
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    dependsOn(buildMobileClientJvmTests)
+    systemProperty("java.library.path", rootProject.file("target/debug").absolutePath)
 }

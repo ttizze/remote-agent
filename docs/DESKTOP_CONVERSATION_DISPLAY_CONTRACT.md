@@ -57,13 +57,21 @@ and history reload:
 - `imageView`: standalone, with adjacent views summarized as an image count.
 - `sleep`: progress-only activity; not rendered as a historical standalone row.
 - `imageGeneration`: pending placeholder, generated output, and
-  `usageLimitExceeded` failure.
+  `usageLimitExceeded` failure. Mac and iPhone keep these rows outside collapsed
+  work. Render `savedPath` on the selected Host, or decode the base64 `result`
+  when no saved path is present; history detail deferral must preserve both.
 - `enteredReviewMode` / `exitedReviewMode`: state transitions, not ordinary
   history rows.
 - `contextCompaction`: manual/automatic in-progress and completed divider.
 
 Unknown future items remain cached and receive a safe fallback row; they are
 never dropped solely because the mobile build does not know their type.
+
+Markdown HTTP/HTTPS links open in the system browser. File links resolve on the
+selected Host, including relative paths, URL-escaped spaces and line suffixes.
+Mac opens the resulting file with the system application. iPhone uses a
+temporary download and a Quick Look sheet with an explicit close action;
+closing the sheet removes the temporary copy.
 
 ## Requests and approvals
 

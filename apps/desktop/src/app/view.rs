@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
     sidebar::{Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem},
@@ -6,6 +7,140 @@ use gpui_kit::component::{
 };
 
 const CHAT_WIDTH: f32 = 780.;
+
+fn model_effort_slider(state: &Entity<slider::SliderState>, effort_count: usize, cx: &App) -> impl IntoElement {
+    let disabled = effort_count < 2;
+    let steps = effort_count.saturating_sub(1).max(1) as f32;
+    let position = state.read(cx).percentage().end;
+    let track = base::SliderIndicator::new(state).relative().w_full().h(px(24.))
+        .child(div().absolute().left(px(-14.)).right(relative(1. - position)).h_full()
+            .rounded_full().bg(rgb(0x3982f7)))
+        .children((0..effort_count).map(|i| {
+            div().absolute().left(relative(i as f32 / steps)).ml(px(-2.)).top(px(10.))
+                .size(px(4.)).rounded_full().bg(rgb(0x9c9c9c))
+        }))
+        .child(base::SliderThumb::new(state).disabled(disabled)
+            .absolute().left(relative(position)).ml(px(-14.)).top(px(-2.))
+            .size(px(28.)).rounded_full().bg(rgb(0xffffff)));
+    base::Slider::new(state).disabled(disabled).w_full().py_1()
+        .child(base::SliderTrack::new(state).disabled(disabled)
+            .w_full().h(px(24.)).px(px(14.)).rounded_full().bg(rgb(0x454545)).child(track))
+}
+
+fn conversation_file_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
+    let source = source.rsplit_once(':')
+        .filter(|(_, line)| !line.is_empty() && line.bytes().all(|c| c.is_ascii_digit()))
+        .map_or(source, |(path, _)| path);
+    let base = url::Url::from_directory_path(cwd).map_err(|_| "作業フォルダが不正です")?;
+    let mut url = base.join(source).map_err(|e| e.to_string())?;
+    if url.scheme() != "file" { return Err("未対応のリンクです".into()); }
+    url.set_fragment(None);
+    url.set_query(None);
+    url.to_file_path().map_err(|_| "ファイルパスが不正です".into())
+}
+
+#[cfg(test)]
+mod model_slider_tests {
+    use super::model_effort_slider;
+    use gpui_kit as gpui;
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement,
+        Render, Styled, TestAppContext, Window, component::slider, div, point, px,
+    };
+
+    struct SliderView {
+        state: Entity<slider::SliderState>,
+        effort_count: usize,
+    }
+
+    impl Render for SliderView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(280.)).p_4().child(model_effort_slider(&self.state, self.effort_count, cx))
+        }
+    }
+
+    #[gpui::test]
+    fn effort_thumb_drags_both_ways_and_single_option_is_inert(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        for effort_count in [4, 1] {
+            let state = cx.new(|_| slider::SliderState::new().max(3.).step(1.).default_value(1.));
+            let owner = state.clone();
+            let (_, cx) = cx.add_window_view(move |_, _| SliderView { state: owner, effort_count });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let bounds = cx.update(|_, cx| state.read(cx).bounds());
+            let at = |fraction| point(bounds.left() + bounds.size.width * fraction, bounds.center().y);
+            let mut from = 1. / 3.;
+            for to in [1., 0.] {
+                cx.simulate_mouse_move(at(from), None, Modifiers::default());
+                cx.simulate_mouse_down(at(from), MouseButton::Left, Modifiers::default());
+                for step in 1..=8 {
+                    cx.simulate_mouse_move(at(from + (to - from) * step as f32 / 8.), MouseButton::Left, Modifiers::default());
+                }
+                cx.simulate_mouse_up(at(to), MouseButton::Left, Modifiers::default());
+                cx.update(|_, cx| assert_eq!(state.read(cx).value(), slider::SliderValue::Single(if effort_count > 1 { to * 3. } else { 1. })));
+                from = to;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::conversation_file_path;
+
+    #[test]
+    fn file_links_resolve_on_the_selected_host_with_spaces_and_line_numbers() {
+        for source in ["/tmp/project/a%20b.png", "file:///tmp/project/a%20b.png", "a%20b.png", "a%20b.png:12", "a%20b.png#L12"] {
+            assert_eq!(conversation_file_path(source, "/tmp/project").unwrap(), std::path::Path::new("/tmp/project/a b.png"));
+        }
+        assert!(conversation_file_path("https://example.com", "/tmp/project").is_err());
+        assert!(conversation_file_path("javascript:alert(1)", "/tmp/project").is_err());
+        assert!(conversation_file_path("file://other-host/private.png", "/tmp/project").is_err());
+    }
+}
+
+// Reuse the conversation paging contract, retaining only image items while
+// traversing older turns and within-turn gaps. Never return just the loaded page.
+fn session_image_sources(rpc: &Rpc, thread_id: &str) -> Result<Value, String> {
+    fn retain_images(thread: &mut Value) {
+        if let Some(turns) = thread["turns"].as_array_mut() {
+            for turn in turns {
+                if let Some(items) = turn["items"].as_array_mut() {
+                    items.retain(|item| item["type"] == "imageGeneration");
+                    for item in items {
+                        if !text(item, "savedPath").is_empty() { item.as_object_mut().unwrap().remove("result"); }
+                    }
+                }
+            }
+        }
+    }
+    let mut result = rpc.request("host/thread/read", json!({"threadId":thread_id,"includeTurns":true,"paginateHistory":true,"deferItemDetails":true}))?;
+    let mut history = Conversation { thread: result["thread"].take(), ..Default::default() };
+    retain_images(&mut history.thread);
+    let mut cursors = HashSet::new();
+    while let Some(page) = history.older_page() {
+        if !cursors.insert((page.turn.clone(), page.cursor.to_string())) { return Err("履歴カーソルが進みませんでした".into()); }
+        let method = if page.turn.is_some() { "host/thread/items/list" } else { "host/thread/turns/list" };
+        let mut result = rpc.request(method, json!({"threadId":thread_id,"turnId":page.turn,"cursor":page.cursor,"deferItemDetails":true}))?;
+        retain_images(&mut result["thread"]);
+        history.merge_older(result, &page)?;
+    }
+    let mut images = Vec::new();
+    if let Value::Array(turns) = history.thread["turns"].take() {
+        for mut turn in turns {
+            if let Value::Array(items) = turn["items"].take() {
+                for mut item in items {
+                    let encoded = text(&item, "savedPath").is_empty();
+                    let source = item[if encoded { "result" } else { "savedPath" }].take();
+                    if source.as_str().is_some_and(|source| !source.is_empty()) {
+                        images.push(json!({"source":source,"encoded":encoded}));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Value::Array(images))
+}
 
 impl Desktop {
     fn button(
@@ -45,17 +180,18 @@ impl Desktop {
                 cx.notify();
             }))
     }
-    fn image(&mut self, source: &str, _cx: &mut Context<Self>) -> AnyElement {
-        let key = format!("{}:{}:{}", self.remote, self.cwd, source);
+    fn image(&mut self, source: &str, encoded: bool, height: f32, clickable: bool, cx: &mut Context<Self>) -> AnyElement {
+        let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
         if !self.images.contains_key(&key) {
+            let source = std::sync::Arc::new(source.to_owned());
             self.images.insert(
                 key.clone(),
                 ImageState {
+                    source: source.clone(),
                     path: None,
                     error: None,
                 },
             );
-            let source = source.to_owned();
             let cwd = self.cwd.clone();
             let remote = self.remote.clone();
             let manager = self.manager.clone();
@@ -66,9 +202,10 @@ impl Desktop {
             let returned = key.clone();
             self.work(false,move||{
                 let result=(||->Result<String,String>{
-                    if source.starts_with("https://")||source.starts_with("http://"){return Ok(source);}
+                    if encoded { let bytes=base64::engine::general_purpose::STANDARD.decode(source.as_bytes()).map_err(|e|e.to_string())?; std::fs::write(&destination,bytes).map_err(|e|e.to_string())?;return Ok(destination.to_string_lossy().into_owned()); }
+                    if source.starts_with("https://")||source.starts_with("http://"){return Ok(source.as_ref().clone());}
                     if source.starts_with("data:image/"){let (header,data)=source.split_once(',').ok_or("画像データが不正です")?;if !header.ends_with(";base64"){return Err("未対応の画像データです".into());}let bytes=base64::engine::general_purpose::STANDARD.decode(data).map_err(|e|e.to_string())?;std::fs::write(&destination,bytes).map_err(|e|e.to_string())?;return Ok(destination.to_string_lossy().into_owned());}
-                    let path=if source.starts_with("file:"){url::Url::parse(&source).map_err(|e|e.to_string())?.to_file_path().map_err(|_|"画像パスが不正です")?}else{if url::Url::parse(&source).is_ok(){return Err("未対応の画像URLです".into());}Path::new(&cwd).join(&source)};
+                    let path=conversation_file_path(&source,&cwd)?;
                     if remote.is_empty(){return Ok(path.to_string_lossy().into_owned());}
                     manager.request("host/transfer",json!({"profileId":remote,"direction":"download","source":path,"destination":destination}))?;Ok(destination.to_string_lossy().into_owned())
                 })();Ok(match result{Ok(path)=>json!({"path":path}),Err(error)=>json!({"error":error})})
@@ -76,11 +213,13 @@ impl Desktop {
         }
         let state = &self.images[&key];
         if let Some(path) = &state.path {
-            img(path.clone())
-                .w_full()
-                .h(px(320.))
-                .object_fit(ObjectFit::Contain)
-                .into_any_element()
+            let image = img(path.clone()).w_full().h(px(height)).min_h(px(height)).max_h(px(height)).object_fit(ObjectFit::Contain);
+            if clickable {
+                let source = state.source.clone();
+                div().id(SharedString::from(key)).w_full().h(px(height)).flex_shrink_0().flex().items_center().justify_center().cursor_pointer()
+                    .on_click(cx.listener(move |s, _, _, cx| s.open_image_gallery(source.clone(), encoded, cx)))
+                    .child(image).into_any_element()
+            } else { image.into_any_element() }
         } else {
             div()
                 .text_sm()
@@ -101,7 +240,7 @@ impl Desktop {
             .is_none_or(|cached| cached.source != source)
         {
             let mut images = Vec::new();
-            let mut rendered = String::with_capacity(source.len());
+            let mut rendered = String::new();
             let mut previous = 0;
             let mut image_start = None;
             for (event, range) in
@@ -124,32 +263,205 @@ impl Desktop {
                     _ => {}
                 }
             }
-            rendered.push_str(&source[previous..]);
+            if !images.is_empty() {
+                rendered.push_str(&source[previous..]);
+            }
+            let source: SharedString = source.to_owned().into();
+            let rendered = if images.is_empty() {
+                source.clone()
+            } else {
+                rendered.into()
+            };
             self.markdown_cache.insert(
                 id.clone(),
                 MarkdownContent {
-                    source: source.to_owned(),
-                    rendered: rendered.into(),
+                    source,
+                    rendered,
                     images: images.into(),
                 },
             );
         }
         let cached = &self.markdown_cache[&id];
         let images = cached.images.clone();
+        let view = cx.entity().downgrade();
         let mut body = v_flex().gap_3().w_full().child(
             TextView::markdown(SharedString::from(id), cached.rendered.clone())
                 .selectable(true)
-                .on_link_click(|url, _, _, cx| {
-                    if url.starts_with("https://") || url.starts_with("http://") {
-                        cx.open_url(url);
-                    }
+                .on_link_click(move |url, _, _, cx| {
+                    let _ = view.update(cx, |s, cx| s.open_conversation_link(url, cx));
                 }),
         );
         for source in images.iter() {
-            body = body.child(self.image(&source, cx));
+            body = body.child(self.image(&source, false, 320., true, cx));
         }
         body.into_any_element()
     }
+    fn open_conversation_link(&mut self, source: &str, cx: &mut Context<Self>) {
+        if source.starts_with("https://") || source.starts_with("http://") {
+            cx.open_url(source);
+            return;
+        }
+        let path = match conversation_file_path(source, &self.cwd) {
+            Ok(path) => path,
+            Err(error) => { self.error = error; cx.notify(); return; }
+        };
+        if path.extension().and_then(|extension| extension.to_str()).and_then(image::ImageFormat::from_extension).is_some() {
+            self.open_image_gallery(std::sync::Arc::new(path.to_string_lossy().into_owned()), false, cx);
+            return;
+        }
+        let remote = self.remote.clone();
+        let manager = self.manager.clone();
+        let directory = self.image_dir.path().to_owned();
+        self.work(false, move || {
+            let path = if remote.is_empty() {
+                path
+            } else {
+                let download = tempfile::Builder::new().prefix("link-").tempdir_in(directory).map_err(|e| e.to_string())?.keep();
+                let destination = download.join(path.file_name().ok_or("ファイル名がありません")?);
+                manager.request("host/transfer", json!({"profileId":remote,"direction":"download","source":path,"destination":destination}))?;
+                destination
+            };
+            let path = path.canonicalize().map_err(|e| e.to_string())?;
+            let url = url::Url::from_file_path(path).map_err(|_| "ファイルパスが不正です")?;
+            Ok(json!({"url":url.as_str()}))
+        }, |_, result, _, cx| cx.open_url(text(&result, "url")));
+    }
+    fn open_image_gallery(&mut self, source: std::sync::Arc<String>, encoded: bool, cx: &mut Context<Self>) {
+        let id = uuid::Uuid::new_v4();
+        self.image_gallery = Some(ImageGallery {
+            id, entries: Vec::new(), initial: (source, encoded), selected: None,
+            list: ListState::new(0, ListAlignment::Top, px(160.)),
+            loading: true, saving: false, saved: false, error: String::new(),
+        });
+        let rpc = self.rpc.clone();
+        let thread = self.selected.clone();
+        self.work(false, move || Ok(match session_image_sources(&rpc, &thread) {
+            Ok(images) => json!({"images":images}), Err(error) => json!({"error":error}),
+        }), move |s, mut result, _, _| {
+            let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| gallery.id == id) else { return; };
+            gallery.loading = false;
+            if let Some(error) = result["error"].as_str() { gallery.error = error.into(); return; }
+            let initial = gallery.current_image().clone();
+            let mut entries = Vec::new();
+            let mut seen = HashSet::new();
+            if let Value::Array(images) = result["images"].take() {
+                for mut image in images {
+                    if let Value::String(source) = image["source"].take() {
+                        let source = std::sync::Arc::new(source);
+                        let encoded = image["encoded"] == true;
+                        if seen.insert((source.clone(), encoded)) { entries.push((source, encoded)); }
+                    }
+                }
+            }
+            gallery.selected = entries.iter().position(|entry| entry == &initial);
+            gallery.list.splice(0..gallery.list.item_count(), entries.len());
+            gallery.entries = entries;
+            if let Some(selected) = gallery.selected { gallery.list.scroll_to_reveal_item(selected); }
+        });
+        cx.notify();
+    }
+
+    fn gallery_thumbnail(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(gallery) = &self.image_gallery else { return div().into_any_element(); };
+        let Some((source, encoded)) = gallery.entries.get(index).cloned() else { return div().into_any_element(); };
+        let selected = gallery.selected == Some(index);
+        let image = self.image(&source, encoded, 64., false, cx);
+        Button::new(format!("gallery-thumbnail-{index}"))
+            .accessibility_label(format!("生成画像 {}", index + 1))
+            .ghost().child(image).w(px(80.)).h(px(80.)).p_2().selected(selected)
+            .on_click(cx.listener(move |s, _, _, cx| {
+                if let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| !gallery.saving) {
+                    gallery.selected = Some(index);
+                    gallery.saved = false;
+                    gallery.error.clear();
+                    cx.notify();
+                }
+            })).into_any_element()
+    }
+
+    fn image_gallery_view(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let gallery = self.image_gallery.as_ref().unwrap();
+        let (source, encoded) = gallery.current_image().clone();
+        let list_state = gallery.list.clone();
+        let saving = gallery.saving;
+        let saved = gallery.saved;
+        let loading = gallery.loading;
+        let label = gallery.selected.map(|index| format!("{} / {}", index + 1, gallery.entries.len())).unwrap_or_else(|| "画像".into());
+        let error = gallery.error.clone();
+        let image = self.image(&source, encoded, (f32::from(window.viewport_size().height) - 148.).max(120.), false, cx);
+        let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
+        let ready = self.images.get(&key).is_some_and(|image| image.path.is_some());
+        let entity = cx.entity().downgrade();
+        let thumbnails = list(list_state, move |index, _, cx| {
+            entity.update(cx, |s, cx| s.gallery_thumbnail(index, cx)).unwrap_or_else(|_| div().into_any_element())
+        }).size_full();
+        v_flex().size_full().p_4().pt(px(44.)).gap_3()
+            .child(h_flex().justify_end().gap_3()
+                .child(div().flex_1().child(label))
+                .when(loading, |row| row.child("画像一覧を読み込み中…"))
+                .child(self.button("gallery-save", if saved { "保存済み" } else { "保存" }, cx, |s, _, cx| s.save_gallery_image(cx)).disabled(!ready || saving || saved))
+                .child(self.button("gallery-close", "閉じる", cx, |s, _, _| s.image_gallery = None).disabled(saving)))
+            .when(!error.is_empty(), |view| view.child(div().text_color(rgb(0xff8e86)).child(error)))
+            .child(h_flex().flex_1().min_h_0().gap_4()
+                .child(div().w(px(88.)).h_full().child(thumbnails))
+                .child(h_flex().flex_1().min_w_0().h_full().items_center().justify_center().child(image)))
+            .into_any_element()
+    }
+
+    fn save_gallery_image(&mut self, cx: &mut Context<Self>) {
+        let Some(gallery) = self.image_gallery.as_mut().filter(|gallery| !gallery.saving) else { return; };
+        let (source, encoded) = gallery.current_image();
+        let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
+        let Some(ImageSource::Resource(resource)) = self.images.get(&key).and_then(|image| image.path.clone()) else { return; };
+        gallery.saving = true;
+        gallery.error.clear();
+        let id = gallery.id;
+        let http = cx.http_client();
+        cx.spawn(async move |view, cx| {
+            enum Original { File(std::sync::Arc<Path>), Bytes(Vec<u8>) }
+            let result = async {
+                let original = match resource {
+                    Resource::Path(path) => Original::File(path),
+                    Resource::Uri(uri) => {
+                        use futures_util::AsyncReadExt;
+                        let mut response = http.get(uri.as_ref(), gpui_kit::http_client::AsyncBody::empty(), true).await.map_err(|error| error.to_string())?;
+                        if !response.status().is_success() { return Err(format!("画像の取得に失敗しました: {}", response.status())); }
+                        let mut bytes = Vec::new();
+                        response.body_mut().read_to_end(&mut bytes).await.map_err(|error| error.to_string())?;
+                        Original::Bytes(bytes)
+                    }
+                    _ => return Err("保存できない画像です".into()),
+                };
+                cx.background_executor().spawn(async move {
+                    let format = match &original {
+                        Original::File(path) => image::ImageReader::open(path).and_then(|reader| reader.with_guessed_format()).map_err(|error| error.to_string())?.format().ok_or("画像形式が不明です")?,
+                        Original::Bytes(bytes) => image::guess_format(bytes).map_err(|error| error.to_string())?,
+                    };
+                    let mode = format!("download:image.{}", format.extensions_str()[0]);
+                    let Some(destination) = platform::choose(&mode)? else { return Ok(false); };
+                    match original {
+                        Original::File(path) => {
+                            let source = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+                            if std::fs::canonicalize(&destination).ok().as_deref() != Some(source.as_path()) {
+                                std::fs::copy(source, destination).map_err(|error| error.to_string())?;
+                            }
+                        }
+                        Original::Bytes(bytes) => std::fs::write(destination, bytes).map_err(|error| error.to_string())?,
+                    }
+                    Ok::<_, String>(true)
+                }).await
+            }.await;
+            let _ = view.update(cx, |s, cx| {
+                if let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| gallery.id == id) {
+                    gallery.saving = false;
+                    match result { Ok(saved) => gallery.saved = saved, Err(error) => gallery.error = error }
+                    cx.notify();
+                }
+            });
+        }).detach();
+        cx.notify();
+    }
+
     fn diff(&mut self, id: String, patch: &str, cx: &mut Context<Self>) -> AnyElement {
         let view = self
             .diffs
@@ -161,19 +473,74 @@ impl Desktop {
         view.update(cx, |s, cx| s.set_source(patch, cx));
         view.into_any_element()
     }
-    fn item(&mut self, item: &Value, cx: &mut Context<Self>) -> AnyElement {
+    fn activity_text(id: String, content: &str, language: &str) -> TextView {
+        // Reserve the output viewport before asynchronous Markdown parsing.
+        // Long tool output scrolls inside it instead of moving the conversation.
+        let lines = content.lines().take(18).count().max(2);
+        TextView::markdown(SharedString::from(id), fenced(content, language))
+            .selectable(true)
+            .scrollable(true)
+            .h(px(lines as f32 * 22. + 32.))
+    }
+    fn item(&mut self, item: &Value, turn: &Value, cx: &mut Context<Self>) -> AnyElement {
         let id = text(item, "id").to_owned();
         let kind = text(item, "type");
         let expanded = self.expanded_items.contains(&id);
+        let deferred = array(&turn["deferredItemIds"])
+            .iter()
+            .any(|value| value == &id);
+        if expanded && deferred {
+            let key = (text(turn, "id").to_owned(), id.clone());
+            let label = match self
+                .item_details
+                .get(&key)
+                .map(|state| state.error.as_deref())
+            {
+                Some(None) => "詳細を読み込み中…".to_owned(),
+                Some(Some(error)) => format!("{error} · 再試行"),
+                None => "詳細を読み込む".to_owned(),
+            };
+            let title = conversation_presentation::item_presentation(item).title;
+            let toggle = id.clone();
+            return v_flex()
+                .gap_2()
+                .child(self.button(
+                    format!("collapse-{id}"),
+                    format!("⌄ {title}"),
+                    cx,
+                    move |s, _, _| {
+                        s.expanded_items.remove(&toggle);
+                        s.remeasure_item(&toggle);
+                    },
+                ))
+                .child(
+                    self.button(format!("detail-{id}"), label, cx, move |s, _, _| {
+                        s.load_detail(key.0.clone(), key.1.clone());
+                        s.remeasure_item(&key.0);
+                    }),
+                )
+                .into_any_element();
+        }
+        let turn_id = text(turn, "id").to_owned();
         match kind {
-            "agentMessage" | "exitedReviewMode" => self.markdown(
-                id,
-                item["text"]
-                    .as_str()
-                    .or(item["review"].as_str())
-                    .unwrap_or(""),
-                cx,
-            ),
+            "agentMessage" => self.markdown(id, text(item, "text"), cx),
+            "imageGeneration" => {
+                let path = text(item, "savedPath");
+                let result = text(item, "result");
+                let title = conversation_presentation::item_presentation(item).title;
+                let mut body = v_flex().gap_2().w_full().child(div().text_sm().child(title));
+                if !path.is_empty() {
+                    body = body.child(self.image(path, false, 320., true, cx));
+                    let path = path.to_owned();
+                    body = body.child(self.button(format!("open-image-{id}"), "画像を開く", cx,
+                        move |s, _, cx| s.open_image_gallery(std::sync::Arc::new(path.clone()), false, cx)));
+                } else if !result.is_empty() {
+                    body = body.child(self.image(result, true, 320., true, cx));
+                } else if text(item, "status") == "inProgress" {
+                    body = body.child(spinner::Spinner::new().small());
+                }
+                body.into_any_element()
+            }
             "userMessage" => {
                 let mut body = v_flex()
                     .gap_3()
@@ -190,8 +557,8 @@ impl Desktop {
                             )
                             .selectable(true)
                             .into_any_element(),
-                            "localImage" => self.image(text(part, "path"), cx),
-                            "image" => self.image(text(part, "url"), cx),
+                            "localImage" => self.image(text(part, "path"), false, 320., true, cx),
+                            "image" => self.image(text(part, "url"), false, 320., true, cx),
                             _ => {
                                 let path = text(part, "path").to_owned();
                                 self.button(
@@ -229,11 +596,7 @@ impl Desktop {
                     .into_any_element()
             }
             "commandExecution" | "reasoning" => {
-                let label = if kind == "reasoning" {
-                    "思考"
-                } else {
-                    item["command"].as_str().unwrap_or("コマンド")
-                };
+                let label = conversation_presentation::item_presentation(item).title;
                 let toggle = id.clone();
                 let mut body = v_flex().gap_2().child(self.button(
                     format!("expand-{id}"),
@@ -241,8 +604,11 @@ impl Desktop {
                     cx,
                     move |s, _, _| {
                         toggle_set(&mut s.expanded_items, &toggle);
-                        s.list.pause_following_tail();
-                        s.list.remeasure();
+                        if s.expanded_items.contains(&toggle) {
+                            s.load_detail(turn_id.clone(), toggle.clone());
+                        }
+                        s.pause_tail();
+                        s.remeasure_item(&toggle);
                     },
                 ));
                 if expanded {
@@ -261,16 +627,14 @@ impl Desktop {
                                 .to_owned()
                         }
                     } else {
-                        text(item, "aggregatedOutput").into()
+                        format!(
+                            "$ {}\n\n{}",
+                            text(item, "command"),
+                            text(item, "aggregatedOutput")
+                        )
                     };
                     body = body
-                        .child(
-                            TextView::markdown(
-                                SharedString::from(format!("output-{id}")),
-                                fenced(&content, ""),
-                            )
-                            .selectable(true),
-                        )
+                        .child(Self::activity_text(format!("output-{id}"), &content, ""))
                         .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
                                 "{} {}",
                                 text(item, "status"),
@@ -286,6 +650,7 @@ impl Desktop {
                 for (i, change) in array(&item["changes"]).iter().enumerate() {
                     let path = text(change, "path").to_owned();
                     let toggle = id.clone();
+                    let turn_id = turn_id.clone();
                     let row = h_flex()
                         .gap_2()
                         .child(self.button(
@@ -294,8 +659,11 @@ impl Desktop {
                             cx,
                             move |s, _, _| {
                                 toggle_set(&mut s.expanded_items, &toggle);
-                                s.list.pause_following_tail();
-                                s.list.remeasure();
+                                if s.expanded_items.contains(&toggle) {
+                                    s.load_detail(turn_id.clone(), toggle.clone());
+                                }
+                                s.pause_tail();
+                                s.remeasure_item(&toggle);
                             },
                         ))
                         .child(self.button(
@@ -321,99 +689,162 @@ impl Desktop {
                     .gap_2()
                     .child(self.button(
                         format!("unknown-{id}"),
-                        format!("{} {kind}", if expanded { "⌄" } else { "›" }),
+                        format!(
+                            "{} {}",
+                            if expanded { "⌄" } else { "›" },
+                            conversation_presentation::item_presentation(item).title
+                        ),
                         cx,
                         move |s, _, _| {
                             toggle_set(&mut s.expanded_items, &toggle);
-                            s.list.pause_following_tail();
-                            s.list.remeasure();
+                            if s.expanded_items.contains(&toggle) {
+                                s.load_detail(turn_id.clone(), toggle.clone());
+                            }
+                            s.pause_tail();
+                            s.remeasure_item(&toggle);
                         },
                     ))
                     .when(expanded, |body| {
-                        body.child(
-                            TextView::markdown(
-                                SharedString::from(format!("json-{id}")),
-                                fenced(
-                                    &serde_json::to_string_pretty(item).unwrap_or_default(),
-                                    "json",
-                                ),
-                            )
-                            .selectable(true),
-                        )
+                        body.child(Self::activity_text(
+                            format!("json-{id}"),
+                            &serde_json::to_string_pretty(item).unwrap_or_default(),
+                            "json",
+                        ))
                     })
                     .into_any_element()
             }
         }
     }
-    fn turn(&mut self, turn: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let projection = conversation::project(turn, &self.conversation.requests);
-        let id = text(turn, "id").to_owned();
-        let expanded = self
-            .expanded_work
-            .get(&id)
-            .copied()
-            .unwrap_or(!projection.collapsible);
+    fn turn(&mut self, index: usize, turn: &Value, cx: &mut Context<Self>) -> AnyElement {
+        let projected = self.project_turn(index, turn);
+        let outgoing = std::mem::take(&mut self.outgoing);
+        let items = array(&turn["items"]);
+        let item_at = |index: usize| {
+            let source = projected
+                .sources
+                .as_ref()
+                .map_or(index, |sources| sources[index]);
+            if source < items.len() {
+                &items[source]
+            } else {
+                &outgoing[source - items.len()].item
+            }
+        };
         let mut body = v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4();
-        for item in projection.users {
-            body = body.child(self.item(item, cx));
+        let opening = &turn["openingUserMessage"];
+        if opening.is_object() && !items.iter().any(|item| item["id"] == opening["id"]) {
+            body = body.child(self.item(opening, turn, cx));
         }
-        if !projection.work.is_empty() {
-            let toggle = id.clone();
-            body = body.child(
-                h_flex()
-                    .w_full()
-                    .border_b_1()
-                    .border_color(rgb(0x303030))
-                    .pb_2()
-                    .child(
-                        self.button(
-                            format!("work-{id}"),
-                            format!("{} {}", projection.label, if expanded { "⌄" } else { "›" }),
-                            cx,
-                            move |s, _, _| {
-                                s.expanded_work.insert(toggle.clone(), !expanded);
-                                s.list.pause_following_tail();
-                                s.list.remeasure();
-                            },
-                        )
-                        .text_color(rgb(0xa0a0a0)),
+        for projection in &projected.segments {
+            let id = &projection.id;
+            let status = text(turn, "status");
+            let expanded = self
+                .expanded_work
+                .get(id)
+                .filter(|(previous, _)| previous == status)
+                .map_or(projection.initially_expanded, |(_, expanded)| *expanded);
+            for item in (projection.start..projection.end)
+                .filter(|&index| {
+                    projection.role(index, item_at(index)) == conversation_presentation::Role::User
+                })
+                .map(|index| item_at(index))
+            {
+                body = body.child(self.item(item, turn, cx));
+            }
+            if let Some(label) = &projection.label {
+                let header = if projection.collapsible {
+                    let toggle = id.clone();
+                    let status = status.to_owned();
+                    let turn_id = text(turn, "id").to_owned();
+                    self.button(
+                        format!("work-{id}"),
+                        format!("{label} {}", if expanded { "⌄" } else { "›" }),
+                        cx,
+                        move |s, _, _| {
+                            s.expanded_work
+                                .insert(toggle.clone(), (status.clone(), !expanded));
+                            s.pause_tail();
+                            s.remeasure_item(&turn_id);
+                        },
+                    )
+                    .text_color(rgb(0xa0a0a0))
+                    .into_any_element()
+                } else {
+                    div()
+                        .text_color(rgb(0xa0a0a0))
+                        .child(label.clone())
+                        .into_any_element()
+                };
+                body = body.child(
+                    h_flex()
+                        .gap_2()
+                        .child(header)
+                        .when(projection.last && status == "inProgress", |row| {
+                            row.child(spinner::Spinner::new().small())
+                        }),
+                );
+            }
+            if expanded {
+                for item in (projection.start..projection.end)
+                    .filter(|&index| {
+                        projection.role(index, item_at(index))
+                            == conversation_presentation::Role::Activity
+                    })
+                    .map(|index| item_at(index))
+                {
+                    body = body.child(self.item(item, turn, cx));
+                }
+            }
+            if projection.last && !turn["error"].is_null() {
+                body = body.child(
+                    div().text_color(rgb(0xff8e86)).child(
+                        turn["error"]["message"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| turn["error"].to_string()),
                     ),
-            );
-        }
-        if expanded || !projection.collapsible {
-            for item in projection.work {
-                body = body.child(self.item(item, cx));
+                );
+            }
+            for item in (projection.start..projection.end)
+                .filter(|&index| {
+                    projection.role(index, item_at(index))
+                        == conversation_presentation::Role::Response
+                })
+                .map(|index| item_at(index))
+            {
+                body = body.child(self.item(item, turn, cx));
+                if item["type"] == "agentMessage" && item["phase"] != "commentary" {
+                    let turn_id = text(turn, "id").to_owned();
+                    let item_id = text(item, "id").to_owned();
+                    body = body.child(
+                        h_flex().child(
+                            Button::new(SharedString::from(format!("copy-{}", text(item, "id"))))
+                                .icon(IconName::Copy)
+                                .small()
+                                .ghost()
+                                .tooltip("回答をコピー")
+                                .accessibility_label("回答をコピー")
+                                .on_click(cx.listener(move |s, _, _, cx| {
+                                    if let Some(item) = array(&s.conversation.thread["turns"])
+                                        .iter()
+                                        .find(|turn| turn["id"] == turn_id)
+                                        .and_then(|turn| {
+                                            array(&turn["items"])
+                                                .iter()
+                                                .find(|item| item["id"] == item_id)
+                                        })
+                                    {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text(item, "text").to_owned(),
+                                        ));
+                                    }
+                                })),
+                        ),
+                    );
+                }
             }
         }
-        for item in projection.finals {
-            let value = text(item, "text").to_owned();
-            body = body.child(self.item(item, cx)).child(
-                h_flex().child(
-                    Button::new(SharedString::from(format!("copy-{}", text(item, "id"))))
-                        .icon(IconName::Copy)
-                        .small()
-                        .ghost()
-                        .tooltip("回答をコピー")
-                        .accessibility_label("回答をコピー")
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(value.clone()))
-                        }),
-                ),
-            );
-        }
-        if projection.thinking {
-            body = body.child(div().text_color(rgb(0x999999)).child("作業中…"));
-        }
-        if !turn["error"].is_null() {
-            body = body.child(
-                div().text_color(rgb(0xff8e86)).child(
-                    turn["error"]["message"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| turn["error"].to_string()),
-                ),
-            );
-        }
+        self.outgoing = outgoing;
         h_flex()
             .justify_center()
             .w_full()
@@ -558,43 +989,78 @@ impl Desktop {
             .into_any_element()
     }
     fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
-        let models = self.models.clone();
-        let current = self.model.clone();
         let entity = cx.entity().downgrade();
-        let label = models
-            .iter()
-            .find(|m| m["model"] == current)
-            .map(|m| text(m, "displayName"))
-            .filter(|s| !s.is_empty())
-            .unwrap_or(if current.is_empty() {
-                "モデル"
-            } else {
-                &current
+        let model = self.selected_model();
+        let label = model.map(|m| text(m, "displayName")).filter(|s| !s.is_empty()).unwrap_or("モデル");
+        popover::Popover::new("model-controls")
+            .bg(rgb(0x2b2b2b)).rounded(px(16.)).border_color(rgb(0x3b3b3b))
+            .anchor(Anchor::BottomLeft)
+            .trigger(Button::new("model-select").label(label.to_owned()).dropdown_caret(true).small().ghost())
+            .content(move |_, _, cx| {
+                entity.update(cx, |s, cx| s.model_controls(cx)).unwrap_or_else(|_| div().into_any_element())
             })
-            .to_owned();
-        Button::new("model-select")
-            .label(label)
-            .dropdown_caret(true)
-            .small()
-            .ghost()
-            .dropdown_menu(move |mut menu, _, _| {
-                for model in &models {
-                    let entity = entity.clone();
-                    let value = text(model, "model").to_owned();
-                    let label = model["displayName"].as_str().unwrap_or(&value).to_owned();
-                    menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(value == current)
-                            .on_click(move |_, _, cx| {
-                                let _ = entity.update(cx, |s, cx| {
-                                    s.model = value.clone();
-                                    cx.notify();
-                                });
-                            }),
-                    );
+            .into_any_element()
+    }
+    fn model_controls(&self, cx: &Context<Self>) -> AnyElement {
+        let entity = cx.entity().downgrade();
+        let model = self.selected_model();
+        let effort_label = match self.effort.as_str() {
+            "none" => "なし",
+            "minimal" => "最小",
+            "low" => "低",
+            "medium" => "中",
+            "high" => "高",
+            "xhigh" => "非常に高",
+            "max" => "最大",
+            "ultra" => "最高",
+            value => value,
+        };
+        let model_label = format!("{} {}", model.map(|m| text(m, "displayName")).unwrap_or("モデル"), effort_label);
+        let models = Button::new("model-choice").label(model_label).dropdown_caret(true).small().ghost()
+            .dropdown_menu(move |mut menu, _, cx| {
+                if let Some(owner) = entity.upgrade() {
+                    let s = owner.read(cx);
+                    for model in &s.models {
+                        let value = text(model, "model").to_owned();
+                        let entity = entity.clone();
+                        menu = menu.item(PopupMenuItem::new(text(model, "displayName").to_owned())
+                            .checked(value == s.model).on_click(move |_, _, cx| {
+                                let _ = entity.update(cx, |s, cx| { s.select_model(&value, cx); cx.notify(); });
+                            }));
+                    }
                 }
                 menu
-            })
+            });
+        let entity = cx.entity().downgrade();
+        let speed_label = model.and_then(|m| array(&m["serviceTiers"]).iter().find(|t| t["id"] == self.service_tier))
+            .map(|t| text(t, "name")).unwrap_or("標準");
+        let speed = Button::new("model-speed").label(format!("⚡︎ {speed_label}"))
+            .accessibility_label("速度").dropdown_caret(true).small().ghost()
+            .dropdown_menu(move |mut menu, _, cx| {
+                if let Some(owner) = entity.upgrade() {
+                    let s = owner.read(cx);
+                    let standard = entity.clone();
+                    menu = menu.item(PopupMenuItem::new("標準").checked(s.service_tier == "default")
+                        .on_click(move |_, _, cx| {
+                            let _ = standard.update(cx, |s, cx| { s.service_tier = "default".into(); cx.notify(); });
+                        }));
+                    if let Some(model) = s.selected_model() {
+                        for tier in array(&model["serviceTiers"]).iter().filter(|t| t["id"] != "default") {
+                            let value = text(tier, "id").to_owned();
+                            let entity = entity.clone();
+                            menu = menu.item(PopupMenuItem::new(text(tier, "name").to_owned())
+                                .checked(value == s.service_tier).on_click(move |_, _, cx| {
+                                    let _ = entity.update(cx, |s, cx| { s.service_tier = value.clone(); cx.notify(); });
+                                }));
+                        }
+                    }
+                }
+                menu
+            });
+        let efforts = model.map(|m| array(&m["supportedReasoningEfforts"])).unwrap_or_default();
+        v_flex().w(px(280.)).gap_2()
+            .child(h_flex().justify_between().child(speed).child(models))
+            .child(model_effort_slider(&self.effort_slider, efforts.len(), cx))
             .into_any_element()
     }
     fn host_menu(&self, cx: &Context<Self>) -> AnyElement {
@@ -849,6 +1315,7 @@ impl Desktop {
     }
     fn thread_button(&self, thread: &Value, cx: &Context<Self>) -> SidebarMenuItem {
         let id = text(thread, "id").to_owned();
+        let active = self.task_indicators.is_active(thread);
         SidebarMenuItem::new(
             thread["name"]
                 .as_str()
@@ -858,6 +1325,13 @@ impl Desktop {
         )
         .active(id == self.selected && self.tab != Tab::Settings)
         .disable(self.busy > 0)
+        .when(active, |item| {
+            item.suffix(|_, _| spinner::Spinner::new().small())
+        })
+        .when(
+            !active && self.task_indicators.unread.contains(&id),
+            |item| item.suffix(|_, _| div().size(px(8.)).rounded_full().bg(rgb(0xffffff))),
+        )
         .on_click(cx.listener(move |s, _, w, cx| {
             s.open_thread(id.clone(), w, cx);
             cx.notify();
@@ -868,14 +1342,72 @@ impl Desktop {
         let history = list(self.list.clone(), move |ix, _w, cx| {
             entity
                 .update(cx, |s, cx| {
+                    let ix = if !s.conversation.thread.is_null() {
+                        if ix == 0 {
+                            if s.conversation.older_page().is_none() {
+                                return div().into_any_element();
+                            }
+                            let label = if s.history_loading {
+                                "履歴を読み込み中…".to_owned()
+                            } else if !s.history_error.is_empty() {
+                                format!("{} · 再試行", s.history_error)
+                            } else {
+                                "以前の履歴を読み込む".to_owned()
+                            };
+                            return h_flex()
+                                .justify_center()
+                                .p_4()
+                                .child(s.button("older-history", label, cx, |s, w, cx| {
+                                    s.load_older(w, cx)
+                                }))
+                                .into_any_element();
+                        }
+                        ix - 1
+                    } else {
+                        ix
+                    };
                     let turns = array(&s.conversation.thread["turns"]);
                     if ix < turns.len() {
                         let turn = s.conversation.thread["turns"][ix].take();
-                        let row = s.turn(&turn, cx);
+                        let row = s.turn(ix, &turn, cx);
                         s.conversation.thread["turns"][ix] = turn;
                         row
                     } else {
-                        let request = s.visible_requests().nth(ix - turns.len()).cloned();
+                        let pending_index = ix - turns.len();
+                        let pending = s
+                            .visible_outgoing()
+                            .nth(pending_index)
+                            .map(|(index, message)| (index, message.accepted));
+                        if let Some((index, accepted)) = pending {
+                            let item = s.outgoing[index].item.take();
+                            let row = s.item(&item, &Value::Null, cx);
+                            s.outgoing[index].item = item;
+                            let label = if accepted {
+                                "送信済み"
+                            } else {
+                                "送信中…"
+                            };
+                            return h_flex()
+                                .justify_center()
+                                .w_full()
+                                .px_6()
+                                .pb_8()
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .max_w(px(CHAT_WIDTH))
+                                        .gap_4()
+                                        .child(row)
+                                        .child(
+                                            div().text_sm().text_color(rgb(0x999999)).child(label),
+                                        ),
+                                )
+                                .into_any_element();
+                        }
+                        let request = s
+                            .visible_requests()
+                            .nth(pending_index - s.visible_outgoing().count())
+                            .cloned();
                         request
                             .map(|r| s.request_card(&r, cx))
                             .unwrap_or_else(|| div().into_any_element())
@@ -886,7 +1418,7 @@ impl Desktop {
         .flex_1()
         .min_h_0();
         let mut body = v_flex().flex_1().min_w_0().h_full();
-        if self.conversation.thread.is_null() {
+        if self.conversation.thread.is_null() && self.visible_outgoing().next().is_none() {
             body = body.child(
                 v_flex()
                     .flex_1()
@@ -949,6 +1481,9 @@ impl Desktop {
             .disabled(!self.connected || self.busy > 0 || empty || self.cwd.is_empty())
         };
         let composer = v_flex()
+            .key_context("ChatComposer")
+            .capture_action(cx.listener(Self::paste_image))
+            .capture_action(cx.listener(Self::composer_enter))
             .w_full()
             .max_w(px(CHAT_WIDTH))
             .p_3()
@@ -1632,7 +2167,7 @@ impl Desktop {
 }
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.panel_open && self.tab == Tab::Chat;
+        let active = self.image_gallery.is_none() && self.panel_open && self.tab == Tab::Chat;
         if let Some(view) = self.browser.clone() {
             view.update(cx, |v, cx| {
                 v.set_visible(active && self.panel == Panel::Browser, cx)
@@ -1642,6 +2177,11 @@ impl Render for Desktop {
             view.update(cx, |v, cx| {
                 v.set_visible(active && self.panel == Panel::Terminal, cx)
             });
+        }
+        if self.image_gallery.is_some() {
+            let gallery = self.image_gallery_view(window, cx);
+            return h_flex().size_full().bg(rgb(0x181818)).text_color(rgb(0xececec))
+                .font_family("Hiragino Sans").text_size(px(14.)).child(gallery);
         }
         let wide = window.viewport_size().width >= px(1080.);
         let title = if self.tab == Tab::Settings {

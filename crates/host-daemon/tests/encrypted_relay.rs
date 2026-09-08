@@ -399,6 +399,25 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         }
         assert_eq!(turn_ids.len(), 10);
         assert_eq!(item_ids.len(), 3718);
+
+        let started = mobile.request("host/thread/start", json!({"cwd":directory.path()})).await.unwrap();
+        let image_thread = &started["thread"]["id"];
+        let mut messages = mobile.subscribe();
+        mobile.request("turn/start", json!({"threadId":image_thread,"input":[{"type":"text","text":"[generated-images]"}]})).await.unwrap();
+        loop {
+            let event: Value = serde_json::from_str(&messages.recv().await.unwrap()).unwrap();
+            if event["method"] == "turn/completed" && event["params"]["threadId"] == *image_thread { break; }
+        }
+        let history = mobile.request("host/thread/read", json!({"threadId":image_thread,"includeTurns":true,"paginateHistory":true,"deferItemDetails":true})).await.unwrap();
+        let turn = &history["thread"]["turns"][0];
+        let images: Vec<_> = turn["items"].as_array().unwrap().iter().filter(|item| item["type"] == "imageGeneration").collect();
+        assert_eq!(images.len(), 2);
+        let original = std::fs::read(directory.path().join("fixture image.png")).unwrap();
+        for item in images {
+            assert_eq!(item["status"], "completed");
+            assert_eq!(STANDARD.decode(item["result"].as_str().unwrap()).unwrap(), original);
+            assert!(!turn["deferredItemIds"].as_array().is_some_and(|ids| ids.contains(&item["id"])));
+        }
         mobile.close(); drop(runner); serving.await.unwrap(); drop(service);
         Arc::try_unwrap(server).ok().expect("Codex process retained").shutdown().await.unwrap();
         relay_server.kill().await.unwrap(); relay_server.wait().await.unwrap();

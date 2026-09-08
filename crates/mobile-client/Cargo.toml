@@ -8,7 +8,12 @@ rust-version = "1.85"
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
 
+[features]
+jni = ["dep:jni"]
+
 [dependencies]
+conversation-presentation = { path = "../conversation-presentation" }
+jni = { version = "0.21.1", optional = true }
 base64.workspace = true
 host-protocol = { path = "../host-protocol" }
 relay-transport = { path = "../relay-transport" }
@@ -22,6 +27,3 @@ tokio = { workspace = true, features = ["fs"] }
 tempfile = "3"
 tokio-util.workspace = true
 zeroize.workspace = true
-
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21.1"

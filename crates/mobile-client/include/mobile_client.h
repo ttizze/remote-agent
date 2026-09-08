@@ -73,6 +73,11 @@ char *mobile_client_transfer(MobileClientHandle *handle, const char *params_json
 /* Consumes handle; call exactly once after all request calls have returned. */
 void mobile_client_close(MobileClientHandle *handle);
 
+/* Pure conversation presentation; no connection handle or source bodies needed.
+ * Operations: turn (metadata + pending anchors), item (title metadata),
+ * reconcile (pending/echoed client IDs). Result strings use string_free(). */
+char *mobile_client_present_conversation(const char *request_json, char **error_out);
+
 void mobile_client_string_free(char *value);
 
 #ifdef __cplusplus

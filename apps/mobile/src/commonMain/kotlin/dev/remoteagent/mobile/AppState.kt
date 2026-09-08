@@ -39,6 +39,7 @@ data class ProfileViewState(
     val hasMoreChats: Boolean = false,
     val hasMoreProjects: Boolean = false,
     val selectedThreadId: String? = null,
+    val unreadCompletedThreadIds: Set<String> = emptySet(),
     val newThreadCwd: String? = null,
     val threadDetail: LoadPhase = LoadPhase.Idle,
     val loadingHistory: Boolean = false,
@@ -212,6 +213,7 @@ fun reduce(
             .updateView(action.hostIdentity) {
                 if (!action.select) it else it.copy(
                     selectedThreadId = action.result.thread.summary.id,
+                    unreadCompletedThreadIds = it.unreadCompletedThreadIds - action.result.thread.summary.id,
                     newThreadCwd = null,
                     threadDetail = LoadPhase.Ready,
                     notice = null,
@@ -259,7 +261,25 @@ fun reduce(
 
     is AppAction.HostEventReceived -> if (state.isConnected(action.hostIdentity)) {
         val cache = applyLiveEvent(state.cache, action.hostIdentity, action.event, cacheLimits)
-        if (cache === state.cache) state else state.copy(cache = cache)
+        val updated = if (cache === state.cache) state else state.copy(cache = cache)
+        val event = action.event
+        if (event !is ThreadEvent.TurnStarted && event !is ThreadEvent.TurnCompleted) updated
+        else updated.updateViewIfConnected(action.hostIdentity) { view ->
+            when {
+                event is ThreadEvent.TurnStarted -> view.copy(
+                    unreadCompletedThreadIds = view.unreadCompletedThreadIds - event.threadId,
+                )
+                event is ThreadEvent.TurnCompleted && event.status == TurnStatus.Completed -> {
+                    val isViewingThread = state.selectedProfileId == action.hostIdentity &&
+                        !state.showingPairing && view.selectedThreadId == event.threadId &&
+                        view.threadDetail == LoadPhase.Ready
+                    if (isViewingThread) view else view.copy(
+                        unreadCompletedThreadIds = view.unreadCompletedThreadIds + event.threadId,
+                    )
+                }
+                else -> view
+            }
+        }
     } else {
         state
     }
