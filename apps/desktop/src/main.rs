@@ -1,6 +1,5 @@
 mod app;
 mod browser;
-mod conversation;
 mod diff;
 mod platform;
 mod rpc;
@@ -62,7 +61,7 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
-                        let desktop = cx.new(|cx| app::Desktop::new(app::Mode::Main, window, cx));
+                        let desktop = cx.new(|cx| app::Desktop::new(window, cx));
                         cx.new(|cx| Root::new(desktop, window, cx))
                     },
                 )

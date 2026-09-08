@@ -89,34 +89,6 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    struct TestDirectory {
-        path: PathBuf,
-    }
-
-    impl TestDirectory {
-        fn new(label: &str) -> Self {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-            let path = env::temp_dir().join(format!(
-                "remote-agent-codex-resolution-{label}-{}-{}",
-                std::process::id(),
-                NEXT_ID.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).expect("create test directory");
-            Self { path }
-        }
-
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.path);
-        }
-    }
 
     fn write_executable(path: &Path) {
         fs::write(path, b"not invoked by this test").expect("write test executable");
@@ -136,7 +108,7 @@ mod tests {
 
     #[test]
     fn prefers_bundled_codex_before_path_candidates() {
-        let root = TestDirectory::new("bundle-first");
+        let root = tempfile::tempdir().unwrap();
         let bundled = root.path().join("ChatGPT.app/Contents/Resources/codex");
         let path_directory = root.path().join("path");
         fs::create_dir_all(bundled.parent().unwrap()).unwrap();
@@ -157,7 +129,7 @@ mod tests {
 
     #[test]
     fn falls_back_to_path_when_bundled_codex_is_missing() {
-        let root = TestDirectory::new("path-fallback");
+        let root = tempfile::tempdir().unwrap();
         let bundled = root
             .path()
             .join("missing/ChatGPT.app/Contents/Resources/codex");
@@ -178,7 +150,7 @@ mod tests {
 
     #[test]
     fn keeps_an_explicit_codex_path_authoritative() {
-        let root = TestDirectory::new("explicit");
+        let root = tempfile::tempdir().unwrap();
         let explicit = root.path().join("custom-codex");
         let bundled = root.path().join("bundled-codex");
         let path_directory = root.path().join("path");
@@ -199,7 +171,7 @@ mod tests {
 
     #[test]
     fn reports_missing_bundled_and_path_candidates_without_invoking_codex() {
-        let root = TestDirectory::new("missing");
+        let root = tempfile::tempdir().unwrap();
         let bundled = root.path().join("missing-bundle/codex");
         let path_directory = root.path().join("missing-path");
         fs::create_dir(&path_directory).unwrap();

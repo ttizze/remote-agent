@@ -49,7 +49,7 @@ final class BexAppViewModel: ObservableObject {
     private let controller = IosAppController()
 
     init() {
-        modelSettings = CodexModelSettings(actions: controller.conversation)
+        modelSettings = CodexModelSettings(actions: controller.conversation, accounts: controller.accounts)
         state = controller.currentState()
         conversation = BexConversationModel(thread: controller.currentThread())
         modelSettings.update(host: state.selectedProfileId, connected: state.isConnected)
@@ -148,11 +148,11 @@ extension BexAppViewModel {
     }
 
     private func send(_ text: String, from submission: DraftSubmission, dictatedText: String? = nil) {
-        modelSettings.applyTurnOptions()
         sending = true
         controller.conversation.sendTurn(
             text: text,
-            attachments: submission.files.map { CodexAttachment(path: $0.path, name: $0.name, isImage: $0.isImage) }
+            attachments: submission.files.map { CodexAttachment(path: $0.path, name: $0.name, isImage: $0.isImage) },
+            options: modelSettings.turnOptions
         ) { [weak self] accepted, threadId in
             guard let self else { return }
             sending = false
@@ -273,14 +273,6 @@ extension BexAppViewModel {
                 completion: completion
             )
         } catch { completion(error.localizedDescription) }
-    }
-
-    func workspace(_ method: String, _ params: [String: Any], completion: @escaping ([String: Any]?, String?) -> Void) {
-        do {
-            try controller.workspace.request(method: method, paramsJson: jsonString(params)) { result, error in
-                completion(result.map(jsonObject), error)
-            }
-        } catch { completion(nil, error.localizedDescription) }
     }
 
     func forkThread(

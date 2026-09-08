@@ -14,13 +14,13 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
 /**
- * Shared application module used by the Android Compose and iOS SwiftUI presentation adapters. Platform UI code
- * observes state and invokes these intent-level operations; transport and reconciliation remain hidden here.
+ * Mobile lifecycle and native projection coordinator for Android Compose and iOS SwiftUI. Rust owns agent operations
+ * and transition decisions; UI adapters observe values and submit inputs.
  */
 internal class MobileController(
     internal val gateway: HostGateway,
     repository: MobileRepository,
-    persistenceScope: CoroutineScope,
+    internal val persistenceScope: CoroutineScope,
     private val cacheLimits: MobileCacheLimits = MobileCacheLimits(maxTurnsPerThread = Int.MAX_VALUE),
     deferHistoryItemDetails: Boolean = false,
     internal val clientUserMessageIdGenerator: () -> String = {
@@ -81,6 +81,12 @@ internal class MobileController(
     internal val listLoads = mutableMapOf<String, Long>()
     internal val pendingListRefresh = mutableSetOf<String>()
 
+    internal var accountHost: String? = null
+    internal var accountGeneration: Long? = null
+    internal var accountPolling: Job? = null
+    internal var accountState = AccountSettingsState()
+    internal val accountObservers = mutableSetOf<(AccountSettingsState) -> Unit>()
+
     internal val eventMutex = Mutex()
     internal val sessions = HostSessionCoordinator(cacheLimits)
     internal val historyClient = CommonCodexClient(gateway, deferItemDetails = deferHistoryItemDetails)
@@ -110,6 +116,7 @@ internal class MobileController(
         val updated = reduce(state, action, cacheLimits)
         if (updated === state) return
         state = updated
+        syncAccountHost()
         persistenceDirty = true
         val checkpoint =
             when (action) {

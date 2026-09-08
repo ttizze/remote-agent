@@ -66,6 +66,7 @@ internal fun codexTurnError(raw: JsonObject): CodexTurnError =
         message = raw.string("message").orEmpty(),
         additionalDetails = raw.string("additionalDetails"),
         codexErrorInfo = raw["codexErrorInfo"]?.takeUnless { it is JsonNull },
+        willRetry = raw.boolean("willRetry") == true,
     )
 
 internal fun codexThreadStatus(value: JsonElement?): ThreadStatus {

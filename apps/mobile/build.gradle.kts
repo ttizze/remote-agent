@@ -54,6 +54,7 @@ kotlin {
                     rustTarget,
                 )
                 inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
+                inputs.dir(rootProject.file("crates/agent-client"))
                 inputs.dir(rootProject.file("crates/conversation-presentation"))
                 inputs.dir(rootProject.file("crates/host-protocol"))
                 inputs.dir(rootProject.file("crates/relay-transport"))
@@ -122,6 +123,7 @@ val buildMobileClientAndroid by
             "jni",
         )
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
+        inputs.dir(rootProject.file("crates/agent-client"))
         inputs.dir(rootProject.file("crates/conversation-presentation"))
         inputs.dir(rootProject.file("crates/host-protocol"))
         inputs.dir(rootProject.file("crates/relay-transport"))
@@ -154,6 +156,7 @@ android {
     }
 
     sourceSets.getByName("main").jniLibs.srcDir("src/androidMain/jniLibs")
+    sourceSets.getByName("test").resources.srcDir(rootProject.file("crates/agent-client/tests/fixtures"))
 }
 
 // JVM unit tests execute the same JNI implementation as Android, using a host
@@ -164,7 +167,8 @@ val buildMobileClientJvmTests by
         environment("RUSTC", mobileRustc.get())
         commandLine(mobileCargo.get(), "build", "--package", "mobile-client", "--features", "jni", "--lib")
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
-        for (crate in listOf("conversation-presentation", "host-protocol", "relay-transport", "mobile-client")) {
+        for (crate in
+            listOf("agent-client", "conversation-presentation", "host-protocol", "relay-transport", "mobile-client")) {
             inputs.dir(rootProject.file("crates/$crate"))
         }
         outputs.file(rootProject.file("target/debug/" + System.mapLibraryName("mobile_client")))

@@ -4,15 +4,18 @@ internal suspend fun MobileController.sendMessage(
     profile: HostProfile,
     text: String,
     attachments: List<CodexAttachment> = emptyList(),
+    options: CodexTurnOptions = CodexTurnOptions(),
 ): MessageSendResult {
-    val generation = connectedGeneration(profile.id) ?: return MessageSendResult(false, null)
     val view = state.profileViews[profile.id]
     return when {
         (text.isBlank() && attachments.isEmpty()) || view == null -> MessageSendResult(false, null)
         view.selectedThreadId != null ->
-            MessageSendResult(startTurn(profile, view.selectedThreadId, text, attachments), view.selectedThreadId)
+            MessageSendResult(
+                startTurn(profile, view.selectedThreadId, text, attachments, options),
+                view.selectedThreadId,
+            )
         view.newThreadCwd == null -> MessageSendResult(false, null)
-        else -> startConversation(profile, view.newThreadCwd, text, attachments, generation)
+        else -> startConversation(profile, view.newThreadCwd, text, attachments, options)
     }
 }
 
@@ -21,11 +24,12 @@ private suspend fun MobileController.startConversation(
     cwd: String,
     text: String,
     attachments: List<CodexAttachment>,
-    generation: Long,
+    options: CodexTurnOptions,
 ): MessageSendResult {
-    if (!startingConversations.add(profile.id)) return MessageSendResult(false, null)
+    val generation = connectedGeneration(profile.id)
+    if (generation == null || !startingConversations.add(profile.id)) return MessageSendResult(false, null)
     return try {
-        when (val result = gateway.codex.startThread(profile, cwd)) {
+        when (val result = gateway.codex.startThread(profile, cwd, options)) {
             is GatewayResult.Failure -> {
                 dispatchIfCurrent(profile.id, generation) { AppAction.ThreadStartFailed(profile.id, result.message) }
                 MessageSendResult(false, null)
@@ -43,7 +47,10 @@ private suspend fun MobileController.startConversation(
                         )
                     }
                     // Retain the created conversation even when its first turn fails; retries must reuse it.
-                    MessageSendResult(startTurn(profile, snapshot.summary.id, text, attachments), snapshot.summary.id)
+                    MessageSendResult(
+                        startTurn(profile, snapshot.summary.id, text, attachments, options),
+                        snapshot.summary.id,
+                    )
                 }
             }
         }

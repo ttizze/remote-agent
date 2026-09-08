@@ -25,6 +25,7 @@ class IosAppController {
 
     val hosts = IosHostActions(controller, scope)
     val navigation = IosNavigationActions(controller, scope)
+    val accounts = IosAccountActions(controller, scope)
     val conversation = IosConversationActions(controller, scope, dependencies)
     val workspace = IosWorkspaceActions(controller, scope, dependencies)
 

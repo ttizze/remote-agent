@@ -43,12 +43,6 @@ impl MobileClientConfig {
     }
 }
 
-/// A notification preserved exactly as it appeared on the Codex JSONL wire.
-pub type Notification = String;
-
-/// A request initiated by the Host, preserved as its raw JSON object.
-pub type ServerRequest = String;
-
 /// Relay connection metadata exposed to platform wrappers. The token is
 /// intentionally omitted so callers cannot accidentally display or log it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,18 +86,18 @@ impl MobileClient {
         })
     }
 
+    pub fn agent(&self) -> agent_client::operations::AgentClient {
+        self.peer.agent()
+    }
+
     pub fn host(&self) -> &ConnectedHost {
         &self.host
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
-        self.peer.subscribe_notifications()
-    }
-
-    /// Subscribes to raw requests initiated by the Host. The request includes
-    /// its original JSON `id`, which must be supplied unchanged when replying.
-    pub fn subscribe_server_requests(&self) -> broadcast::Receiver<ServerRequest> {
-        self.peer.subscribe_server_requests()
+    /// Ordered raw notifications and Host requests. A request retains its original
+    /// JSON id for the response. Lagged receivers must resynchronize the session.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.peer.subscribe()
     }
 
     pub async fn request(
@@ -123,25 +117,6 @@ impl MobileClient {
         params: impl Into<String>,
     ) -> Result<Value, MobileClientError> {
         self.peer.request_raw(method.into(), params.into()).await
-    }
-
-    /// Sends a successful response to a Host-initiated request.
-    pub async fn respond_result(
-        &self,
-        id: impl Into<String>,
-        result: Value,
-    ) -> Result<(), MobileClientError> {
-        self.peer.respond_result(id.into(), result).await
-    }
-
-    /// Sends a response whose `error` member is already represented as JSON.
-    /// The error object is not decoded into a fixed DTO.
-    pub async fn respond_error(
-        &self,
-        id: impl Into<String>,
-        error: Value,
-    ) -> Result<(), MobileClientError> {
-        self.peer.respond_error(id.into(), error).await
     }
 
     /// Sends a response while retaining the caller's raw JSON result/error.
@@ -167,6 +142,7 @@ impl MobileClient {
     }
 
     pub fn close(&self) {
+        self.peer.close();
         let session = self
             .session
             .lock()
@@ -208,8 +184,8 @@ pub enum MobileClientError {
     Protocol(String),
     #[error("request ID space exhausted")]
     RequestIdExhausted,
-    #[error("RPC request {id} timed out")]
-    RequestTimeout { id: u64 },
+    #[error("RPC request {method} timed out")]
+    RequestTimeout { method: String },
     #[error("Host returned an RPC error: {error}")]
     Remote { error: String },
     #[error("failed to encode JSON: {0}")]

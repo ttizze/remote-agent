@@ -179,6 +179,25 @@ sealed interface CodexItem {
     data class Unknown(override val id: String, val codexType: String, val raw: JsonObject) : CodexItem
 }
 
+// Ordinals are the stable C/JNI codes documented in mobile_client.h.
+internal enum class ConversationEventKind {
+    Unknown,
+    TurnStarted,
+    TurnCompleted,
+    ItemStarted,
+    ItemCompleted,
+    AgentMessageDelta,
+    ReasoningDelta,
+    ReasoningSummaryDelta,
+    CommandOutputDelta,
+    FileChangeOutputDelta,
+    Error,
+    RequestStarted,
+    RequestResolved,
+    ThreadStatusChanged,
+    GuardianReviewChanged,
+}
+
 @Serializable
 sealed interface ThreadEvent {
     val threadId: String
@@ -186,24 +205,17 @@ sealed interface ThreadEvent {
 
     @Serializable
     @SerialName("turnStarted")
-    data class TurnStarted(
-        override val threadId: String,
-        override val turnId: String,
-        val status: TurnStatus,
-        val startedAtMs: Long? = null,
-    ) : ThreadEvent
+    data class TurnStarted(override val threadId: String, val turn: CodexTurn) : ThreadEvent {
+        override val turnId: String
+            get() = turn.id
+    }
 
     @Serializable
     @SerialName("turnCompleted")
-    data class TurnCompleted(
-        override val threadId: String,
-        override val turnId: String,
-        val status: TurnStatus,
-        val startedAtMs: Long? = null,
-        val completedAtMs: Long? = null,
-        val durationMs: Long? = null,
-        val error: CodexTurnError? = null,
-    ) : ThreadEvent
+    data class TurnCompleted(override val threadId: String, val turn: CodexTurn) : ThreadEvent {
+        override val turnId: String
+            get() = turn.id
+    }
 
     @Serializable
     @SerialName("itemStarted")

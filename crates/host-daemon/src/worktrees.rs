@@ -9,19 +9,12 @@ use std::{
     process::Command,
 };
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-struct Settings {
-    create_on_new_session: bool,
-    copy_on_create: bool,
-    copy_paths: Vec<String>,
-    worktree_directory: String,
-}
+use host_protocol::api::WorktreeSettings;
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct State {
-    settings: Settings,
+    settings: WorktreeSettings,
     workspace_roots: HashMap<String, String>,
 }
 
@@ -44,7 +37,7 @@ impl Worktrees {
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
             if let Some(update) = update {
-                let settings: Settings = serde_json::from_value(update).map_err(|e| e.to_string())?;
+                let settings: WorktreeSettings = serde_json::from_value(update).map_err(|e| e.to_string())?;
                 for entry in &settings.copy_paths { relative_path(entry)?; }
                 if !settings.worktree_directory.is_empty() && !Path::new(&settings.worktree_directory).is_absolute() {
                     return Err("worktree directory must be an absolute path on the Host, or empty for the default".into());

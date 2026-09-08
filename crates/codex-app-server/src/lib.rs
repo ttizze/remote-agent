@@ -69,8 +69,6 @@ pub enum Error {
     ExecutableNotFound(PathBuf),
     #[error("failed to create private schema directory: {0}")]
     CreateSchemaDirectory(#[source] io::Error),
-    #[error("secure random generation failed while creating schema directory")]
-    SchemaRandom,
     #[error("failed to run Codex schema generator: {0}")]
     SchemaGenerator(#[source] io::Error),
     #[error("Codex schema generator exited unsuccessfully: {0}")]

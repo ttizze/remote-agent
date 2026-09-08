@@ -1,3 +1,11 @@
+# Architecture boundaries
+
+- Rust owns agent operations and all behavior shared by desktop and mobile: protocol contracts, request construction and response interpretation, conversation state and event reduction, history reconciliation, accounts, worktree settings, and workspace file listing, reading, writing, and diffs. Both clients must call the same Rust implementation.
+- Kotlin owns only mobile-specific coordination and lifecycle behavior. Do not implement desktop/mobile shared rules or agent state machines in Kotlin.
+- Swift and Android platform code own UI rendering, user interaction, and APIs that require their platform. Keep platform adapters thin; send intents to the shared implementation and render its state.
+- Choose ownership by responsibility and cross-platform reuse, not by the screen that first needs a feature. Do not duplicate shared behavior in Kotlin, Swift, or Android code. During a cutover, migrate every caller and remove the obsolete implementation.
+- Do not introduce mutable service, manager, or controller classes to own agent behavior. Represent state as values and compute transitions with pure functions; pass operation inputs explicitly. Review UI classes by responsibility: retain thin framework adapters for rendering and interaction, but keep agent rules and state transitions out of them. In Rust, move owned state through transitions instead of copying conversation bodies.
+
 # Mobile debugging order
 
 When debugging mobile behavior, especially task loading, use this escalation order:

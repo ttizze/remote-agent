@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jni::{
     JNIEnv,
     objects::{JByteArray, JClass, JString},
-    sys::{JNI_FALSE, JNI_TRUE, jboolean, jlong, jstring},
+    sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jstring},
 };
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use zeroize::Zeroizing;
@@ -106,22 +106,6 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_request(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_nextServerRequest(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-) -> jstring {
-    match borrowed_handle(handle).and_then(ffi::next_server_request_json) {
-        Ok(Some(request)) => java_string(&mut env, request),
-        Ok(None) => ptr::null_mut(),
-        Err(error) => {
-            exception(&mut env, error);
-            ptr::null_mut()
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_respondResult(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
@@ -180,12 +164,12 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_respondEr
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_nextNotification(
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_nextEvent(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) -> jstring {
-    match borrowed_handle(handle).and_then(ffi::next_notification_json) {
+    match borrowed_handle(handle).and_then(ffi::next_event_json) {
         Ok(Some(notification)) => java_string(&mut env, notification),
         Ok(None) => ptr::null_mut(),
         Err(error) => {
@@ -228,7 +212,7 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_transfer(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_presentConversation(
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeConversation_presentConversation(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     request_json: JString<'_>,
@@ -237,6 +221,68 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_presentCo
         .and_then(|request| conversation_presentation::present_json(&request))
     {
         Ok(result) => java_string(&mut env, result),
+        Err(error) => {
+            exception(&mut env, error);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeConversation_classifyEvent(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    method: JString<'_>,
+) -> jint {
+    let code = env.get_string(&method).ok().and_then(|method| {
+        method
+            .to_str()
+            .ok()
+            .map(|method| conversation_presentation::state::classify_event(method, false) as jint)
+    });
+    code.unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeConversation_conversationTransition(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    kind: jint,
+    status: jint,
+    current_status: jint,
+    item: jint,
+    flags: jint,
+) -> jint {
+    conversation_presentation::state::transition_code(
+        kind as u32,
+        status as u32,
+        current_status as u32,
+        item as u32,
+        flags as u32,
+    ) as jint
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeConversation_accountTransition(
+    _env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    event: jint,
+    flags: jint,
+) -> jint {
+    agent_client::accounts::transition(event as u32, flags as u32) as jint
+}
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_agentCommand(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    command_json: JString<'_>,
+) -> jstring {
+    let result = (|| {
+        let command = string(&mut env, command_json)?;
+        ffi::agent_command_json(borrowed_handle(handle)?, &command)
+    })();
+    match result {
+        Ok(response) => java_string(&mut env, response),
         Err(error) => {
             exception(&mut env, error);
             ptr::null_mut()

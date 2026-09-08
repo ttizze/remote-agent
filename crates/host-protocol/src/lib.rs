@@ -1,3 +1,6 @@
+pub mod api;
+mod peer;
+pub use peer::{HOST_REQUEST_LIMIT, RpcEvent, RpcEventQueue, RpcPeer, RpcPeerError, rpc_runtime};
 mod auth;
 mod jsonl;
 mod relay;

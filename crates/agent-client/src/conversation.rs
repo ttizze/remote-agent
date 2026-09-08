@@ -1,16 +1,17 @@
+use conversation_presentation::history;
 use conversation_presentation::state::{
     CurrentMetadata, EventKind, EventMetadata, Mutation, classify_event, transition,
 };
 use serde_json::{Value, json};
-pub(crate) fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+pub fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap_or("")
 }
-pub(crate) fn array(value: &Value) -> &[Value] {
+pub fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or_default()
 }
 
 #[derive(Default, Debug)]
-pub(crate) struct Change {
+pub struct Change {
     pub turn: Option<usize>,
     pub item: Option<usize>,
     pub projection: bool,
@@ -25,12 +26,14 @@ impl Change {
 }
 
 #[derive(Default)]
-pub(crate) struct Conversation {
+pub struct Conversation {
     pub thread: Value,
     pub requests: Vec<Value>,
 }
-impl Conversation {
-    pub fn reduce(&mut self, mut message: Value) -> Change {
+/// Pure ownership transition: no state outside this value is mutated.
+/// Existing bodies move with the state; deltas do not clone the conversation.
+pub fn reduce(mut state: Conversation, mut message: Value) -> (Conversation, Change) {
+    let change = (|| {
         let kind = classify_event(text(&message, "method"), message.get("id").is_some());
         let mut params = message["params"].take();
         let event = EventMetadata {
@@ -51,14 +54,15 @@ impl Conversation {
             match action {
                 Mutation::Request => {
                     message["params"] = params;
-                    if let Some(old) = self.requests.iter_mut().find(|r| r["id"] == message["id"]) {
+                    if let Some(old) = state.requests.iter_mut().find(|r| r["id"] == message["id"])
+                    {
                         *old = message;
                     } else {
-                        self.requests.push(message);
+                        state.requests.push(message);
                     }
                 }
                 Mutation::ResolveRequest => {
-                    self.requests.retain(|r| r["id"] != params["requestId"])
+                    state.requests.retain(|r| r["id"] != params["requestId"])
                 }
                 _ => unreachable!(),
             }
@@ -67,10 +71,10 @@ impl Conversation {
                 ..Default::default()
             };
         }
-        if self.thread.is_null()
+        if state.thread.is_null()
             || params
                 .get("threadId")
-                .is_some_and(|id| id != &self.thread["id"])
+                .is_some_and(|id| id != &state.thread["id"])
         {
             return Change::default();
         }
@@ -79,10 +83,10 @@ impl Conversation {
             .filter(|id| !id.is_empty())
             .or_else(|| params["turnId"].as_str())
             .unwrap_or("");
-        let turn_index = array(&self.thread["turns"])
+        let turn_index = array(&state.thread["turns"])
             .iter()
             .rposition(|turn| text(turn, "id") == id);
-        let current = turn_index.map(|i| &self.thread["turns"][i]);
+        let current = turn_index.map(|i| &state.thread["turns"][i]);
         let item_id = if kind == EventKind::GuardianReviewChanged {
             &params["reviewId"]
         } else if matches!(kind, EventKind::ItemStarted | EventKind::ItemCompleted) {
@@ -108,10 +112,10 @@ impl Conversation {
             return Change::default();
         }
         if decision.action == Mutation::ThreadStatus {
-            if self.thread["status"] == params["status"] {
+            if state.thread["status"] == params["status"] {
                 return Change::default();
             }
-            self.thread["status"] = params["status"].take();
+            state.thread["status"] = params["status"].take();
             return Change {
                 status: true,
                 ..Default::default()
@@ -121,16 +125,16 @@ impl Conversation {
             Some(index) => index,
             None if decision.action == Mutation::Turn && !id.is_empty() => {
                 let turn = json!({"id":id,"status":"inProgress","items":[]});
-                if !self.thread["turns"].is_array() {
-                    self.thread["turns"] = json!([]);
+                if !state.thread["turns"].is_array() {
+                    state.thread["turns"] = json!([]);
                 }
-                let turns = self.thread["turns"].as_array_mut().unwrap();
+                let turns = state.thread["turns"].as_array_mut().unwrap();
                 turns.push(turn);
                 turns.len() - 1
             }
             _ => return Change::default(),
         };
-        let turn = &mut self.thread["turns"][ix];
+        let turn = &mut state.thread["turns"][ix];
         let mut change = Change {
             turn: Some(ix),
             item: item_index,
@@ -138,40 +142,11 @@ impl Conversation {
         };
         match decision.action {
             Mutation::Turn => {
-                let mut incoming = params["turn"].take();
-                let preserve = matches!(text(&incoming, "itemsView"), "summary" | "notLoaded")
-                    || array(&incoming["items"]).is_empty();
-                let items = incoming["items"].take();
-                if let Value::Object(fields) = incoming {
-                    for (key, value) in fields {
-                        if key != "items"
-                            && key != "status"
-                            && !(value.is_null()
-                                && matches!(
-                                    key.as_str(),
-                                    "error" | "startedAt" | "completedAt" | "durationMs"
-                                ))
-                        {
-                            turn[key] = value;
-                        }
-                    }
-                }
-                if let Value::Array(items) = items {
-                    for item in &items {
-                        remove_deferred(turn, text(item, "id"));
-                    }
-                    if preserve {
-                        for item in items {
-                            upsert(turn, item);
-                        }
-                    } else {
-                        turn["items"] = Value::Array(items);
-                    }
-                }
-                turn["status"] = json!(decision.status.unwrap());
-                if decision.clear_error {
-                    turn.as_object_mut().unwrap().remove("error");
-                }
+                *turn = conversation_presentation::state::merge_lifecycle(
+                    turn.take(),
+                    params["turn"].take(),
+                    kind,
+                );
                 change.projection = true;
             }
             Mutation::Item => {
@@ -224,7 +199,10 @@ impl Conversation {
             _ => unreachable!(),
         }
         change
-    }
+    })();
+    (state, change)
+}
+impl Conversation {
     pub fn active(&self) -> Option<&Value> {
         array(&self.thread["turns"])
             .iter()
@@ -277,7 +255,7 @@ fn upsert(turn: &mut Value, item: Value) -> usize {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct HistoryPage {
+pub struct HistoryPage {
     pub turn: Option<String>,
     pub cursor: Value,
 }
@@ -299,100 +277,29 @@ impl Conversation {
                 cursor: self.thread["historyCursor"].clone(),
             })
     }
-    // Check the opaque cursor before mutation; a delayed page cannot replay or
-    // overwrite content observed through live events or a newer read.
-    pub fn merge_older(&mut self, mut page: Value, request: &HistoryPage) -> Result<usize, String> {
-        if page["thread"]["id"] != self.thread["id"] {
-            return Err("履歴の会話IDが一致しません".into());
-        }
-        let incoming = page["thread"]["turns"]
-            .as_array_mut()
-            .ok_or("履歴のターンがありません")?;
-        if let Some(id) = &request.turn {
-            if incoming.len() != 1 || incoming[0]["id"] != *id {
-                return Err("履歴のターンIDが一致しません".into());
-            }
-            let turn = self.thread["turns"]
-                .as_array_mut()
-                .and_then(|turns| turns.iter_mut().find(|turn| turn["id"] == *id))
-                .ok_or("履歴のターンが見つかりません")?;
-            if turn["itemsNextCursor"] != request.cursor || turn["itemsHasMore"] != true {
-                return Ok(0);
-            }
-            let older = &mut incoming[0];
-            if !older["itemsNextCursor"].is_null() && older["itemsNextCursor"] == request.cursor {
-                return Err("履歴カーソルが進みませんでした".into());
-            }
-            let values = older["items"]
-                .as_array_mut()
-                .ok_or("履歴の項目がありません")?;
-            if values.iter().any(|item| text(item, "id").is_empty()) {
-                return Err("履歴の項目IDがありません".into());
-            }
-            let mut prefix = std::mem::take(values);
-            let mut known: std::collections::HashSet<String> = array(&turn["items"])
-                .iter()
-                .map(|item| text(item, "id").to_owned())
-                .collect();
-            prefix.retain(|item| known.insert(text(item, "id").to_owned()));
-            let mut deferred = array(&turn["deferredItemIds"]).to_vec();
-            for id in array(&older["deferredItemIds"]) {
-                if prefix.iter().any(|item| &item["id"] == id) && !deferred.contains(id) {
-                    deferred.push(id.clone());
-                }
-            }
-            if let Some(items) = turn["items"].as_array_mut() {
-                prefix.append(items);
-            }
-            turn["items"] = Value::Array(prefix);
-            turn["deferredItemIds"] = Value::Array(deferred);
-            turn["itemsNextCursor"] = older["itemsNextCursor"].take();
-            turn["itemsHasMore"] = json!(older["itemsHasMore"] == true);
-            if !older["openingUserMessage"].is_null() {
-                turn["openingUserMessage"] = older["openingUserMessage"].take();
-            }
-            Ok(0)
-        } else {
-            if self.thread["historyCursor"] != request.cursor {
-                return Ok(0);
-            }
-            if incoming
-                .iter()
-                .any(|turn| text(turn, "id").is_empty() || !turn["items"].is_array())
-            {
-                return Err("履歴のターンが不正です".into());
-            }
-            let mut prefix = std::mem::take(incoming);
-            if !page["thread"]["historyCursor"].is_null()
-                && page["thread"]["historyCursor"] == request.cursor
-            {
-                return Err("履歴カーソルが進みませんでした".into());
-            }
-            // Repeated turn IDs within a page are native history, not duplicates.
-            prefix.retain(|turn| {
-                !array(&self.thread["turns"])
-                    .iter()
-                    .any(|current| current["id"] == turn["id"])
-            });
-            let added = prefix.len();
-            if let Some(turns) = self.thread["turns"].as_array_mut() {
-                prefix.append(turns);
-            }
-            self.thread["turns"] = Value::Array(prefix);
-            self.thread["historyCursor"] = page["thread"]["historyCursor"].take();
-            Ok(added)
-        }
-    }
-    pub fn apply_detail(
-        &mut self,
-        turn_id: &str,
-        item_id: &str,
-        item: Value,
-    ) -> Result<bool, String> {
+}
+
+pub fn merge_older(
+    mut state: Conversation,
+    page: Value,
+    request: &HistoryPage,
+) -> (Conversation, Result<usize, String>) {
+    let (thread, result) =
+        history::merge_older(state.thread, page, request.turn.as_deref(), &request.cursor);
+    state.thread = thread;
+    (state, result)
+}
+pub fn apply_detail(
+    mut state: Conversation,
+    turn_id: &str,
+    item_id: &str,
+    item: Value,
+) -> (Conversation, Result<bool, String>) {
+    let result = (|| {
         if text(&item, "id") != item_id {
             return Err("詳細の項目IDが一致しません".into());
         }
-        let Some(turn) = self.thread["turns"]
+        let Some(turn) = state.thread["turns"]
             .as_array_mut()
             .and_then(|turns| turns.iter_mut().find(|turn| turn["id"] == turn_id))
         else {
@@ -413,104 +320,23 @@ impl Conversation {
         *target = item;
         remove_deferred(turn, item_id);
         Ok(true)
-    }
+    })();
+    (state, result)
 }
+
 fn remove_deferred(turn: &mut Value, item_id: &str) {
     if let Some(ids) = turn["deferredItemIds"].as_array_mut() {
         ids.retain(|id| id != item_id);
     }
 }
 
-impl Conversation {
-    pub fn refresh_history(&mut self, mut fresh: Value) -> Result<(), String> {
-        if fresh["id"] != self.thread["id"] || !fresh["turns"].is_array() {
-            return Err("更新された履歴が不正です".into());
-        }
-        let first = array(&fresh["turns"]).first().map(|turn| text(turn, "id"));
-        let boundary = first.and_then(|id| {
-            array(&self.thread["turns"])
-                .iter()
-                .position(|turn| text(turn, "id") == id)
-        });
-        if self.thread.get("historyCursor").is_some()
-            && let Some(boundary) = boundary
-        {
-            let mut old = self.thread["turns"]
-                .take()
-                .as_array_mut()
-                .map(std::mem::take)
-                .unwrap_or_default();
-            let tail = old.split_off(boundary);
-            let mut old_tail = tail;
-            for turn in fresh["turns"].as_array_mut().unwrap() {
-                let Some(previous) = old_tail
-                    .iter_mut()
-                    .find(|previous| previous["id"] == turn["id"])
-                else {
-                    continue;
-                };
-                let mut previous = previous.take();
-                let item_boundary = array(&turn["items"]).first().and_then(|first| {
-                    array(&previous["items"])
-                        .iter()
-                        .position(|item| item["id"] == first["id"])
-                });
-                if let Some(item_boundary) = item_boundary {
-                    let mut prefix = previous["items"]
-                        .take()
-                        .as_array_mut()
-                        .map(std::mem::take)
-                        .unwrap_or_default();
-                    let mut old_items = prefix.split_off(item_boundary);
-                    let mut deferred = Vec::new();
-                    for id in array(&previous["deferredItemIds"]) {
-                        if prefix.iter().any(|item| item["id"] == *id) {
-                            deferred.push(id.clone());
-                        }
-                    }
-                    // Keep already fetched details when a fresh tail only carries summaries.
-                    let fresh_deferred = turn["deferredItemIds"].take();
-                    for item in turn["items"].as_array_mut().unwrap() {
-                        if array(&fresh_deferred).iter().any(|id| *id == item["id"]) {
-                            if !array(&previous["deferredItemIds"])
-                                .iter()
-                                .any(|id| *id == item["id"])
-                                && let Some(full) =
-                                    old_items.iter_mut().find(|old| old["id"] == item["id"])
-                            {
-                                *item = full.take();
-                            } else {
-                                deferred.push(item["id"].clone());
-                            }
-                        }
-                    }
-                    prefix.append(turn["items"].as_array_mut().unwrap());
-                    turn["items"] = Value::Array(prefix);
-                    turn["deferredItemIds"] = Value::Array(deferred);
-                    turn["itemsHasMore"] = previous["itemsHasMore"].take();
-                    turn["itemsNextCursor"] = previous["itemsNextCursor"].take();
-                    if turn["openingUserMessage"].is_null() {
-                        turn["openingUserMessage"] = previous["openingUserMessage"].take();
-                    }
-                } else if array(&turn["items"]).is_empty() && turn["itemsHasMore"] == true {
-                    for field in [
-                        "items",
-                        "itemsHasMore",
-                        "itemsNextCursor",
-                        "deferredItemIds",
-                        "openingUserMessage",
-                    ] {
-                        turn[field] = previous[field].take();
-                    }
-                }
-            }
-            old.append(fresh["turns"].as_array_mut().unwrap());
-            fresh["turns"] = Value::Array(old);
-            fresh["historyCursor"] = self.thread["historyCursor"].take();
-        }
-        self.thread = fresh;
-        Ok(())
-    }
+pub fn refresh_history(
+    mut state: Conversation,
+    fresh: Value,
+) -> (Conversation, Result<(), String>) {
+    let (thread, result) = history::merge_refresh(state.thread, fresh);
+    state.thread = thread;
+    (state, result)
 }
 
 #[cfg(test)]
@@ -523,7 +349,14 @@ mod tests {
             thread: json!({"id":"thread","turns":[{"id":"turn","status":"inProgress","items":items}]}),
             requests: vec![],
         };
-        state.reduce(json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed","itemsView":"summary","items":[items[2]],"durationMs":2349}}}));
+        {
+            let (next, result) = reduce(
+                state,
+                json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"turn","status":"completed","itemsView":"summary","items":[items[2]],"durationMs":2349}}}),
+            );
+            state = next;
+            result
+        };
         assert_eq!(state.thread["turns"][0]["items"], items);
         assert_eq!(state.thread["turns"][0]["durationMs"], 2349);
         assert!(state.active().is_none());
@@ -539,18 +372,36 @@ mod tests {
             json!({"method":"item/started","params":{"threadId":"thread","turnId":"turn","item":{"id":"agent","type":"agentMessage","phase":"commentary","text":""}}}),
             json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"agent","delta":"確認しています"}}),
         ] {
-            state.reduce(event);
+            {
+                let (next, result) = reduce(state, event);
+                state = next;
+                result
+            };
         }
         assert_eq!(
             state.thread["turns"][0]["items"][0]["text"],
             "確認しています"
         );
-        state.reduce(json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","item":{"id":"agent","type":"agentMessage","phase":"commentary","text":"確認しています。","unknownFutureField":42}}}));
+        {
+            let (next, result) = reduce(
+                state,
+                json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","item":{"id":"agent","type":"agentMessage","phase":"commentary","text":"確認しています。","unknownFutureField":42}}}),
+            );
+            state = next;
+            result
+        };
         let items = array(&state.thread["turns"][0]["items"]);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["text"], "確認しています。");
         assert_eq!(items[0]["unknownFutureField"], 42);
-        state.reduce(json!({"method":"item/agentMessage/delta","params":{"threadId":"other","turnId":"turn","itemId":"agent","delta":"wrong"}}));
+        {
+            let (next, result) = reduce(
+                state,
+                json!({"method":"item/agentMessage/delta","params":{"threadId":"other","turnId":"turn","itemId":"agent","delta":"wrong"}}),
+            );
+            state = next;
+            result
+        };
         assert_eq!(
             state.thread["turns"][0]["items"][0]["text"],
             "確認しています。"
@@ -560,10 +411,25 @@ mod tests {
     fn requests_remain_actionable_until_resolved() {
         let mut state = Conversation::default();
         let request = json!({"id":"r","method":"item/commandExecution/requestApproval","params":{"threadId":"thread","turnId":"turn","command":"npm test"}});
-        state.reduce(request.clone());
-        state.reduce(request.clone());
+        {
+            let (next, result) = reduce(state, request.clone());
+            state = next;
+            result
+        };
+        {
+            let (next, result) = reduce(state, request.clone());
+            state = next;
+            result
+        };
         assert_eq!(state.requests, vec![request]);
-        state.reduce(json!({"method":"serverRequest/resolved","params":{"requestId":"r"}}));
+        {
+            let (next, result) = reduce(
+                state,
+                json!({"method":"serverRequest/resolved","params":{"requestId":"r"}}),
+            );
+            state = next;
+            result
+        };
         assert!(state.requests.is_empty());
     }
 }
@@ -581,7 +447,11 @@ mod transition_tests {
     fn denied_automatic_review_is_visible_until_approved() {
         let mut state = conversation();
         let event = |status| json!({"method":"item/autoApprovalReview/completed","params":{"threadId":"thread","turnId":"turn","reviewId":"review","review":{"status":status}}});
-        state.reduce(event("denied"));
+        {
+            let (next, result) = reduce(state, event("denied"));
+            state = next;
+            result
+        };
         assert_eq!(
             state.thread["turns"][0]["items"][0]["type"],
             "automaticApprovalReview"
@@ -590,7 +460,11 @@ mod transition_tests {
             state.thread["turns"][0]["items"][0]["review"]["status"],
             "denied"
         );
-        state.reduce(event("approved"));
+        {
+            let (next, result) = reduce(state, event("approved"));
+            state = next;
+            result
+        };
         assert!(array(&state.thread["turns"][0]["items"]).is_empty());
     }
     #[test]
@@ -598,7 +472,11 @@ mod transition_tests {
         let mut state = conversation();
         let message = json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","item":{"id":"answer","type":"agentMessage","text":"x".repeat(1024*1024)}}});
         let body = message["params"]["item"]["text"].as_str().unwrap().as_ptr();
-        state.reduce(message);
+        {
+            let (next, result) = reduce(state, message);
+            state = next;
+            result
+        };
         assert_eq!(
             state.thread["turns"][0]["items"][0]["text"]
                 .as_str()
@@ -626,14 +504,14 @@ mod history_tests {
             .unwrap()
             .as_ptr();
         let request = state.older_page().unwrap();
-        state.merge_older(json!({"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"command","type":"commandExecution"},{"id":"answer","type":"agentMessage","text":"stale"}],"deferredItemIds":["command","answer"],"itemsHasMore":false,"itemsNextCursor":null}]}}), &request).unwrap();
+        { let (next, result) = merge_older(state, json!({"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"command","type":"commandExecution"},{"id":"answer","type":"agentMessage","text":"stale"}],"deferredItemIds":["command","answer"],"itemsHasMore":false,"itemsNextCursor":null}]}}), &request); state = next; result }.unwrap();
         let turn = &state.thread["turns"][0];
         assert_eq!(turn["status"], "inProgress");
         assert_eq!(turn["items"][1]["text"], "live answer");
         assert_eq!(turn["items"][1]["text"].as_str().unwrap().as_ptr(), body);
         assert_eq!(turn["deferredItemIds"], json!(["command"]));
         assert_eq!(state.older_page().unwrap().turn, None);
-        state.merge_older(json!({"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"duplicate"}]}]}}), &request).unwrap();
+        { let (next, result) = merge_older(state, json!({"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"duplicate"}]}]}}), &request); state = next; result }.unwrap();
         assert_eq!(array(&state.thread["turns"][0]["items"]).len(), 2);
     }
     #[test]
@@ -646,7 +524,14 @@ mod history_tests {
             json!({"thread":{"id":"thread","turns":[{"id":"other","items":[]}]}}),
             json!({"thread":{"id":"thread","turns":[{"id":"turn","items":[],"itemsNextCursor":"items:1"}]}}),
         ] {
-            assert!(state.merge_older(page, &request).is_err());
+            assert!(
+                {
+                    let (next, result) = merge_older(state, page, &request);
+                    state = next;
+                    result
+                }
+                .is_err()
+            );
             assert_eq!(state.thread, before);
         }
     }
@@ -657,7 +542,7 @@ mod history_tests {
             turn: None,
             cursor: json!("turns:1"),
         };
-        let added = state.merge_older(json!({"thread":{"id":"thread","historyCursor":null,"turns":[{"id":"repeat","items":[{"id":"one"}]},{"id":"repeat","items":[{"id":"two"}]},{"id":"turn","items":[]}]}}), &request).unwrap();
+        let added = { let (next, result) = merge_older(state, json!({"thread":{"id":"thread","historyCursor":null,"turns":[{"id":"repeat","items":[{"id":"one"}]},{"id":"repeat","items":[{"id":"two"}]},{"id":"turn","items":[]}]}}), &request); state = next; result }.unwrap();
         assert_eq!(added, 2);
         assert_eq!(state.thread["turns"][0]["items"][0]["id"], "one");
         assert_eq!(state.thread["turns"][1]["items"][0]["id"], "two");
@@ -667,11 +552,26 @@ mod history_tests {
     fn late_detail_cannot_replace_an_item_completed_live() {
         let mut state = state();
         state.thread["turns"][0]["deferredItemIds"] = json!(["answer"]);
-        state.reduce(json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","item":{"id":"answer","type":"agentMessage","text":"new full body"}}}));
+        {
+            let (next, result) = reduce(
+                state,
+                json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","item":{"id":"answer","type":"agentMessage","text":"new full body"}}}),
+            );
+            state = next;
+            result
+        };
         assert!(
-            !state
-                .apply_detail("turn", "answer", json!({"id":"answer","text":"stale"}))
-                .unwrap()
+            !{
+                let (next, result) = apply_detail(
+                    state,
+                    "turn",
+                    "answer",
+                    json!({"id":"answer","text":"stale"}),
+                );
+                state = next;
+                result
+            }
+            .unwrap()
         );
         assert_eq!(
             state.thread["turns"][0]["items"][0]["text"],
@@ -686,7 +586,7 @@ mod history_tests {
             .as_str()
             .unwrap()
             .as_ptr();
-        state.refresh_history(json!({"id":"thread","historyCursor":"new-window","turns":[{"id":"turn","status":"completed","itemsHasMore":true,"itemsNextCursor":"new-items-window","deferredItemIds":["command"],"items":[{"id":"command","type":"commandExecution"},{"id":"answer","type":"agentMessage","text":"updated"}]}]})).unwrap();
+        { let (next, result) = refresh_history(state, json!({"id":"thread","historyCursor":"new-window","turns":[{"id":"turn","status":"completed","itemsHasMore":true,"itemsNextCursor":"new-items-window","deferredItemIds":["command"],"items":[{"id":"command","type":"commandExecution"},{"id":"answer","type":"agentMessage","text":"updated"}]}]})); state = next; result }.unwrap();
         let turn = &state.thread["turns"][0];
         assert_eq!(state.thread["historyCursor"], "turns:1");
         assert_eq!(turn["itemsNextCursor"], "items:1");
@@ -704,10 +604,24 @@ mod history_tests {
     #[test]
     fn delta_dirties_only_its_row_but_phase_change_invalidates_projection() {
         let mut state = state();
-        let change = state.reduce(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"answer","delta":"!"}}));
+        let change = {
+            let (next, result) = reduce(
+                state,
+                json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"answer","delta":"!"}}),
+            );
+            state = next;
+            result
+        };
         assert_eq!(change.turn, Some(0));
         assert!(!change.projection);
-        let change = state.reduce(json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","item":{"id":"answer","type":"agentMessage","phase":"final_answer","text":"done"}}}));
+        let change = {
+            let (next, result) = reduce(
+                state,
+                json!({"method":"item/completed","params":{"threadId":"thread","turnId":"turn","item":{"id":"answer","type":"agentMessage","phase":"final_answer","text":"done"}}}),
+            );
+            state = next;
+            result
+        };
         assert!(change.projection);
         assert_eq!(array(&state.thread["turns"][0]["items"]).len(), 1);
     }

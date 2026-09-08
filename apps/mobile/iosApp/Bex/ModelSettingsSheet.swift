@@ -4,22 +4,17 @@ struct ModelSettingsSheet: View {
     @ObservedObject var model: CodexModelSettings
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @State private var login: [String: Any]?
-    @State private var loginError: String?
-    @State private var startingLogin = false
-    @State private var pollingLogin: Task<Void, Never>?
-
     var body: some View {
         NavigationView {
             List {
-                ForEach(model.accounts) { account in
+                ForEach(model.accounts, id: \.id) { account in
                     Section {
                         Button { model.chooseAccount(account.id) } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "person.crop.circle").font(.title2)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(account.email).foregroundColor(.primary)
-                                    Text(account.plan.uppercased()).font(.caption).foregroundColor(.secondary)
+                                    Text(account.planType.uppercased()).font(.caption).foregroundColor(.secondary)
                                 }
                                 Spacer()
                                 if account.id == model.selectedAccountId {
@@ -74,21 +69,21 @@ struct ModelSettingsSheet: View {
                     }
                 }
                 Section {
-                    if let login {
+                    if let login = model.login {
                         Text("ブラウザでログインし、次のコードを入力してください。")
-                        Text(login["userCode"] as? String ?? "").font(.title2.monospaced()).textSelection(.enabled)
+                        Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
                             .accessibilityIdentifier("model.login.code")
-                        if let value = login["verificationUrl"] as? String, let url = URL(string: value),
+                        if let url = URL(string: login.verificationUrl),
                            url.scheme == "https" {
                             Link("ログインページを開く", destination: url)
                         }
-                        Button("ログインをキャンセル") { cancelLogin() }
+                        Button("ログインをキャンセル") { model.cancelLogin() }
                     } else {
-                        Button { startLogin() } label: { Label("Codex アカウントを追加", systemImage: "plus") }
-                            .disabled(startingLogin)
+                        Button { model.startLogin() } label: { Label("Codex アカウントを追加", systemImage: "plus") }
+                            .disabled(model.startingLogin)
                             .accessibilityIdentifier("model.account.add")
                     }
-                    if let error = loginError ?? model.accountError ?? model.modelError {
+                    if let error = model.accountError ?? model.modelError {
                         Text(error).font(.caption).foregroundColor(.red)
                         Button("再読み込み") { refresh() }
                     }
@@ -97,77 +92,23 @@ struct ModelSettingsSheet: View {
             .navigationTitle("アカウントとモデル")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) {
-                Button("完了") { dismiss() }.disabled(login != nil || startingLogin)
+                Button("完了") { dismiss() }.disabled(model.login != nil || model.startingLogin)
                     .accessibilityIdentifier("model.close")
             } }
         }
         .navigationViewStyle(StackNavigationViewStyle())
-        .interactiveDismissDisabled(login != nil || startingLogin)
+        .interactiveDismissDisabled(model.login != nil || model.startingLogin)
         .onAppear { refresh() }
         .onChange(of: scenePhase) { phase in
-            if phase == .active, let id = login?["loginId"] as? String {
-                pollLogin(id)
+            if phase == .active {
+                model.resumeLogin()
             }
         }
-        .onDisappear { pollingLogin?.cancel(); pollingLogin = nil }
-    }
-
-    private func startLogin() {
-        startingLogin = true
-        loginError = nil
-        model.account("host/account/login/start", [:]) { result, error in
-            startingLogin = false
-            loginError = error
-            guard let result, let id = result["loginId"] as? String else { return }
-            login = result
-            pollLogin(id)
-        }
+        .onDisappear { model.pauseLogin() }
     }
 
     private func refresh() {
-        if let id = login?["loginId"] as? String {
-            pollLogin(id)
-        } else {
-            model.loadAccounts(); model.loadModels()
-        }
-    }
-
-    private func pollLogin(_ id: String) {
-        guard pollingLogin == nil else { return }
-        loginError = nil
-        pollingLogin = Task { @MainActor in
-            while !Task.isCancelled {
-                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
-                let (status, error): ([String: Any]?, String?) = await withCheckedContinuation { continuation in
-                    model.account("host/account/login/status", ["loginId": id]) { continuation.resume(returning: (
-                        $0,
-                        $1
-                    )) }
-                }
-                guard !Task.isCancelled else { return }
-                if let error {
-                    loginError = error
-                    pollingLogin = nil
-                    return
-                }
-                if status?["completed"] as? Bool == true {
-                    login = nil
-                    pollingLogin = nil
-                    model.loadAccounts(selecting: status?["accountId"] as? String)
-                    return
-                }
-            }
-        }
-    }
-
-    private func cancelLogin() {
-        guard let id = login?["loginId"] as? String else { return }
-        pollingLogin?.cancel()
-        pollingLogin = nil
-        login = nil
-        model.account("host/account/login/cancel", ["loginId": id]) { _, error in
-            loginError = error
-            model.loadAccounts()
-        }
+        model.loadAccounts()
+        model.loadModels()
     }
 }

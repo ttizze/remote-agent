@@ -294,7 +294,7 @@ private fun reduceHostEvent(
                 when {
                     event is ThreadEvent.TurnStarted ->
                         view.copy(unreadCompletedThreadIds = view.unreadCompletedThreadIds - event.threadId)
-                    event is ThreadEvent.TurnCompleted && event.status == TurnStatus.Completed -> {
+                    event is ThreadEvent.TurnCompleted && event.turn.status == TurnStatus.Completed -> {
                         val isViewingThread =
                             state.selectedProfileId == action.hostIdentity &&
                                 !state.showingPairing &&

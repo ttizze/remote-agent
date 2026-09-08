@@ -5,6 +5,7 @@
 
 use serde::Serialize;
 use serde_json::{Value, json};
+pub mod history;
 pub mod state;
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -417,19 +418,38 @@ fn tool_title(item: &Value) -> String {
 /// Metadata-only bridge used by C/JNI clients. Output contains source indices,
 /// display policy and labels, never source message bodies or tool output.
 pub fn present_json(request: &str) -> Result<String, String> {
-    let request: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
+    let mut request: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
     let result = match text(&request, "operation") {
-        "eventKind" => serde_json::to_value(state::classify_event(
-            text(&request, "method"),
-            request["isRequest"] == true,
-        ))
-        .map_err(|e| e.to_string())?,
-        "transition" => {
-            let event: state::EventMetadata<'_> =
-                serde::Deserialize::deserialize(&request["event"]).map_err(|e| e.to_string())?;
-            let current: state::CurrentMetadata<'_> =
-                serde::Deserialize::deserialize(&request["current"]).map_err(|e| e.to_string())?;
-            serde_json::to_value(state::transition(&event, &current)).map_err(|e| e.to_string())?
+        "watchPath" => serde_json::to_value(state::watch_path(&request["thread"]))
+            .map_err(|e| e.to_string())?,
+        "sendPlan" => {
+            serde_json::to_value(state::plan_send(&request["snapshot"], &request["listed"]))
+                .map_err(|e| e.to_string())?
+        }
+        "turnLifecycle" => {
+            let kind = if request["started"] == true {
+                state::EventKind::TurnStarted
+            } else {
+                state::EventKind::TurnCompleted
+            };
+            state::merge_lifecycle(request["previous"].take(), request["incoming"].take(), kind)
+        }
+        "historyRefresh" => {
+            let (thread, result) =
+                history::merge_refresh(request["previous"].take(), request["incoming"].take());
+            result?;
+            thread
+        }
+        "historyOlder" => {
+            let page = serde_json::json!({"thread":request["incoming"].take()});
+            let (thread, result) = history::merge_older(
+                request["previous"].take(),
+                page,
+                request["turnId"].as_str(),
+                &request["cursor"],
+            );
+            result?;
+            thread
         }
         "turn" => {
             let turn = &request["turn"];

@@ -70,10 +70,19 @@ internal suspend fun MobileController.loadOlderHistory(profile: HostProfile, tur
         eventMutex.withLock {
             if (!isConnected(profile.id, generation) || historyNavigation != navigation) return@withLock
             val current = state.cache.snapshot(profile.id, threadId) ?: return@withLock
-            if (!current.matchesHistoryPage(turnId, cursor)) return@withLock
             when (result) {
-                is GatewayResult.Success ->
-                    dispatch(AppAction.HistoryReceived(profile.id, mergeOlderHistory(current, result.value, turnId)))
+                is GatewayResult.Success -> {
+                    try {
+                        dispatch(
+                            AppAction.HistoryReceived(
+                                profile.id,
+                                mergeOlderHistory(current, result.value, turnId, cursor),
+                            )
+                        )
+                    } catch (error: IllegalStateException) {
+                        dispatch(AppAction.HistoryLoading(profile.id, false, error.message))
+                    }
+                }
                 is GatewayResult.Failure -> dispatch(AppAction.HistoryLoading(profile.id, false, result.message))
             }
         }
@@ -99,6 +108,3 @@ private fun MobileController.selectedHistoryPage(hostIdentity: String, turnId: S
 
 private fun ThreadSnapshot.historyCursor(turnId: String?): String? =
     if (turnId == null) olderTurnsCursor else turns.firstOrNull { it.id == turnId }?.olderItemsCursor
-
-private fun ThreadSnapshot.matchesHistoryPage(turnId: String?, cursor: String?): Boolean =
-    historyCursor(turnId) == cursor && (turnId == null || turns.firstOrNull { it.id == turnId }?.hasOlderItems == true)

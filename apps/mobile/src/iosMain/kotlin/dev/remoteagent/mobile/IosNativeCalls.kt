@@ -18,8 +18,7 @@ import kotlinx.cinterop.value
 import kotlinx.serialization.json.JsonElement
 import mobile_client.mobile_client_connect
 import mobile_client.mobile_client_generate_device_key
-import mobile_client.mobile_client_next_notification
-import mobile_client.mobile_client_next_server_request
+import mobile_client.mobile_client_next_event
 import mobile_client.mobile_client_request
 import mobile_client.mobile_client_respond_error
 import mobile_client.mobile_client_respond_result
@@ -33,21 +32,10 @@ internal fun callConnect(config: String, key: ByteArray): GatewayResult<CPointer
     }
 }
 
-internal fun nextNotification(current: CPointer<MobileClientHandle>): String? = memScoped {
+internal fun nextEvent(current: CPointer<MobileClientHandle>): String? = memScoped {
     val error = alloc<CPointerVar<ByteVar>>()
     error.value = null
-    val value = mobile_client_next_notification(current, error.ptr)
-    if (value == null) {
-        if (error.value != null) error(takeError(error.value))
-        return null
-    }
-    takeString(value)
-}
-
-internal fun nextServerRequest(current: CPointer<MobileClientHandle>): String? = memScoped {
-    val error = alloc<CPointerVar<ByteVar>>()
-    error.value = null
-    val value = mobile_client_next_server_request(current, error.ptr)
+    val value = mobile_client_next_event(current, error.ptr)
     if (value == null) {
         if (error.value != null) error(takeError(error.value))
         return null
@@ -71,7 +59,7 @@ internal fun takeResult(value: CPointer<ByteVar>?, error: CPointer<ByteVar>?): G
 }
 
 internal fun nextRawMessage(current: CPointer<MobileClientHandle>): RawCodexMessage? {
-    val raw = nextNotification(current) ?: nextServerRequest(current)
+    val raw = nextEvent(current)
     return raw?.let(::parseRawCodexMessage)
 }
 

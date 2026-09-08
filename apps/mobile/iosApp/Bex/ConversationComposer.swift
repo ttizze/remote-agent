@@ -178,11 +178,14 @@ extension ThreadScreen {
     func refreshReview() {
         let directory = model.cwd
         guard !directory.isEmpty, let threadId = conversation.thread?.id else { review = nil; return }
-        model.workspace("host/workspace/review", ["cwd": directory]) { result, _ in
+        model.workspace.reviewWorkspace(cwd: directory) { result, _ in
             guard model.cwd == directory, model.state.selectedThreadId == threadId else { return }
-            if let result, let files = result["files"] as? [[String: Any]],
-               let additions = result["additions"] as? Int, let deletions = result["deletions"] as? Int {
-                review = WorkspaceReviewSummary(files: files.count, additions: additions, deletions: deletions)
+            if let result {
+                review = WorkspaceReviewSummary(
+                    files: result.files.count,
+                    additions: Int(result.additions),
+                    deletions: Int(result.deletions)
+                )
             } else {
                 review = nil
             }

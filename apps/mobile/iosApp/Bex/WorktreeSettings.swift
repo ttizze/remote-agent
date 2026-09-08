@@ -1,3 +1,4 @@
+import RemoteAgentMobile
 import SwiftUI
 
 struct WorktreeSettingsHost: Identifiable {
@@ -83,15 +84,12 @@ struct WorktreeSettingsSheet: View {
         .task { await load() }
     }
 
-    private func requestSettings(update: [String: Any]? = nil) async -> ([String: Any]?, String?) {
-        do {
-            let updateJson = try update.map(jsonString)
-            return await withCheckedContinuation { continuation in
-                model.workspace.worktreeSettings(hostIdentity: host.id, updateJson: updateJson) { result, error in
-                    continuation.resume(returning: (result.map(jsonObject), error))
-                }
+    private func requestSettings(update: HostWorktreeSettings? = nil) async -> (HostWorktreeSettings?, String?) {
+        await withCheckedContinuation { continuation in
+            model.workspace.worktreeSettings(hostIdentity: host.id, update: update) { result, error in
+                continuation.resume(returning: (result, error))
             }
-        } catch { return (nil, error.localizedDescription) }
+        }
     }
 
     private func load() async {
@@ -99,17 +97,14 @@ struct WorktreeSettingsSheet: View {
         error = nil
         defer { busy = false }
         let (settings, failure) = await requestSettings()
-        guard let settings, failure == nil,
-              let create = settings["createOnNewSession"] as? Bool,
-              let copy = settings["copyOnCreate"] as? Bool,
-              let paths = settings["copyPaths"] as? [String] else {
+        guard let settings, failure == nil else {
             error = failure ?? "設定の応答が無効です。"
             return
         }
-        createOnNewSession = create
-        copyOnCreate = copy
-        copyPaths = paths.joined(separator: "\n")
-        directory = settings["worktreeDirectory"] as? String ?? ""
+        createOnNewSession = settings.createOnNewSession
+        copyOnCreate = settings.copyOnCreate
+        copyPaths = settings.copyPaths.joined(separator: "\n")
+        directory = settings.worktreeDirectory
         loaded = true
     }
 
@@ -119,10 +114,10 @@ struct WorktreeSettingsSheet: View {
         defer { busy = false }
         let paths = copyPaths.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        let (result, failure) = await requestSettings(update: [
-            "createOnNewSession": createOnNewSession, "copyOnCreate": copyOnCreate,
-            "copyPaths": paths, "worktreeDirectory": directory.trimmingCharacters(in: .whitespacesAndNewlines)
-        ])
+        let (result, failure) = await requestSettings(update: HostWorktreeSettings(
+            createOnNewSession: createOnNewSession, copyOnCreate: copyOnCreate,
+            copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines)
+        ))
         if result != nil, failure == nil {
             dismiss()
         } else {

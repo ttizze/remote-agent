@@ -1,15 +1,17 @@
 import AppKit
 import AVFoundation
 
-// Like FilePicker, this helper owns its AppKit loop independently of GPUI.
-// stdin EOF cancels recording even if the parent exits unexpectedly. Audio stays
-// in the parent's private temporary directory; stdout contains only status.
+/// Like FilePicker, this helper owns its AppKit loop independently of GPUI.
+/// stdin EOF cancels recording even if the parent exits unexpectedly. Audio stays
+/// in the parent's private temporary directory; stdout contains only status.
 final class Dictation: NSObject, AVAudioRecorderDelegate {
     private let directory: URL
     private var recorder: AVAudioRecorder?
     private var finished = false
 
-    init(directory: URL) { self.directory = directory }
+    init(directory: URL) {
+        self.directory = directory
+    }
 
     func start() {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
@@ -24,12 +26,13 @@ final class Dictation: NSObject, AVAudioRecorderDelegate {
                         url: self.directory.appendingPathComponent("recording.wav"),
                         settings: [
                             AVFormatIDKey: kAudioFormatLinearPCM,
-                            AVSampleRateKey: 24_000,
+                            AVSampleRateKey: 24000,
                             AVNumberOfChannelsKey: 1,
                             AVLinearPCMBitDepthKey: 16,
                             AVLinearPCMIsBigEndianKey: false,
                             AVLinearPCMIsFloatKey: false
-                        ])
+                        ]
+                    )
                     self.recorder = recorder
                     recorder.delegate = self
                     guard recorder.record() else {
@@ -74,20 +77,26 @@ final class Dictation: NSObject, AVAudioRecorderDelegate {
                     return
                 }
                 try writer.write(contentsOf: Data(bytesNoCopy: samples,
-                    count: Int(buffer.frameLength) * MemoryLayout<Int16>.size, deallocator: .none))
+                                                  count: Int(buffer.frameLength) * MemoryLayout<Int16>.size,
+                                                  deallocator: .none))
             }
             complete(error: nil)
         } catch { complete(error: error.localizedDescription) }
     }
 
-    func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+    func audioRecorderEncodeErrorDidOccur(_: AVAudioRecorder, error: Error?) {
         complete(error: error?.localizedDescription ?? "音声を録音できませんでした。")
     }
 
     private func emit(_ value: [String: Any]) {
-        let data = try! JSONSerialization.data(withJSONObject: value)
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data([10]))
+        do {
+            let data = try JSONSerialization.data(withJSONObject: value)
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data([10]))
+        } catch {
+            FileHandle.standardError.write(Data("音声入力の応答を生成できませんでした。\n".utf8))
+            exit(1)
+        }
     }
 
     private func complete(error: String?) {
@@ -95,7 +104,11 @@ final class Dictation: NSObject, AVAudioRecorderDelegate {
         finished = true
         recorder?.delegate = nil
         recorder?.stop()
-        if let error { emit(["error": error]) } else { emit(["complete": true]) }
+        if let error {
+            emit(["error": error])
+        } else {
+            emit(["complete": true])
+        }
         exit(error == nil ? 0 : 1)
     }
 }
@@ -110,5 +123,6 @@ DispatchQueue.global().async {
     }
     DispatchQueue.main.async { dictation.command(nil) }
 }
+
 dictation.start()
 application.run()

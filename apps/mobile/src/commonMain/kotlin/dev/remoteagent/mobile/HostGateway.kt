@@ -1,10 +1,12 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
-data class CodexAttachment(val path: String, val name: String, val isImage: Boolean)
+@Serializable data class CodexAttachment(val path: String, val name: String, val isImage: Boolean)
 
 /** One client-assigned input identity is shared by start, steer, and queue. */
+@Serializable
 data class CodexTurnInput(
     val text: String,
     val attachments: List<CodexAttachment> = emptyList(),
@@ -14,6 +16,8 @@ data class CodexTurnInput(
 /** The only effect boundary used by common mobile presentation code. */
 interface HostGateway : RawCodexGateway {
     val codex: CodexGateway
+
+    suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String>
 
     suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile>
 
@@ -35,7 +39,11 @@ interface CodexGateway {
 
     suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult>
 
-    suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot>
+    suspend fun startThread(
+        profile: HostProfile,
+        cwd: String,
+        options: CodexTurnOptions = CodexTurnOptions(),
+    ): GatewayResult<ThreadSnapshot>
 
     suspend fun startTurn(
         profile: HostProfile,
@@ -43,6 +51,7 @@ interface CodexGateway {
         cwd: String,
         input: CodexTurnInput,
         resume: Boolean,
+        options: CodexTurnOptions = CodexTurnOptions(),
     ): GatewayResult<String>
 
     suspend fun steerTurn(

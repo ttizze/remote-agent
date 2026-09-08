@@ -14,9 +14,7 @@ pub mod ffi;
 #[cfg(feature = "jni")]
 mod android_jni;
 
-pub use client::{
-    ConnectedHost, MobileClient, MobileClientConfig, MobileClientError, Notification, ServerRequest,
-};
+pub use client::{ConnectedHost, MobileClient, MobileClientConfig, MobileClientError};
 
 /// Proxy a local application's raw RPC stream through the same pinned,
 /// authenticated transport used by MobileClient. No JSON fields or IDs change.

@@ -5,7 +5,6 @@ import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.COpaquePointerVar
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
-import kotlinx.cinterop.CPointerVar
 import kotlinx.cinterop.CValuesRef
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
@@ -18,7 +17,6 @@ import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
 import kotlinx.serialization.json.Json
-import mobile_client.mobile_client_present_conversation
 import mobile_client.mobile_client_string_free
 import platform.CoreFoundation.CFDataCreate
 import platform.CoreFoundation.CFDataGetBytePtr
@@ -262,11 +260,3 @@ internal fun takeString(value: CPointer<ByteVar>): String =
 
 @OptIn(ExperimentalForeignApi::class)
 internal fun takeError(value: CPointer<ByteVar>?): String = value?.let(::takeString) ?: "mobile-client call failed"
-
-@OptIn(ExperimentalForeignApi::class)
-internal actual fun nativeConversationPresentation(request: String): String = memScoped {
-    val failure = alloc<CPointerVar<ByteVar>>()
-    failure.value = null
-    val result = mobile_client_present_conversation(request, failure.ptr) ?: error(takeError(failure.value))
-    takeString(result)
-}

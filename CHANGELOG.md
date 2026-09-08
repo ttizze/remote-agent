@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Centralize Mac/mobile agent operations and pure conversation, history, lifecycle, and submission decisions in Rust. Keep Kotlin mobile coordination and native UI adapters thin; preserve unknown payload metadata without copying conversation bodies through the native bridge. Exercise both adapters with 72 shared fixture cases.
+- Share the asynchronous JSONL RPC engine and preserve snapshot-before-notification delivery. Move Host title/history projection into its own owner while retaining session routing and authorization in the RPC service.
+- Split Mac main and Side Chat into independent native conversation views and watches with shared Host catalogue, management, and draft resources. Replace mutable Host/draft services with plain state values and pure transitions.
+
+- Share one Mac draft writer between main and Side Chat, preserving their separate files and pending saves when either view closes.
+
+- Restore workspace Rust quality checks: format Mac and Host code, disambiguate the NUL separator in workspace-review fixtures, and simplify the hidden Side Chat recording-cancellation condition without changing its behavior.
+
+- Remove unused Rust JSON-value response wrappers from the mobile client; C and JNI responses continue through the raw JSON path. Replace custom Codex schema and executable-test temporary-directory management with `tempfile`, preserving owner-only schema permissions and automatic cleanup; remove the obsolete schema-random error and direct `ring` dependency from `codex-app-server`.
+
 - Add iPhone Codex account and model selection with device-code login, Host-side credential refresh, and persisted account selection. Keep one shared App Server and conversation history across accounts; retain original Codex credentials and store added credentials through Codex's Keychain support. Keep history accessible if saved authentication needs renewal, and report generation errors until account selection succeeds.
 - Add a branch action beneath completed iPhone answers. Fork through the selected native turn into a new conversation, open its inherited history, and preserve later turns in the original conversation.
 - Use icon-only Save and Close controls in iPhone image previews while retaining accessible labels and the original image-saving behavior.

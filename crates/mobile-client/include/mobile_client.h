@@ -39,18 +39,16 @@ char *mobile_client_request(
     const char *params_json,
     char **error_out);
 
-/* Returns NULL when no notification is pending; check *error_out for errors. */
-char *mobile_client_next_notification(MobileClientHandle *handle, char **error_out);
+/* Typed agent intent; shares operations with the native Mac client. */
+char *mobile_client_agent_command(MobileClientHandle *handle, const char *command_json, char **error_out);
 
-/*
- * Returns NULL when no Host-initiated request is pending. The returned JSON
- * is the raw request and contains an `id` that may be a JSON number or string.
- */
-char *mobile_client_next_server_request(MobileClientHandle *handle, char **error_out);
+/* Next raw notification or Host request, in wire order. NULL means empty unless
+ * *error_out is set. Overflow/closure require reconnect and resynchronization. */
+char *mobile_client_next_event(MobileClientHandle *handle, char **error_out);
 
 /*
  * Answers a Host-initiated request. request_id_json must be the raw JSON
- * number/string from next_server_request. Return value is 1 on success and 0
+ * number/string from next_event. Return value is 1 on success and 0
  * on failure; on failure, *error_out receives a string when non-NULL.
  */
 int mobile_client_respond_result(
@@ -77,6 +75,33 @@ void mobile_client_close(MobileClientHandle *handle);
  * Operations: turn (metadata + pending anchors), item (title metadata),
  * reconcile (pending/echoed client IDs). Result strings use string_free(). */
 char *mobile_client_present_conversation(const char *request_json, char **error_out);
+
+/* Stable event codes shared with ConversationEventKind in Kotlin. */
+enum MobileConversationEvent {
+    MOBILE_EVENT_UNKNOWN = 0, MOBILE_EVENT_TURN_STARTED = 1, MOBILE_EVENT_TURN_COMPLETED = 2,
+    MOBILE_EVENT_ITEM_STARTED = 3, MOBILE_EVENT_ITEM_COMPLETED = 4, MOBILE_EVENT_AGENT_DELTA = 5,
+    MOBILE_EVENT_REASONING_DELTA = 6, MOBILE_EVENT_REASONING_SUMMARY_DELTA = 7,
+    MOBILE_EVENT_COMMAND_DELTA = 8, MOBILE_EVENT_FILE_DELTA = 9, MOBILE_EVENT_ERROR = 10,
+    MOBILE_EVENT_REQUEST_STARTED = 11, MOBILE_EVENT_REQUEST_RESOLVED = 12,
+    MOBILE_EVENT_THREAD_STATUS = 13, MOBILE_EVENT_GUARDIAN_REVIEW = 14
+};
+uint32_t mobile_client_classify_event(const char *method, int32_t is_request);
+/* Status: 0 absent, 1 inProgress, 2 completed, 3 failed, 4 interrupted, 5 approved.
+ * Item: 0 absent/unknown, 1 agentMessage, 2 reasoning, 3 commandExecution, 4 fileChange.
+ * Input flags: 1 hasError, 2 willRetry, 4 emptyDelta, 8 current retryingError.
+ * Result: low byte action, next byte status, bit 16 clearError.
+ * Actions: 0 ignore, 1 threadStatus, 2 turn, 3 item, 4 removeItem, 5 append,
+ *          6 error, 7 request, 8 resolveRequest. No strings require freeing. */
+uint32_t mobile_client_conversation_transition(uint32_t kind, uint32_t status,
+    uint32_t current_status, uint32_t item, uint32_t flags);
+
+/* Account events: select=0, startLogin=1, listReply=2, selectionReply=3,
+ * loginReply=4, statusReply=5, cancelReply=6.
+ * Flags: selecting=1, sameSelection=2, hasLogin=4, startingLogin=8,
+ * failed=16, completed=32. Actions: ignore=0, beginSelection=1, beginLogin=2,
+ * applyList=3, applySelection=4, applyLogin=5, completeLogin=6, clearLogin=7,
+ * showError=8, selectionFailed=9, loginFailed=10, continuePolling=11. */
+uint32_t mobile_client_account_transition(uint32_t event, uint32_t flags);
 
 void mobile_client_string_free(char *value);
 

@@ -1,8 +1,8 @@
 use crate::{
-    conversation::text,
     platform,
     rpc::{self, Rpc},
 };
+use agent_client::conversation::text;
 use base64::Engine;
 use gpui_kit::{
     component::{h_flex, v_flex},

@@ -1,10 +1,7 @@
 package dev.remoteagent.mobile
 
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 internal fun codexThreadEvent(
     method: String,
@@ -13,27 +10,20 @@ internal fun codexThreadEvent(
 ): ThreadEvent {
     val raw = params.asObjectOrNull() ?: JsonObject(mapOf("value" to params))
     val threadId = raw.string("threadId").orEmpty()
-    val kind =
-        Json.decodeFromString<String>(
-            nativeConversationPresentation(
-                buildJsonObject {
-                        put("operation", "eventKind")
-                        put("method", method)
-                    }
-                    .toString()
-            )
-        )
+    val kind = ConversationEventKind.entries[nativeClassifyEvent(method)]
     return when (kind) {
-        "turnStarted",
-        "turnCompleted" -> turnLifecycleEvent(threadId, raw, kind == "turnStarted")
-        "itemStarted",
-        "itemCompleted" -> itemLifecycleEvent(threadId, raw, kind == "itemStarted")
-        "agentMessageDelta",
-        "reasoningDelta",
-        "reasoningSummaryDelta",
-        "commandOutputDelta",
-        "fileChangeOutputDelta" -> contentDeltaEvent(kind, threadId, raw)
-        "error" ->
+        ConversationEventKind.TurnStarted,
+        ConversationEventKind.TurnCompleted ->
+            turnLifecycleEvent(threadId, raw, kind == ConversationEventKind.TurnStarted)
+        ConversationEventKind.ItemStarted,
+        ConversationEventKind.ItemCompleted ->
+            itemLifecycleEvent(threadId, raw, kind == ConversationEventKind.ItemStarted)
+        ConversationEventKind.AgentMessageDelta,
+        ConversationEventKind.ReasoningDelta,
+        ConversationEventKind.ReasoningSummaryDelta,
+        ConversationEventKind.CommandOutputDelta,
+        ConversationEventKind.FileChangeOutputDelta -> contentDeltaEvent(kind, threadId, raw)
+        ConversationEventKind.Error ->
             ThreadEvent.Error(
                 threadId = threadId,
                 turnId = raw.string("turnId").orEmpty(),
@@ -42,13 +32,14 @@ internal fun codexThreadEvent(
                         .copy(willRetry = raw.boolean("willRetry") == true),
                 willRetry = raw.boolean("willRetry") == true,
             )
-        "requestResolved" ->
+        ConversationEventKind.RequestResolved ->
             ThreadEvent.RequestResolved(
                 threadId = threadId,
                 requestId = raw["requestId"]?.stringOrNull() ?: raw["requestId"].toString(),
             )
-        "threadStatusChanged" -> ThreadEvent.ThreadStatusChanged(threadId, status = codexThreadStatus(raw["status"]))
-        "guardianReviewChanged" ->
+        ConversationEventKind.ThreadStatusChanged ->
+            ThreadEvent.ThreadStatusChanged(threadId, status = codexThreadStatus(raw["status"]))
+        ConversationEventKind.GuardianReviewChanged ->
             ThreadEvent.GuardianReviewChanged(
                 threadId = threadId,
                 turnId = raw.string("turnId").orEmpty(),
@@ -61,20 +52,8 @@ internal fun codexThreadEvent(
 }
 
 private fun turnLifecycleEvent(threadId: String, raw: JsonObject, started: Boolean): ThreadEvent {
-    val turn = raw.childObject("turn")
-    val turnId = turn?.string("id").orEmpty()
-    val startedAt = unixSecondsToMilliseconds(turn?.long("startedAt"))
-    return if (started) ThreadEvent.TurnStarted(threadId, turnId, TurnStatus.InProgress, startedAt)
-    else
-        ThreadEvent.TurnCompleted(
-            threadId,
-            turnId,
-            codexTurnStatus(turn?.string("status")),
-            startedAt,
-            unixSecondsToMilliseconds(turn?.long("completedAt")),
-            nonNegative(turn?.long("durationMs")),
-            turn?.childObject("error")?.let(::codexTurnError),
-        )
+    val turn = codexTurn(raw["turn"] ?: emptyJsonObject())
+    return if (started) ThreadEvent.TurnStarted(threadId, turn) else ThreadEvent.TurnCompleted(threadId, turn)
 }
 
 private fun itemLifecycleEvent(threadId: String, raw: JsonObject, started: Boolean): ThreadEvent {
@@ -84,16 +63,18 @@ private fun itemLifecycleEvent(threadId: String, raw: JsonObject, started: Boole
     else ThreadEvent.ItemCompleted(threadId, turnId, item)
 }
 
-private fun contentDeltaEvent(kind: String, threadId: String, raw: JsonObject): ThreadEvent {
+private fun contentDeltaEvent(kind: ConversationEventKind, threadId: String, raw: JsonObject): ThreadEvent {
     val turnId = raw.string("turnId").orEmpty()
     val itemId = raw.string("itemId").orEmpty()
     val delta = raw.string("delta").orEmpty()
     return when (kind) {
-        "agentMessageDelta" -> ThreadEvent.AgentMessageDelta(threadId, turnId, itemId, delta)
-        "reasoningDelta" -> ThreadEvent.ReasoningDelta(threadId, turnId, itemId, delta)
-        "reasoningSummaryDelta" -> ThreadEvent.ReasoningSummaryDelta(threadId, turnId, itemId, delta)
-        "commandOutputDelta" -> ThreadEvent.CommandOutputDelta(threadId, turnId, itemId, delta)
-        "fileChangeOutputDelta" -> ThreadEvent.FileChangeOutputDelta(threadId, turnId, itemId, delta)
+        ConversationEventKind.AgentMessageDelta -> ThreadEvent.AgentMessageDelta(threadId, turnId, itemId, delta)
+        ConversationEventKind.ReasoningDelta -> ThreadEvent.ReasoningDelta(threadId, turnId, itemId, delta)
+        ConversationEventKind.ReasoningSummaryDelta ->
+            ThreadEvent.ReasoningSummaryDelta(threadId, turnId, itemId, delta)
+        ConversationEventKind.CommandOutputDelta -> ThreadEvent.CommandOutputDelta(threadId, turnId, itemId, delta)
+        ConversationEventKind.FileChangeOutputDelta ->
+            ThreadEvent.FileChangeOutputDelta(threadId, turnId, itemId, delta)
         else -> error("Not a content delta: $kind")
     }
 }

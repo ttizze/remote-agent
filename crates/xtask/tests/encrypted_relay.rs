@@ -296,15 +296,24 @@ async fn local_management_and_relay_share_one_codex_and_shutdown_releases_sessio
         let document = directory.path().join("document.txt");
         std::fs::write(&document, b"\xef\xbb\xbfalpha\r\nbeta\r\n").unwrap();
         std::fs::set_permissions(&document, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let read = mobile.request("host/file/read", json!({"path":document})).await.unwrap();
-        assert_eq!(read["bom"], true);
-        assert_eq!(read["lineEnding"], "crlf");
-        let saved = mobile.request("host/file/write", json!({"path":document,"revision":read["revision"],"text":"changed\n日本語\n"})).await.unwrap();
-        assert_ne!(read["revision"], saved["revision"]);
+        let agent = mobile.agent();
+        let listed = agent.list_files(directory.path()).await.unwrap();
+        let canonical_document = document.canonicalize().unwrap();
+        assert!(listed.entries.iter().any(|entry| entry.path == canonical_document && !entry.directory));
+        let read = agent.read_file(&document).await.unwrap();
+        assert!(read.bom);
+        assert_eq!(read.line_ending, "crlf");
+        let saved = agent.write_file(&document, &read.revision, "changed\n日本語\n").await.unwrap();
+        assert_ne!(read.revision, saved.revision);
         assert_eq!(std::fs::read(&document).unwrap(), "\u{feff}changed\r\n日本語\r\n".as_bytes());
         assert_eq!(std::fs::metadata(&document).unwrap().permissions().mode() & 0o777, 0o640);
-        assert!(mobile.request("host/file/write", json!({"path":document,"revision":read["revision"],"text":"stale overwrite"})).await.is_err());
-        assert_eq!(mobile.request("host/file/read", json!({"path":document})).await.unwrap()["text"], "changed\r\n日本語\r\n");
+        assert!(agent.write_file(&document, &read.revision, "stale overwrite").await.is_err());
+        // Mobile crosses this intent boundary; desktop calls the typed methods
+        // above. Both must expose the same saved Host document.
+        let projection: Value = serde_json::from_str(&agent.command_json(&json!({"type":"readFile","path":document}).to_string()).await.unwrap()).unwrap();
+        assert_eq!(projection["text"], "changed\r\n日本語\r\n");
+        assert_eq!(projection["revision"], saved.revision);
+        drop(agent);
         let binary = directory.path().join("binary.dat");
         let data: Vec<u8> = (0..4*1024*1024).map(|index| (index % 251) as u8).collect();
         std::fs::write(&binary, &data).unwrap();

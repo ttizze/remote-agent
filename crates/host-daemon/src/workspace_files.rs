@@ -9,6 +9,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use host_protocol::api;
 use ring::{
     digest::{self, Context, SHA256},
     rand::{SecureRandom, SystemRandom},
@@ -68,12 +69,8 @@ impl WorkspaceFiles {
 
     fn dispatch(&self, session: SessionId, method: &str, params: Value) -> Result<Value, String> {
         match method {
-            "host/file/list" => {
-                #[derive(Deserialize)]
-                struct List {
-                    path: PathBuf,
-                }
-                let params: List = decode(params)?;
+            api::FILE_LIST => {
+                let params: api::FilePathParams = decode(params)?;
                 let path = absolute_path(&params.path)?
                     .canonicalize()
                     .map_err(io_error)?;
@@ -86,41 +83,35 @@ impl WorkspaceFiles {
                         break;
                     }
                     let metadata = entry.metadata().map_err(io_error)?;
-                    entries.push(json!({"name":entry.file_name().to_string_lossy(),"path":entry.path(),"directory":metadata.is_dir(),"size":metadata.len()}));
+                    entries.push(api::FileEntry {
+                        name: entry.file_name().to_string_lossy().into_owned(),
+                        path: entry.path(),
+                        directory: metadata.is_dir(),
+                        size: metadata.len(),
+                    });
                 }
-                entries.sort_by(|a, b| {
-                    b["directory"]
-                        .as_bool()
-                        .cmp(&a["directory"].as_bool())
-                        .then(a["name"].as_str().cmp(&b["name"].as_str()))
-                });
-                Ok(json!({"path":path,"entries":entries,"truncated":truncated}))
+                entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.name.cmp(&b.name)));
+                Ok(json!(api::FileList {
+                    path,
+                    entries,
+                    truncated
+                }))
             }
-            "host/file/read" => {
-                #[derive(Deserialize)]
-                struct ReadFile {
-                    path: PathBuf,
-                }
-                let params: ReadFile = decode(params)?;
+            api::FILE_READ => {
+                let params: api::FilePathParams = decode(params)?;
                 let path = absolute_path(&params.path)?
                     .canonicalize()
                     .map_err(io_error)?;
                 read_editable(&path)
             }
-            "host/file/write" => {
-                #[derive(Deserialize)]
-                struct Save {
-                    path: PathBuf,
-                    revision: String,
-                    text: String,
-                }
-                let params: Save = decode(params)?;
+            api::FILE_WRITE => {
+                let params: api::FileWriteParams = decode(params)?;
                 let path = absolute_path(&params.path)?
                     .canonicalize()
                     .map_err(io_error)?;
                 let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
                 let original = read_bounded(&path, EDIT_LIMIT)?;
-                if hash(&original) != params.revision {
+                if hash(&original) != params.revision.as_ref() {
                     return Err("revision_conflict: file changed; reload before saving".into());
                 }
                 let bom = original.starts_with(&[0xef, 0xbb, 0xbf]);
@@ -130,7 +121,7 @@ impl WorkspaceFiles {
                 let text = if line_ending(original_text) == "crlf" {
                     params.text.replace("\r\n", "\n").replace('\n', "\r\n")
                 } else {
-                    params.text
+                    params.text.into_owned()
                 };
                 if text.len() as u64 + if bom { 3 } else { 0 } > EDIT_LIMIT {
                     return Err("file exceeds editor size limit".into());
@@ -149,7 +140,7 @@ impl WorkspaceFiles {
                 output.as_file().sync_all().map_err(io_error)?;
                 // Codex and other editors don't share our mutex. Recheck the
                 // external file immediately before atomic replacement.
-                if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision {
+                if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision.as_ref() {
                     return Err("revision_conflict: file changed while saving".into());
                 }
                 output
@@ -199,11 +190,7 @@ impl WorkspaceFiles {
                 })
             }
             "host/blob/download" => {
-                #[derive(Deserialize)]
-                struct Download {
-                    path: PathBuf,
-                }
-                let params: Download = decode(params)?;
+                let params: api::FilePathParams = decode(params)?;
                 let path = absolute_path(&params.path)?;
                 let mut file = File::open(path).map_err(io_error)?;
                 if !file.metadata().map_err(io_error)?.is_file() {
@@ -404,9 +391,14 @@ fn read_editable(path: &Path) -> Result<Value, String> {
     if text.contains('\0') {
         return Err("binary file; download it instead".into());
     }
-    Ok(
-        json!({"path":path,"revision":hash(&bytes),"text":text,"bom":bom,"lineEnding":line_ending(text),"size":bytes.len()}),
-    )
+    Ok(json!(api::FileDocument {
+        path: path.into(),
+        revision: hash(&bytes),
+        text: text.into(),
+        bom,
+        line_ending: line_ending(text).into(),
+        size: bytes.len()
+    }))
 }
 fn line_ending(text: &str) -> &'static str {
     let crlf = text

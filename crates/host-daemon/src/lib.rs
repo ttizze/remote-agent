@@ -14,7 +14,7 @@ mod worktrees;
 #[cfg(target_os = "macos")]
 pub use remote_hosts::KeychainRemoteStore;
 pub use remote_hosts::{RemoteCredentialStore, RemoteHostProfile, RemoteHosts};
-pub use workspace_review::{WorkspaceReview, inspect_workspace};
+pub use workspace_review::inspect_workspace;
 
 pub use host_runtime::{HostRuntime, LocalListener};
 

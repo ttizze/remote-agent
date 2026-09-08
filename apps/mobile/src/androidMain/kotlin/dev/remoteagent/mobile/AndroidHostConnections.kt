@@ -36,7 +36,7 @@ internal class AndroidHostConnections {
         }
     }
 
-    /** One poller drains both raw native queues and fans messages out to the current subscribers. */
+    /** One poller drains the ordered native event queue and fans messages out to the current subscribers. */
     fun subscribe(
         profile: HostProfile,
         onMessage: (RawCodexMessage) -> Unit,
@@ -82,10 +82,7 @@ internal class AndroidHostConnections {
         val current =
             try {
                 active = synchronized(stateLock) { handles[hostIdentity] } === handle && !handle.closed
-                if (active)
-                    NativeHostTransport.nextNotification(handle.pointer)
-                        ?: NativeHostTransport.nextServerRequest(handle.pointer)
-                else null
+                if (active) NativeHostTransport.nextEvent(handle.pointer) else null
             } catch (failure: IllegalStateException) {
                 runCatching { onClosed(failure.message ?: "PC Host connection closed") }
                 active = false

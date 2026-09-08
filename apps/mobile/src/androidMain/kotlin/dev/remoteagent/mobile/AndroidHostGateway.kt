@@ -8,14 +8,10 @@ import kotlinx.serialization.json.JsonElement
 
 /** Android adapter over the native raw Codex JSON-RPC client. */
 class AndroidHostGateway(private val context: Context) : HostGateway {
-    private val json = Json {
-        ignoreUnknownKeys = false
-        isLenient = false
-    }
     private val connections = AndroidHostConnections()
     override val codex = CommonCodexClient(this)
 
-    override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = invoke {
+    override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = invokeAndroidHost {
         val reference = payload.hostIdentity
         val key =
             AndroidCredentialStore(context, "key:$reference").loadOrCreate {
@@ -34,7 +30,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
     override suspend fun discover(profile: HostProfile): GatewayResult<List<String>> =
         GatewayResult.Success(listOf(profile.relayUrl))
 
-    override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = invoke {
+    override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = invokeAndroidHost {
         connections.retire(profile.id)
         val key =
             AndroidCredentialStore(context, "key:${profile.deviceIdentityReference}").load()
@@ -52,29 +48,36 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         connections.replace(profile.id, handle)
     }
 
-    override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = invoke {
+    override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = invokeAndroidHost {
         connections.retire(profile.id)
     }
 
-    override suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement> = invoke {
-        json.parseToJsonElement(connections.withHandle(profile) { NativeHostTransport.transfer(it, params.toString()) })
-    }
+    override suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement> =
+        invokeAndroidHost {
+            Json.parseToJsonElement(
+                connections.withHandle(profile) { NativeHostTransport.transfer(it, params.toString()) }
+            )
+        }
+
+    override suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String> =
+        invokeAndroidHost { connections.withHandle(profile) { NativeHostTransport.agentCommand(it, command.encode()) } }
+            .agentResult()
 
     override suspend fun rawRequest(
         profile: HostProfile,
         method: String,
         params: JsonElement,
-    ): GatewayResult<JsonElement> = invoke {
+    ): GatewayResult<JsonElement> = invokeAndroidHost {
         val raw =
             connections.withHandle(profile) { handle -> NativeHostTransport.request(handle, method, params.toString()) }
-        json.parseToJsonElement(raw)
+        Json.parseToJsonElement(raw)
     }
 
     override suspend fun respondResult(
         profile: HostProfile,
         requestId: JsonElement,
         result: JsonElement,
-    ): GatewayResult<Unit> = invoke {
+    ): GatewayResult<Unit> = invokeAndroidHost {
         connections.withHandle(profile) { handle ->
             check(NativeHostTransport.respondResult(handle, requestId.toString(), result.toString()))
         }
@@ -84,7 +87,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         profile: HostProfile,
         requestId: JsonElement,
         error: JsonElement,
-    ): GatewayResult<Unit> = invoke {
+    ): GatewayResult<Unit> = invokeAndroidHost {
         connections.withHandle(profile) { handle ->
             check(NativeHostTransport.respondError(handle, requestId.toString(), error.toString()))
         }
@@ -95,28 +98,28 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         onMessage: (RawCodexMessage) -> Unit,
         onClosed: (String) -> Unit,
     ): HostEventSubscription = connections.subscribe(profile, onMessage, onClosed)
-
-    private suspend fun <T> invoke(block: () -> T): GatewayResult<T> =
-        withContext(Dispatchers.IO) {
-            try {
-                GatewayResult.Success(block())
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (failure: java.io.IOException) {
-                val raw = runCatching { json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
-                GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
-            } catch (failure: java.security.GeneralSecurityException) {
-                val raw = runCatching { json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
-                GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
-            } catch (failure: IllegalArgumentException) {
-                val raw = runCatching { json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
-                GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
-            } catch (failure: IllegalStateException) {
-                val raw = runCatching { json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
-                GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
-            } catch (failure: SecurityException) {
-                val raw = runCatching { json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
-                GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
-            }
-        }
 }
+
+private suspend fun <T> invokeAndroidHost(block: () -> T): GatewayResult<T> =
+    withContext(Dispatchers.IO) {
+        try {
+            GatewayResult.Success(block())
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: java.io.IOException) {
+            val raw = runCatching { Json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
+            GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
+        } catch (failure: java.security.GeneralSecurityException) {
+            val raw = runCatching { Json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
+            GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
+        } catch (failure: IllegalArgumentException) {
+            val raw = runCatching { Json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
+            GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
+        } catch (failure: IllegalStateException) {
+            val raw = runCatching { Json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
+            GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
+        } catch (failure: SecurityException) {
+            val raw = runCatching { Json.parseToJsonElement(failure.message.orEmpty()) }.getOrNull()
+            GatewayResult.Failure(failure.message ?: "PC Host connection failed.", raw)
+        }
+    }

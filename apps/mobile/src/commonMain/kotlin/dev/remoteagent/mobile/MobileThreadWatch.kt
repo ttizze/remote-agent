@@ -7,7 +7,11 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 internal fun MobileController.ensureVisibleThreadWatch(scope: CoroutineScope) {
@@ -56,29 +60,38 @@ private fun MobileController.visibleThreadWatchTarget(): ThreadWatchTarget? {
     val profile = state.selectedProfile ?: return null
     val view = state.selectedView
     val snapshot = view.selectedThreadId?.let { state.cache.snapshot(profile.id, it) }
-    val path = snapshot?.raw?.string("path")?.takeIf(String::isNotBlank)
+    val path = snapshot?.let { thread ->
+        Json.parseToJsonElement(
+                nativeConversationPresentation(
+                    buildJsonObject {
+                            put("operation", "watchPath")
+                            put(
+                                "thread",
+                                buildJsonObject {
+                                    put("path", thread.raw?.string("path"))
+                                    put(
+                                        "status",
+                                        Json.encodeToJsonElement(ThreadStatus.serializer(), thread.summary.status),
+                                    )
+                                },
+                            )
+                        }
+                        .toString()
+                )
+            )
+            .jsonPrimitive
+            .contentOrNull
+    }
     val generation = connectedGeneration(profile.id)
     return if (snapshot == null || path == null || generation == null) null
-    else if (
-        snapshot.summary.status != ThreadStatus.NotLoaded ||
-            (view.threadDetail !is LoadPhase.Ready && view.threadDetail !is LoadPhase.Failed)
-    )
-        null
+    else if (view.threadDetail !is LoadPhase.Ready && view.threadDetail !is LoadPhase.Failed) null
     else ThreadWatchTarget(profile, snapshot.summary.id, path, generation)
 }
 
 private suspend fun MobileController.watchThread(target: ThreadWatchTarget, changes: Channel<Unit>, revision: Long) {
     try {
         val registered =
-            gateway.rawRequest(
-                target.profile,
-                "host/thread/watch",
-                buildJsonObject {
-                    put("watchId", revision)
-                    put("threadId", target.threadId)
-                    put("path", target.path)
-                },
-            )
+            gateway.agentCommand(target.profile, AgentCommand.WatchThread(target.threadId, revision, target.path))
         if (registered is GatewayResult.Failure) {
             if (threadWatchTarget == target && threadWatchRevision == revision) {
                 dispatch(AppAction.ThreadReadFailed(target.profile.id, "会話の自動更新を開始できません: ${registered.message}"))
@@ -100,7 +113,7 @@ private suspend fun MobileController.watchThread(target: ThreadWatchTarget, chan
     } finally {
         withContext(NonCancellable) {
             if (isConnected(target.profile.id, target.generation)) {
-                gateway.rawRequest(target.profile, "host/thread/unwatch", buildJsonObject { put("watchId", revision) })
+                gateway.agentCommand(target.profile, AgentCommand.UnwatchThread(revision))
             }
         }
     }

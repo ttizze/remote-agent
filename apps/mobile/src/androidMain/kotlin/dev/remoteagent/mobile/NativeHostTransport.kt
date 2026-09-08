@@ -6,19 +6,17 @@ object NativeHostTransport {
         System.loadLibrary("mobile_client")
     }
 
-    external fun presentConversation(requestJson: String): String
-
     external fun generateDeviceKey(): String
 
     external fun connect(configJson: String, devicePkcs8: ByteArray): Long
 
     external fun transfer(handle: Long, paramsJson: String): String
 
+    external fun agentCommand(handle: Long, commandJson: String): String
+
     external fun request(handle: Long, method: String, paramsJson: String): String
 
-    external fun nextNotification(handle: Long): String?
-
-    external fun nextServerRequest(handle: Long): String?
+    external fun nextEvent(handle: Long): String?
 
     external fun respondResult(handle: Long, requestIdJson: String, resultJson: String): Boolean
 
@@ -27,5 +25,32 @@ object NativeHostTransport {
     external fun close(handle: Long)
 }
 
+internal object NativeConversation {
+    init {
+        NativeHostTransport
+    }
+
+    external fun presentConversation(requestJson: String): String
+
+    external fun classifyEvent(method: String): Int
+
+    external fun conversationTransition(kind: Int, status: Int, currentStatus: Int, item: Int, flags: Int): Int
+
+    external fun accountTransition(event: Int, flags: Int): Int
+}
+
 internal actual fun nativeConversationPresentation(request: String): String =
-    NativeHostTransport.presentConversation(request)
+    NativeConversation.presentConversation(request)
+
+internal actual fun nativeClassifyEvent(method: String): Int = NativeConversation.classifyEvent(method)
+
+internal actual fun nativeConversationTransition(
+    kind: Int,
+    status: Int,
+    currentStatus: Int,
+    item: Int,
+    flags: Int,
+): Int = NativeConversation.conversationTransition(kind, status, currentStatus, item, flags)
+
+internal actual fun nativeAccountTransition(event: Int, flags: Int): Int =
+    NativeConversation.accountTransition(event, flags)

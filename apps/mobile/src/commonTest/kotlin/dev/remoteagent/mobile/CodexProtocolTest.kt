@@ -115,7 +115,7 @@ class CodexProtocolTest {
             """
                 ),
             )
-        assertEquals(TurnStatus.Interrupted, assertIs<ThreadEvent.TurnCompleted>(event).status)
+        assertEquals(TurnStatus.Interrupted, assertIs<ThreadEvent.TurnCompleted>(event).turn.status)
     }
 
     @Test
@@ -194,10 +194,10 @@ class CodexProtocolTest {
                 )
             )
 
-        assertEquals(10_000, started.startedAtMs)
-        assertEquals(10_000, completed.startedAtMs)
-        assertEquals(12_000, completed.completedAtMs)
-        assertEquals(2_345, completed.durationMs)
+        assertEquals(10_000, started.turn.startedAtMs)
+        assertEquals(10_000, completed.turn.startedAtMs)
+        assertEquals(12_000, completed.turn.completedAtMs)
+        assertEquals(2_345, completed.turn.durationMs)
     }
 
     @Test
@@ -319,9 +319,9 @@ class CodexProtocolTest {
                 )
             )
 
-        assertEquals(TurnStatus.Failed, event.status)
-        assertEquals("context full", event.error?.message)
-        assertEquals("contextWindowExceeded", event.error?.codexErrorInfo?.toString()?.trim('"'))
+        assertEquals(TurnStatus.Failed, event.turn.status)
+        assertEquals("context full", event.turn.error?.message)
+        assertEquals("contextWindowExceeded", event.turn.error?.codexErrorInfo?.toString()?.trim('"'))
     }
 
     @Test

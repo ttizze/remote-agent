@@ -16,7 +16,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
@@ -30,10 +29,10 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
         try {
             controller.openApp(scope)
             controller.readThread(profile, "thread-1")
-            val blocked = CompletableDeferred<GatewayResult<JsonElement>>()
+            val blocked = CompletableDeferred<GatewayResult<String>>()
             var calls = 0
-            gateway.rawBlock = { method, _ ->
-                assertEquals("host/thread/turns/list", method)
+            gateway.agentBlock = { command ->
+                assertEquals(AgentCommand.ReadOlder("thread-1", "opaque", null, false), command)
                 calls++
                 blocked.await()
             }
@@ -43,9 +42,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
             controller.dispatch(AppAction.ThreadSelected(profile.id, "thread-2"))
             blocked.complete(
                 GatewayResult.Success(
-                    Json.parseToJsonElement(
-                        """{"thread":{"id":"thread-1","historyCursor":null,"turns":[{"id":"older","items":[]}]}}"""
-                    )
+                    """{"thread":{"id":"thread-1","historyCursor":null,"turns":[{"id":"older","items":[]}]}}"""
                 )
             )
             load.join()
@@ -124,11 +121,15 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
             FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(initial, emptyList())) }
         val controller = controller(gateway, selectedThreadId = "thread-1", cachedThread = initial)
         val scope = CoroutineScope(coroutineContext + SupervisorJob())
-        val registered = CompletableDeferred<JsonElement>()
+        val registered = CompletableDeferred<Long>()
         val unregistered = CompletableDeferred<Unit>()
-        gateway.rawHook = { method, params ->
-            if (method == "host/thread/watch") registered.complete(params)
-            if (method == "host/thread/unwatch") unregistered.complete(Unit)
+        gateway.agentBlock = { command ->
+            when (command) {
+                is AgentCommand.WatchThread -> registered.complete(command.watchId)
+                is AgentCommand.UnwatchThread -> unregistered.complete(Unit)
+                else -> error("Unexpected intent: $command")
+            }
+            GatewayResult.Success("null")
         }
         var enteredLoading = false
         val initialRefresh = CompletableDeferred<Unit>()
@@ -144,7 +145,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
                 if (answer == CodexItem.AgentMessage("item-1", "Persisted external answer")) updated.complete(Unit)
             }
             maintenance = controller.maintainConnection(scope)
-            val revision = withTimeout(5_000) { registered.await() }.asObjectOrNull()!!.long("watchId")!!
+            val revision = withTimeout(5_000) { registered.await() }
             withTimeout(5_000) { initialRefresh.await() }
             replaceWatchedAnswer(gateway, initial, revision)
             withTimeout(5_000) { updated.await() }

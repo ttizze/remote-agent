@@ -155,9 +155,9 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func loadDiff() {
         busy = true; error = nil
-        model.workspace("host/workspace/review", ["cwd": root]) { result, message in
+        model.workspace.reviewWorkspace(cwd: root) { result, message in
             busy = false; error = message
-            if let value = result?["diff"] as? String {
+            if let value = result?.diff {
                 diff = value.components(separatedBy: "\n"); showingDiff = true
             }
         }
@@ -165,15 +165,12 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func load(_ directory: String) {
         busy = true; error = nil
-        model.workspace("host/file/list", ["path": directory]) { result, message in
+        model.workspace.listFiles(path: directory) { result, message in
             busy = false; error = message
             guard let result else { return }
-            path = result["path"] as? String ?? directory
-            entries = (result["entries"] as? [[String: Any]] ?? []).compactMap {
-                guard let name = $0["name"] as? String, let path = $0["path"] as? String else { return nil }
-                return WorkspaceEntry(name: name, path: path, directory: $0["directory"] as? Bool ?? false)
-            }
-            if result["truncated"] as? Bool == true {
+            path = result.path
+            entries = result.entries.map { WorkspaceEntry(name: $0.name, path: $0.path, directory: $0.directory) }
+            if result.truncated {
                 error = "先頭 2,000 件を表示しています。パスを指定して開けます。"
             }
         }
@@ -259,21 +256,22 @@ private struct FileEditorSheet: View {
                     Button("保存") {
                         busy = true; error = nil
                         let submitted = text
-                        model.workspace(
-                            "host/file/write",
-                            ["path": entry.path, "revision": revision, "text": submitted]
-                        ) { result, message in
-                            busy = false; error = message
-                            if let result, let nextRevision = result["revision"] as? String {
-                                revision = nextRevision; savedText = result["text"] as? String ?? submitted
-                                if text ==
-                                    submitted {
-                                    text = savedText; UserDefaults.standard.removeObject(forKey: draftKey)
-                                } else {
-                                    UserDefaults.standard.set(["text": text, "revision": revision], forKey: draftKey)
+                        model.workspace
+                            .writeFile(path: entry.path, revision: revision, text: submitted) { result, message in
+                                busy = false; error = message
+                                if let result {
+                                    revision = result.revision; savedText = result.text
+                                    if text ==
+                                        submitted {
+                                        text = savedText; UserDefaults.standard.removeObject(forKey: draftKey)
+                                    } else {
+                                        UserDefaults.standard.set(
+                                            ["text": text, "revision": revision],
+                                            forKey: draftKey
+                                        )
+                                    }
                                 }
                             }
-                        }
                     }.disabled(busy || revision.isEmpty || text == savedText).accessibilityIdentifier("file.save")
                 }
             }
@@ -292,12 +290,12 @@ private struct FileEditorSheet: View {
 
     private func load(restoreDraft: Bool) {
         busy = true; error = nil
-        model.workspace("host/file/read", ["path": entry.path]) { result, message in
+        model.workspace.readFile(path: entry.path) { result, message in
             busy = false; error = message
-            guard let result, let value = result["text"] as? String,
-                  let version = result["revision"] as? String else { return }
+            guard let result else { return }
+            let version = result.revision
             initialized = false
-            text = value; savedText = value; revision = version
+            text = result.text; savedText = result.text; revision = version
             if restoreDraft, let draft = UserDefaults.standard.dictionary(forKey: draftKey) as? [String: String],
                let cached = draft["text"] {
                 text = cached

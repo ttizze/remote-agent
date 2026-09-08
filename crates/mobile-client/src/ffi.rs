@@ -1,5 +1,5 @@
 //! Minimal C ABI for Android JNI/Swift wrappers. The command/event model above
-//! remains the primary API; this only owns a Tokio runtime and never persists
+//! remains the primary API; this borrows the process runtime and never persists
 //! or logs the caller-supplied PKCS#8 key.
 
 use std::{
@@ -15,7 +15,7 @@ use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use crate::{MobileClient, MobileClientConfig, MobileClientError, Notification, ServerRequest};
+use crate::{MobileClient, MobileClientConfig, MobileClientError};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,10 +81,9 @@ pub struct Handle {
     // A multi-thread Tokio runtime supports concurrent `block_on` calls.
     // Requests must not exclude polling/responding: an outbound Codex
     // request can pause until the mobile answers a server request.
-    runtime: tokio::runtime::Runtime,
+    runtime: &'static tokio::runtime::Runtime,
     client: MobileClient,
-    notifications: Mutex<broadcast::Receiver<Notification>>,
-    server_requests: Mutex<broadcast::Receiver<ServerRequest>>,
+    events: Mutex<broadcast::Receiver<String>>,
 }
 
 fn set_error(out: *mut *mut c_char, error: impl ToString) {
@@ -107,20 +106,15 @@ fn input_string<'a>(input: *const c_char) -> Result<&'a str, String> {
 }
 
 pub(crate) fn connect_handle(config: CConfig, key: &[u8]) -> Result<*mut Handle, String> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| "failed to create Tokio runtime")?;
+    let runtime = host_protocol::rpc_runtime()?;
     let client = runtime
         .block_on(MobileClient::connect(config.into(), key))
         .map_err(|error| error.to_string())?;
-    let notifications = client.subscribe();
-    let server_requests = client.subscribe_server_requests();
+    let events = client.subscribe();
     Ok(Box::into_raw(Box::new(Handle {
         runtime,
         client,
-        notifications: Mutex::new(notifications),
-        server_requests: Mutex::new(server_requests),
+        events: Mutex::new(events),
     })))
 }
 
@@ -134,6 +128,13 @@ pub(crate) fn request_json(
         .block_on(handle.client.request_raw(method, params_json))
         .map_err(encode_mobile_error)?;
     serde_json::to_string(&result).map_err(|_| "failed to encode response".to_owned())
+}
+
+pub(crate) fn agent_command_json(handle: &Handle, command: &str) -> Result<String, String> {
+    handle
+        .runtime
+        .block_on(handle.client.agent().command_json(command))
+        .map_err(agent_client::operations::AgentError::into_native_error)
 }
 
 fn encode_mobile_error(error: MobileClientError) -> String {
@@ -173,25 +174,10 @@ pub(crate) fn respond_error_json(
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn next_notification_json(handle: &Handle) -> Result<Option<String>, String> {
-    let mut notifications = handle
-        .notifications
-        .lock()
-        .map_err(|_| "notification lock poisoned")?;
-    match notifications.try_recv() {
-        Ok(notification) => Ok(Some(notification)),
-        Err(broadcast::error::TryRecvError::Empty) => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-pub(crate) fn next_server_request_json(handle: &Handle) -> Result<Option<String>, String> {
-    let mut requests = handle
-        .server_requests
-        .lock()
-        .map_err(|_| "server-request lock poisoned")?;
-    match requests.try_recv() {
-        Ok(request) => Ok(Some(request)),
+pub(crate) fn next_event_json(handle: &Handle) -> Result<Option<String>, String> {
+    let mut events = handle.events.lock().map_err(|_| "event lock poisoned")?;
+    match events.try_recv() {
+        Ok(event) => Ok(Some(event)),
         Err(broadcast::error::TryRecvError::Empty) => Ok(None),
         Err(error) => Err(error.to_string()),
     }
@@ -287,14 +273,16 @@ pub unsafe extern "C" fn mobile_client_request(
     }
 }
 
-/// Returns one queued notification, if available.
+/// Executes a typed agent intent through the shared PC/mobile client.
 ///
 /// # Safety
-/// `handle` must be live. If non-null, `error_out` must be writable for
-/// one `char *`; non-null returned strings use `mobile_client_string_free`.
+/// `handle` must be live and exclusively retained by the caller; all
+/// string inputs must be valid NUL-terminated UTF-8. If non-null,
+/// `error_out` must be writable for one `char *`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mobile_client_next_notification(
+pub unsafe extern "C" fn mobile_client_agent_command(
     handle: *mut Handle,
+    command_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
     if !error_out.is_null() {
@@ -305,28 +293,33 @@ pub unsafe extern "C" fn mobile_client_next_notification(
         set_error(error_out, "null mobile client handle");
         return ptr::null_mut();
     }
-    // SAFETY: checked non-null and the handle remains owned by caller.
-    let handle = unsafe { &*handle };
-    match next_notification_json(handle) {
-        Ok(Some(notification)) => CString::new(notification).unwrap().into_raw(),
-        Ok(None) => ptr::null_mut(),
-        Err(error) => {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<CString, String> {
+        let command = input_string(command_json)?;
+        // SAFETY: checked non-null and the handle remains owned by caller.
+        let handle = unsafe { &*handle };
+        CString::new(agent_command_json(handle, command)?)
+            .map_err(|_| "response contains NUL".to_owned())
+    }));
+    match result {
+        Ok(Ok(value)) => value.into_raw(),
+        Ok(Err(error)) => {
             set_error(error_out, error);
+            ptr::null_mut()
+        }
+        Err(_) => {
+            set_error(error_out, "mobile client panicked");
             ptr::null_mut()
         }
     }
 }
 
-/// Returns one queued Host-initiated request, if available. The returned
-/// JSON contains the raw request, including its numeric or string `id`.
-/// Call `mobile_client_respond_result` or `mobile_client_respond_error`
-/// with that ID to complete it.
+/// Returns the next notification or Host request in wire order, if available.
 ///
 /// # Safety
-/// `handle` must remain live for the call. If non-null, `error_out` must
-/// be writable for one `char *`.
+/// `handle` must be live. If non-null, `error_out` must be writable for
+/// one `char *`; non-null returned strings use `mobile_client_string_free`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mobile_client_next_server_request(
+pub unsafe extern "C" fn mobile_client_next_event(
     handle: *mut Handle,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
@@ -340,8 +333,8 @@ pub unsafe extern "C" fn mobile_client_next_server_request(
     }
     // SAFETY: checked non-null and the handle remains owned by caller.
     let handle = unsafe { &*handle };
-    match next_server_request_json(handle) {
-        Ok(Some(request)) => CString::new(request).unwrap().into_raw(),
+    match next_event_json(handle) {
+        Ok(Some(notification)) => CString::new(notification).unwrap().into_raw(),
         Ok(None) => ptr::null_mut(),
         Err(error) => {
             set_error(error_out, error);
@@ -570,6 +563,45 @@ pub unsafe extern "C" fn mobile_client_present_conversation(
             ptr::null_mut()
         }
     }
+}
+
+/// Classifies a UTF-8 method without allocating JSON. Unknown/invalid methods
+/// return zero; server requests return RequestStarted independently of method.
+///
+/// # Safety
+/// A non-null method must point to a valid NUL-terminated string for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mobile_client_classify_event(
+    method: *const c_char,
+    is_request: i32,
+) -> u32 {
+    if method.is_null() {
+        return 0;
+    }
+    // SAFETY: guaranteed by the C ABI caller.
+    unsafe { CStr::from_ptr(method) }
+        .to_str()
+        .map(|method| {
+            conversation_presentation::state::classify_event(method, is_request != 0) as u32
+        })
+        .unwrap_or(0)
+}
+
+/// Allocation-free transition; see mobile_client.h for the packed enum contract.
+#[unsafe(no_mangle)]
+pub extern "C" fn mobile_client_conversation_transition(
+    kind: u32,
+    status: u32,
+    current_status: u32,
+    item: u32,
+    flags: u32,
+) -> u32 {
+    conversation_presentation::state::transition_code(kind, status, current_status, item, flags)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mobile_client_account_transition(event: u32, flags: u32) -> u32 {
+    agent_client::accounts::transition(event, flags) as u32
 }
 
 #[cfg(test)]

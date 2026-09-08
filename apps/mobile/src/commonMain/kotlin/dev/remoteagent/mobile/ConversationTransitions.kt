@@ -1,10 +1,33 @@
 package dev.remoteagent.mobile
 
-import kotlinx.serialization.Serializable
+import kotlin.jvm.JvmInline
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+
+private enum class ConversationMutation {
+    Ignore,
+    ThreadStatus,
+    Turn,
+    Item,
+    RemoveItem,
+    Append,
+    Error,
+    Request,
+    ResolveRequest,
+}
+
+internal expect fun nativeClassifyEvent(method: String): Int
+
+internal expect fun nativeConversationTransition(kind: Int, status: Int, currentStatus: Int, item: Int, flags: Int): Int
 
 /** Native body storage adapter; Rust decides the state transition. */
 internal fun ThreadSnapshot.applyConversationEvent(event: ThreadEvent): ThreadSnapshot {
@@ -15,12 +38,13 @@ internal fun ThreadSnapshot.applyConversationEvent(event: ThreadEvent): ThreadSn
     val delta = event.storageDelta
     val decision = conversationTransition(event, current, itemIndex, delta)
     return when (decision.action) {
-        "ignore" -> this
-        "threadStatus" -> copy(summary = summary.copy(status = (event as ThreadEvent.ThreadStatusChanged).status))
-        "resolveRequest" -> resolveRequest((event as ThreadEvent.RequestResolved).requestId)
+        ConversationMutation.Ignore -> this
+        ConversationMutation.ThreadStatus ->
+            copy(summary = summary.copy(status = (event as ThreadEvent.ThreadStatusChanged).status))
+        ConversationMutation.ResolveRequest -> resolveRequest((event as ThreadEvent.RequestResolved).requestId)
         else -> {
             val updated =
-                if (decision.action == "turn") applyTurnLifecycle(current, event, decision)
+                if (decision.action == ConversationMutation.Turn) applyTurnLifecycle(current, event)
                 else current?.applyItemTransition(event, decision, itemIndex, delta)
             if (updated == null || updated == current) this
             else
@@ -46,60 +70,120 @@ private fun conversationTransition(
     itemIndex: Int,
     delta: String,
 ): ConversationTransition {
-    val request = buildJsonObject {
-        put("operation", "transition")
-        put(
-            "event",
-            buildJsonObject {
-                put("kind", event.conversationKind)
-                when (event) {
-                    is ThreadEvent.TurnStarted -> put("status", "inProgress")
-                    is ThreadEvent.TurnCompleted -> {
-                        put("status", Json.encodeToJsonElement(TurnStatus.serializer(), event.status))
-                        put("hasError", event.error != null)
-                    }
-                    is ThreadEvent.GuardianReviewChanged -> put("status", event.status)
-                    is ThreadEvent.Error -> put("willRetry", event.error.willRetry)
-                    else -> Unit
-                }
-                put("emptyDelta", delta.isEmpty())
-            },
+    val status = event.wireStatus
+    val item =
+        when (current?.items?.getOrNull(itemIndex)) {
+            is CodexItem.AgentMessage -> NativeItemKind.AgentMessage
+            is CodexItem.Reasoning -> NativeItemKind.Reasoning
+            is CodexItem.CommandExecution -> NativeItemKind.CommandExecution
+            is CodexItem.FileChange -> NativeItemKind.FileChange
+            else -> NativeItemKind.Unknown
+        }.ordinal
+    val flags =
+        (if (event is ThreadEvent.TurnCompleted && event.turn.error != null) 1 else 0) or
+            (if (event is ThreadEvent.Error && event.error.willRetry) 2 else 0) or
+            (if (delta.isEmpty()) EMPTY_DELTA else 0) or
+            (if (current?.error?.willRetry == true) RETRYING_ERROR else 0)
+    return ConversationTransition(
+        nativeConversationTransition(
+            event.conversationKind.ordinal,
+            status,
+            current?.status?.wireStatus ?: 0,
+            item,
+            flags,
         )
-        put(
-            "current",
-            buildJsonObject {
-                current?.let {
-                    put("turnStatus", Json.encodeToJsonElement(TurnStatus.serializer(), it.status))
-                    put("retryingError", it.error?.willRetry == true)
-                    it.items.getOrNull(itemIndex)?.let { item -> put("itemType", item.conversationType) }
-                }
-            },
-        )
-    }
-    return Json.decodeFromString<ConversationTransition>(nativeConversationPresentation(request.toString()))
+    )
 }
 
-private fun applyTurnLifecycle(current: CodexTurn?, event: ThreadEvent, decision: ConversationTransition): CodexTurn {
+// Stable C/JNI codes documented in mobile_client.h.
+private enum class NativeTurnStatus {
+    Absent,
+    InProgress,
+    Completed,
+    Failed,
+    Interrupted,
+    Approved,
+}
+
+private enum class NativeItemKind {
+    Unknown,
+    AgentMessage,
+    Reasoning,
+    CommandExecution,
+    FileChange,
+}
+
+private const val EMPTY_DELTA = 4
+private const val RETRYING_ERROR = 8
+private const val ACTION_MASK = 255
+private const val MILLISECONDS_PER_SECOND = 1000
+private val ThreadEvent.wireStatus: Int
+    get() =
+        when (this) {
+            is ThreadEvent.TurnStarted -> NativeTurnStatus.InProgress.ordinal
+            is ThreadEvent.TurnCompleted -> turn.status.wireStatus
+            is ThreadEvent.GuardianReviewChanged ->
+                if (status == "approved") NativeTurnStatus.Approved.ordinal else NativeTurnStatus.Absent.ordinal
+            else -> NativeTurnStatus.Absent.ordinal
+        }
+private val TurnStatus.wireStatus: Int
+    get() =
+        when (this) {
+            TurnStatus.InProgress -> NativeTurnStatus.InProgress
+            TurnStatus.Completed -> NativeTurnStatus.Completed
+            TurnStatus.Failed -> NativeTurnStatus.Failed
+            TurnStatus.Interrupted -> NativeTurnStatus.Interrupted
+        }.ordinal
+
+private fun applyTurnLifecycle(current: CodexTurn?, event: ThreadEvent): CodexTurn {
     val incoming =
         when (event) {
-            is ThreadEvent.TurnStarted -> CodexTurn(event.turnId, event.status, startedAtMs = event.startedAtMs)
-            is ThreadEvent.TurnCompleted ->
-                CodexTurn(
-                    event.turnId,
-                    event.status,
-                    startedAtMs = event.startedAtMs,
-                    completedAtMs = event.completedAtMs,
-                    durationMs = event.durationMs,
-                    error = event.error,
-                )
+            is ThreadEvent.TurnStarted -> event.turn
+            is ThreadEvent.TurnCompleted -> event.turn
             else -> error("Lifecycle transition requires a turn event")
         }
-    return (current ?: incoming).copy(
-        status = Json.decodeFromJsonElement(TurnStatus.serializer(), JsonPrimitive(decision.status!!)),
-        startedAtMs = incoming.startedAtMs ?: current?.startedAtMs,
-        completedAtMs = incoming.completedAtMs ?: current?.completedAtMs,
-        durationMs = incoming.durationMs ?: current?.durationMs,
-        error = if (decision.clearError) null else incoming.error ?: current?.error,
+    val result =
+        Json.parseToJsonElement(
+                nativeConversationPresentation(
+                    buildJsonObject {
+                            put("operation", "turnLifecycle")
+                            put("started", event is ThreadEvent.TurnStarted)
+                            put("previous", current?.lifecycleMetadata("previous") ?: JsonNull)
+                            put("incoming", incoming.lifecycleMetadata("incoming"))
+                        }
+                        .toString()
+                )
+            )
+            .jsonObject
+    val items =
+        result.getValue("items").jsonArray.map { token ->
+            val reference = token.jsonObject
+            (if (reference.string("source") == "previous") requireNotNull(current).items else incoming.items)[
+                reference.getValue("index").jsonPrimitive.int]
+        }
+    return codexTurn(result.without("items")).copy(items = items, pendingRequests = current?.pendingRequests.orEmpty())
+}
+
+/** Metadata and source positions only: text/tool bodies remain in native storage. */
+private fun CodexTurn.lifecycleMetadata(source: String): JsonObject = buildJsonObject {
+    raw?.forEach { (key, value) -> put(key, value) }
+    put("id", id)
+    put("status", Json.encodeToJsonElement(TurnStatus.serializer(), status))
+    startedAtMs?.let { put("startedAt", it / MILLISECONDS_PER_SECOND) }
+    completedAtMs?.let { put("completedAt", it / MILLISECONDS_PER_SECOND) }
+    durationMs?.let { put("durationMs", it) }
+    error?.let { put("error", Json.encodeToJsonElement(CodexTurnError.serializer(), it)) }
+    put(
+        "items",
+        JsonArray(
+            items.mapIndexed { index, item ->
+                buildJsonObject {
+                    put("id", item.id)
+                    put("source", source)
+                    put("index", index)
+                }
+            }
+        ),
     )
 }
 
@@ -110,21 +194,21 @@ private fun CodexTurn.applyItemTransition(
     delta: String,
 ): CodexTurn? {
     return when (decision.action) {
-        "item" -> {
+        ConversationMutation.Item -> {
             val item = event.storageItem()
             this.copy(
                 items =
                     if (itemIndex < 0) this.items + item else this.items.toMutableList().also { it[itemIndex] = item }
             )
         }
-        "removeItem" ->
+        ConversationMutation.RemoveItem ->
             if (itemIndex < 0) null else this.copy(items = this.items.toMutableList().also { it.removeAt(itemIndex) })
-        "append" ->
+        ConversationMutation.Append ->
             this.copy(
                 items = this.items.toMutableList().also { it[itemIndex] = it[itemIndex].appendConversationText(delta) }
             )
-        "error" -> this.copy(error = (event as ThreadEvent.Error).error)
-        "request" -> {
+        ConversationMutation.Error -> this.copy(error = (event as ThreadEvent.Error).error)
+        ConversationMutation.Request -> {
             val request = (event as ThreadEvent.RequestStarted).request
             this.copy(pendingRequests = this.pendingRequests.replaceById(request.id, request) { it.id })
         }
@@ -157,13 +241,11 @@ private val ThreadEvent.storageDelta: String
             else -> ""
         }
 
-@Serializable
-private data class ConversationTransition(
-    val action: String,
-    val status: String?,
-    val field: String?,
-    val clearError: Boolean,
-)
+@JvmInline
+private value class ConversationTransition(val code: Int) {
+    val action: ConversationMutation
+        get() = ConversationMutation.entries[code and ACTION_MASK]
+}
 
 // These mappings describe the native types, not event acceptance or precedence.
 internal val CodexItem.conversationType: String
@@ -176,24 +258,24 @@ internal val CodexItem.conversationType: String
             is CodexItem.FileChange -> "fileChange"
             is CodexItem.Unknown -> codexType
         }
-private val ThreadEvent.conversationKind: String
+private val ThreadEvent.conversationKind: ConversationEventKind
     get() =
         when (this) {
-            is ThreadEvent.TurnStarted -> "turnStarted"
-            is ThreadEvent.TurnCompleted -> "turnCompleted"
-            is ThreadEvent.ItemStarted -> "itemStarted"
-            is ThreadEvent.ItemCompleted -> "itemCompleted"
-            is ThreadEvent.AgentMessageDelta -> "agentMessageDelta"
-            is ThreadEvent.ReasoningDelta -> "reasoningDelta"
-            is ThreadEvent.ReasoningSummaryDelta -> "reasoningSummaryDelta"
-            is ThreadEvent.CommandOutputDelta -> "commandOutputDelta"
-            is ThreadEvent.FileChangeOutputDelta -> "fileChangeOutputDelta"
-            is ThreadEvent.Error -> "error"
-            is ThreadEvent.RequestStarted -> "requestStarted"
-            is ThreadEvent.RequestResolved -> "requestResolved"
-            is ThreadEvent.ThreadStatusChanged -> "threadStatusChanged"
-            is ThreadEvent.GuardianReviewChanged -> "guardianReviewChanged"
-            is ThreadEvent.Unknown -> "unknown"
+            is ThreadEvent.TurnStarted -> ConversationEventKind.TurnStarted
+            is ThreadEvent.TurnCompleted -> ConversationEventKind.TurnCompleted
+            is ThreadEvent.ItemStarted -> ConversationEventKind.ItemStarted
+            is ThreadEvent.ItemCompleted -> ConversationEventKind.ItemCompleted
+            is ThreadEvent.AgentMessageDelta -> ConversationEventKind.AgentMessageDelta
+            is ThreadEvent.ReasoningDelta -> ConversationEventKind.ReasoningDelta
+            is ThreadEvent.ReasoningSummaryDelta -> ConversationEventKind.ReasoningSummaryDelta
+            is ThreadEvent.CommandOutputDelta -> ConversationEventKind.CommandOutputDelta
+            is ThreadEvent.FileChangeOutputDelta -> ConversationEventKind.FileChangeOutputDelta
+            is ThreadEvent.Error -> ConversationEventKind.Error
+            is ThreadEvent.RequestStarted -> ConversationEventKind.RequestStarted
+            is ThreadEvent.RequestResolved -> ConversationEventKind.RequestResolved
+            is ThreadEvent.ThreadStatusChanged -> ConversationEventKind.ThreadStatusChanged
+            is ThreadEvent.GuardianReviewChanged -> ConversationEventKind.GuardianReviewChanged
+            is ThreadEvent.Unknown -> ConversationEventKind.Unknown
         }
 
 private fun CodexItem.appendConversationText(delta: String): CodexItem =

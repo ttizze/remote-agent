@@ -15,11 +15,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import mobile_client.mobile_client_agent_command
 import mobile_client.mobile_client_transfer
 
 /** Native request execution uses leased handles; replacement never closes a borrowed handle. */
@@ -37,7 +39,7 @@ internal class IosHostGateway : HostGateway {
                 IosCredentialStore.save("relay:$reference", payload.relayToken.encodeToByteArray())
                 val profile =
                     HostProfile(payload.runnerId, payload.hostName, payload.relayUrl, payload.hostIdentity, reference)
-                when (val result = connect(profile, payload.relayToken, key, payload.ticket)) {
+                when (val result = connectIosHost(handles, profile, payload.relayToken, key, payload.ticket)) {
                     is GatewayResult.Success -> GatewayResult.Success(profile)
                     is GatewayResult.Failure -> result
                 }
@@ -61,7 +63,7 @@ internal class IosHostGateway : HostGateway {
                 val token =
                     IosCredentialStore.load("relay:${profile.deviceIdentityReference}")
                         ?: error("接続資格情報がありません。再ペアリングしてください")
-                connect(profile, token.decodeToString(), key, null)
+                connectIosHost(handles, profile, token.decodeToString(), key, null)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: IllegalStateException) {
@@ -83,6 +85,18 @@ internal class IosHostGateway : HostGateway {
                 }
             } ?: GatewayResult.Failure("PC Hostへ接続されていません")
         }
+
+    override suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String> =
+        withContext(Dispatchers.Default) {
+                handles.withHandle(profile.id) { current ->
+                    memScoped {
+                        val error = alloc<CPointerVar<ByteVar>>()
+                        error.value = null
+                        takeResult(mobile_client_agent_command(current, command.encode(), error.ptr), error.value)
+                    }
+                } ?: GatewayResult.Failure("PC Hostへ接続されていません")
+            }
+            .agentResult()
 
     override suspend fun rawRequest(
         profile: HostProfile,
@@ -136,33 +150,6 @@ internal class IosHostGateway : HostGateway {
             job.cancel()
         }
     }
-
-    private suspend fun connect(
-        profile: HostProfile,
-        relayToken: String,
-        key: ByteArray,
-        ticket: String?,
-    ): GatewayResult<Unit> {
-        val runnerId = profile.id
-        val config =
-            buildJsonObject {
-                    put("relayUrl", profile.relayUrl)
-                    put("runnerId", profile.runnerId)
-                    put("hostIdentity", profile.hostIdentity)
-                    put("deviceName", platform.UIKit.UIDevice.currentDevice.name)
-                    put("relayToken", relayToken)
-                    ticket?.let { put("pairingTicket", it) }
-                    put("requestTimeoutMs", DEFAULT_REQUEST_TIMEOUT_MS)
-                }
-                .toString()
-        return when (val result = callConnect(config, key)) {
-            is GatewayResult.Success -> {
-                handles.replace(runnerId, result.value)
-                GatewayResult.Success(Unit)
-            }
-            is GatewayResult.Failure -> result
-        }
-    }
 }
 
 private const val POLL_INTERVAL_MS = 50L
@@ -177,9 +164,11 @@ private suspend fun drainRawMessages(
 ) {
     try {
         while (true) {
+            currentCoroutineContext().ensureActive()
+            if (!handles.isCurrentHandle(hostIdentity, subscribedHandle)) return
             val message = handles.withHandle(hostIdentity, subscribedHandle, ::nextRawMessage)
-            if (message != null && handles.isCurrentHandle(hostIdentity, subscribedHandle)) onMessage(message)
-            delay(POLL_INTERVAL_MS)
+            if (message == null) delay(POLL_INTERVAL_MS)
+            else if (handles.isCurrentHandle(hostIdentity, subscribedHandle)) onMessage(message)
         }
     } catch (cancelled: CancellationException) {
         throw cancelled
@@ -202,5 +191,34 @@ private fun notifyClosed(
 ) {
     if (handles.isCurrentHandle(hostIdentity, subscribedHandle)) {
         runCatching { onClosed(failure.message ?: "PC Hostとの接続が切れました") }
+    }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private suspend fun connectIosHost(
+    handles: IosClientHandles,
+    profile: HostProfile,
+    relayToken: String,
+    key: ByteArray,
+    ticket: String?,
+): GatewayResult<Unit> {
+    val runnerId = profile.id
+    val config =
+        buildJsonObject {
+                put("relayUrl", profile.relayUrl)
+                put("runnerId", profile.runnerId)
+                put("hostIdentity", profile.hostIdentity)
+                put("deviceName", platform.UIKit.UIDevice.currentDevice.name)
+                put("relayToken", relayToken)
+                ticket?.let { put("pairingTicket", it) }
+                put("requestTimeoutMs", DEFAULT_REQUEST_TIMEOUT_MS)
+            }
+            .toString()
+    return when (val result = callConnect(config, key)) {
+        is GatewayResult.Success -> {
+            handles.replace(runnerId, result.value)
+            GatewayResult.Success(Unit)
+        }
+        is GatewayResult.Failure -> result
     }
 }

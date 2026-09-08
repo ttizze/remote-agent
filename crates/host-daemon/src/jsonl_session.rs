@@ -11,7 +11,7 @@ use tokio::{
     task::JoinSet,
 };
 
-const MAX_IN_FLIGHT_REQUESTS: usize = 8;
+use host_protocol::HOST_REQUEST_LIMIT;
 
 pub(crate) async fn serve_jsonl_session<S>(
     stream: S,
@@ -26,7 +26,7 @@ where
     let (reader, writer) = split(stream);
     let mut reader = JsonlReader::with_max_message_bytes(reader, DEFAULT_MAX_MESSAGE_BYTES);
     let mut writer = JsonlWriter::with_max_message_bytes(writer, DEFAULT_MAX_MESSAGE_BYTES);
-    let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
+    let permits = Arc::new(Semaphore::new(HOST_REQUEST_LIMIT));
     let mut tasks = JoinSet::<Result<(), String>>::new();
 
     let result = async {

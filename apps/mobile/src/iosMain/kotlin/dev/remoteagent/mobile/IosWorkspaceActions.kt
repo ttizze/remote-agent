@@ -4,7 +4,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
 
 class IosWorkspaceActions
 internal constructor(
@@ -12,44 +11,38 @@ internal constructor(
     private val scope: CoroutineScope,
     private val dependencies: IosMobileDependencies,
 ) {
-    /** Files and reviews use the same authenticated RPC connection as the task. */
-    fun request(method: String, paramsJson: String, completion: (String?, String?) -> Unit) {
-        val profile =
-            controller.state.selectedProfile
-                ?: run {
-                    completion(null, "接続先が選択されていません")
-                    return
-                }
-        if (method !in setOf("host/file/list", "host/file/read", "host/file/write", "host/workspace/review")) {
-            completion(null, "未対応のファイル操作です")
-            return
-        }
-        scope.launch {
-            try {
-                completeJson(
-                    dependencies.gateway.rawRequest(profile, method, Json.parseToJsonElement(paramsJson)),
-                    completion,
-                )
-            } catch (failure: IllegalArgumentException) {
-                completion(null, failure.message ?: "JSONが無効です")
-            }
+    fun listFiles(path: String, completion: (HostFileList?, String?) -> Unit) {
+        scope.launch { complete(controller.listFiles(path), completion) }
+    }
+
+    fun readFile(path: String, completion: (HostFileDocument?, String?) -> Unit) {
+        scope.launch { complete(controller.readFile(path), completion) }
+    }
+
+    fun writeFile(path: String, revision: String, text: String, completion: (HostFileDocument?, String?) -> Unit) {
+        scope.launch { complete(controller.writeFile(path, revision, text), completion) }
+    }
+
+    fun reviewWorkspace(cwd: String, completion: (HostWorkspaceReview?, String?) -> Unit) {
+        scope.launch { complete(controller.reviewWorkspace(cwd), completion) }
+    }
+
+    private fun <T> complete(result: GatewayResult<T>, completion: (T?, String?) -> Unit) {
+        when (result) {
+            is GatewayResult.Success -> completion(result.value, null)
+            is GatewayResult.Failure -> completion(null, result.message)
         }
     }
 
-    fun worktreeSettings(hostIdentity: String, updateJson: String?, completion: (String?, String?) -> Unit) {
-        val profile =
-            controller.state.selectedProfile?.takeIf { it.hostIdentity == hostIdentity }
-                ?: run {
-                    completion(null, "接続先が変更されました。設定を開き直してください。")
-                    return
-                }
+    fun worktreeSettings(
+        hostIdentity: String,
+        update: HostWorktreeSettings?,
+        completion: (HostWorktreeSettings?, String?) -> Unit,
+    ) {
         scope.launch {
-            try {
-                val method = if (updateJson == null) "host/worktree/settings/read" else "host/worktree/settings/update"
-                val params = updateJson?.let(Json::parseToJsonElement) ?: JsonObject(emptyMap())
-                completeJson(dependencies.gateway.rawRequest(profile, method, params), completion)
-            } catch (failure: IllegalArgumentException) {
-                completion(null, failure.message ?: "JSONが無効です")
+            when (val result = controller.worktreeSettings(hostIdentity, update)) {
+                is GatewayResult.Success -> completion(result.value, null)
+                is GatewayResult.Failure -> completion(null, result.message)
             }
         }
     }

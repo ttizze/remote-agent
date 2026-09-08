@@ -174,6 +174,7 @@ internal abstract class MobileControllerTestFixture {
         var interruptResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectBlock: (suspend () -> GatewayResult<Unit>)? = null
+        var agentBlock: (suspend (AgentCommand) -> GatewayResult<String>)? = null
         var rawBlock: (suspend (String, JsonElement) -> GatewayResult<JsonElement>)? = null
         var rawHook: ((String, JsonElement) -> Unit)? = null
         var readHook: (() -> Unit)? = null
@@ -248,7 +249,11 @@ internal abstract class MobileControllerTestFixture {
             return readResult
         }
 
-        override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> {
+        override suspend fun startThread(
+            profile: HostProfile,
+            cwd: String,
+            options: CodexTurnOptions,
+        ): GatewayResult<ThreadSnapshot> {
             startCalls += 1
             startCwds += cwd
             return startResult
@@ -260,6 +265,7 @@ internal abstract class MobileControllerTestFixture {
             cwd: String,
             input: CodexTurnInput,
             resume: Boolean,
+            options: CodexTurnOptions,
         ): GatewayResult<String> {
             submittedClientIds += input.clientUserMessageId
             turnResumes += resume
@@ -297,6 +303,9 @@ internal abstract class MobileControllerTestFixture {
             interruptHook?.invoke()
             return interruptResult
         }
+
+        override suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String> =
+            requireNotNull(agentBlock) { "No response configured for native agent intent" }(command)
 
         override suspend fun rawRequest(
             profile: HostProfile,

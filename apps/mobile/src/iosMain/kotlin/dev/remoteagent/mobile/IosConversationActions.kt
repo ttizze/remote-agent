@@ -14,7 +14,12 @@ internal constructor(
     private val scope: CoroutineScope,
     private val dependencies: IosMobileDependencies,
 ) {
-    fun sendTurn(text: String, attachments: List<CodexAttachment>, completion: (Boolean, String?) -> Unit) {
+    fun sendTurn(
+        text: String,
+        attachments: List<CodexAttachment>,
+        options: CodexTurnOptions,
+        completion: (Boolean, String?) -> Unit,
+    ) {
         val profile =
             controller.state.selectedProfile
                 ?: run {
@@ -22,7 +27,7 @@ internal constructor(
                     return
                 }
         scope.launch {
-            val result = controller.sendMessage(profile, text, attachments)
+            val result = controller.sendMessage(profile, text, attachments, options)
             completion(result.accepted, result.threadId)
         }
     }
@@ -53,60 +58,9 @@ internal constructor(
         }
     }
 
-    fun accountRequest(method: String, paramsJson: String, completion: (String?, String?) -> Unit) {
-        val profile =
-            controller.state.selectedProfile
-                ?: run {
-                    completion(null, "接続先が選択されていません")
-                    return
-                }
-        if (
-            method !in
-                setOf(
-                    "host/account/list",
-                    "host/account/select",
-                    "host/account/login/start",
-                    "host/account/login/status",
-                    "host/account/login/cancel",
-                )
-        ) {
-            completion(null, "未対応のアカウント操作です")
-            return
-        }
-        scope.launch {
-            try {
-                when (
-                    val result = dependencies.gateway.rawRequest(profile, method, Json.parseToJsonElement(paramsJson))
-                ) {
-                    is GatewayResult.Success -> completion(result.value.toString(), null)
-                    is GatewayResult.Failure -> completion(null, result.message)
-                }
-            } catch (failure: IllegalArgumentException) {
-                completion(null, failure.message ?: "JSONが無効です")
-            }
-        }
-    }
-
     fun forkThread(threadId: String, lastTurnId: String, completion: (String?, String?) -> Unit) {
-        val profile =
-            controller.state.selectedProfile
-                ?: run {
-                    completion(null, "接続先が選択されていません")
-                    return
-                }
         scope.launch {
-            when (
-                val result =
-                    dependencies.gateway.rawRequest(
-                        profile,
-                        "thread/fork",
-                        buildJsonObject {
-                            put("threadId", threadId)
-                            put("lastTurnId", lastTurnId)
-                            put("excludeTurns", true)
-                        },
-                    )
-            ) {
+            when (val result = controller.forkThread(threadId, lastTurnId)) {
                 is GatewayResult.Success -> completion(result.value.toString(), null)
                 is GatewayResult.Failure -> completion(null, result.message)
             }
@@ -191,9 +145,5 @@ internal constructor(
                 is GatewayResult.Failure -> completion(null, result.message)
             }
         }
-    }
-
-    fun setTurnOptions(hostIdentity: String, model: String?, effort: String?) {
-        dependencies.gateway.codex.setTurnOptions(hostIdentity, CodexTurnOptions(model, effort))
     }
 }

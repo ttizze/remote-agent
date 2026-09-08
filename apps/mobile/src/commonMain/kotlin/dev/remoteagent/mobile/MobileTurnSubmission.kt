@@ -1,35 +1,38 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.put
+
 internal suspend fun MobileController.startTurn(
     profile: HostProfile,
     threadId: String,
     text: String,
     attachments: List<CodexAttachment> = emptyList(),
+    options: CodexTurnOptions = CodexTurnOptions(),
 ): Boolean {
     val generation = connectedGeneration(profile.id) ?: return false
     val cached = state.cache.snapshot(profile.id, threadId)
     val input = CodexTurnInput(text, attachments, clientUserMessageIdGenerator())
     val displayText = input.displayText()
-    val activeTurnId = cached?.turns?.lastOrNull { it.status == TurnStatus.InProgress && it.id.isNotBlank() }?.id
-    var acceptedTurnId = activeTurnId
+    val listed = state.cache.profile(profile.id).threadList.lastOrNull { it.id == threadId }
+    val plan = planTurnSubmission(cached, listed)
+    var acceptedTurnId = (plan as? SendPlan.Steer)?.turnId
     val result =
-        when {
-            activeTurnId != null -> gateway.codex.steerTurn(profile, threadId, activeTurnId, input)
-            threadIsActive(profile.id, threadId, cached) -> gateway.codex.queueTurn(profile, threadId, input)
-            else -> {
-                val cwd = cachedWorkingDirectory(profile.id, threadId)
-                if (cwd == null) GatewayResult.Failure(MISSING_THREAD_WORKING_DIRECTORY_MESSAGE)
-                else
-                    gateway.codex
-                        .startTurn(
-                            profile,
-                            threadId,
-                            cwd,
-                            input,
-                            resume = cached == null || cached.summary.status == ThreadStatus.NotLoaded,
-                        )
-                        .also { if (it is GatewayResult.Success) acceptedTurnId = it.value }
-            }
+        when (plan) {
+            is SendPlan.Steer -> gateway.codex.steerTurn(profile, threadId, plan.turnId, input)
+            SendPlan.Queue -> gateway.codex.queueTurn(profile, threadId, input)
+            is SendPlan.Start ->
+                gateway.codex.startTurn(profile, threadId, plan.cwd, input, plan.resume, options).also {
+                    if (it is GatewayResult.Success) acceptedTurnId = it.value
+                }
+            is SendPlan.Reject -> GatewayResult.Failure(plan.message)
         }
     return when (result) {
         is GatewayResult.Failure -> {
@@ -46,9 +49,49 @@ internal suspend fun MobileController.startTurn(
     }
 }
 
-private fun MobileController.threadIsActive(hostIdentity: String, threadId: String, cached: ThreadSnapshot?): Boolean =
-    cached?.summary?.status is ThreadStatus.Active ||
-        state.cache.profile(hostIdentity).threadList.lastOrNull { it.id == threadId }?.status is ThreadStatus.Active
+@Serializable
+internal sealed interface SendPlan {
+    @Serializable @SerialName("steer") data class Steer(val turnId: String) : SendPlan
+
+    @Serializable @SerialName("queue") data object Queue : SendPlan
+
+    @Serializable @SerialName("start") data class Start(val cwd: String, val resume: Boolean) : SendPlan
+
+    @Serializable @SerialName("reject") data class Reject(val message: String) : SendPlan
+}
+
+private val sendPlanJson = Json { classDiscriminator = "action" }
+
+internal fun planTurnSubmission(snapshot: ThreadSnapshot?, listed: ThreadSummary?): SendPlan {
+    fun summary(value: ThreadSummary) = buildJsonObject {
+        put("cwd", value.workingDirectory.path)
+        put("status", Json.encodeToJsonElement(ThreadStatus.serializer(), value.status))
+    }
+    val request = buildJsonObject {
+        put("operation", "sendPlan")
+        put(
+            "snapshot",
+            snapshot?.let {
+                buildJsonObject {
+                    summary(it.summary).forEach { (key, value) -> put(key, value) }
+                    put(
+                        "turns",
+                        JsonArray(
+                            it.turns.map { turn ->
+                                buildJsonObject {
+                                    put("id", turn.id)
+                                    put("status", Json.encodeToJsonElement(TurnStatus.serializer(), turn.status))
+                                }
+                            }
+                        ),
+                    )
+                }
+            } ?: JsonNull,
+        )
+        put("listed", listed?.let(::summary) ?: JsonNull)
+    }
+    return sendPlanJson.decodeFromString<SendPlan>(nativeConversationPresentation(request.toString()))
+}
 
 private fun CodexTurnInput.displayText(): String = buildString {
     append(text)
@@ -108,5 +151,3 @@ internal suspend fun <T> GatewayResult<T>.fold(success: suspend (T) -> Unit, fai
         is GatewayResult.Success -> success(value)
         is GatewayResult.Failure -> failure(message)
     }
-
-private const val MISSING_THREAD_WORKING_DIRECTORY_MESSAGE = "タスクの作業ディレクトリが不明です。タスク一覧を更新してください"

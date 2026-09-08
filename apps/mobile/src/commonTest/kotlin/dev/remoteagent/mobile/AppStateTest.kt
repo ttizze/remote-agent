@@ -72,7 +72,7 @@ class AppStateTest {
         val connected = reduce(reduce(AppState(), AppAction.ProfilePaired(mac)), AppAction.ConnectSucceeded(mac.id))
         val listed = reduce(connected, AppAction.ThreadListLoaded(mac.id, listOf(summary("old"), summary("new"))))
         assertEquals(emptySet(), listed.selectedView.unreadCompletedThreadIds)
-        val completed = receive(listed, ThreadEvent.TurnCompleted("new", "turn", TurnStatus.Completed))
+        val completed = receive(listed, ThreadEvent.TurnCompleted("new", CodexTurn("turn", TurnStatus.Completed)))
         assertEquals(setOf("new"), completed.selectedView.unreadCompletedThreadIds)
         val refreshed = reduce(completed, AppAction.ThreadListLoaded(mac.id, listOf(summary("old"), summary("new"))))
         assertEquals(setOf("new"), refreshed.selectedView.unreadCompletedThreadIds)
@@ -91,8 +91,9 @@ class AppStateTest {
     fun existing_idle_failed_interrupted_and_visible_completions_do_not_mark_unread() {
         val connected = reduce(reduce(AppState(), AppAction.ProfilePaired(mac)), AppAction.ConnectSucceeded(mac.id))
         val idle = receive(connected, ThreadEvent.ThreadStatusChanged("old", status = ThreadStatus.Idle))
-        val failed = receive(idle, ThreadEvent.TurnCompleted("failed", "turn", TurnStatus.Failed))
-        val interrupted = receive(failed, ThreadEvent.TurnCompleted("stopped", "turn", TurnStatus.Interrupted))
+        val failed = receive(idle, ThreadEvent.TurnCompleted("failed", CodexTurn("turn", TurnStatus.Failed)))
+        val interrupted =
+            receive(failed, ThreadEvent.TurnCompleted("stopped", CodexTurn("turn", TurnStatus.Interrupted)))
         assertEquals(emptySet(), interrupted.selectedView.unreadCompletedThreadIds)
         val visible =
             reduce(
@@ -101,15 +102,16 @@ class AppStateTest {
             )
         assertEquals(
             emptySet(),
-            receive(visible, ThreadEvent.TurnCompleted("visible", "turn", TurnStatus.Completed))
+            receive(visible, ThreadEvent.TurnCompleted("visible", CodexTurn("turn", TurnStatus.Completed)))
                 .selectedView
                 .unreadCompletedThreadIds,
         )
         val otherHost = reduce(visible, AppAction.ProfilePaired(linux))
-        val completed = receive(otherHost, ThreadEvent.TurnCompleted("visible", "turn", TurnStatus.Completed))
+        val completed =
+            receive(otherHost, ThreadEvent.TurnCompleted("visible", CodexTurn("turn", TurnStatus.Completed)))
         assertEquals(setOf("visible"), completed.profileViews.getValue(mac.id).unreadCompletedThreadIds)
         assertEquals(emptySet(), completed.selectedView.unreadCompletedThreadIds)
-        val restarted = receive(completed, ThreadEvent.TurnStarted("visible", "next", TurnStatus.InProgress))
+        val restarted = receive(completed, ThreadEvent.TurnStarted("visible", CodexTurn("next", TurnStatus.InProgress)))
         assertEquals(emptySet(), restarted.profileViews.getValue(mac.id).unreadCompletedThreadIds)
     }
 

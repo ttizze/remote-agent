@@ -1,0 +1,1728 @@
+[
+  {
+    "name": "initial-title-window",
+    "command": {
+      "type": "listThreads",
+      "query": {
+        "projectLimit": 5,
+        "chatLimit": 5,
+        "projectThreadLimits": {},
+        "searchTerm": ""
+      }
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/list",
+        "params": {
+          "titleOnly": true,
+          "projectLimit": 5,
+          "chatLimit": 5,
+          "projectThreadLimits": {},
+          "searchTerm": ""
+        },
+        "response": {
+          "result": {
+            "data": [
+              {
+                "id": "recent",
+                "name": "Recent title",
+                "projectId": "project",
+                "cwd": "/workspace",
+                "futureField": [
+                  42
+                ]
+              }
+            ],
+            "projects": [
+              {
+                "id": "project",
+                "name": "Project",
+                "roots": []
+              }
+            ],
+            "moreProjectIds": [
+              "project"
+            ],
+            "hasMoreChats": true,
+            "hasMoreProjects": true,
+            "opaque": {
+              "a": 1
+            }
+          }
+        }
+      }
+    ],
+    "result": {
+      "data": [
+        {
+          "id": "recent",
+          "name": "Recent title",
+          "projectId": "project",
+          "cwd": "/workspace",
+          "futureField": [
+            42
+          ]
+        }
+      ],
+      "projects": [
+        {
+          "id": "project",
+          "name": "Project",
+          "roots": []
+        }
+      ],
+      "moreProjectIds": [
+        "project"
+      ],
+      "hasMoreChats": true,
+      "hasMoreProjects": true,
+      "opaque": {
+        "a": 1
+      }
+    }
+  },
+  {
+    "name": "independent-list-limits",
+    "command": {
+      "type": "listThreads",
+      "query": {
+        "projectLimit": 15,
+        "chatLimit": 25,
+        "projectThreadLimits": {
+          "project": 15
+        },
+        "searchTerm": "needle"
+      }
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/list",
+        "params": {
+          "titleOnly": true,
+          "projectLimit": 15,
+          "chatLimit": 25,
+          "projectThreadLimits": {
+            "project": 15
+          },
+          "searchTerm": "needle"
+        },
+        "response": {
+          "result": {
+            "data": [
+              {
+                "id": "recent",
+                "name": "Recent title",
+                "projectId": "project",
+                "cwd": "/workspace",
+                "futureField": [
+                  42
+                ]
+              }
+            ],
+            "projects": [
+              {
+                "id": "project",
+                "name": "Project",
+                "roots": []
+              }
+            ],
+            "moreProjectIds": [
+              "project"
+            ],
+            "hasMoreChats": true,
+            "hasMoreProjects": true,
+            "opaque": {
+              "a": 1
+            }
+          }
+        }
+      }
+    ],
+    "result": {
+      "data": [
+        {
+          "id": "recent",
+          "name": "Recent title",
+          "projectId": "project",
+          "cwd": "/workspace",
+          "futureField": [
+            42
+          ]
+        }
+      ],
+      "projects": [
+        {
+          "id": "project",
+          "name": "Project",
+          "roots": []
+        }
+      ],
+      "moreProjectIds": [
+        "project"
+      ],
+      "hasMoreChats": true,
+      "hasMoreProjects": true,
+      "opaque": {
+        "a": 1
+      }
+    }
+  },
+  {
+    "name": "malformed-title-list",
+    "command": {
+      "type": "listThreads",
+      "query": {
+        "projectLimit": 5,
+        "chatLimit": 5,
+        "projectThreadLimits": {},
+        "searchTerm": ""
+      }
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/list",
+        "params": {
+          "titleOnly": true,
+          "projectLimit": 5,
+          "chatLimit": 5,
+          "projectThreadLimits": {},
+          "searchTerm": ""
+        },
+        "response": {
+          "result": {
+            "data": [],
+            "projects": [],
+            "hasMoreChats": false,
+            "hasMoreProjects": false
+          }
+        }
+      }
+    ],
+    "errorContains": "Invalid host/thread/list response",
+    "errorRaw": {
+      "data": [],
+      "projects": [],
+      "hasMoreChats": false,
+      "hasMoreProjects": false
+    }
+  },
+  {
+    "name": "new-thread-options",
+    "command": {
+      "type": "startThread",
+      "cwd": "/workspace",
+      "model": "model-b"
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/start",
+        "params": {
+          "cwd": "/workspace",
+          "model": "model-b"
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread-new",
+              "cwd": "/workspace",
+              "turns": [],
+              "future": {
+                "opaque": 42
+              }
+            },
+            "model": "model-b"
+          }
+        }
+      }
+    ],
+    "result": {
+      "thread": {
+        "id": "thread-new",
+        "cwd": "/workspace",
+        "turns": [],
+        "future": {
+          "opaque": 42
+        }
+      },
+      "model": "model-b"
+    }
+  },
+  {
+    "name": "host-default-directory",
+    "command": {
+      "type": "startThread",
+      "cwd": "",
+      "model": null
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/start",
+        "params": {},
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread-new",
+              "cwd": "/default",
+              "turns": [],
+              "future": {
+                "opaque": 42
+              }
+            },
+            "model": "model-b"
+          }
+        }
+      }
+    ],
+    "result": {
+      "thread": {
+        "id": "thread-new",
+        "cwd": "/default",
+        "turns": [],
+        "future": {
+          "opaque": 42
+        }
+      },
+      "model": "model-b"
+    }
+  },
+  {
+    "name": "deferred-history",
+    "command": {
+      "type": "readThread",
+      "threadId": "thread-1",
+      "deferItemDetails": true
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/read",
+        "params": {
+          "threadId": "thread-1",
+          "includeTurns": true,
+          "paginateHistory": true,
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread-1",
+              "cwd": "/workspace",
+              "turns": [
+                {
+                  "id": "turn-1",
+                  "status": "completed",
+                  "deferredItemIds": [
+                    "item-1"
+                  ],
+                  "items": [
+                    {
+                      "id": "item-1",
+                      "type": "commandExecution",
+                      "command": "cat log",
+                      "status": "completed"
+                    }
+                  ]
+                }
+              ],
+              "future": {
+                "opaque": 42
+              }
+            },
+            "model": "model-b"
+          }
+        }
+      }
+    ],
+    "result": {
+      "thread": {
+        "id": "thread-1",
+        "cwd": "/workspace",
+        "turns": [
+          {
+            "id": "turn-1",
+            "status": "completed",
+            "deferredItemIds": [
+              "item-1"
+            ],
+            "items": [
+              {
+                "id": "item-1",
+                "type": "commandExecution",
+                "command": "cat log",
+                "status": "completed"
+              }
+            ]
+          }
+        ],
+        "future": {
+          "opaque": 42
+        }
+      },
+      "model": "model-b"
+    }
+  },
+  {
+    "name": "wrong-thread",
+    "command": {
+      "type": "readThread",
+      "threadId": "thread-1",
+      "deferItemDetails": true
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/read",
+        "params": {
+          "threadId": "thread-1",
+          "includeTurns": true,
+          "paginateHistory": true,
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "other",
+              "cwd": "/workspace",
+              "turns": [],
+              "future": {
+                "opaque": 42
+              }
+            },
+            "model": "model-b"
+          }
+        }
+      }
+    ],
+    "errorContains": "thread ID does not match",
+    "errorRaw": {
+      "thread": {
+        "id": "other",
+        "cwd": "/workspace",
+        "turns": [],
+        "future": {
+          "opaque": 42
+        }
+      },
+      "model": "model-b"
+    }
+  },
+  {
+    "name": "missing-thread-id",
+    "command": {
+      "type": "readThread",
+      "threadId": "thread-1",
+      "deferItemDetails": true
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/read",
+        "params": {
+          "threadId": "thread-1",
+          "includeTurns": true,
+          "paginateHistory": true,
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "cwd": "/workspace"
+            }
+          }
+        }
+      }
+    ],
+    "errorContains": "Invalid host/thread/read response",
+    "errorRaw": {
+      "thread": {
+        "cwd": "/workspace"
+      }
+    }
+  },
+  {
+    "name": "older-turns",
+    "command": {
+      "type": "readOlder",
+      "threadId": "thread-1",
+      "cursor": "turns:1",
+      "turnId": null,
+      "deferItemDetails": true
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/turns/list",
+        "params": {
+          "threadId": "thread-1",
+          "cursor": "turns:1",
+          "turnId": null,
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread-1",
+              "cwd": "/workspace",
+              "turns": [
+                {
+                  "id": "turn-1",
+                  "items": [
+                    {
+                      "id": "item-1",
+                      "type": "agentMessage",
+                      "text": "older",
+                      "future": 17
+                    }
+                  ]
+                }
+              ],
+              "future": {
+                "opaque": 42
+              },
+              "historyCursor": null
+            },
+            "model": "model-b"
+          }
+        }
+      }
+    ],
+    "result": {
+      "thread": {
+        "id": "thread-1",
+        "cwd": "/workspace",
+        "turns": [
+          {
+            "id": "turn-1",
+            "items": [
+              {
+                "id": "item-1",
+                "type": "agentMessage",
+                "text": "older",
+                "future": 17
+              }
+            ]
+          }
+        ],
+        "future": {
+          "opaque": 42
+        },
+        "historyCursor": null
+      },
+      "model": "model-b"
+    }
+  },
+  {
+    "name": "older-items",
+    "command": {
+      "type": "readOlder",
+      "threadId": "thread-1",
+      "cursor": "items:1",
+      "turnId": "turn-1",
+      "deferItemDetails": true
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/items/list",
+        "params": {
+          "threadId": "thread-1",
+          "cursor": "items:1",
+          "turnId": "turn-1",
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread-1",
+              "cwd": "/workspace",
+              "turns": [
+                {
+                  "id": "turn-1",
+                  "items": [
+                    {
+                      "id": "item-1",
+                      "type": "agentMessage",
+                      "text": "older",
+                      "future": 17
+                    }
+                  ]
+                }
+              ],
+              "future": {
+                "opaque": 42
+              },
+              "historyCursor": null
+            },
+            "model": "model-b"
+          }
+        }
+      }
+    ],
+    "result": {
+      "thread": {
+        "id": "thread-1",
+        "cwd": "/workspace",
+        "turns": [
+          {
+            "id": "turn-1",
+            "items": [
+              {
+                "id": "item-1",
+                "type": "agentMessage",
+                "text": "older",
+                "future": 17
+              }
+            ]
+          }
+        ],
+        "future": {
+          "opaque": 42
+        },
+        "historyCursor": null
+      },
+      "model": "model-b"
+    }
+  },
+  {
+    "name": "full-item",
+    "command": {
+      "type": "readItem",
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "itemId": "item-1"
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/item/read",
+        "params": {
+          "threadId": "thread-1",
+          "turnId": "turn-1",
+          "itemId": "item-1"
+        },
+        "response": {
+          "result": {
+            "item": {
+              "id": "item-1",
+              "type": "commandExecution",
+              "command": "cat log",
+              "status": "completed",
+              "aggregatedOutput": "first\nlast",
+              "future": {
+                "b": true
+              }
+            }
+          }
+        }
+      }
+    ],
+    "result": {
+      "item": {
+        "id": "item-1",
+        "type": "commandExecution",
+        "command": "cat log",
+        "status": "completed",
+        "aggregatedOutput": "first\nlast",
+        "future": {
+          "b": true
+        }
+      }
+    }
+  },
+  {
+    "name": "wrong-item",
+    "command": {
+      "type": "readItem",
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "itemId": "item-1"
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/item/read",
+        "params": {
+          "threadId": "thread-1",
+          "turnId": "turn-1",
+          "itemId": "item-1"
+        },
+        "response": {
+          "result": {
+            "item": {
+              "id": "other",
+              "type": "agentMessage",
+              "text": "wrong"
+            }
+          }
+        }
+      }
+    ],
+    "errorContains": "item ID does not match",
+    "errorRaw": {
+      "item": {
+        "id": "other",
+        "type": "agentMessage",
+        "text": "wrong"
+      }
+    }
+  },
+  {
+    "name": "first-turn",
+    "command": {
+      "type": "startTurn",
+      "threadId": "thread-1",
+      "cwd": "/workspace",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      },
+      "resume": false,
+      "model": null,
+      "effort": null
+    },
+    "exchanges": [
+      {
+        "method": "turn/start",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-1",
+          "input": [
+            {
+              "type": "text",
+              "text": "hello",
+              "text_elements": []
+            }
+          ]
+        },
+        "response": {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        }
+      }
+    ],
+    "result": "turn-1"
+  },
+  {
+    "name": "selected-options",
+    "command": {
+      "type": "startTurn",
+      "threadId": "thread-1",
+      "cwd": "/workspace",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      },
+      "resume": false,
+      "model": "model-b",
+      "effort": "high"
+    },
+    "exchanges": [
+      {
+        "method": "turn/start",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-1",
+          "input": [
+            {
+              "type": "text",
+              "text": "hello",
+              "text_elements": []
+            }
+          ],
+          "model": "model-b",
+          "effort": "high"
+        },
+        "response": {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        }
+      }
+    ],
+    "result": "turn-1"
+  },
+  {
+    "name": "explicit-cwd-first",
+    "command": {
+      "type": "startTurn",
+      "threadId": "thread-1",
+      "cwd": "/first",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      },
+      "resume": true,
+      "model": null,
+      "effort": null
+    },
+    "exchanges": [
+      {
+        "method": "thread/resume",
+        "params": {
+          "threadId": "thread-1",
+          "cwd": "/first"
+        },
+        "response": {
+          "result": {}
+        }
+      },
+      {
+        "method": "turn/start",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-1",
+          "input": [
+            {
+              "type": "text",
+              "text": "hello",
+              "text_elements": []
+            }
+          ]
+        },
+        "response": {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        }
+      }
+    ],
+    "result": "turn-1"
+  },
+  {
+    "name": "explicit-cwd-second",
+    "command": {
+      "type": "startTurn",
+      "threadId": "thread-1",
+      "cwd": "/second",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      },
+      "resume": true,
+      "model": null,
+      "effort": null
+    },
+    "exchanges": [
+      {
+        "method": "thread/resume",
+        "params": {
+          "threadId": "thread-1",
+          "cwd": "/second"
+        },
+        "response": {
+          "result": {}
+        }
+      },
+      {
+        "method": "turn/start",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-1",
+          "input": [
+            {
+              "type": "text",
+              "text": "hello",
+              "text_elements": []
+            }
+          ]
+        },
+        "response": {
+          "result": {
+            "turn": {
+              "id": "turn-1"
+            }
+          }
+        }
+      }
+    ],
+    "result": "turn-1"
+  },
+  {
+    "name": "failed-resume-stops-send",
+    "command": {
+      "type": "startTurn",
+      "threadId": "thread-1",
+      "cwd": "/workspace",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      },
+      "resume": true,
+      "model": null,
+      "effort": null
+    },
+    "exchanges": [
+      {
+        "method": "thread/resume",
+        "params": {
+          "threadId": "thread-1",
+          "cwd": "/workspace"
+        },
+        "response": {
+          "error": {
+            "code": 400,
+            "message": "resume rejected",
+            "future": [
+              1,
+              2
+            ]
+          }
+        }
+      }
+    ],
+    "errorContains": "resume rejected",
+    "errorRaw": {
+      "code": 400,
+      "message": "resume rejected",
+      "future": [
+        1,
+        2
+      ]
+    }
+  },
+  {
+    "name": "steer-input",
+    "command": {
+      "type": "steerTurn",
+      "threadId": "thread-1",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      },
+      "turnId": "turn-1"
+    },
+    "exchanges": [
+      {
+        "method": "turn/steer",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-1",
+          "input": [
+            {
+              "type": "text",
+              "text": "hello",
+              "text_elements": []
+            }
+          ],
+          "expectedTurnId": "turn-1"
+        },
+        "response": {
+          "result": {}
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "queue-input",
+    "command": {
+      "type": "queueTurn",
+      "threadId": "thread-1",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      }
+    },
+    "exchanges": [
+      {
+        "method": "thread/queue/add",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-1",
+          "input": [
+            {
+              "type": "text",
+              "text": "hello",
+              "text_elements": []
+            }
+          ]
+        },
+        "response": {
+          "result": {
+            "queuedSubmission": {
+              "id": "queued-1"
+            }
+          }
+        }
+      }
+    ],
+    "result": "queued-1"
+  },
+  {
+    "name": "queue-fresh-identity",
+    "command": {
+      "type": "queueTurn",
+      "threadId": "thread-1",
+      "input": {
+        "text": "again",
+        "attachments": [],
+        "clientUserMessageId": "client-2"
+      }
+    },
+    "exchanges": [
+      {
+        "method": "thread/queue/add",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-2",
+          "input": [
+            {
+              "type": "text",
+              "text": "again",
+              "text_elements": []
+            }
+          ]
+        },
+        "response": {
+          "result": {
+            "queuedSubmission": {
+              "id": "queued-2"
+            }
+          }
+        }
+      }
+    ],
+    "result": "queued-2"
+  },
+  {
+    "name": "malformed-queue",
+    "command": {
+      "type": "queueTurn",
+      "threadId": "thread-1",
+      "input": {
+        "text": "hello",
+        "attachments": [],
+        "clientUserMessageId": "client-1"
+      }
+    },
+    "exchanges": [
+      {
+        "method": "thread/queue/add",
+        "params": {
+          "threadId": "thread-1",
+          "clientUserMessageId": "client-1",
+          "input": [
+            {
+              "type": "text",
+              "text": "hello",
+              "text_elements": []
+            }
+          ]
+        },
+        "response": {
+          "result": {
+            "queuedSubmission": {
+              "clientUserMessageId": "client-1",
+              "input": []
+            }
+          }
+        }
+      }
+    ],
+    "errorContains": "Invalid thread/queue/add response",
+    "errorRaw": {
+      "queuedSubmission": {
+        "clientUserMessageId": "client-1",
+        "input": []
+      }
+    }
+  },
+  {
+    "name": "attachments-startTurn",
+    "command": {
+      "type": "startTurn",
+      "threadId": "thread-1",
+      "input": {
+        "text": "",
+        "attachments": [
+          {
+            "path": "/uploads/image.png",
+            "name": "image.png",
+            "isImage": true
+          },
+          {
+            "path": "/uploads/notes.txt",
+            "name": "notes.txt",
+            "isImage": false
+          }
+        ],
+        "clientUserMessageId": "client-1"
+      },
+      "cwd": "/workspace",
+      "resume": false,
+      "model": null,
+      "effort": null
+    },
+    "exchanges": [
+      {
+        "method": "turn/start",
+        "params": {
+          "threadId": "thread-1",
+          "input": [
+            {
+              "type": "localImage",
+              "path": "/uploads/image.png"
+            },
+            {
+              "type": "mention",
+              "path": "/uploads/notes.txt",
+              "name": "notes.txt"
+            }
+          ],
+          "clientUserMessageId": "client-1"
+        },
+        "response": {
+          "result": {
+            "turnId": "turn-1"
+          }
+        }
+      }
+    ],
+    "result": "turn-1"
+  },
+  {
+    "name": "attachments-steerTurn",
+    "command": {
+      "type": "steerTurn",
+      "threadId": "thread-1",
+      "input": {
+        "text": "",
+        "attachments": [
+          {
+            "path": "/uploads/image.png",
+            "name": "image.png",
+            "isImage": true
+          },
+          {
+            "path": "/uploads/notes.txt",
+            "name": "notes.txt",
+            "isImage": false
+          }
+        ],
+        "clientUserMessageId": "client-1"
+      },
+      "turnId": "turn-1"
+    },
+    "exchanges": [
+      {
+        "method": "turn/steer",
+        "params": {
+          "threadId": "thread-1",
+          "input": [
+            {
+              "type": "localImage",
+              "path": "/uploads/image.png"
+            },
+            {
+              "type": "mention",
+              "path": "/uploads/notes.txt",
+              "name": "notes.txt"
+            }
+          ],
+          "clientUserMessageId": "client-1",
+          "expectedTurnId": "turn-1"
+        },
+        "response": {
+          "result": {}
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "attachments-queueTurn",
+    "command": {
+      "type": "queueTurn",
+      "threadId": "thread-1",
+      "input": {
+        "text": "",
+        "attachments": [
+          {
+            "path": "/uploads/image.png",
+            "name": "image.png",
+            "isImage": true
+          },
+          {
+            "path": "/uploads/notes.txt",
+            "name": "notes.txt",
+            "isImage": false
+          }
+        ],
+        "clientUserMessageId": "client-1"
+      }
+    },
+    "exchanges": [
+      {
+        "method": "thread/queue/add",
+        "params": {
+          "threadId": "thread-1",
+          "input": [
+            {
+              "type": "localImage",
+              "path": "/uploads/image.png"
+            },
+            {
+              "type": "mention",
+              "path": "/uploads/notes.txt",
+              "name": "notes.txt"
+            }
+          ],
+          "clientUserMessageId": "client-1"
+        },
+        "response": {
+          "result": {
+            "queuedSubmission": {
+              "id": "queued-1"
+            }
+          }
+        }
+      }
+    ],
+    "result": "queued-1"
+  },
+  {
+    "name": "interrupt",
+    "command": {
+      "type": "interruptTurn",
+      "threadId": "thread-1",
+      "turnId": "turn-1"
+    },
+    "exchanges": [
+      {
+        "method": "turn/interrupt",
+        "params": {
+          "threadId": "thread-1",
+          "turnId": "turn-1"
+        },
+        "response": {
+          "result": {}
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "models-pages-and-duplicate",
+    "command": {
+      "type": "models"
+    },
+    "exchanges": [
+      {
+        "method": "model/list",
+        "params": {
+          "limit": 100
+        },
+        "response": {
+          "result": {
+            "data": [
+              {
+                "id": "a",
+                "model": "model-a",
+                "displayName": "Model a",
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                  {
+                    "reasoningEffort": "medium"
+                  },
+                  {
+                    "reasoningEffort": "high"
+                  }
+                ],
+                "futureField": true
+              }
+            ],
+            "nextCursor": "page-2"
+          }
+        }
+      },
+      {
+        "method": "model/list",
+        "params": {
+          "limit": 100,
+          "cursor": "page-2"
+        },
+        "response": {
+          "result": {
+            "data": [
+              {
+                "id": "b",
+                "model": "model-b",
+                "displayName": "Model b",
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                  {
+                    "reasoningEffort": "medium"
+                  },
+                  {
+                    "reasoningEffort": "high"
+                  }
+                ],
+                "futureField": true
+              },
+              {
+                "id": "a",
+                "model": "model-a",
+                "displayName": "Updated A",
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                  {
+                    "reasoningEffort": "medium"
+                  },
+                  {
+                    "reasoningEffort": "high"
+                  }
+                ],
+                "futureField": true
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "result": [
+      {
+        "id": "a",
+        "model": "model-a",
+        "displayName": "Updated A",
+        "defaultReasoningEffort": "medium",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "high"
+          }
+        ],
+        "futureField": true
+      },
+      {
+        "id": "b",
+        "model": "model-b",
+        "displayName": "Model b",
+        "defaultReasoningEffort": "medium",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "high"
+          }
+        ],
+        "futureField": true
+      }
+    ]
+  },
+  {
+    "name": "models-repeated-cursor",
+    "command": {
+      "type": "models"
+    },
+    "exchanges": [
+      {
+        "method": "model/list",
+        "params": {
+          "limit": 100
+        },
+        "response": {
+          "result": {
+            "data": [
+              {
+                "id": "a",
+                "model": "model-a",
+                "displayName": "Model a",
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                  {
+                    "reasoningEffort": "medium"
+                  },
+                  {
+                    "reasoningEffort": "high"
+                  }
+                ],
+                "futureField": true
+              }
+            ],
+            "nextCursor": "loop"
+          }
+        }
+      },
+      {
+        "method": "model/list",
+        "params": {
+          "limit": 100,
+          "cursor": "loop"
+        },
+        "response": {
+          "result": {
+            "data": [
+              {
+                "id": "a",
+                "model": "model-a",
+                "displayName": "Model a",
+                "defaultReasoningEffort": "medium",
+                "supportedReasoningEfforts": [
+                  {
+                    "reasoningEffort": "medium"
+                  },
+                  {
+                    "reasoningEffort": "high"
+                  }
+                ],
+                "futureField": true
+              }
+            ],
+            "nextCursor": "loop"
+          }
+        }
+      }
+    ],
+    "errorContains": "モデル一覧の続きを取得できませんでした",
+    "errorRaw": null
+  },
+  {
+    "name": "malformed-models",
+    "command": {
+      "type": "models"
+    },
+    "exchanges": [
+      {
+        "method": "model/list",
+        "params": {
+          "limit": 100
+        },
+        "response": {
+          "result": {
+            "data": [
+              {
+                "id": "a"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "errorContains": "Invalid model/list response",
+    "errorRaw": {
+      "data": [
+        {
+          "id": "a"
+        }
+      ]
+    }
+  },
+  {
+    "name": "remote-error-preserves-payload",
+    "command": {
+      "type": "readItem",
+      "threadId": "thread-1",
+      "turnId": "turn-1",
+      "itemId": "item-1"
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/item/read",
+        "params": {
+          "threadId": "thread-1",
+          "turnId": "turn-1",
+          "itemId": "item-1"
+        },
+        "response": {
+          "error": {
+            "code": 503,
+            "message": "offline",
+            "opaque": {
+              "b": 1
+            }
+          }
+        }
+      }
+    ],
+    "errorContains": "offline",
+    "errorRaw": {
+      "code": 503,
+      "message": "offline",
+      "opaque": {
+        "b": 1
+      }
+    }
+  },
+  {
+    "name": "watchThread sends explicit watch identity",
+    "command": {
+      "type": "watchThread",
+      "threadId": "thread",
+      "watchId": 17,
+      "path": "/fixture/rollout.jsonl"
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/watch",
+        "params": {
+          "threadId": "thread",
+          "watchId": 17,
+          "path": "/fixture/rollout.jsonl"
+        },
+        "response": {
+          "result": {
+            "watchId": 17
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "unwatchThread sends explicit watch identity",
+    "command": {
+      "type": "unwatchThread",
+      "watchId": 17
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/unwatch",
+        "params": {
+          "watchId": 17
+        },
+        "response": {
+          "result": {
+            "watchId": 17
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "session gallery traverses both cursors and deduplicates latest sources",
+    "command": {
+      "type": "sessionImages",
+      "threadId": "thread"
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/read",
+        "params": {
+          "threadId": "thread",
+          "includeTurns": true,
+          "paginateHistory": true,
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread",
+              "turns": [
+                {
+                  "id": "new",
+                  "status": "completed",
+                  "items": [
+                    {
+                      "id": "n",
+                      "type": "imageGeneration",
+                      "savedPath": "/new.png",
+                      "result": "discarded"
+                    }
+                  ],
+                  "itemsHasMore": true,
+                  "itemsNextCursor": "items-c"
+                }
+              ],
+              "historyCursor": "turns-c"
+            }
+          }
+        }
+      },
+      {
+        "method": "host/thread/items/list",
+        "params": {
+          "threadId": "thread",
+          "turnId": "new",
+          "cursor": "items-c",
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread",
+              "turns": [
+                {
+                  "id": "new",
+                  "status": "completed",
+                  "items": [
+                    {
+                      "id": "inline",
+                      "type": "imageGeneration",
+                      "result": "AQID"
+                    },
+                    {
+                      "id": "n",
+                      "type": "imageGeneration",
+                      "savedPath": "/stale.png"
+                    }
+                  ],
+                  "itemsHasMore": false,
+                  "itemsNextCursor": null
+                }
+              ],
+              "historyCursor": null
+            }
+          }
+        }
+      },
+      {
+        "method": "host/thread/turns/list",
+        "params": {
+          "threadId": "thread",
+          "turnId": null,
+          "cursor": "turns-c",
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread",
+              "turns": [
+                {
+                  "id": "old",
+                  "status": "completed",
+                  "items": [],
+                  "itemsHasMore": true,
+                  "itemsNextCursor": null
+                }
+              ],
+              "historyCursor": null
+            }
+          }
+        }
+      },
+      {
+        "method": "host/thread/items/list",
+        "params": {
+          "threadId": "thread",
+          "turnId": "old",
+          "cursor": null,
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread",
+              "turns": [
+                {
+                  "id": "old",
+                  "status": "completed",
+                  "items": [
+                    {
+                      "id": "oldest",
+                      "type": "imageGeneration",
+                      "savedPath": "/old.png"
+                    },
+                    {
+                      "id": "duplicate",
+                      "type": "imageGeneration",
+                      "savedPath": "/new.png"
+                    }
+                  ],
+                  "itemsHasMore": false,
+                  "itemsNextCursor": null
+                }
+              ],
+              "historyCursor": null
+            }
+          }
+        }
+      }
+    ],
+    "result": [
+      {
+        "source": "/old.png",
+        "encoded": false
+      },
+      {
+        "source": "AQID",
+        "encoded": true
+      },
+      {
+        "source": "/new.png",
+        "encoded": false
+      }
+    ]
+  },
+  {
+    "name": "session gallery rejects nonadvancing page",
+    "command": {
+      "type": "sessionImages",
+      "threadId": "thread"
+    },
+    "exchanges": [
+      {
+        "method": "host/thread/read",
+        "params": {
+          "threadId": "thread",
+          "includeTurns": true,
+          "paginateHistory": true,
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread",
+              "turns": [
+                {
+                  "id": "new",
+                  "status": "completed",
+                  "items": [
+                    {
+                      "id": "n",
+                      "type": "imageGeneration",
+                      "savedPath": "/new.png",
+                      "result": "discarded"
+                    }
+                  ],
+                  "itemsHasMore": true,
+                  "itemsNextCursor": "items-c"
+                }
+              ],
+              "historyCursor": "turns-c"
+            }
+          }
+        }
+      },
+      {
+        "method": "host/thread/items/list",
+        "params": {
+          "threadId": "thread",
+          "turnId": "new",
+          "cursor": "items-c",
+          "deferItemDetails": true
+        },
+        "response": {
+          "result": {
+            "thread": {
+              "id": "thread",
+              "turns": [
+                {
+                  "id": "new",
+                  "status": "completed",
+                  "items": [],
+                  "itemsHasMore": true,
+                  "itemsNextCursor": "items-c"
+                }
+              ],
+              "historyCursor": null
+            }
+          }
+        }
+      }
+    ],
+    "errorContains": "カーソル",
+    "errorRaw": null
+  }
+]

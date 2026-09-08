@@ -63,8 +63,8 @@ class HostSessionCoordinatorTest {
         val first = assertNotNull(coordinator.beginRead("host-1", "thread-1", generation))
         val second = assertNotNull(coordinator.beginRead("host-1", "thread-2", generation))
 
-        val firstEvent = ThreadEvent.TurnStarted("thread-1", "turn-1", TurnStatus.InProgress)
-        val secondEvent = ThreadEvent.TurnStarted("thread-2", "turn-2", TurnStatus.InProgress)
+        val firstEvent = ThreadEvent.TurnStarted("thread-1", CodexTurn("turn-1", TurnStatus.InProgress))
+        val secondEvent = ThreadEvent.TurnStarted("thread-2", CodexTurn("turn-2", TurnStatus.InProgress))
         assertEquals(HostReadBufferResult.Buffered, coordinator.bufferEvent(first, firstEvent))
         assertEquals(HostReadBufferResult.NotBuffered, coordinator.bufferEvent(first, secondEvent))
         assertEquals(HostReadBufferResult.Buffered, coordinator.bufferEvent(second, secondEvent))
@@ -101,11 +101,11 @@ class HostSessionCoordinatorTest {
                 HostReadBufferResult.Buffered,
                 countLimited.bufferEvent(
                     countToken,
-                    ThreadEvent.TurnStarted("thread-1", "turn-$it", TurnStatus.InProgress),
+                    ThreadEvent.TurnStarted("thread-1", CodexTurn("turn-$it", TurnStatus.InProgress)),
                 ),
             )
         }
-        val overflow = ThreadEvent.TurnStarted("thread-1", "turn-256", TurnStatus.InProgress)
+        val overflow = ThreadEvent.TurnStarted("thread-1", CodexTurn("turn-256", TurnStatus.InProgress))
         assertEquals(HostReadBufferResult.Overflowed, countLimited.bufferEvent(countToken, overflow))
         assertTrue(assertNotNull(countLimited.finishRead(countToken)).retryRequired)
     }

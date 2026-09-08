@@ -7,14 +7,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use zeroize::Zeroizing;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Account {
-    id: String,
-    email: String,
-    plan_type: String,
-    chatgpt_account_id: String,
-}
+use host_protocol::api::{self, Account};
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,7 +130,7 @@ impl Accounts {
         params: &Value,
     ) -> Result<Value, String> {
         match method {
-            "host/account/list" => {
+            api::ACCOUNT_LIST => {
                 self.discover_desktop().await?;
                 let selected = if self.restoration_error.is_some() {
                     None
@@ -150,18 +143,23 @@ impl Accounts {
                             .then_some("desktop")
                     })
                 };
-                Ok(
-                    json!({"accounts":self.registry.accounts,"selectedId":selected,"error":self.restoration_error}),
-                )
+                Ok(json!(api::AccountList {
+                    accounts: self.registry.accounts.as_slice().into(),
+                    selected_id: selected.map(Into::into),
+                    error: self.restoration_error.as_deref().map(Into::into)
+                }))
             }
-            "host/account/select" => {
-                let id = params["accountId"]
-                    .as_str()
-                    .ok_or("アカウントを指定してください。")?;
+            api::ACCOUNT_SELECT => {
+                let api::AccountSelectParams { account_id: id } =
+                    api::AccountSelectParams::deserialize(params)
+                        .map_err(|_| "アカウントを指定してください。")?;
                 self.select(primary, id).await?;
-                Ok(json!({"selectedId":id,"persistenceError":self.save().err()}))
+                Ok(json!(api::AccountSelection {
+                    selected_id: id.into(),
+                    persistence_error: self.save().err()
+                }))
             }
-            "host/account/login/start" => {
+            api::ACCOUNT_LOGIN_START => {
                 if self.login.is_some() {
                     self.cancel_login().await?;
                 }
@@ -188,7 +186,17 @@ impl Accounts {
                     .as_str()
                     .ok_or("ログインを開始できませんでした。")?
                     .to_owned();
-                let response = json!({"loginId":id,"userCode":result["userCode"],"verificationUrl":result["verificationUrl"]});
+                let response = json!(api::AccountLogin {
+                    login_id: id.as_str().into(),
+                    user_code: result["userCode"]
+                        .as_str()
+                        .ok_or("ログインコードがありません。")?
+                        .into(),
+                    verification_url: result["verificationUrl"]
+                        .as_str()
+                        .ok_or("ログインURLがありません。")?
+                        .into(),
+                });
                 self.login = Some(Login {
                     directory,
                     server,
@@ -199,17 +207,23 @@ impl Accounts {
                 self.completed_login = None;
                 Ok(response)
             }
-            "host/account/login/status" => self.login_status(params).await,
-            "host/account/login/cancel" => {
+            api::ACCOUNT_LOGIN_STATUS => {
+                let params = api::AccountLoginParams::deserialize(params)
+                    .map_err(|_| "ログイン手続きが一致しません。")?;
+                self.login_status(params.login_id).await
+            }
+            api::ACCOUNT_LOGIN_CANCEL => {
+                let params = api::AccountLoginParams::deserialize(params)
+                    .map_err(|_| "ログイン手続きが一致しません。")?;
                 if self
                     .completed_login
                     .as_ref()
-                    .is_some_and(|(id, _)| params["loginId"] == *id)
+                    .is_some_and(|(id, _)| params.login_id == id)
                 {
                     return Ok(json!({}));
                 }
                 let login = self.login.as_ref().ok_or("ログイン手続きがありません。")?;
-                if params["loginId"] != login.id {
+                if params.login_id != login.id {
                     return Err("ログイン手続きが一致しません。".into());
                 }
                 self.cancel_login().await?;
@@ -219,14 +233,17 @@ impl Accounts {
         }
     }
 
-    async fn login_status(&mut self, params: &Value) -> Result<Value, String> {
-        if let Some((login_id, account_id)) = &self.completed_login
-            && params["loginId"] == *login_id
+    async fn login_status(&mut self, login_id: &str) -> Result<Value, String> {
+        if let Some((completed_id, account_id)) = &self.completed_login
+            && login_id == completed_id
         {
-            return Ok(json!({"completed":true,"accountId":account_id}));
+            return Ok(json!(api::AccountLoginStatus {
+                completed: true,
+                account_id: Some(account_id.as_str().into())
+            }));
         }
         let login = self.login.as_mut().ok_or("ログイン手続きがありません。")?;
-        if params["loginId"] != login.id {
+        if login_id != login.id {
             return Err("ログイン手続きが一致しません。".into());
         }
         while !login.completed {
@@ -246,7 +263,10 @@ impl Accounts {
                     login.completed = true;
                 }
                 Err(broadcast::error::TryRecvError::Empty) => {
-                    return Ok(json!({"completed":false}));
+                    return Ok(json!(api::AccountLoginStatus {
+                        completed: false,
+                        account_id: None
+                    }));
                 }
                 Err(_) => {
                     self.login = None;
@@ -273,7 +293,10 @@ impl Accounts {
         let _ = login.directory.keep();
         self.completed_login = Some((login.id, id.clone()));
         self.helpers.insert(id.clone(), login.server);
-        Ok(json!({"completed":true,"accountId":id}))
+        Ok(json!(api::AccountLoginStatus {
+            completed: true,
+            account_id: Some(id.as_str().into())
+        }))
     }
 
     async fn select(&mut self, primary: &CodexAppServer, id: &str) -> Result<(), String> {

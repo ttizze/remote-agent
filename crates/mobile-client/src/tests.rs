@@ -86,11 +86,10 @@ async fn replayed_requests_and_initial_events_survive_until_the_first_subscriber
     // Receiving this response proves the read loop already consumed both
     // earlier events. No scheduling sleep or timing assumption is involved.
     peer.request("thread/list".into(), json!({})).await.unwrap();
-    let mut requests = peer.subscribe_server_requests();
-    let mut notifications = peer.subscribe_notifications();
+    let mut events = peer.subscribe();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(
-            &requests
+            &events
                 .try_recv()
                 .expect("pending approval lost before subscribing")
         )
@@ -99,13 +98,55 @@ async fn replayed_requests_and_initial_events_survive_until_the_first_subscriber
     );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(
-            &notifications
+            &events
                 .try_recv()
                 .expect("initial event lost before subscribing")
         )
         .unwrap()["method"],
         "turn/started"
     );
+    drop(peer);
+    host.abort();
+    let _ = host.await;
+}
+
+#[tokio::test]
+async fn native_event_order_preserves_approval_before_resolution() {
+    use host_protocol::{JsonlReader, JsonlWriter};
+    use serde_json::json;
+    let trace = [
+        r#"{"method":"item/agentMessage/delta","params":{"delta":"hello"}}"#,
+        r#"{"id":"approval","method":"item/fileChange/requestApproval","params":{}}"#,
+        r#"{"method":"serverRequest/resolved","params":{"requestId":"approval"}}"#,
+    ];
+    let (client, server) = tokio::io::duplex(8192);
+    let peer = crate::rpc::RpcPeer::open(client, 8192, Duration::from_secs(1)).unwrap();
+    let host = tokio::spawn(async move {
+        let (read, write) = tokio::io::split(server);
+        let mut reader = JsonlReader::new(read);
+        let mut writer = JsonlWriter::new(write);
+        for event in trace {
+            writer.write_line(event).await.unwrap();
+        }
+        let request: serde_json::Value =
+            serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+        writer
+            .write_line(&json!({"id":request["id"],"result":{}}).to_string())
+            .await
+            .unwrap();
+        let _ = reader.read_line().await;
+    });
+    // The response is a read-loop barrier: all events are queued before polling,
+    // exactly the condition that used to prioritize resolution over approval.
+    peer.request("barrier".into(), json!({})).await.unwrap();
+    let mut events = peer.subscribe();
+    for expected in trace {
+        assert_eq!(events.try_recv().unwrap(), expected);
+    }
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     drop(peer);
     host.abort();
     let _ = host.await;
