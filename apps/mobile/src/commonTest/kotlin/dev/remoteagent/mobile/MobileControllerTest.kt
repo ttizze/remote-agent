@@ -95,6 +95,29 @@ class MobileControllerTest {
     }
 
     @Test
+    fun returning_to_list_preserves_expanded_sections_and_search() {
+        val gateway = FakeHostGateway().apply {
+            readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
+        }
+        val controller = controller(gateway)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            controller.openApp(scope)
+            runSuspend {
+                controller.searchTaskList(profile, "retained")
+                controller.expandTaskList(profile, projects = true)
+                controller.expandTaskList(profile, projects = false)
+                controller.expandTaskList(profile, projects = false, projectId = "project")
+                controller.readThread(profile, "thread-1")
+                controller.showThreadList(profile)
+            }
+            assertEquals(ThreadListQuery(15, 15, mapOf("project" to 15), "retained"), gateway.listQueries.last())
+            assertNull(controller.state.selectedView.selectedThreadId)
+            assertEquals("retained", controller.state.selectedView.threadSearchTerm)
+        } finally { scope.cancel() }
+    }
+
+    @Test
     fun changing_search_during_list_fetch_discards_the_obsolete_result() = runBlocking {
         val gateway = FakeHostGateway()
         val controller = controller(gateway)

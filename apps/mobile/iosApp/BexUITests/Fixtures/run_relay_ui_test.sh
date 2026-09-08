@@ -79,9 +79,9 @@ if [ "$#" -eq 0 ]; then
         testSimulatorShowsWorkspaceConversationInsideItsProject \
         testSimulatorFetchesNewTaskWhenReturningToList \
         testSimulatorFetchesNewTaskAfterForeground \
-        testSimulatorFetchesLatestReplyWhenOpeningTaskAfterForeground \
+        testSimulatorKeepsOpenTaskAndFetchesLatestReplyAfterForeground \
         testSimulatorUpdatesAnOpenConversationFromAnotherClient \
-        testSimulatorOpensListAndKeepsModelAfterRelaunchAndForeground \
+        testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorReturnsToListWithNativeEdgeSwipeAndRetainsDrafts \
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
