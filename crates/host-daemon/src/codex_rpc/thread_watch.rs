@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
@@ -29,9 +33,13 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let value: Value = serde_json::from_str(&session.recv().await.unwrap()).unwrap();
-                if value["params"]["watchId"] == revision { return value; }
+                if value["params"]["watchId"] == revision {
+                    return value;
+                }
             }
-        }).await.expect("a changed rollout must notify its visible conversation")
+        })
+        .await
+        .expect("a changed rollout must notify its visible conversation")
     }
 
     #[tokio::test]
@@ -43,12 +51,24 @@ mod tests {
         let mut owner = router.open_session(16);
         let mut other = router.open_session(16);
         let watches = ThreadWatches::default();
-        watches.request(owner.id(), router.clone(), "host/thread/watch".into(), json!({"watchId":1,"threadId":"open","path":path})).await.unwrap();
+        watches
+            .request(
+                owner.id(),
+                router.clone(),
+                "host/thread/watch".into(),
+                json!({"watchId":1,"threadId":"open","path":path}),
+            )
+            .await
+            .unwrap();
         append(&path);
         let event = changed(&mut owner, 1).await;
         assert_eq!(event["method"], "host/thread/changed");
         assert_eq!(event["params"]["threadId"], "open");
-        assert!(tokio::time::timeout(Duration::from_millis(50), other.recv()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), other.recv())
+                .await
+                .is_err()
+        );
         watches.clear_session(owner.id());
     }
 
@@ -63,17 +83,67 @@ mod tests {
         let mut session = router.open_session(16);
         let watches = ThreadWatches::default();
         let register = |revision, path| json!({"watchId":revision,"threadId":"open","path":path});
-        watches.request(session.id(), router.clone(), "host/thread/watch".into(), register(2, &second)).await.unwrap();
-        watches.request(session.id(), router.clone(), "host/thread/unwatch".into(), json!({"watchId":1})).await.unwrap();
-        watches.request(session.id(), router.clone(), "host/thread/watch".into(), register(1, &first)).await.unwrap();
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/watch".into(),
+                register(2, &second),
+            )
+            .await
+            .unwrap();
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/unwatch".into(),
+                json!({"watchId":1}),
+            )
+            .await
+            .unwrap();
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/watch".into(),
+                register(1, &first),
+            )
+            .await
+            .unwrap();
         append(&second);
-        assert_eq!(changed(&mut session, 2).await["method"], "host/thread/changed");
-        watches.request(session.id(), router.clone(), "host/thread/unwatch".into(), json!({"watchId":2})).await.unwrap();
-        watches.request(session.id(), router.clone(), "host/thread/watch".into(), register(2, &second)).await.unwrap();
-        while matches!(tokio::time::timeout(Duration::from_millis(300), session.recv()).await, Ok(Some(_))) {}
+        assert_eq!(
+            changed(&mut session, 2).await["method"],
+            "host/thread/changed"
+        );
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/unwatch".into(),
+                json!({"watchId":2}),
+            )
+            .await
+            .unwrap();
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/watch".into(),
+                register(2, &second),
+            )
+            .await
+            .unwrap();
+        while matches!(
+            tokio::time::timeout(Duration::from_millis(300), session.recv()).await,
+            Ok(Some(_))
+        ) {}
         append(&second);
-        assert!(tokio::time::timeout(Duration::from_secs(2), session.recv()).await.is_err(),
-                "a cancelled revision cannot be resurrected by a delayed registration");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), session.recv())
+                .await
+                .is_err(),
+            "a cancelled revision cannot be resurrected by a delayed registration"
+        );
     }
 }
 
@@ -86,36 +156,61 @@ struct Slot {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WatchParams { watch_id: u64, thread_id: String, path: PathBuf }
+struct WatchParams {
+    watch_id: u64,
+    thread_id: String,
+    path: PathBuf,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UnwatchParams { watch_id: u64 }
+struct UnwatchParams {
+    watch_id: u64,
+}
 
 impl ThreadWatches {
-    pub(super) async fn request(&self, session: SessionId, router: SessionRouter, method: String, params: Value) -> Result<Value, String> {
+    pub(super) async fn request(
+        &self,
+        session: SessionId,
+        router: SessionRouter,
+        method: String,
+        params: Value,
+    ) -> Result<Value, String> {
         let watches = self.clone();
         tokio::task::spawn_blocking(move || {
-            router.ensure_session(session).map_err(|error| error.to_string())?;
+            router
+                .ensure_session(session)
+                .map_err(|error| error.to_string())?;
             if method == "host/thread/unwatch" {
-                let params: UnwatchParams = serde_json::from_value(params).map_err(|error| error.to_string())?;
+                let params: UnwatchParams =
+                    serde_json::from_value(params).map_err(|error| error.to_string())?;
                 watches.unwatch(session, params.watch_id);
                 return Ok(json!({}));
             }
-            let params: WatchParams = serde_json::from_value(params).map_err(|error| error.to_string())?;
+            let params: WatchParams =
+                serde_json::from_value(params).map_err(|error| error.to_string())?;
             watches.watch(session, router, params)?;
             Ok(json!({}))
-        }).await.map_err(|error| error.to_string())?
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
-    fn watch(&self, session: SessionId, router: SessionRouter, params: WatchParams) -> Result<(), String> {
+    fn watch(
+        &self,
+        session: SessionId,
+        router: SessionRouter,
+        params: WatchParams,
+    ) -> Result<(), String> {
         if params.watch_id == 0 || params.thread_id.is_empty() || !params.path.is_absolute() {
             return Err("watchId, threadId and an absolute rollout path are required".into());
         }
         let previous = {
             let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
             let slot = slots.entry(session).or_default();
-            if params.watch_id <= slot.revision { return Ok(()); }
+            if params.watch_id <= slot.revision {
+                return Ok(());
+            }
             slot.revision = params.watch_id;
             slot.enabled = true;
             slot.watcher.take()
@@ -123,9 +218,18 @@ impl ThreadWatches {
         drop(previous);
 
         // Watch the parent so atomic replacement of the rollout keeps working.
-        let parent = params.path.parent().ok_or("rollout parent is missing")?
-            .canonicalize().map_err(|error| error.to_string())?;
-        let path = parent.join(params.path.file_name().ok_or("rollout filename is missing")?);
+        let parent = params
+            .path
+            .parent()
+            .ok_or("rollout parent is missing")?
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let path = parent.join(
+            params
+                .path
+                .file_name()
+                .ok_or("rollout filename is missing")?,
+        );
         let event_router = router.clone();
         let watch_id = params.watch_id;
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -138,14 +242,19 @@ impl ThreadWatches {
             };
             let _ = event_router.send_line(session, message.to_string());
         }).map_err(|error| error.to_string())?;
-        watcher.watch(&parent, RecursiveMode::NonRecursive).map_err(|error| error.to_string())?;
+        watcher
+            .watch(&parent, RecursiveMode::NonRecursive)
+            .map_err(|error| error.to_string())?;
 
         if router.ensure_session(session).is_err() {
             self.clear_session(session);
             return Err("conversation connection closed".into());
         }
         let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(slot) = slots.get_mut(&session).filter(|slot| slot.revision == watch_id && slot.enabled) {
+        if let Some(slot) = slots
+            .get_mut(&session)
+            .filter(|slot| slot.revision == watch_id && slot.enabled)
+        {
             slot.watcher = Some(watcher);
         }
         Ok(())
@@ -155,7 +264,9 @@ impl ThreadWatches {
         let previous = {
             let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
             let slot = slots.entry(session).or_default();
-            if revision < slot.revision { return; }
+            if revision < slot.revision {
+                return;
+            }
             slot.revision = revision;
             slot.enabled = false;
             slot.watcher.take()
@@ -166,12 +277,17 @@ impl ThreadWatches {
     }
 
     pub(super) fn clear_session(&self, session: SessionId) {
-        let previous = self.slots.lock().unwrap_or_else(|error| error.into_inner()).remove(&session);
+        let previous = self
+            .slots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&session);
         drop(previous);
     }
 
     pub(super) fn clear_all(&self) {
-        let previous = std::mem::take(&mut *self.slots.lock().unwrap_or_else(|error| error.into_inner()));
+        let previous =
+            std::mem::take(&mut *self.slots.lock().unwrap_or_else(|error| error.into_inner()));
         drop(previous);
     }
 }

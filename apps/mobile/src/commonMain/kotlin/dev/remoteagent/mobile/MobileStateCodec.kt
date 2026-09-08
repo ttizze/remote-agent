@@ -16,16 +16,13 @@ private val codecJson = Json {
 }
 
 /**
- * The result returned by the state decoder.  Decode failures are data rather
- * than thrown exceptions so a malformed file cannot take down app startup.
+ * The result returned by the state decoder. Decode failures are data rather than thrown exceptions so a malformed file
+ * cannot take down app startup.
  */
 sealed interface MobileStateDecodeResult<out T> {
     data class Success<T>(val value: T) : MobileStateDecodeResult<T>
 
-    data class Failure(
-        val reason: MobileStateDecodeReason,
-        val version: Int? = null,
-    ) : MobileStateDecodeResult<Nothing>
+    data class Failure(val reason: MobileStateDecodeReason, val version: Int? = null) : MobileStateDecodeResult<Nothing>
 }
 
 enum class MobileStateDecodeReason {
@@ -36,13 +33,11 @@ enum class MobileStateDecodeReason {
 }
 
 /**
- * Versioned, platform-neutral persistence for the mobile profile and cache
- * state. Only secure-store references are retained; platform secure storage
- * owns device keys and relay credentials.
+ * Versioned, platform-neutral persistence for the mobile profile and cache state. Only secure-store references are
+ * retained; platform secure storage owns device keys and relay credentials.
  *
- * The codec intentionally accepts and returns ByteArray values.  Android and
- * iOS repositories therefore only need to own atomic file I/O; they do not
- * need to duplicate the model projection or JSON schema.
+ * The codec intentionally accepts and returns ByteArray values. Android and iOS repositories therefore only need to own
+ * atomic file I/O; they do not need to duplicate the model projection or JSON schema.
  */
 object MobileStateCodec {
     const val CurrentVersion: Int = 2
@@ -55,45 +50,45 @@ object MobileStateCodec {
         return encodeEnvelope(AppStateKind, state.copy(cache = MobileCache()).toPersisted())
     }
 
-    fun encodeCache(cache: MobileCache): ByteArray = encodeEnvelope(
-        kind = CacheKind,
-        payload = cache.toPersisted(),
-    )
+    fun encodeCache(cache: MobileCache): ByteArray = encodeEnvelope(kind = CacheKind, payload = cache.toPersisted())
 
     /** Decode an application state and apply local cache limits after decode. */
     fun decode(
         bytes: ByteArray,
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
-    ): MobileStateDecodeResult<AppState> = when (val envelope = readEnvelope(bytes, AppStateKind)) {
-        is MobileStateDecodeResult.Failure -> envelope
-        is MobileStateDecodeResult.Success -> decodePayload<PersistedAppState, AppState>(envelope.value.payload) {
-            it.toAppState(cacheLimits)
+    ): MobileStateDecodeResult<AppState> =
+        when (val envelope = readEnvelope(bytes, AppStateKind)) {
+            is MobileStateDecodeResult.Failure -> envelope
+            is MobileStateDecodeResult.Success ->
+                decodePayload<PersistedAppState, AppState>(envelope.value.payload) { it.toAppState(cacheLimits) }
         }
-    }
 
     /** Decode only a display cache and apply local cache limits after decode. */
     fun decodeCache(
         bytes: ByteArray,
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
-    ): MobileStateDecodeResult<MobileCache> = when (val envelope = readEnvelope(bytes, CacheKind)) {
-        is MobileStateDecodeResult.Failure -> envelope
-        is MobileStateDecodeResult.Success -> decodePayload<PersistedMobileCache, MobileCache>(envelope.value.payload) {
-            it.toMobileCache(cacheLimits)
+    ): MobileStateDecodeResult<MobileCache> =
+        when (val envelope = readEnvelope(bytes, CacheKind)) {
+            is MobileStateDecodeResult.Failure -> envelope
+            is MobileStateDecodeResult.Success ->
+                decodePayload<PersistedMobileCache, MobileCache>(envelope.value.payload) {
+                    it.toMobileCache(cacheLimits)
+                }
         }
-    }
 
     private inline fun <reified T, R> decodePayload(
         payload: JsonObject,
         transform: (T) -> R,
-    ): MobileStateDecodeResult<R> = try {
-        MobileStateDecodeResult.Success(transform(codecJson.decodeFromJsonElement<T>(payload)))
-    } catch (_: SerializationException) {
-        MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    } catch (_: IllegalArgumentException) {
-        MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    } catch (_: IllegalStateException) {
-        MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-    }
+    ): MobileStateDecodeResult<R> =
+        try {
+            MobileStateDecodeResult.Success(transform(codecJson.decodeFromJsonElement<T>(payload)))
+        } catch (_: SerializationException) {
+            MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
+        } catch (_: IllegalArgumentException) {
+            MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
+        } catch (_: IllegalStateException) {
+            MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
+        }
 
     private fun readEnvelope(
         bytes: ByteArray,
@@ -102,51 +97,62 @@ object MobileStateCodec {
         if (bytes.size > MaxInputBytes) {
             return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Oversize)
         }
+        val root =
+            try {
+                codecJson.parseToJsonElement(bytes.decodeToString()) as? JsonObject
+            } catch (_: SerializationException) {
+                null
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        return if (root == null) MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
+        else readEnvelope(root, expectedKind)
+    }
 
-        val root = try {
-            codecJson.parseToJsonElement(bytes.decodeToString()) as? JsonObject
-        } catch (_: SerializationException) {
-            null
-        } catch (_: IllegalArgumentException) {
-            null
-        }
-            ?: return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-
-        // Inspect the version before decoding the payload.  This lets a
-        // future format fail closed without attempting to interpret fields it
-        // does not understand.
+    private fun readEnvelope(
+        root: JsonObject,
+        expectedKind: String,
+    ): MobileStateDecodeResult<PersistedEnvelope<JsonObject>> {
+        // Inspect the version before decoding unknown future payload fields.
         val version = (root[VersionField] as? JsonPrimitive)?.content?.toIntOrNull()
-            ?: return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-        if (version != CurrentVersion) {
-            return MobileStateDecodeResult.Failure(MobileStateDecodeReason.UnsupportedVersion, version)
+        return when {
+            version == null -> MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
+            version != CurrentVersion ->
+                MobileStateDecodeResult.Failure(MobileStateDecodeReason.UnsupportedVersion, version)
+            else -> decodeEnvelope(root, expectedKind)
         }
+    }
 
-        val envelope = try {
-            codecJson.decodeFromJsonElement<PersistedEnvelope<JsonObject>>(root)
-        } catch (_: SerializationException) {
-            return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-        } catch (_: IllegalArgumentException) {
-            return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
+    private fun decodeEnvelope(
+        root: JsonObject,
+        expectedKind: String,
+    ): MobileStateDecodeResult<PersistedEnvelope<JsonObject>> {
+        val envelope =
+            try {
+                codecJson.decodeFromJsonElement<PersistedEnvelope<JsonObject>>(root)
+            } catch (_: SerializationException) {
+                null
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        return when {
+            envelope == null || envelope.format != Format ->
+                MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
+            envelope.kind != expectedKind -> MobileStateDecodeResult.Failure(MobileStateDecodeReason.WrongPayloadKind)
+            else -> MobileStateDecodeResult.Success(envelope)
         }
-        if (envelope.format != Format) {
-            return MobileStateDecodeResult.Failure(MobileStateDecodeReason.Corrupt)
-        }
-        if (envelope.kind != expectedKind) {
-            return MobileStateDecodeResult.Failure(MobileStateDecodeReason.WrongPayloadKind)
-        }
-        return MobileStateDecodeResult.Success(envelope)
     }
 
     private inline fun <reified T> encodeEnvelope(kind: String, payload: T, enforceLimit: Boolean = true): ByteArray {
-        val bytes = codecJson.encodeToString(
-            PersistedEnvelope(
-                format = Format,
-                version = CurrentVersion,
-                kind = kind,
-                payload = payload,
-            ),
-        ).encodeToByteArray()
-        require(!enforceLimit || bytes.size <= MaxInputBytes) { "Mobile state exceeds the $MaxInputBytes-byte storage limit" }
+        val bytes =
+            codecJson
+                .encodeToString(
+                    PersistedEnvelope(format = Format, version = CurrentVersion, kind = kind, payload = payload)
+                )
+                .encodeToByteArray()
+        require(!enforceLimit || bytes.size <= MaxInputBytes) {
+            "Mobile state exceeds the $MaxInputBytes-byte storage limit"
+        }
         return bytes
     }
 
@@ -158,12 +164,7 @@ object MobileStateCodec {
 
 /** A small explicit envelope keeps the persisted schema independent of model DTOs. */
 @Serializable
-private data class PersistedEnvelope<T>(
-    val format: String,
-    val version: Int,
-    val kind: String,
-    val payload: T,
-)
+private data class PersistedEnvelope<T>(val format: String, val version: Int, val kind: String, val payload: T)
 
 @Serializable
 private data class PersistedAppState(
@@ -191,9 +192,7 @@ private data class PersistedProfileViewState(
 )
 
 @Serializable
-private data class PersistedMobileCache(
-    val profiles: Map<String, PersistedProfileMobileCache> = emptyMap(),
-)
+private data class PersistedMobileCache(val profiles: Map<String, PersistedProfileMobileCache> = emptyMap())
 
 @Serializable
 private data class PersistedProfileMobileCache(
@@ -201,93 +200,109 @@ private data class PersistedProfileMobileCache(
     val snapshots: Map<String, ThreadSnapshot> = emptyMap(),
 )
 
-private fun AppState.toPersisted(): PersistedAppState = PersistedAppState(
-    profiles = profiles.map { profile ->
-        PersistedHostProfile(
-            runnerId = profile.runnerId,
-            name = profile.name,
-            relayUrl = profile.relayUrl,
-            hostIdentity = profile.hostIdentity,
-            deviceIdentityReference = profile.deviceIdentityReference,
-        )
-    },
-    selectedProfileId = selectedProfileId,
-    profileViews = profileViews.mapValues { (_, view) ->
-        PersistedProfileViewState(
-            workingDirectoryPath = view.workingDirectoryPath,
-            selectedThreadId = view.selectedThreadId,
-            unreadCompletedThreadIds = view.unreadCompletedThreadIds,
-        )
-    },
-    cache = cache.toPersisted(),
-)
+private fun AppState.toPersisted(): PersistedAppState =
+    PersistedAppState(
+        profiles =
+            profiles.map { profile ->
+                PersistedHostProfile(
+                    runnerId = profile.runnerId,
+                    name = profile.name,
+                    relayUrl = profile.relayUrl,
+                    hostIdentity = profile.hostIdentity,
+                    deviceIdentityReference = profile.deviceIdentityReference,
+                )
+            },
+        selectedProfileId = selectedProfileId,
+        profileViews =
+            profileViews.mapValues { (_, view) ->
+                PersistedProfileViewState(
+                    workingDirectoryPath = view.workingDirectoryPath,
+                    selectedThreadId = view.selectedThreadId,
+                    unreadCompletedThreadIds = view.unreadCompletedThreadIds,
+                )
+            },
+        cache = cache.toPersisted(),
+    )
 
 private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppState {
-    val restoredProfiles = profiles.asSequence()
-        .filter { it.hostIdentity.isNotBlank() && it.runnerId.isNotBlank() && it.relayUrl.isNotBlank() && it.deviceIdentityReference.isNotBlank() }
-        .map { profile ->
-            HostProfile(
-                runnerId = profile.runnerId,
-                name = profile.name.ifBlank { profile.hostIdentity },
-                relayUrl = profile.relayUrl,
-                hostIdentity = profile.hostIdentity,
-            deviceIdentityReference = profile.deviceIdentityReference,
-            )
-        }
-        .distinctBy { it.id }
-        .toList()
+    val restoredProfiles =
+        profiles
+            .asSequence()
+            .filter {
+                it.hostIdentity.isNotBlank() &&
+                    it.runnerId.isNotBlank() &&
+                    it.relayUrl.isNotBlank() &&
+                    it.deviceIdentityReference.isNotBlank()
+            }
+            .map { profile ->
+                HostProfile(
+                    runnerId = profile.runnerId,
+                    name = profile.name.ifBlank { profile.hostIdentity },
+                    relayUrl = profile.relayUrl,
+                    hostIdentity = profile.hostIdentity,
+                    deviceIdentityReference = profile.deviceIdentityReference,
+                )
+            }
+            .distinctBy { it.id }
+            .toList()
     val restoredProfileIds = restoredProfiles.mapTo(mutableSetOf()) { it.id }
     return AppState(
         profiles = restoredProfiles,
         selectedProfileId = selectedProfileId?.takeIf { it in restoredProfileIds },
-        profileViews = restoredProfiles.associate { profile ->
-            val view = profileViews[profile.id] ?: PersistedProfileViewState()
-            profile.id to ProfileViewState(
-                connection = ConnectionPhase.Disconnected,
-                workingDirectoryPath = view.workingDirectoryPath,
-                threadList = LoadPhase.Idle,
-                selectedThreadId = view.selectedThreadId,
-                unreadCompletedThreadIds = view.unreadCompletedThreadIds,
-                threadDetail = LoadPhase.Idle,
-                interruptingTurnId = null,
-                notice = null,
-            )
-        },
-        cache = cache.toMobileCache(cacheLimits).let { decoded ->
-            MobileCache(decoded.profiles.filterKeys { it in restoredProfileIds })
-        },
+        profileViews =
+            restoredProfiles.associate { profile ->
+                val view = profileViews[profile.id] ?: PersistedProfileViewState()
+                profile.id to
+                    ProfileViewState(
+                        connection = ConnectionPhase.Disconnected,
+                        workingDirectoryPath = view.workingDirectoryPath,
+                        threadList = LoadPhase.Idle,
+                        selectedThreadId = view.selectedThreadId,
+                        unreadCompletedThreadIds = view.unreadCompletedThreadIds,
+                        threadDetail = LoadPhase.Idle,
+                        interruptingTurnId = null,
+                        notice = null,
+                    )
+            },
+        cache =
+            cache.toMobileCache(cacheLimits).let { decoded ->
+                MobileCache(decoded.profiles.filterKeys { it in restoredProfileIds })
+            },
         showingPairing = false,
         pairingError = null,
     )
 }
 
-private fun MobileCache.toPersisted(): PersistedMobileCache = PersistedMobileCache(
-    profiles = profiles.mapValues { (_, profile) ->
-        PersistedProfileMobileCache(
-            threadList = profile.threadList.map { it.withoutRawBody() },
-            snapshots = profile.snapshots.mapValues { (_, snapshot) -> snapshot.forPersistence() },
-        )
-    },
-)
+private fun MobileCache.toPersisted(): PersistedMobileCache =
+    PersistedMobileCache(
+        profiles =
+            profiles.mapValues { (_, profile) ->
+                PersistedProfileMobileCache(
+                    threadList = profile.threadList.map { it.withoutRawBody() },
+                    snapshots = profile.snapshots.mapValues { (_, snapshot) -> snapshot.forPersistence() },
+                )
+            }
+    )
 
 private fun PersistedMobileCache.toMobileCache(cacheLimits: MobileCacheLimits): MobileCache {
-    val decoded = MobileCache(
-        profiles = profiles.mapValues { (_, profile) ->
-            ProfileMobileCache(
-                threadList = profile.threadList.map { it.withoutRawBody() },
-                // Older version-2 files also contain nested raw bodies.
-                snapshots = profile.snapshots.mapValues { (_, snapshot) -> snapshot.forPersistence() },
-            )
-        },
-    )
+    val decoded =
+        MobileCache(
+            profiles =
+                profiles.mapValues { (_, profile) ->
+                    ProfileMobileCache(
+                        threadList = profile.threadList.map { it.withoutRawBody() },
+                        // Older version-2 files also contain nested raw bodies.
+                        snapshots = profile.snapshots.mapValues { (_, snapshot) -> snapshot.forPersistence() },
+                    )
+                }
+        )
     return decoded.applyCacheLimits(cacheLimits)
 }
 
 /**
- * Reuse the cache's public reconciliation entry points so decode applies the
- * same thread/item/byte limits as live updates.  In particular, snapshots
- * without a retained list entry are dropped just as [reconcileThreadRead]
- * would drop them through the normal bounded cache path.
+ * Reuse the cache's public reconciliation entry points so decode applies the same thread/item/byte limits as live
+ * updates. In particular, snapshots without a retained list entry are dropped just as [reconcileThreadRead] would drop
+ * them through the normal bounded cache path.
  */
 private fun MobileCache.applyCacheLimits(limits: MobileCacheLimits): MobileCache {
     var result = MobileCache()
@@ -297,12 +312,13 @@ private fun MobileCache.applyCacheLimits(limits: MobileCacheLimits): MobileCache
             .sortedWith(compareBy<ThreadSnapshot> { it.summary.updatedAtMs }.thenBy { it.summary.id })
             .forEach { snapshot ->
                 if (snapshot.summary.id in result.profile(hostIdentity).threadList.map { it.id }) {
-                    result = reconcileThreadRead(
-                        result,
-                        hostIdentity,
-                        ThreadReadResult(thread = snapshot, bufferedEvents = emptyList()),
-                        limits,
-                    )
+                    result =
+                        reconcileThreadRead(
+                            result,
+                            hostIdentity,
+                            ThreadReadResult(thread = snapshot, bufferedEvents = emptyList()),
+                            limits,
+                        )
                 }
             }
     }
@@ -327,5 +343,6 @@ private fun ThreadSnapshot.forPersistence(): ThreadSnapshot {
         }
     }
     return if (summary !== this.summary || metadata !== raw || updated != null)
-        copy(summary = summary, raw = metadata, turns = updated ?: turns) else this
+        copy(summary = summary, raw = metadata, turns = updated ?: turns)
+    else this
 }

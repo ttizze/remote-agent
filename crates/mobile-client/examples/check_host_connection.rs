@@ -1,8 +1,8 @@
 use std::{collections::HashSet, env, time::Duration};
 
 use host_protocol::{CURRENT_PROTOCOL_VERSION, PairingQrPayload};
-use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use mobile_client::{MobileClient, MobileClientConfig};
+use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde_json::json;
 
 #[tokio::main]
@@ -25,7 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pairing_ticket: Some(payload.ticket),
         request_timeout: Duration::from_secs(10),
     };
-    let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).map_err(|_| "secure random generation failed")?;
+    let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| "secure random generation failed")?;
     let reconnected = MobileClient::connect(config, key.as_ref()).await?;
     let projects = reconnected
         .request("host/project/list", json!({ "limit": 1 }))

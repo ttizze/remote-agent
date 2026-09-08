@@ -5,11 +5,11 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 
 /** Must stay aligned with host_protocol::CURRENT_PROTOCOL_VERSION. */
-private const val CurrentProtocolVersion = 4
-private const val MaximumQrCharacters = 8 * 1024
-private const val MaximumRelayUrlCharacters = 2 * 1024
-private const val MaximumRunnerIdCharacters = 256
-private const val MaximumRelayTokenCharacters = 4 * 1024
+private const val CURRENT_PROTOCOL_VERSION = 4
+private const val MAXIMUM_QR_CHARACTERS = 8 * 1024
+private const val MAXIMUM_RELAY_URL_CHARACTERS = 2 * 1024
+private const val MAXIMUM_RUNNER_ID_CHARACTERS = 256
+private const val MAXIMUM_RELAY_TOKEN_CHARACTERS = 4 * 1024
 
 /** The only connection material carried by a mobile pairing QR. */
 @Serializable
@@ -26,6 +26,7 @@ data class PairingQrPayload(
 
 sealed interface PairingQrResult {
     data class Valid(val payload: PairingQrPayload) : PairingQrResult
+
     data class Invalid(val reason: PairingQrFailure) : PairingQrResult
 }
 
@@ -47,63 +48,64 @@ private val pairingJson = Json {
 }
 
 fun parsePairingQr(contents: String, nowMs: Long): PairingQrResult {
-    if (contents.length > MaximumQrCharacters) {
+    if (contents.length > MAXIMUM_QR_CHARACTERS) {
         return PairingQrResult.Invalid(PairingQrFailure.TooLarge)
     }
-    val payload = try {
-        pairingJson.decodeFromString<PairingQrPayload>(contents)
-    } catch (_: SerializationException) {
-        return PairingQrResult.Invalid(PairingQrFailure.InvalidJson)
-    } catch (_: IllegalArgumentException) {
-        return PairingQrResult.Invalid(PairingQrFailure.InvalidJson)
-    }
-    if (payload.protocolVersion != CurrentProtocolVersion) {
-        return PairingQrResult.Invalid(PairingQrFailure.UnsupportedProtocol)
-    }
-    if (nowMs >= payload.expiresAtMs) {
-        return PairingQrResult.Invalid(PairingQrFailure.Expired)
-    }
-    if (!isRelayUrl(payload.relayUrl)) {
-        return PairingQrResult.Invalid(PairingQrFailure.InvalidRelayUrl)
-    }
-    if (!isBoundedToken(payload.runnerId, MaximumRunnerIdCharacters)) {
-        return PairingQrResult.Invalid(PairingQrFailure.InvalidRunnerId)
-    }
-    if (!isBoundedToken(payload.relayToken, MaximumRelayTokenCharacters)) {
-        return PairingQrResult.Invalid(PairingQrFailure.InvalidRelayToken)
-    }
-    if (!isCanonicalKey(payload.hostIdentity)) return PairingQrResult.Invalid(PairingQrFailure.InvalidHostIdentity)
-    if (!isCanonicalKey(payload.ticket)) return PairingQrResult.Invalid(PairingQrFailure.InvalidTicket)
-    return PairingQrResult.Valid(payload)
+    val payload =
+        try {
+            pairingJson.decodeFromString<PairingQrPayload>(contents)
+        } catch (_: SerializationException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    return if (payload == null) PairingQrResult.Invalid(PairingQrFailure.InvalidJson)
+    else validatePairingPayload(payload, nowMs)
 }
 
-private fun isRelayUrl(value: String): Boolean {
-    if (
-        value.length > MaximumRelayUrlCharacters ||
-        value.any(Char::isWhitespace) ||
-        value.any(Char::isISOControl) ||
-        '#' in value
-    ) {
-        return false
+private fun validatePairingPayload(payload: PairingQrPayload, nowMs: Long): PairingQrResult =
+    when {
+        payload.protocolVersion != CURRENT_PROTOCOL_VERSION ->
+            PairingQrResult.Invalid(PairingQrFailure.UnsupportedProtocol)
+        nowMs >= payload.expiresAtMs -> PairingQrResult.Invalid(PairingQrFailure.Expired)
+        !isRelayUrl(payload.relayUrl) -> PairingQrResult.Invalid(PairingQrFailure.InvalidRelayUrl)
+        !isBoundedToken(payload.runnerId, MAXIMUM_RUNNER_ID_CHARACTERS) ->
+            PairingQrResult.Invalid(PairingQrFailure.InvalidRunnerId)
+        !isBoundedToken(payload.relayToken, MAXIMUM_RELAY_TOKEN_CHARACTERS) ->
+            PairingQrResult.Invalid(PairingQrFailure.InvalidRelayToken)
+        !isCanonicalKey(payload.hostIdentity) -> PairingQrResult.Invalid(PairingQrFailure.InvalidHostIdentity)
+        !isCanonicalKey(payload.ticket) -> PairingQrResult.Invalid(PairingQrFailure.InvalidTicket)
+        else -> PairingQrResult.Valid(payload)
     }
-    val schemeEnd = value.indexOf("://")
-    if (schemeEnd <= 0) return false
-    val scheme = value.substring(0, schemeEnd)
-    if (scheme != "ws" && scheme != "wss") return false
-    val authority = value.substring(schemeEnd + 3).substringBeforeAny('/', '?', '#')
-    return authority.isNotEmpty() && !authority.startsWith(':')
+
+private fun isRelayUrl(value: String): Boolean {
+    if (!hasValidRelayCharacters(value)) return false
+    val authorityStart =
+        when {
+            value.startsWith(WS_PREFIX) -> WS_PREFIX.length
+            value.startsWith(WSS_PREFIX) -> WSS_PREFIX.length
+            else -> 0
+        }
+    return authorityStart > 0 && authorityStart < value.length && value[authorityStart] !in ":/?#"
 }
+
+private fun hasValidRelayCharacters(value: String): Boolean =
+    value.length <= MAXIMUM_RELAY_URL_CHARACTERS && value.none(::isInvalidRelayCharacter)
+
+private fun isInvalidRelayCharacter(value: Char): Boolean = value.isWhitespace() || value.isISOControl() || value == '#'
 
 private fun isBoundedToken(value: String, maximumCharacters: Int): Boolean =
     value.isNotBlank() && value.length <= maximumCharacters && !value.any(Char::isISOControl)
 
-private fun String.substringBeforeAny(vararg delimiters: Char): String {
-    val end = indexOfFirst { it in delimiters }
-    return if (end < 0) this else substring(0, end)
-}
+private fun isCanonicalKey(value: String): Boolean =
+    try {
+        val codec = kotlin.io.encoding.Base64.UrlSafe.withPadding(kotlin.io.encoding.Base64.PaddingOption.ABSENT)
+        val bytes = codec.decode(value)
+        bytes.size == KEY_BYTES && codec.encode(bytes) == value
+    } catch (_: IllegalArgumentException) {
+        false
+    }
 
-private fun isCanonicalKey(value: String): Boolean = try {
-    val codec = kotlin.io.encoding.Base64.UrlSafe.withPadding(kotlin.io.encoding.Base64.PaddingOption.ABSENT)
-    val bytes = codec.decode(value)
-    bytes.size == 32 && codec.encode(bytes) == value
-} catch (_: IllegalArgumentException) { false }
+private const val WS_PREFIX = "ws://"
+private const val WSS_PREFIX = "wss://"
+private const val KEY_BYTES = 32

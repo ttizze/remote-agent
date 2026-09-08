@@ -116,12 +116,23 @@ impl CodexRpcService {
                 if parse_params(&line)?.get("titleOnly") == Some(&Value::Bool(true)) {
                     self.host_title_list(&line).await?
                 } else {
-                    self.host_thread_request(&line, "thread/list", false).await?
+                    self.host_thread_request(&line, "thread/list", false)
+                        .await?
                 }
             }
             "host/thread/item/read" => self.host_thread_item_read(&line).await?,
             "host/thread/watch" | "host/thread/unwatch" => {
-                match self.inner.thread_watches.request(session, self.inner.router.clone(), method.clone(), parse_params(&line)?).await {
+                match self
+                    .inner
+                    .thread_watches
+                    .request(
+                        session,
+                        self.inner.router.clone(),
+                        method.clone(),
+                        parse_params(&line)?,
+                    )
+                    .await
+                {
                     Ok(result) => response_with_result(&line, result)?,
                     Err(error) => response_with_error(&line, "thread_watch_failed", &error)?,
                 }
@@ -130,7 +141,11 @@ impl CodexRpcService {
             "host/thread/turns/list" => self.host_thread_history_page(&line, false).await?,
             "host/thread/items/list" => self.host_thread_history_page(&line, true).await?,
             "host/worktree/settings/read" | "host/worktree/settings/update" => {
-                let update = if method.ends_with("/update") { Some(parse_params(&line)?) } else { None };
+                let update = if method.ends_with("/update") {
+                    Some(parse_params(&line)?)
+                } else {
+                    None
+                };
                 match self.inner.worktrees.settings(update).await {
                     Ok(result) => response_with_result(&line, result)?,
                     Err(error) => response_with_error(&line, "worktree_settings_failed", &error)?,
@@ -141,7 +156,9 @@ impl CodexRpcService {
                     .await?
             }
             "host/dictation/transcribe" => {
-                match crate::dictation::transcribe(&self.inner.app_server, &parse_params(&line)?).await {
+                match crate::dictation::transcribe(&self.inner.app_server, &parse_params(&line)?)
+                    .await
+                {
                     Ok(result) => response_with_result(&line, result)?,
                     Err(error) => response_with_error(&line, "dictation_failed", &error)?,
                 }
@@ -149,7 +166,13 @@ impl CodexRpcService {
             "host/workspace/review" => {
                 let params = parse_params(&line)?;
                 let result = match params.get("cwd").and_then(Value::as_str) {
-                    Some(cwd) => crate::inspect_workspace(cwd.to_owned()).await.and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string())),
+                    Some(cwd) => {
+                        crate::inspect_workspace(cwd.to_owned())
+                            .await
+                            .and_then(|result| {
+                                serde_json::to_value(result).map_err(|error| error.to_string())
+                            })
+                    }
                     None => Err("working directory is required".into()),
                 };
                 match result {
@@ -157,8 +180,14 @@ impl CodexRpcService {
                     Err(error) => response_with_error(&line, "workspace_review_failed", &error)?,
                 }
             }
-            "host/file/list" | "host/file/read" | "host/file/write" | "host/blob/upload" | "host/blob/download" => {
-                match self.inner.files.request(session, method.clone(), parse_params(&line)?).await {
+            "host/file/list" | "host/file/read" | "host/file/write" | "host/blob/upload"
+            | "host/blob/download" => {
+                match self
+                    .inner
+                    .files
+                    .request(session, method.clone(), parse_params(&line)?)
+                    .await
+                {
                     Ok(result) => response_with_result(&line, result)?,
                     Err(error) => response_with_error(&line, "file_operation_failed", &error)?,
                 }
@@ -230,7 +259,9 @@ impl CodexRpcService {
         Ok(ResponseDisposition::Accepted)
     }
 
-    pub(crate) fn files(&self) -> &crate::workspace_files::WorkspaceFiles { &self.inner.files }
+    pub(crate) fn files(&self) -> &crate::workspace_files::WorkspaceFiles {
+        &self.inner.files
+    }
 
     fn ensure_session(&self, session: SessionId) -> Result<(), DispatchError> {
         self.inner
@@ -251,27 +282,43 @@ impl CodexRpcService {
         let params = parse_params(line)?;
         let snapshot = match self.inner.desktop_projects.load().await {
             Ok(snapshot) => snapshot,
-            Err(error) => return response_with_error(line, "desktop_project_state_unavailable", &error),
+            Err(error) => {
+                return response_with_error(line, "desktop_project_state_unavailable", &error);
+            }
         };
         let mut projects = Vec::new();
         let mut project_cursor = Value::Null;
         loop {
-            let mut page = snapshot.project_list(&json!({"limit":512,"cursor":project_cursor}))
+            let mut page = snapshot
+                .project_list(&json!({"limit":512,"cursor":project_cursor}))
                 .map_err(|_| DispatchError::InvalidMessage("invalid project cursor".into()))?;
             projects.append(page["data"].as_array_mut().unwrap());
             project_cursor = page["nextCursor"].take();
-            if project_cursor.is_null() { break; }
+            if project_cursor.is_null() {
+                break;
+            }
         }
         let mut titles = crate::desktop_projects::titles::TitleList::new(projects, &params);
         let mut cursors = std::collections::HashSet::new();
         let mut upstream_params = json!({"limit":100,"sortKey":"updated_at","sortDirection":"desc","useStateDbOnly":true});
-        if let Some(term) = params.get("searchTerm").and_then(Value::as_str).filter(|term| !term.trim().is_empty()) {
+        if let Some(term) = params
+            .get("searchTerm")
+            .and_then(Value::as_str)
+            .filter(|term| !term.trim().is_empty())
+        {
             upstream_params["searchTerm"] = json!(term);
         }
         loop {
             // The DB-only flag avoids scanning or repairing JSONL history. A
             // single Desktop snapshot gives every page the same membership rules.
-            let response = match self.inner.app_server.request_raw(&json!({"id":0,"method":"thread/list","params":upstream_params}).to_string()).await {
+            let response = match self
+                .inner
+                .app_server
+                .request_raw(
+                    &json!({"id":0,"method":"thread/list","params":upstream_params}).to_string(),
+                )
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => return response_with_error(line, "codex_unavailable", &error),
             };
@@ -280,15 +327,22 @@ impl CodexRpcService {
             if let Some(error) = response.get_mut("error") {
                 let mut object = response_object(line)?;
                 object.insert("error".into(), raw_value(error.take())?);
-                return serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()));
+                return serde_json::to_string(&object)
+                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
             }
             let mut result = snapshot.enrich_threads(response["result"].take());
             let Some(data) = result["data"].as_array_mut() else {
                 return error_response(line, "invalid_thread_list", "thread list data is missing");
             };
-            for thread in data.drain(..) { titles.push(thread); }
-            let next_cursor = result["nextCursor"].as_str().filter(|cursor| !cursor.is_empty());
-            if titles.complete() || next_cursor.is_none() { break; }
+            for thread in data.drain(..) {
+                titles.push(thread);
+            }
+            let next_cursor = result["nextCursor"]
+                .as_str()
+                .filter(|cursor| !cursor.is_empty());
+            if titles.complete() || next_cursor.is_none() {
+                break;
+            }
             let next_cursor = next_cursor.unwrap();
             if !cursors.insert(next_cursor.to_owned()) {
                 return error_response(line, "invalid_thread_list", "thread list cursor repeated");
@@ -311,17 +365,30 @@ impl CodexRpcService {
                 Ok(worktree) => worktree,
                 Err(error) => return response_with_error(line, "worktree_creation_failed", &error),
             }
-        } else { None };
-        if let Some(cwd) = &worktree { params["cwd"] = json!(cwd); }
-        let paginate = params.as_object_mut().and_then(|params| params.remove("paginateHistory")) == Some(Value::Bool(true));
-        let defer_setting = params.as_object_mut().and_then(|params| params.remove("deferItemDetails"));
+        } else {
+            None
+        };
+        if let Some(cwd) = &worktree {
+            params["cwd"] = json!(cwd);
+        }
+        let paginate = params
+            .as_object_mut()
+            .and_then(|params| params.remove("paginateHistory"))
+            == Some(Value::Bool(true));
+        let defer_setting = params
+            .as_object_mut()
+            .and_then(|params| params.remove("deferItemDetails"));
         let defer_details = defer_setting == Some(Value::Bool(true));
         let hydrate = upstream_method == "thread/read" && params["includeTurns"] == true;
-        if hydrate { params["includeTurns"] = Value::Bool(false); }
+        if hydrate {
+            params["includeTurns"] = Value::Bool(false);
+        }
         if defer_setting.is_some() || hydrate || paginate || worktree.is_some() {
-            let mut request = raw_object(&upstream_line).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
+            let mut request = raw_object(&upstream_line)
+                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
             request.insert("params".into(), raw_value(params)?);
-            upstream_line = serde_json::to_string(&request).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
+            upstream_line = serde_json::to_string(&request)
+                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
         }
         let response = match self.inner.app_server.request_raw(&upstream_line).await {
             Ok(response) => response,
@@ -360,11 +427,17 @@ impl CodexRpcService {
             };
             let mut history_object = raw_object(&response)
                 .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            let Some(history) = history_object.remove("result") else { return Ok(response); };
+            let Some(history) = history_object.remove("result") else {
+                return Ok(response);
+            };
             let mut history: Value = serde_json::from_str(history.get())
                 .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
             if paginated {
-                if paginate && let Err(error) = self.hydrate_turn_page(&mut history, &result["thread"]["id"]).await {
+                if paginate
+                    && let Err(error) = self
+                        .hydrate_turn_page(&mut history, &result["thread"]["id"])
+                        .await
+                {
                     return response_with_error(line, "invalid_thread_history", &error);
                 }
                 if let Err(message) = apply_native_turn_page(&mut result, history) {
@@ -373,7 +446,9 @@ impl CodexRpcService {
             } else {
                 result = history;
                 if !paginate
-                    && let Some(turns) = result.pointer_mut("/thread/turns").and_then(Value::as_array_mut)
+                    && let Some(turns) = result
+                        .pointer_mut("/thread/turns")
+                        .and_then(Value::as_array_mut)
                     && turns.len() > 10
                 {
                     turns.drain(..turns.len() - 10);
@@ -387,7 +462,9 @@ impl CodexRpcService {
             }
         };
         let mut result = result;
-        if retain_recent_turns && defer_details { defer_large_item_details(&mut result); }
+        if retain_recent_turns && defer_details {
+            defer_large_item_details(&mut result);
+        }
         object.insert("result".to_owned(), raw_value(result)?);
         serde_json::to_string(&object)
             .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
@@ -397,15 +474,29 @@ impl CodexRpcService {
     // use the desktop five-turn / 500-item initial window, in pages of 100.
     async fn history_request(&self, method: &str, params: Value) -> Result<Value, String> {
         let request = json!({"id":0,"method":method,"params":params});
-        let response = self.inner.app_server.request_raw(&request.to_string()).await.map_err(|error| error.to_string())?;
+        let response = self
+            .inner
+            .app_server
+            .request_raw(&request.to_string())
+            .await
+            .map_err(|error| error.to_string())?;
         let mut response: Value = serde_json::from_str(&response).map_err(|e| e.to_string())?;
-        if let Some(error) = response.get("error") { return Err(error.to_string()); }
-        response.get_mut("result").map(Value::take).ok_or_else(|| "history result is missing".into())
+        if let Some(error) = response.get("error") {
+            return Err(error.to_string());
+        }
+        response
+            .get_mut("result")
+            .map(Value::take)
+            .ok_or_else(|| "history result is missing".into())
     }
 
     async fn hydrate_turn_page(&self, page: &mut Value, thread_id: &Value) -> Result<(), String> {
-        let turns = page["data"].as_array_mut().ok_or("turn page data is missing")?;
-        if turns.len() > MOBILE_THREAD_PAGE_SIZE { return Err("turn page exceeds requested size".into()); }
+        let turns = page["data"]
+            .as_array_mut()
+            .ok_or("turn page data is missing")?;
+        if turns.len() > MOBILE_THREAD_PAGE_SIZE {
+            return Err("turn page exceeds requested size".into());
+        }
         let mut budget = MOBILE_THREAD_PAGE_SIZE * 100;
         for turn in turns {
             let mut values = Vec::with_capacity(budget);
@@ -414,20 +505,29 @@ impl CodexRpcService {
             let mut cursors = std::collections::HashSet::new();
             let mut ids = std::collections::HashSet::new();
             while has_more && budget > 0 {
-                let mut page = self.history_request("thread/items/list", json!({
-                    "threadId":thread_id,"turnId":turn["id"],"cursor":cursor,
-                    "limit":budget.min(100),"sortDirection":"desc"
-                })).await?;
+                let mut page = self
+                    .history_request(
+                        "thread/items/list",
+                        json!({
+                            "threadId":thread_id,"turnId":turn["id"],"cursor":cursor,
+                            "limit":budget.min(100),"sortDirection":"desc"
+                        }),
+                    )
+                    .await?;
                 for item in take_history_items(&mut page)? {
                     if ids.insert(item["id"].as_str().unwrap().to_owned()) {
-                        budget = budget.checked_sub(1).ok_or("item page exceeds requested budget")?;
+                        budget = budget
+                            .checked_sub(1)
+                            .ok_or("item page exceeds requested budget")?;
                         values.push(item);
                     }
                 }
                 cursor = page["nextCursor"].take();
                 has_more = !cursor.is_null();
                 if let Some(cursor) = cursor.as_str() {
-                    if !cursors.insert(cursor.to_owned()) { return Err("history cursor repeated".into()); }
+                    if !cursors.insert(cursor.to_owned()) {
+                        return Err("history cursor repeated".into());
+                    }
                 }
             }
             values.reverse();
@@ -440,15 +540,28 @@ impl CodexRpcService {
         Ok(())
     }
 
-    async fn preserve_opening_question(&self, turn: &mut Value, thread_id: &Value) -> Result<(), String> {
+    async fn preserve_opening_question(
+        &self,
+        turn: &mut Value,
+        thread_id: &Value,
+    ) -> Result<(), String> {
         let values = turn["items"].as_array().ok_or("turn items are missing")?;
-        if turn["itemsHasMore"] != true || values.is_empty() { return Ok(()); }
-        let mut opening = self.history_request("thread/items/list", json!({
-            "threadId":thread_id,"turnId":turn["id"],"limit":2,"sortDirection":"asc"
-        })).await?;
-        if let Some(item) = take_history_items(&mut opening)?.into_iter()
+        if turn["itemsHasMore"] != true || values.is_empty() {
+            return Ok(());
+        }
+        let mut opening = self
+            .history_request(
+                "thread/items/list",
+                json!({
+                    "threadId":thread_id,"turnId":turn["id"],"limit":2,"sortDirection":"asc"
+                }),
+            )
+            .await?;
+        if let Some(item) = take_history_items(&mut opening)?
+            .into_iter()
             .find(|item| item["type"] != "contextCompaction")
-            .filter(|item| item["type"] == "userMessage") {
+            .filter(|item| item["type"] == "userMessage")
+        {
             if !values.iter().any(|value| value["id"] == item["id"]) {
                 turn["openingUserMessage"] = item;
             }
@@ -456,7 +569,11 @@ impl CodexRpcService {
         Ok(())
     }
 
-    async fn host_thread_history_page(&self, line: &str, items: bool) -> Result<String, DispatchError> {
+    async fn host_thread_history_page(
+        &self,
+        line: &str,
+        items: bool,
+    ) -> Result<String, DispatchError> {
         let params = parse_params(line)?;
         let Some(thread_id) = params["threadId"].as_str().filter(|id| !id.is_empty()) else {
             return error_response(line, "invalid_params", "threadId is required");
@@ -494,7 +611,11 @@ impl CodexRpcService {
             values.reverse();
             result["thread"]["turns"] = json!([{"id":params["turnId"],"items":values,
                 "itemsHasMore":!page["nextCursor"].is_null(),"itemsNextCursor":page["nextCursor"].take()}]);
-            if cursor.is_none() && let Err(error) = self.preserve_opening_question(&mut result["thread"]["turns"][0], &json!(thread_id)).await {
+            if cursor.is_none()
+                && let Err(error) = self
+                    .preserve_opening_question(&mut result["thread"]["turns"][0], &json!(thread_id))
+                    .await
+            {
                 return response_with_error(line, "invalid_thread_history", &error);
             }
         } else {
@@ -505,23 +626,45 @@ impl CodexRpcService {
                 return error_response(line, "invalid_thread_history", error);
             }
         }
-        if params["deferItemDetails"] == true { defer_large_item_details(&mut result); }
+        if params["deferItemDetails"] == true {
+            defer_large_item_details(&mut result);
+        }
         response_with_result(line, result)
     }
 
     async fn host_thread_item_read(&self, line: &str) -> Result<String, DispatchError> {
         let params = parse_params(line)?;
         let (Some(thread_id), Some(turn_id), Some(item_id)) = (
-            params.get("threadId").and_then(Value::as_str).filter(|id| !id.is_empty()),
-            params.get("turnId").and_then(Value::as_str).filter(|id| !id.is_empty()),
-            params.get("itemId").and_then(Value::as_str).filter(|id| !id.is_empty()),
-        ) else { return error_response(line, "invalid_params", "threadId, turnId and itemId are required"); };
+            params
+                .get("threadId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty()),
+            params
+                .get("turnId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty()),
+            params
+                .get("itemId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty()),
+        ) else {
+            return error_response(
+                line,
+                "invalid_params",
+                "threadId, turnId and itemId are required",
+            );
+        };
         let mut request = json!({"id":0,"method":"thread/items/list","params":{
             "threadId":thread_id,"turnId":turn_id,"limit":100,"sortDirection":"asc"
         }});
         let mut cursors = std::collections::HashSet::new();
         loop {
-            let response = match self.inner.app_server.request_raw(&request.to_string()).await {
+            let response = match self
+                .inner
+                .app_server
+                .request_raw(&request.to_string())
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => return response_with_error(line, "codex_unavailable", &error),
             };
@@ -530,16 +673,31 @@ impl CodexRpcService {
             if let Some(error) = response.get_mut("error") {
                 let mut object = response_object(line)?;
                 object.insert("error".to_owned(), raw_value(error.take())?);
-                return serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()));
+                return serde_json::to_string(&object)
+                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
             }
-            let Some(entries) = response.pointer_mut("/result/data").and_then(Value::as_array_mut) else {
+            let Some(entries) = response
+                .pointer_mut("/result/data")
+                .and_then(Value::as_array_mut)
+            else {
                 return error_response(line, "invalid_thread_history", "item page data is missing");
             };
-            if let Some(entry) = entries.iter_mut().find(|entry| entry["turnId"] == turn_id && entry["item"]["id"] == item_id) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry["turnId"] == turn_id && entry["item"]["id"] == item_id)
+            {
                 return response_with_result(line, json!({"item":entry["item"].take()}));
             }
-            let Some(cursor) = response.pointer("/result/nextCursor").and_then(Value::as_str).filter(|cursor| !cursor.is_empty()) else {
-                return error_response(line, "item_not_found", "The activity is no longer available. Refresh the task.");
+            let Some(cursor) = response
+                .pointer("/result/nextCursor")
+                .and_then(Value::as_str)
+                .filter(|cursor| !cursor.is_empty())
+            else {
+                return error_response(
+                    line,
+                    "item_not_found",
+                    "The activity is no longer available. Refresh the task.",
+                );
             };
             if !cursors.insert(cursor.to_owned()) {
                 return error_response(line, "invalid_thread_history", "item page cursor repeated");
@@ -636,20 +794,34 @@ fn raw_value(value: Value) -> Result<Box<RawValue>, DispatchError> {
 }
 
 fn apply_native_turn_page(result: &mut Value, mut page: Value) -> Result<(), &'static str> {
-    let Some(turns) = page["data"].as_array_mut() else { return Err("turn page data is missing"); };
+    let Some(turns) = page["data"].as_array_mut() else {
+        return Err("turn page data is missing");
+    };
     turns.reverse();
     result["thread"]["turns"] = Value::Array(std::mem::take(turns));
-    result["thread"]["historyCursor"] = page["nextCursor"].as_str().filter(|cursor| !cursor.is_empty())
-        .map(|cursor| json!(cursor)).unwrap_or(Value::Null);
+    result["thread"]["historyCursor"] = page["nextCursor"]
+        .as_str()
+        .filter(|cursor| !cursor.is_empty())
+        .map(|cursor| json!(cursor))
+        .unwrap_or(Value::Null);
     Ok(())
 }
 
 fn take_history_items(page: &mut Value) -> Result<Vec<Value>, String> {
-    let entries = page["data"].as_array_mut().ok_or("item page data is missing")?;
-    if entries.len() > 100 { return Err("item page exceeds requested size".into()); }
+    let entries = page["data"]
+        .as_array_mut()
+        .ok_or("item page data is missing")?;
+    if entries.len() > 100 {
+        return Err("item page exceeds requested size".into());
+    }
     for entry in entries.iter_mut() {
-        let item = entry.get_mut("item").ok_or("history item is missing")?.take();
-        if item["id"].as_str().is_none_or(str::is_empty) { return Err("history item ID is missing".into()); }
+        let item = entry
+            .get_mut("item")
+            .ok_or("history item is missing")?
+            .take();
+        if item["id"].as_str().is_none_or(str::is_empty) {
+            return Err("history item ID is missing".into());
+        }
         *entry = item;
     }
     Ok(std::mem::take(entries))
@@ -661,43 +833,73 @@ fn fits_inline(value: &Value) -> bool {
     struct Budget(usize);
     impl std::io::Write for Budget {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self.0.checked_sub(bytes.len()).ok_or_else(|| std::io::Error::other("inline budget exceeded"))?;
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or_else(|| std::io::Error::other("inline budget exceeded"))?;
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     serde_json::to_writer(Budget(4096), value).is_ok()
 }
 
 fn defer_large_item_details(result: &mut Value) {
-    let Some(turns) = result.pointer_mut("/thread/turns").and_then(Value::as_array_mut) else { return; };
+    let Some(turns) = result
+        .pointer_mut("/thread/turns")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
     for turn in turns {
-        let Some(items) = turn.get_mut("items").and_then(Value::as_array_mut) else { continue; };
+        let Some(items) = turn.get_mut("items").and_then(Value::as_array_mut) else {
+            continue;
+        };
         let mut deferred = Vec::new();
         for item in items {
             // Visible responses must remain complete, including image bytes and paths.
             // Only expandable activities defer their details.
-            if matches!(item["type"].as_str(), Some("userMessage" | "agentMessage" | "imageGeneration")) || fits_inline(item) { continue; }
-            let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else { continue; };
+            if matches!(
+                item["type"].as_str(),
+                Some("userMessage" | "agentMessage" | "imageGeneration")
+            ) || fits_inline(item)
+            {
+                continue;
+            }
+            let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
+                continue;
+            };
             deferred.push(Value::String(id.to_owned()));
-            let Some(object) = item.as_object_mut() else { continue; };
+            let Some(object) = item.as_object_mut() else {
+                continue;
+            };
             // File names/kinds and command/status keep the existing activity titles.
             if let Some(changes) = object.get_mut("changes").and_then(Value::as_array_mut) {
                 for change in changes {
-                    if let Some(change) = change.as_object_mut() { change.remove("diff"); }
+                    if let Some(change) = change.as_object_mut() {
+                        change.remove("diff");
+                    }
                 }
             }
             object.retain(|key, value| {
-                if key == "changes" || key == "id" || key == "type" { return true; }
+                if key == "changes" || key == "id" || key == "type" {
+                    return true;
+                }
                 if let Value::String(text) = value {
                     let mut end = text.len().min(256);
-                    while !text.is_char_boundary(end) { end -= 1; }
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     text.truncate(end);
                 }
                 !value.is_array() && !value.is_object()
             });
         }
-        if !deferred.is_empty() { turn["deferredItemIds"] = Value::Array(deferred); }
+        if !deferred.is_empty() {
+            turn["deferredItemIds"] = Value::Array(deferred);
+        }
     }
 }
 
@@ -739,7 +941,10 @@ mod tests {
         assert_eq!(items[3]["changes"][0]["kind"]["type"], "update");
         assert_eq!(items[4]["tool"], "inspect");
         assert_eq!(items[5]["summary"], json!(["short"]));
-        assert_eq!(turn["deferredItemIds"], json!(["command","files","future"]));
+        assert_eq!(
+            turn["deferredItemIds"],
+            json!(["command", "files", "future"])
+        );
     }
 
     #[test]
@@ -755,7 +960,11 @@ mod tests {
     #[test]
     fn history_page_preserves_the_opaque_cursor_and_chronological_order() {
         let mut result = json!({"thread":{}});
-        apply_native_turn_page(&mut result, json!({"data":[{"id":"new"},{"id":"old"}],"nextCursor":"opaque:token"})).unwrap();
+        apply_native_turn_page(
+            &mut result,
+            json!({"data":[{"id":"new"},{"id":"old"}],"nextCursor":"opaque:token"}),
+        )
+        .unwrap();
         assert_eq!(result["thread"]["turns"][0]["id"], "old");
         assert_eq!(result["thread"]["historyCursor"], "opaque:token");
     }

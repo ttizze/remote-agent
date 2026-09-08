@@ -1,0 +1,8 @@
+--swift-version 6.3
+--language-mode 5
+--indent 4
+--linebreaks lf
+--maxwidth 120
+--commas inline
+# SwiftLint's opening_brace rule keeps the brace on the declaration line.
+--disable wrapMultilineStatementBraces

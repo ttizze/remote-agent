@@ -1,7 +1,7 @@
 import AppKit
 
-// A native panel process keeps AppKit's modal loop off the GPUI event loop.
-// Only the selected path crosses stdout; cancel is JSON null.
+/// A native panel process keeps AppKit's modal loop off the GPUI event loop.
+/// Only the selected path crosses stdout; cancel is JSON null.
 let application = NSApplication.shared
 application.setActivationPolicy(.regular)
 application.finishLaunching()
@@ -25,4 +25,4 @@ default:
 }
 panel.canCreateDirectories = true
 let selected = panel.runModal() == .OK ? panel.url?.path : nil
-FileHandle.standardOutput.write(try JSONEncoder().encode(selected))
+try FileHandle.standardOutput.write(JSONEncoder().encode(selected))

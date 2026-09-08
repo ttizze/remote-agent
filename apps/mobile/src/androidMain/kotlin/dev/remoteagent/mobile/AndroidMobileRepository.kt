@@ -8,27 +8,33 @@ import java.io.File
 class AndroidMobileRepository(context: Context) : MobileRepository {
     private val file = AtomicFile(File(context.filesDir, "mobile-state.v1.json"))
 
-    override fun load(): AppState = runCatching {
-        val bytes = file.openRead().use { it.readBytes() }
-        when (val result = MobileStateCodec.decode(bytes)) {
-            is MobileStateDecodeResult.Success -> result.value
-            is MobileStateDecodeResult.Failure -> AppState().also {
-                if (result.reason == MobileStateDecodeReason.UnsupportedVersion) save(it)
+    override fun load(): AppState =
+        runCatching {
+                val bytes = file.openRead().use { it.readBytes() }
+                when (val result = MobileStateCodec.decode(bytes)) {
+                    is MobileStateDecodeResult.Success -> result.value
+                    is MobileStateDecodeResult.Failure ->
+                        AppState().also { if (result.reason == MobileStateDecodeReason.UnsupportedVersion) save(it) }
+                }
             }
-        }
-    }.getOrElse { AppState() }
+            .getOrElse { AppState() }
 
     override fun save(state: AppState) {
-        val bytes = MobileStateCodec.encode(state)
-        require(bytes.size <= MobileStateCodec.MaxInputBytes) { "Mobile cache exceeds storage limit" }
-        val output = file.startWrite()
         try {
-            output.write(bytes)
-            output.fd.sync()
-            file.finishWrite(output)
-        } catch (error: Throwable) {
-            file.failWrite(output)
-            throw error
+            val bytes = MobileStateCodec.encode(state)
+            require(bytes.size <= MobileStateCodec.MaxInputBytes) { "Mobile cache exceeds storage limit" }
+            val output = file.startWrite()
+            var committed = false
+            try {
+                output.write(bytes)
+                output.fd.sync()
+                file.finishWrite(output)
+                committed = true
+            } finally {
+                if (!committed) file.failWrite(output)
+            }
+        } catch (failure: java.io.IOException) {
+            throw MobilePersistenceException(failure)
         }
     }
 }

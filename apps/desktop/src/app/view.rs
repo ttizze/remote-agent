@@ -1,42 +1,85 @@
 use super::*;
-use std::path::PathBuf;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
     sidebar::{Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem},
     tab::{Tab as UiTab, TabBar},
 };
+use std::path::PathBuf;
 
 const CHAT_WIDTH: f32 = 780.;
 
-fn model_effort_slider(state: &Entity<slider::SliderState>, effort_count: usize, cx: &App) -> impl IntoElement {
+fn model_effort_slider(
+    state: &Entity<slider::SliderState>,
+    effort_count: usize,
+    cx: &App,
+) -> impl IntoElement {
     let disabled = effort_count < 2;
     let steps = effort_count.saturating_sub(1).max(1) as f32;
     let position = state.read(cx).percentage().end;
-    let track = base::SliderIndicator::new(state).relative().w_full().h(px(24.))
-        .child(div().absolute().left(px(-14.)).right(relative(1. - position)).h_full()
-            .rounded_full().bg(rgb(0x3982f7)))
+    let track = base::SliderIndicator::new(state)
+        .relative()
+        .w_full()
+        .h(px(24.))
+        .child(
+            div()
+                .absolute()
+                .left(px(-14.))
+                .right(relative(1. - position))
+                .h_full()
+                .rounded_full()
+                .bg(rgb(0x3982f7)),
+        )
         .children((0..effort_count).map(|i| {
-            div().absolute().left(relative(i as f32 / steps)).ml(px(-2.)).top(px(10.))
-                .size(px(4.)).rounded_full().bg(rgb(0x9c9c9c))
+            div()
+                .absolute()
+                .left(relative(i as f32 / steps))
+                .ml(px(-2.))
+                .top(px(10.))
+                .size(px(4.))
+                .rounded_full()
+                .bg(rgb(0x9c9c9c))
         }))
-        .child(base::SliderThumb::new(state).disabled(disabled)
-            .absolute().left(relative(position)).ml(px(-14.)).top(px(-2.))
-            .size(px(28.)).rounded_full().bg(rgb(0xffffff)));
-    base::Slider::new(state).disabled(disabled).w_full().py_1()
-        .child(base::SliderTrack::new(state).disabled(disabled)
-            .w_full().h(px(24.)).px(px(14.)).rounded_full().bg(rgb(0x454545)).child(track))
+        .child(
+            base::SliderThumb::new(state)
+                .disabled(disabled)
+                .absolute()
+                .left(relative(position))
+                .ml(px(-14.))
+                .top(px(-2.))
+                .size(px(28.))
+                .rounded_full()
+                .bg(rgb(0xffffff)),
+        );
+    base::Slider::new(state)
+        .disabled(disabled)
+        .w_full()
+        .py_1()
+        .child(
+            base::SliderTrack::new(state)
+                .disabled(disabled)
+                .w_full()
+                .h(px(24.))
+                .px(px(14.))
+                .rounded_full()
+                .bg(rgb(0x454545))
+                .child(track),
+        )
 }
 
 fn conversation_file_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
-    let source = source.rsplit_once(':')
+    let source = source
+        .rsplit_once(':')
         .filter(|(_, line)| !line.is_empty() && line.bytes().all(|c| c.is_ascii_digit()))
         .map_or(source, |(path, _)| path);
     let base = url::Url::from_directory_path(cwd).map_err(|_| "作業フォルダが不正です")?;
     let mut url = base.join(source).map_err(|e| e.to_string())?;
-    if url.scheme() != "file" { return Err("未対応のリンクです".into()); }
+    if url.scheme() != "file" {
+        return Err("未対応のリンクです".into());
+    }
     url.set_fragment(None);
     url.set_query(None);
-    url.to_file_path().map_err(|_| "ファイルパスが不正です".into())
+    url.to_file_path()
+        .map_err(|_| "ファイルパスが不正です".into())
 }
 
 #[cfg(test)]
@@ -44,8 +87,8 @@ mod model_slider_tests {
     use super::model_effort_slider;
     use gpui_kit as gpui;
     use gpui_kit::{
-        AppContext, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement,
-        Render, Styled, TestAppContext, Window, component::slider, div, point, px,
+        AppContext, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement, Render,
+        Styled, TestAppContext, Window, component::slider, div, point, px,
     };
 
     struct SliderView {
@@ -55,7 +98,10 @@ mod model_slider_tests {
 
     impl Render for SliderView {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().w(px(280.)).p_4().child(model_effort_slider(&self.state, self.effort_count, cx))
+            div()
+                .w(px(280.))
+                .p_4()
+                .child(model_effort_slider(&self.state, self.effort_count, cx))
         }
     }
 
@@ -63,21 +109,43 @@ mod model_slider_tests {
     fn effort_thumb_drags_both_ways_and_single_option_is_inert(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         for effort_count in [4, 1] {
-            let state = cx.new(|_| slider::SliderState::new().max(3.).step(1.).default_value(1.));
+            let state = cx.new(|_| {
+                slider::SliderState::new()
+                    .max(3.)
+                    .step(1.)
+                    .default_value(1.)
+            });
             let owner = state.clone();
-            let (_, cx) = cx.add_window_view(move |_, _| SliderView { state: owner, effort_count });
+            let (_, cx) = cx.add_window_view(move |_, _| SliderView {
+                state: owner,
+                effort_count,
+            });
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let bounds = cx.update(|_, cx| state.read(cx).bounds());
-            let at = |fraction| point(bounds.left() + bounds.size.width * fraction, bounds.center().y);
+            let at = |fraction| {
+                point(
+                    bounds.left() + bounds.size.width * fraction,
+                    bounds.center().y,
+                )
+            };
             let mut from = 1. / 3.;
             for to in [1., 0.] {
                 cx.simulate_mouse_move(at(from), None, Modifiers::default());
                 cx.simulate_mouse_down(at(from), MouseButton::Left, Modifiers::default());
                 for step in 1..=8 {
-                    cx.simulate_mouse_move(at(from + (to - from) * step as f32 / 8.), MouseButton::Left, Modifiers::default());
+                    cx.simulate_mouse_move(
+                        at(from + (to - from) * step as f32 / 8.),
+                        MouseButton::Left,
+                        Modifiers::default(),
+                    );
                 }
                 cx.simulate_mouse_up(at(to), MouseButton::Left, Modifiers::default());
-                cx.update(|_, cx| assert_eq!(state.read(cx).value(), slider::SliderValue::Single(if effort_count > 1 { to * 3. } else { 1. })));
+                cx.update(|_, cx| {
+                    assert_eq!(
+                        state.read(cx).value(),
+                        slider::SliderValue::Single(if effort_count > 1 { to * 3. } else { 1. })
+                    )
+                });
                 from = to;
             }
         }
@@ -90,8 +158,17 @@ mod link_tests {
 
     #[test]
     fn file_links_resolve_on_the_selected_host_with_spaces_and_line_numbers() {
-        for source in ["/tmp/project/a%20b.png", "file:///tmp/project/a%20b.png", "a%20b.png", "a%20b.png:12", "a%20b.png#L12"] {
-            assert_eq!(conversation_file_path(source, "/tmp/project").unwrap(), std::path::Path::new("/tmp/project/a b.png"));
+        for source in [
+            "/tmp/project/a%20b.png",
+            "file:///tmp/project/a%20b.png",
+            "a%20b.png",
+            "a%20b.png:12",
+            "a%20b.png#L12",
+        ] {
+            assert_eq!(
+                conversation_file_path(source, "/tmp/project").unwrap(),
+                std::path::Path::new("/tmp/project/a b.png")
+            );
         }
         assert!(conversation_file_path("https://example.com", "/tmp/project").is_err());
         assert!(conversation_file_path("javascript:alert(1)", "/tmp/project").is_err());
@@ -108,19 +185,30 @@ fn session_image_sources(rpc: &Rpc, thread_id: &str) -> Result<Value, String> {
                 if let Some(items) = turn["items"].as_array_mut() {
                     items.retain(|item| item["type"] == "imageGeneration");
                     for item in items {
-                        if !text(item, "savedPath").is_empty() { item.as_object_mut().unwrap().remove("result"); }
+                        if !text(item, "savedPath").is_empty() {
+                            item.as_object_mut().unwrap().remove("result");
+                        }
                     }
                 }
             }
         }
     }
     let mut result = rpc.request("host/thread/read", json!({"threadId":thread_id,"includeTurns":true,"paginateHistory":true,"deferItemDetails":true}))?;
-    let mut history = Conversation { thread: result["thread"].take(), ..Default::default() };
+    let mut history = Conversation {
+        thread: result["thread"].take(),
+        ..Default::default()
+    };
     retain_images(&mut history.thread);
     let mut cursors = HashSet::new();
     while let Some(page) = history.older_page() {
-        if !cursors.insert((page.turn.clone(), page.cursor.to_string())) { return Err("履歴カーソルが進みませんでした".into()); }
-        let method = if page.turn.is_some() { "host/thread/items/list" } else { "host/thread/turns/list" };
+        if !cursors.insert((page.turn.clone(), page.cursor.to_string())) {
+            return Err("履歴カーソルが進みませんでした".into());
+        }
+        let method = if page.turn.is_some() {
+            "host/thread/items/list"
+        } else {
+            "host/thread/turns/list"
+        };
         let mut result = rpc.request(method, json!({"threadId":thread_id,"turnId":page.turn,"cursor":page.cursor,"deferItemDetails":true}))?;
         retain_images(&mut result["thread"]);
         history.merge_older(result, &page)?;
@@ -180,7 +268,14 @@ impl Desktop {
                 cx.notify();
             }))
     }
-    fn image(&mut self, source: &str, encoded: bool, height: f32, clickable: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn image(
+        &mut self,
+        source: &str,
+        encoded: bool,
+        height: f32,
+        clickable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
         if !self.images.contains_key(&key) {
             let source = std::sync::Arc::new(source.to_owned());
@@ -213,13 +308,31 @@ impl Desktop {
         }
         let state = &self.images[&key];
         if let Some(path) = &state.path {
-            let image = img(path.clone()).w_full().h(px(height)).min_h(px(height)).max_h(px(height)).object_fit(ObjectFit::Contain);
+            let image = img(path.clone())
+                .w_full()
+                .h(px(height))
+                .min_h(px(height))
+                .max_h(px(height))
+                .object_fit(ObjectFit::Contain);
             if clickable {
                 let source = state.source.clone();
-                div().id(SharedString::from(key)).w_full().h(px(height)).flex_shrink_0().flex().items_center().justify_center().cursor_pointer()
-                    .on_click(cx.listener(move |s, _, _, cx| s.open_image_gallery(source.clone(), encoded, cx)))
-                    .child(image).into_any_element()
-            } else { image.into_any_element() }
+                div()
+                    .id(SharedString::from(key))
+                    .w_full()
+                    .h(px(height))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        s.open_image_gallery(source.clone(), encoded, cx)
+                    }))
+                    .child(image)
+                    .into_any_element()
+            } else {
+                image.into_any_element()
+            }
         } else {
             div()
                 .text_sm()
@@ -292,7 +405,7 @@ impl Desktop {
                 }),
         );
         for source in images.iter() {
-            body = body.child(self.image(&source, false, 320., true, cx));
+            body = body.child(self.image(source, false, 320., true, cx));
         }
         body.into_any_element()
     }
@@ -303,10 +416,23 @@ impl Desktop {
         }
         let path = match conversation_file_path(source, &self.cwd) {
             Ok(path) => path,
-            Err(error) => { self.error = error; cx.notify(); return; }
+            Err(error) => {
+                self.error = error;
+                cx.notify();
+                return;
+            }
         };
-        if path.extension().and_then(|extension| extension.to_str()).and_then(image::ImageFormat::from_extension).is_some() {
-            self.open_image_gallery(std::sync::Arc::new(path.to_string_lossy().into_owned()), false, cx);
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(image::ImageFormat::from_extension)
+            .is_some()
+        {
+            self.open_image_gallery(
+                std::sync::Arc::new(path.to_string_lossy().into_owned()),
+                false,
+                cx,
+            );
             return;
         }
         let remote = self.remote.clone();
@@ -326,49 +452,88 @@ impl Desktop {
             Ok(json!({"url":url.as_str()}))
         }, |_, result, _, cx| cx.open_url(text(&result, "url")));
     }
-    fn open_image_gallery(&mut self, source: std::sync::Arc<String>, encoded: bool, cx: &mut Context<Self>) {
+    fn open_image_gallery(
+        &mut self,
+        source: std::sync::Arc<String>,
+        encoded: bool,
+        cx: &mut Context<Self>,
+    ) {
         let id = uuid::Uuid::new_v4();
         self.image_gallery = Some(ImageGallery {
-            id, entries: Vec::new(), initial: (source, encoded), selected: None,
+            id,
+            entries: Vec::new(),
+            initial: (source, encoded),
+            selected: None,
             list: ListState::new(0, ListAlignment::Top, px(160.)),
-            loading: true, saving: false, saved: false, error: String::new(),
+            loading: true,
+            saving: false,
+            saved: false,
+            error: String::new(),
         });
         let rpc = self.rpc.clone();
         let thread = self.selected.clone();
-        self.work(false, move || Ok(match session_image_sources(&rpc, &thread) {
-            Ok(images) => json!({"images":images}), Err(error) => json!({"error":error}),
-        }), move |s, mut result, _, _| {
-            let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| gallery.id == id) else { return; };
-            gallery.loading = false;
-            if let Some(error) = result["error"].as_str() { gallery.error = error.into(); return; }
-            let initial = gallery.current_image().clone();
-            let mut entries = Vec::new();
-            let mut seen = HashSet::new();
-            if let Value::Array(images) = result["images"].take() {
-                for mut image in images {
-                    if let Value::String(source) = image["source"].take() {
-                        let source = std::sync::Arc::new(source);
-                        let encoded = image["encoded"] == true;
-                        if seen.insert((source.clone(), encoded)) { entries.push((source, encoded)); }
+        self.work(
+            false,
+            move || {
+                Ok(match session_image_sources(&rpc, &thread) {
+                    Ok(images) => json!({"images":images}),
+                    Err(error) => json!({"error":error}),
+                })
+            },
+            move |s, mut result, _, _| {
+                let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| gallery.id == id)
+                else {
+                    return;
+                };
+                gallery.loading = false;
+                if let Some(error) = result["error"].as_str() {
+                    gallery.error = error.into();
+                    return;
+                }
+                let initial = gallery.current_image().clone();
+                let mut entries = Vec::new();
+                let mut seen = HashSet::new();
+                if let Value::Array(images) = result["images"].take() {
+                    for mut image in images {
+                        if let Value::String(source) = image["source"].take() {
+                            let source = std::sync::Arc::new(source);
+                            let encoded = image["encoded"] == true;
+                            if seen.insert((source.clone(), encoded)) {
+                                entries.push((source, encoded));
+                            }
+                        }
                     }
                 }
-            }
-            gallery.selected = entries.iter().position(|entry| entry == &initial);
-            gallery.list.splice(0..gallery.list.item_count(), entries.len());
-            gallery.entries = entries;
-            if let Some(selected) = gallery.selected { gallery.list.scroll_to_reveal_item(selected); }
-        });
+                gallery.selected = entries.iter().position(|entry| entry == &initial);
+                gallery
+                    .list
+                    .splice(0..gallery.list.item_count(), entries.len());
+                gallery.entries = entries;
+                if let Some(selected) = gallery.selected {
+                    gallery.list.scroll_to_reveal_item(selected);
+                }
+            },
+        );
         cx.notify();
     }
 
     fn gallery_thumbnail(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(gallery) = &self.image_gallery else { return div().into_any_element(); };
-        let Some((source, encoded)) = gallery.entries.get(index).cloned() else { return div().into_any_element(); };
+        let Some(gallery) = &self.image_gallery else {
+            return div().into_any_element();
+        };
+        let Some((source, encoded)) = gallery.entries.get(index).cloned() else {
+            return div().into_any_element();
+        };
         let selected = gallery.selected == Some(index);
         let image = self.image(&source, encoded, 64., false, cx);
         Button::new(format!("gallery-thumbnail-{index}"))
             .accessibility_label(format!("生成画像 {}", index + 1))
-            .ghost().child(image).w(px(80.)).h(px(80.)).p_2().selected(selected)
+            .ghost()
+            .child(image)
+            .w(px(80.))
+            .h(px(80.))
+            .p_2()
+            .selected(selected)
             .on_click(cx.listener(move |s, _, _, cx| {
                 if let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| !gallery.saving) {
                     gallery.selected = Some(index);
@@ -376,7 +541,8 @@ impl Desktop {
                     gallery.error.clear();
                     cx.notify();
                 }
-            })).into_any_element()
+            }))
+            .into_any_element()
     }
 
     fn image_gallery_view(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -386,85 +552,186 @@ impl Desktop {
         let saving = gallery.saving;
         let saved = gallery.saved;
         let loading = gallery.loading;
-        let label = gallery.selected.map(|index| format!("{} / {}", index + 1, gallery.entries.len())).unwrap_or_else(|| "画像".into());
+        let label = gallery
+            .selected
+            .map(|index| format!("{} / {}", index + 1, gallery.entries.len()))
+            .unwrap_or_else(|| "画像".into());
         let error = gallery.error.clone();
-        let image = self.image(&source, encoded, (f32::from(window.viewport_size().height) - 148.).max(120.), false, cx);
+        let image = self.image(
+            &source,
+            encoded,
+            (f32::from(window.viewport_size().height) - 148.).max(120.),
+            false,
+            cx,
+        );
         let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
-        let ready = self.images.get(&key).is_some_and(|image| image.path.is_some());
+        let ready = self
+            .images
+            .get(&key)
+            .is_some_and(|image| image.path.is_some());
         let entity = cx.entity().downgrade();
         let thumbnails = list(list_state, move |index, _, cx| {
-            entity.update(cx, |s, cx| s.gallery_thumbnail(index, cx)).unwrap_or_else(|_| div().into_any_element())
-        }).size_full();
-        v_flex().size_full().p_4().pt(px(44.)).gap_3()
-            .child(h_flex().justify_end().gap_3()
-                .child(div().flex_1().child(label))
-                .when(loading, |row| row.child("画像一覧を読み込み中…"))
-                .child(self.button("gallery-save", if saved { "保存済み" } else { "保存" }, cx, |s, _, cx| s.save_gallery_image(cx)).disabled(!ready || saving || saved))
-                .child(self.button("gallery-close", "閉じる", cx, |s, _, _| s.image_gallery = None).disabled(saving)))
-            .when(!error.is_empty(), |view| view.child(div().text_color(rgb(0xff8e86)).child(error)))
-            .child(h_flex().flex_1().min_h_0().gap_4()
-                .child(div().w(px(88.)).h_full().child(thumbnails))
-                .child(h_flex().flex_1().min_w_0().h_full().items_center().justify_center().child(image)))
+            entity
+                .update(cx, |s, cx| s.gallery_thumbnail(index, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .size_full();
+        v_flex()
+            .size_full()
+            .p_4()
+            .pt(px(44.))
+            .gap_3()
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_3()
+                    .child(div().flex_1().child(label))
+                    .when(loading, |row| row.child("画像一覧を読み込み中…"))
+                    .child(
+                        self.button(
+                            "gallery-save",
+                            if saved { "保存済み" } else { "保存" },
+                            cx,
+                            |s, _, cx| s.save_gallery_image(cx),
+                        )
+                        .disabled(!ready || saving || saved),
+                    )
+                    .child(
+                        self.button("gallery-close", "閉じる", cx, |s, _, _| {
+                            s.image_gallery = None
+                        })
+                        .disabled(saving),
+                    ),
+            )
+            .when(!error.is_empty(), |view| {
+                view.child(div().text_color(rgb(0xff8e86)).child(error))
+            })
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_4()
+                    .child(div().w(px(88.)).h_full().child(thumbnails))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .items_center()
+                            .justify_center()
+                            .child(image),
+                    ),
+            )
             .into_any_element()
     }
 
     fn save_gallery_image(&mut self, cx: &mut Context<Self>) {
-        let Some(gallery) = self.image_gallery.as_mut().filter(|gallery| !gallery.saving) else { return; };
+        let Some(gallery) = self
+            .image_gallery
+            .as_mut()
+            .filter(|gallery| !gallery.saving)
+        else {
+            return;
+        };
         let (source, encoded) = gallery.current_image();
         let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
-        let Some(ImageSource::Resource(resource)) = self.images.get(&key).and_then(|image| image.path.clone()) else { return; };
+        let Some(ImageSource::Resource(resource)) =
+            self.images.get(&key).and_then(|image| image.path.clone())
+        else {
+            return;
+        };
         gallery.saving = true;
         gallery.error.clear();
         let id = gallery.id;
         let http = cx.http_client();
         cx.spawn(async move |view, cx| {
-            enum Original { File(std::sync::Arc<Path>), Bytes(Vec<u8>) }
+            enum Original {
+                File(std::sync::Arc<Path>),
+                Bytes(Vec<u8>),
+            }
             let result = async {
                 let original = match resource {
                     Resource::Path(path) => Original::File(path),
                     Resource::Uri(uri) => {
                         use futures_util::AsyncReadExt;
-                        let mut response = http.get(uri.as_ref(), gpui_kit::http_client::AsyncBody::empty(), true).await.map_err(|error| error.to_string())?;
-                        if !response.status().is_success() { return Err(format!("画像の取得に失敗しました: {}", response.status())); }
+                        let mut response = http
+                            .get(
+                                uri.as_ref(),
+                                gpui_kit::http_client::AsyncBody::empty(),
+                                true,
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if !response.status().is_success() {
+                            return Err(format!("画像の取得に失敗しました: {}", response.status()));
+                        }
                         let mut bytes = Vec::new();
-                        response.body_mut().read_to_end(&mut bytes).await.map_err(|error| error.to_string())?;
+                        response
+                            .body_mut()
+                            .read_to_end(&mut bytes)
+                            .await
+                            .map_err(|error| error.to_string())?;
                         Original::Bytes(bytes)
                     }
                     _ => return Err("保存できない画像です".into()),
                 };
-                cx.background_executor().spawn(async move {
-                    let format = match &original {
-                        Original::File(path) => image::ImageReader::open(path).and_then(|reader| reader.with_guessed_format()).map_err(|error| error.to_string())?.format().ok_or("画像形式が不明です")?,
-                        Original::Bytes(bytes) => image::guess_format(bytes).map_err(|error| error.to_string())?,
-                    };
-                    let mode = format!("download:image.{}", format.extensions_str()[0]);
-                    let Some(destination) = platform::choose(&mode)? else { return Ok(false); };
-                    match original {
-                        Original::File(path) => {
-                            let source = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
-                            if std::fs::canonicalize(&destination).ok().as_deref() != Some(source.as_path()) {
-                                std::fs::copy(source, destination).map_err(|error| error.to_string())?;
+                cx.background_executor()
+                    .spawn(async move {
+                        let format = match &original {
+                            Original::File(path) => image::ImageReader::open(path)
+                                .and_then(|reader| reader.with_guessed_format())
+                                .map_err(|error| error.to_string())?
+                                .format()
+                                .ok_or("画像形式が不明です")?,
+                            Original::Bytes(bytes) => {
+                                image::guess_format(bytes).map_err(|error| error.to_string())?
                             }
+                        };
+                        let mode = format!("download:image.{}", format.extensions_str()[0]);
+                        let Some(destination) = platform::choose(&mode)? else {
+                            return Ok(false);
+                        };
+                        match original {
+                            Original::File(path) => {
+                                let source = std::fs::canonicalize(&path)
+                                    .map_err(|error| error.to_string())?;
+                                if std::fs::canonicalize(&destination).ok().as_deref()
+                                    != Some(source.as_path())
+                                {
+                                    std::fs::copy(source, destination)
+                                        .map_err(|error| error.to_string())?;
+                                }
+                            }
+                            Original::Bytes(bytes) => std::fs::write(destination, bytes)
+                                .map_err(|error| error.to_string())?,
                         }
-                        Original::Bytes(bytes) => std::fs::write(destination, bytes).map_err(|error| error.to_string())?,
-                    }
-                    Ok::<_, String>(true)
-                }).await
-            }.await;
+                        Ok::<_, String>(true)
+                    })
+                    .await
+            }
+            .await;
             let _ = view.update(cx, |s, cx| {
                 if let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| gallery.id == id) {
                     gallery.saving = false;
-                    match result { Ok(saved) => gallery.saved = saved, Err(error) => gallery.error = error }
+                    match result {
+                        Ok(saved) => gallery.saved = saved,
+                        Err(error) => gallery.error = error,
+                    }
                     cx.notify();
                 }
             });
-        }).detach();
+        })
+        .detach();
         cx.notify();
     }
 
-    fn diff(&mut self, id: String, patch: &str, cx: &mut Context<Self>) -> AnyElement {
-        let view = self
-            .diffs
+    fn diff(
+        diffs: &mut HashMap<String, Entity<DiffView>>,
+        id: String,
+        patch: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = diffs
             .entry(id.clone())
             .or_insert_with(|| {
                 cx.new(|_| DiffView::new(patch.to_owned().into(), id == "workspace-patch"))
@@ -528,12 +795,21 @@ impl Desktop {
                 let path = text(item, "savedPath");
                 let result = text(item, "result");
                 let title = conversation_presentation::item_presentation(item).title;
-                let mut body = v_flex().gap_2().w_full().child(div().text_sm().child(title));
+                let mut body = v_flex()
+                    .gap_2()
+                    .w_full()
+                    .child(div().text_sm().child(title));
                 if !path.is_empty() {
                     body = body.child(self.image(path, false, 320., true, cx));
                     let path = path.to_owned();
-                    body = body.child(self.button(format!("open-image-{id}"), "画像を開く", cx,
-                        move |s, _, cx| s.open_image_gallery(std::sync::Arc::new(path.clone()), false, cx)));
+                    body = body.child(self.button(
+                        format!("open-image-{id}"),
+                        "画像を開く",
+                        cx,
+                        move |s, _, cx| {
+                            s.open_image_gallery(std::sync::Arc::new(path.clone()), false, cx)
+                        },
+                    ));
                 } else if !result.is_empty() {
                     body = body.child(self.image(result, true, 320., true, cx));
                 } else if text(item, "status") == "inProgress" {
@@ -674,7 +950,8 @@ impl Desktop {
                         ));
                     body = body.child(row);
                     if expanded {
-                        body = body.child(self.diff(
+                        body = body.child(Self::diff(
+                            &mut self.diffs,
                             format!("diff-{id}-{i}"),
                             text(change, "diff"),
                             cx,
@@ -747,7 +1024,7 @@ impl Desktop {
                 .filter(|&index| {
                     projection.role(index, item_at(index)) == conversation_presentation::Role::User
                 })
-                .map(|index| item_at(index))
+                .map(&item_at)
             {
                 body = body.child(self.item(item, turn, cx));
             }
@@ -790,7 +1067,7 @@ impl Desktop {
                         projection.role(index, item_at(index))
                             == conversation_presentation::Role::Activity
                     })
-                    .map(|index| item_at(index))
+                    .map(&item_at)
                 {
                     body = body.child(self.item(item, turn, cx));
                 }
@@ -810,7 +1087,7 @@ impl Desktop {
                     projection.role(index, item_at(index))
                         == conversation_presentation::Role::Response
                 })
-                .map(|index| item_at(index))
+                .map(&item_at)
             {
                 body = body.child(self.item(item, turn, cx));
                 if item["type"] == "agentMessage" && item["phase"] != "commentary" {
@@ -854,10 +1131,10 @@ impl Desktop {
             .into_any_element()
     }
     fn request_card(&mut self, request: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let key = request["id"].to_string();
+        let key = &request["id"];
         let id = request["id"].clone();
         let params = &request["params"];
-        let Some(inputs) = self.requests.get(&key) else {
+        let Some(inputs) = self.requests.get(key) else {
             return div().into_any_element();
         };
         let mut body = v_flex()
@@ -902,7 +1179,7 @@ impl Desktop {
                 "回答を送信",
                 cx,
                 move |s, _, cx| {
-                    let inputs = &s.requests[&key];
+                    let inputs = &s.requests[&id];
                     let mut answers = serde_json::Map::new();
                     for q in &inputs.questions {
                         let value = q.input.read(cx).value();
@@ -973,7 +1250,7 @@ impl Desktop {
                     "回答を送信",
                     cx,
                     move |s, _, cx| match serde_json::from_str(
-                        s.requests[&key].raw.read(cx).value().as_ref(),
+                        s.requests[&id].raw.read(cx).value().as_ref(),
                     ) {
                         Ok(value) => s.respond(id.clone(), value),
                         Err(e) => s.error = e.to_string(),
@@ -991,13 +1268,26 @@ impl Desktop {
     fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         let model = self.selected_model();
-        let label = model.map(|m| text(m, "displayName")).filter(|s| !s.is_empty()).unwrap_or("モデル");
+        let label = model
+            .map(|m| text(m, "displayName"))
+            .filter(|s| !s.is_empty())
+            .unwrap_or("モデル");
         popover::Popover::new("model-controls")
-            .bg(rgb(0x2b2b2b)).rounded(px(16.)).border_color(rgb(0x3b3b3b))
+            .bg(rgb(0x2b2b2b))
+            .rounded(px(16.))
+            .border_color(rgb(0x3b3b3b))
             .anchor(Anchor::BottomLeft)
-            .trigger(Button::new("model-select").label(label.to_owned()).dropdown_caret(true).small().ghost())
+            .trigger(
+                Button::new("model-select")
+                    .label(label.to_owned())
+                    .dropdown_caret(true)
+                    .small()
+                    .ghost(),
+            )
             .content(move |_, _, cx| {
-                entity.update(cx, |s, cx| s.model_controls(cx)).unwrap_or_else(|_| div().into_any_element())
+                entity
+                    .update(cx, |s, cx| s.model_controls(cx))
+                    .unwrap_or_else(|_| div().into_any_element())
             })
             .into_any_element()
     }
@@ -1015,50 +1305,93 @@ impl Desktop {
             "ultra" => "最高",
             value => value,
         };
-        let model_label = format!("{} {}", model.map(|m| text(m, "displayName")).unwrap_or("モデル"), effort_label);
-        let models = Button::new("model-choice").label(model_label).dropdown_caret(true).small().ghost()
+        let model_label = format!(
+            "{} {}",
+            model.map(|m| text(m, "displayName")).unwrap_or("モデル"),
+            effort_label
+        );
+        let models = Button::new("model-choice")
+            .label(model_label)
+            .dropdown_caret(true)
+            .small()
+            .ghost()
             .dropdown_menu(move |mut menu, _, cx| {
                 if let Some(owner) = entity.upgrade() {
                     let s = owner.read(cx);
                     for model in &s.models {
                         let value = text(model, "model").to_owned();
                         let entity = entity.clone();
-                        menu = menu.item(PopupMenuItem::new(text(model, "displayName").to_owned())
-                            .checked(value == s.model).on_click(move |_, _, cx| {
-                                let _ = entity.update(cx, |s, cx| { s.select_model(&value, cx); cx.notify(); });
-                            }));
+                        menu = menu.item(
+                            PopupMenuItem::new(text(model, "displayName").to_owned())
+                                .checked(value == s.model)
+                                .on_click(move |_, _, cx| {
+                                    let _ = entity.update(cx, |s, cx| {
+                                        s.select_model(&value, cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        );
                     }
                 }
                 menu
             });
         let entity = cx.entity().downgrade();
-        let speed_label = model.and_then(|m| array(&m["serviceTiers"]).iter().find(|t| t["id"] == self.service_tier))
-            .map(|t| text(t, "name")).unwrap_or("標準");
-        let speed = Button::new("model-speed").label(format!("⚡︎ {speed_label}"))
-            .accessibility_label("速度").dropdown_caret(true).small().ghost()
+        let speed_label = model
+            .and_then(|m| {
+                array(&m["serviceTiers"])
+                    .iter()
+                    .find(|t| t["id"] == self.service_tier)
+            })
+            .map(|t| text(t, "name"))
+            .unwrap_or("標準");
+        let speed = Button::new("model-speed")
+            .label(format!("⚡︎ {speed_label}"))
+            .accessibility_label("速度")
+            .dropdown_caret(true)
+            .small()
+            .ghost()
             .dropdown_menu(move |mut menu, _, cx| {
                 if let Some(owner) = entity.upgrade() {
                     let s = owner.read(cx);
                     let standard = entity.clone();
-                    menu = menu.item(PopupMenuItem::new("標準").checked(s.service_tier == "default")
-                        .on_click(move |_, _, cx| {
-                            let _ = standard.update(cx, |s, cx| { s.service_tier = "default".into(); cx.notify(); });
-                        }));
+                    menu = menu.item(
+                        PopupMenuItem::new("標準")
+                            .checked(s.service_tier == "default")
+                            .on_click(move |_, _, cx| {
+                                let _ = standard.update(cx, |s, cx| {
+                                    s.service_tier = "default".into();
+                                    cx.notify();
+                                });
+                            }),
+                    );
                     if let Some(model) = s.selected_model() {
-                        for tier in array(&model["serviceTiers"]).iter().filter(|t| t["id"] != "default") {
+                        for tier in array(&model["serviceTiers"])
+                            .iter()
+                            .filter(|t| t["id"] != "default")
+                        {
                             let value = text(tier, "id").to_owned();
                             let entity = entity.clone();
-                            menu = menu.item(PopupMenuItem::new(text(tier, "name").to_owned())
-                                .checked(value == s.service_tier).on_click(move |_, _, cx| {
-                                    let _ = entity.update(cx, |s, cx| { s.service_tier = value.clone(); cx.notify(); });
-                                }));
+                            menu = menu.item(
+                                PopupMenuItem::new(text(tier, "name").to_owned())
+                                    .checked(value == s.service_tier)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = entity.update(cx, |s, cx| {
+                                            s.service_tier = value.clone();
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
                         }
                     }
                 }
                 menu
             });
-        let efforts = model.map(|m| array(&m["supportedReasoningEfforts"])).unwrap_or_default();
-        v_flex().w(px(280.)).gap_2()
+        let efforts = model
+            .map(|m| array(&m["supportedReasoningEfforts"]))
+            .unwrap_or_default();
+        v_flex()
+            .w(px(280.))
+            .gap_2()
             .child(h_flex().justify_between().child(speed).child(models))
             .child(model_effort_slider(&self.effort_slider, efforts.len(), cx))
             .into_any_element()
@@ -1445,10 +1778,10 @@ impl Desktop {
                 format!("{} ×", text(file, "name")),
                 cx,
                 move |s, _, _| {
-                    if let Some(files) = s.cache["attachments"][&key].as_array_mut() {
-                        if i < files.len() {
-                            files.remove(i);
-                        }
+                    if let Some(files) = s.cache["attachments"][&key].as_array_mut()
+                        && i < files.len()
+                    {
+                        files.remove(i);
                     }
                     s.refresh_sources();
                     s.persist();
@@ -2119,9 +2452,10 @@ impl Desktop {
                             .child(self.review_error.clone()),
                     )
                 })
-                .child(div().flex_1().min_h_0().child(self.diff(
+                .child(div().flex_1().min_h_0().child(Self::diff(
+                    &mut self.diffs,
                     "workspace-patch".into(),
-                    &text(&self.review, "diff").to_owned(),
+                    text(&self.review, "diff"),
                     cx,
                 )))
                 .into_any_element(),
@@ -2180,8 +2514,13 @@ impl Render for Desktop {
         }
         if self.image_gallery.is_some() {
             let gallery = self.image_gallery_view(window, cx);
-            return h_flex().size_full().bg(rgb(0x181818)).text_color(rgb(0xececec))
-                .font_family("Hiragino Sans").text_size(px(14.)).child(gallery);
+            return h_flex()
+                .size_full()
+                .bg(rgb(0x181818))
+                .text_color(rgb(0xececec))
+                .font_family("Hiragino Sans")
+                .text_size(px(14.))
+                .child(gallery);
         }
         let wide = window.viewport_size().width >= px(1080.);
         let title = if self.tab == Tab::Settings {

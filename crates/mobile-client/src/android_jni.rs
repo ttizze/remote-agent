@@ -5,7 +5,7 @@ use std::ptr;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jni::{
     JNIEnv,
-    objects::{JClass, JString},
+    objects::{JByteArray, JClass, JString},
     sys::{JNI_FALSE, JNI_TRUE, jboolean, jlong, jstring},
 };
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
@@ -14,7 +14,7 @@ use zeroize::Zeroizing;
 use crate::ffi::{self, CConfig};
 
 fn exception(env: &mut JNIEnv<'_>, error: impl AsRef<str>) {
-    let _ = env.throw_new("java/lang/RuntimeException", error.as_ref());
+    let _ = env.throw_new("java/lang/IllegalStateException", error.as_ref());
 }
 
 fn java_string(env: &mut JNIEnv<'_>, value: impl AsRef<str>) -> jstring {
@@ -63,15 +63,14 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_connect(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     config_json: JString<'_>,
-    key_base64: JString<'_>,
+    device_pkcs8: JByteArray<'_>,
 ) -> jlong {
     let result = (|| {
         let config: CConfig = serde_json::from_str(&string(&mut env, config_json)?)
             .map_err(|_| "invalid config JSON".to_owned())?;
         let key = Zeroizing::new(
-            URL_SAFE_NO_PAD
-                .decode(string(&mut env, key_base64)?)
-                .map_err(|_| "invalid device key base64".to_owned())?,
+            env.convert_byte_array(&device_pkcs8)
+                .map_err(|_| "invalid device key bytes".to_owned())?,
         );
         ffi::connect_handle(config, &key).map(|handle| handle as jlong)
     })();
@@ -209,14 +208,22 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_close(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_transfer(mut env: JNIEnv<'_>, _class: JClass<'_>, handle: jlong, params_json: JString<'_>) -> jstring {
+pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_transfer(
+    mut env: JNIEnv<'_>,
+    _class: JClass<'_>,
+    handle: jlong,
+    params_json: JString<'_>,
+) -> jstring {
     let result = (|| {
         let params = string(&mut env, params_json)?;
         ffi::transfer_json(borrowed_handle(handle)?, &params)
     })();
     match result {
         Ok(response) => java_string(&mut env, response),
-        Err(error) => { exception(&mut env, error); ptr::null_mut() }
+        Err(error) => {
+            exception(&mut env, error);
+            ptr::null_mut()
+        }
     }
 }
 
@@ -226,8 +233,13 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_presentCo
     _class: JClass<'_>,
     request_json: JString<'_>,
 ) -> jstring {
-    match string(&mut env, request_json).and_then(|request| conversation_presentation::present_json(&request)) {
+    match string(&mut env, request_json)
+        .and_then(|request| conversation_presentation::present_json(&request))
+    {
         Ok(result) => java_string(&mut env, result),
-        Err(error) => { exception(&mut env, error); ptr::null_mut() }
+        Err(error) => {
+            exception(&mut env, error);
+            ptr::null_mut()
+        }
     }
 }

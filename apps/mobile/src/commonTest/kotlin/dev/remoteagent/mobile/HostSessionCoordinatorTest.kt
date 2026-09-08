@@ -7,9 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
-import kotlin.test.assertNotSame
 import kotlin.test.assertNull
-import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -52,9 +50,7 @@ class HostSessionCoordinatorTest {
         val second = coordinator.beginConnection("host-1")
         var cancelled = false
 
-        assertFalse(
-            coordinator.installSubscription("host-1", first, HostEventSubscription { cancelled = true }),
-        )
+        assertFalse(coordinator.installSubscription("host-1", first, HostEventSubscription { cancelled = true }))
 
         assertTrue(cancelled)
         assertTrue(coordinator.isCurrent("host-1", second))
@@ -109,10 +105,8 @@ class HostSessionCoordinatorTest {
                 ),
             )
         }
-        assertEquals(
-            HostReadBufferResult.Overflowed,
-            countLimited.bufferEvent(countToken, ThreadEvent.TurnStarted("thread-1", "turn-256", TurnStatus.InProgress)),
-        )
+        val overflow = ThreadEvent.TurnStarted("thread-1", "turn-256", TurnStatus.InProgress)
+        assertEquals(HostReadBufferResult.Overflowed, countLimited.bufferEvent(countToken, overflow))
         assertTrue(assertNotNull(countLimited.finishRead(countToken)).retryRequired)
     }
 
@@ -128,11 +122,8 @@ class HostSessionCoordinatorTest {
     }
 
     @Test
-    fun each_host_has_one_connect_mutex_and_hosts_do_not_share_it() {
+    fun connection_blocks_complete_for_each_host() {
         val coordinator = HostSessionCoordinator()
-        val firstHostMutex = coordinator.hostConnectionMutex("host-1")
-        assertSame(firstHostMutex, coordinator.hostConnectionMutex("host-1"))
-        assertNotSame(firstHostMutex, coordinator.hostConnectionMutex("host-2"))
 
         var firstResult = 0
         var secondResult = 0
@@ -150,15 +141,12 @@ class HostSessionCoordinatorTest {
         val releaseFirstHost = CompletableDeferred<Unit>()
         val sameHostEntered = CompletableDeferred<Unit>()
         val otherHostEntered = CompletableDeferred<Unit>()
-        val first = launch(start = CoroutineStart.UNDISPATCHED) {
-            coordinator.withHostConnection("host-1") { releaseFirstHost.await() }
-        }
-        val sameHost = launch {
-            coordinator.withHostConnection("host-1") { sameHostEntered.complete(Unit) }
-        }
-        val otherHost = launch {
-            coordinator.withHostConnection("host-2") { otherHostEntered.complete(Unit) }
-        }
+        val first =
+            launch(start = CoroutineStart.UNDISPATCHED) {
+                coordinator.withHostConnection("host-1") { releaseFirstHost.await() }
+            }
+        val sameHost = launch { coordinator.withHostConnection("host-1") { sameHostEntered.complete(Unit) } }
+        val otherHost = launch { coordinator.withHostConnection("host-2") { otherHostEntered.complete(Unit) } }
 
         otherHostEntered.await()
         assertFalse(sameHostEntered.isCompleted)
@@ -169,12 +157,15 @@ class HostSessionCoordinatorTest {
 
     private fun runSuspend(block: suspend () -> Unit) {
         var completion: Result<Unit>? = null
-        block.startCoroutine(object : Continuation<Unit> {
-            override val context = EmptyCoroutineContext
-            override fun resumeWith(result: Result<Unit>) {
-                completion = result
+        block.startCoroutine(
+            object : Continuation<Unit> {
+                override val context = EmptyCoroutineContext
+
+                override fun resumeWith(result: Result<Unit>) {
+                    completion = result
+                }
             }
-        })
+        )
         (completion ?: error("test coroutine suspended unexpectedly")).getOrThrow()
     }
 }

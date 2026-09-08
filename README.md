@@ -126,6 +126,26 @@ nix develop . --command cargo xtask relay-e2e
 
 Other verification commands:
 
+Code quality uses the same command locally and in `.github/workflows/quality.yml`:
+
+```sh
+nix develop . --command cargo xtask quality
+nix develop . --command cargo xtask quality rust # or elixir, kotlin, swift
+```
+
+The command checks every selected language and returns a failure if any check fails. It does not rewrite files. Run `mix deps.get --check-locked` inside `apps/server` in the Nix shell before the first Elixir check. CI installs dependencies from the committed lockfile.
+
+| Language | Configuration and policy |
+| --- | --- |
+| Rust | `cargo fmt --all --check` and Clippy over all workspace targets, with warnings denied. Keep Clippy's default lint groups; do not enable `restriction` or `pedantic` wholesale. The toolchain is pinned by `flake.lock`. |
+| Elixir | `.formatter.exs`, `.credo.exs`, and `mix quality`: formatter, compiler warnings, strict Credo defaults, and Dialyxir defaults, including unknown-function checks. Dev/test dependencies are pinned by `mix.lock`; PLTs stay in ignored build directories. |
+| Kotlin | ktfmt Gradle plugin 0.26.0 with Kotlin style and 120-column wrapping, plus detekt 1.23.8 with `buildUponDefaultConfig`, validated `detekt.yml`, and all `src` source sets, including tests and Native. Apply the official Compose naming/default-parameter adjustments. This stable release runs source analysis; its Kotlin 2.0 compiler does not establish Kotlin 2.3 type-resolution coverage. Kotlin compilation and tests remain separate checks. |
+| Swift | Nix-pinned SwiftLint and SwiftFormat, `.swiftlint.yml` and `.swiftformat`, Swift 6.3 formatting syntax with Swift 5 language mode matching Xcode, four-space indentation, LF, 120-column wrapping, and inline commas. Lint handwritten iOS/macOS sources and UI fixtures; build products and dependencies are outside the included roots. |
+
+Default thresholds remain enabled. There are no baselines or blanket failure suppression. New tool versions and individual rule exceptions require review. Formatting can be applied with `cargo fmt --all`, `mix format`, `./gradlew :apps:mobile:ktfmtFormat`, and `swiftformat apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/desktop/macos` in the Nix shell.
+
+Configuration references: [Clippy lint groups](https://doc.rust-lang.org/stable/clippy/lints.html), [Credo configuration](https://credo.hexdocs.pm/config_file.html), [Dialyxir defaults](https://dialyxir.hexdocs.pm/readme.html), [detekt configuration](https://detekt.dev/docs/1.23.8/gettingstarted/gradle/), [Compose adjustments](https://detekt.dev/docs/1.23.8/introduction/compose/), [SwiftLint](https://github.com/realm/SwiftLint), [SwiftFormat](https://github.com/nicklockwood/SwiftFormat).
+
 ```sh
 nix develop . --command cargo test --workspace
 nix develop . --command cargo test --package bex-desktop

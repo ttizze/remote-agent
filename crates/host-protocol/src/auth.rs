@@ -25,15 +25,21 @@ fn decode_key(encoded: &str, kind: &'static str) -> Result<[u8; 32], Base64UrlEr
 pub struct PairingToken([u8; 32]);
 
 impl PairingToken {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
-    pub fn to_base64url(&self) -> String { URL_SAFE_NO_PAD.encode(self.0) }
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+    pub fn to_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.0)
+    }
     pub fn from_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
         decode_key(encoded, "pairing token").map(Self)
     }
 }
 
 impl fmt::Debug for PairingToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("PairingToken([redacted])") }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PairingToken([redacted])")
+    }
 }
 
 impl Serialize for PairingToken {
@@ -53,9 +59,15 @@ impl<'de> Deserialize<'de> for PairingToken {
 pub struct Ed25519PublicKey([u8; 32]);
 
 impl Ed25519PublicKey {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
-    pub const fn as_bytes(&self) -> &[u8; 32] { &self.0 }
-    pub fn to_base64url(&self) -> String { URL_SAFE_NO_PAD.encode(self.0) }
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+    pub fn to_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.0)
+    }
     pub fn from_base64url(encoded: &str) -> Result<Self, Base64UrlError> {
         decode_key(encoded, "Ed25519 public key").map(Self)
     }
@@ -93,7 +105,10 @@ mod tests {
     #[test]
     fn fixed_keys_reject_wrong_lengths_padding_and_noncanonical_trailing_bits() {
         let key = Ed25519PublicKey::from_bytes([7; 32]);
-        assert_eq!(Ed25519PublicKey::from_base64url(&key.to_base64url()).unwrap(), key);
+        assert_eq!(
+            Ed25519PublicKey::from_base64url(&key.to_base64url()).unwrap(),
+            key
+        );
         assert!(Ed25519PublicKey::from_base64url(&URL_SAFE_NO_PAD.encode([7; 31])).is_err());
         assert!(Ed25519PublicKey::from_base64url(&(key.to_base64url() + "=")).is_err());
         let mut invalid = URL_SAFE_NO_PAD.encode([0; 32]);
@@ -101,7 +116,10 @@ mod tests {
         invalid.push('B');
         assert!(Ed25519PublicKey::from_base64url(&invalid).is_err());
         let ticket = PairingToken::from_bytes([9; 32]);
-        assert_eq!(PairingToken::from_base64url(&ticket.to_base64url()).unwrap(), ticket);
+        assert_eq!(
+            PairingToken::from_base64url(&ticket.to_base64url()).unwrap(),
+            ticket
+        );
         assert!(!format!("{ticket:?}").contains(&ticket.to_base64url()));
     }
 }

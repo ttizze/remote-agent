@@ -45,7 +45,7 @@ impl DiffView {
         if self.source.as_ref() == source {
             return;
         }
-        self.rows = parse(&source);
+        self.rows = parse(source);
         self.source = source.to_owned().into();
         self.rebuild();
         cx.notify();

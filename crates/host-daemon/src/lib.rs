@@ -3,17 +3,17 @@ mod desktop_projects;
 mod device_auth;
 mod dictation;
 mod host_identity;
-mod jsonl_session;
-mod ssh_gateway;
 mod host_runtime;
+mod jsonl_session;
 mod remote_hosts;
+mod ssh_gateway;
 mod workspace_files;
-mod worktrees;
 mod workspace_review;
-pub use workspace_review::{WorkspaceReview, inspect_workspace};
-pub use remote_hosts::{RemoteCredentialStore, RemoteHosts, RemoteHostProfile};
+mod worktrees;
 #[cfg(target_os = "macos")]
 pub use remote_hosts::KeychainRemoteStore;
+pub use remote_hosts::{RemoteCredentialStore, RemoteHostProfile, RemoteHosts};
+pub use workspace_review::{WorkspaceReview, inspect_workspace};
 
 pub use host_runtime::{HostRuntime, LocalListener};
 

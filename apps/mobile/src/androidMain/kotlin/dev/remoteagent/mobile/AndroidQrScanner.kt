@@ -22,8 +22,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.ExecutorService
@@ -35,19 +35,24 @@ import java.util.concurrent.atomic.AtomicBoolean
 fun rememberAndroidQrScanner(activity: ComponentActivity): (onContents: (String) -> Unit) -> Unit {
     var request by remember { mutableStateOf<((String) -> Unit)?>(null) }
     var permissionRequested by remember { mutableStateOf(false) }
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        permissionRequested = granted
-        if (!granted) request = null
-    }
+    val permission =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            permissionRequested = granted
+            if (!granted) request = null
+        }
     val requestScan: ((String) -> Unit) -> Unit = { callback ->
         request = callback
-        permissionRequested = ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        permissionRequested =
+            ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         if (!permissionRequested) permission.launch(Manifest.permission.CAMERA)
     }
     if (request != null && permissionRequested) {
         AndroidQrCaptureDialog(
             activity = activity,
-            onContents = { contents -> request?.invoke(contents); request = null },
+            onContents = { contents ->
+                request?.invoke(contents)
+                request = null
+            },
             onDismiss = { request = null },
         )
     }
@@ -66,56 +71,58 @@ private fun AndroidQrCaptureDialog(activity: ComponentActivity, onContents: (Str
             AndroidView(
                 factory = { viewContext ->
                     PreviewView(viewContext).also { previewView ->
-                        bindCamera(activity, activity, previewView, executor, handled, onContents)
+                        bindCamera(activity, previewView, executor, handled, onContents)
                     }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
         },
     )
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { executor.shutdownNow() }
-    }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { executor.shutdownNow() } }
 }
 
 private fun bindCamera(
     activity: ComponentActivity,
-    lifecycleOwner: androidx.lifecycle.LifecycleOwner,
     previewView: PreviewView,
     executor: ExecutorService,
     handled: AtomicBoolean,
     onContents: (String) -> Unit,
 ) {
     val providerFuture = ProcessCameraProvider.getInstance(activity)
-    providerFuture.addListener({
-        val provider = runCatching { providerFuture.get() }.getOrNull() ?: return@addListener
-        val scannerOptions = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build()
-        val scanner = BarcodeScanning.getClient(scannerOptions)
-        val analysis = ImageAnalysis.Builder().build().also { useCase ->
-            useCase.setAnalyzer(executor) { imageProxy ->
-                val mediaImage = imageProxy.image
-                if (mediaImage == null || handled.get()) {
-                    imageProxy.close()
-                } else {
-                    scanner.process(InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees))
-                        .addOnSuccessListener(executor) { barcodes ->
-                            val value = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE }?.rawValue
-                            if (value != null && handled.compareAndSet(false, true)) activity.runOnUiThread { onContents(value) }
+    providerFuture.addListener(
+        {
+            val provider = runCatching { providerFuture.get() }.getOrNull() ?: return@addListener
+            val scannerOptions = BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
+            val scanner = BarcodeScanning.getClient(scannerOptions)
+            val analysis =
+                ImageAnalysis.Builder().build().also { useCase ->
+                    useCase.setAnalyzer(executor) { imageProxy ->
+                        val mediaImage = imageProxy.image
+                        if (mediaImage == null || handled.get()) {
+                            imageProxy.close()
+                        } else {
+                            scanner
+                                .process(InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees))
+                                .addOnSuccessListener(executor) { barcodes ->
+                                    val value = barcodes.firstOrNull { it.format == Barcode.FORMAT_QR_CODE }?.rawValue
+                                    if (value != null && handled.compareAndSet(false, true))
+                                        activity.runOnUiThread { onContents(value) }
+                                }
+                                .addOnCompleteListener { imageProxy.close() }
                         }
-                        .addOnCompleteListener { imageProxy.close() }
+                    }
                 }
-            }
-        }
-        runCatching {
-            provider.unbindAll()
-            provider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) },
-                analysis,
-            )
-        }.onFailure { scanner.close() }
-    }, ContextCompat.getMainExecutor(activity))
+            runCatching {
+                    provider.unbindAll()
+                    provider.bindToLifecycle(
+                        activity,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) },
+                        analysis,
+                    )
+                }
+                .onFailure { scanner.close() }
+        },
+        ContextCompat.getMainExecutor(activity),
+    )
 }

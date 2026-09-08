@@ -1,10 +1,10 @@
 package dev.remoteagent.mobile
 
 import kotlin.test.Test
-import kotlin.test.assertNotSame
-import kotlin.test.assertSame
-import kotlin.test.assertNull
 import kotlin.test.assertEquals
+import kotlin.test.assertNotSame
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -13,13 +13,24 @@ import kotlinx.serialization.json.put
 class IosAppViewStateTest {
     @Test
     fun generated_images_survive_projection_with_a_saved_path_or_inline_result() {
-        val images = listOf("/fixture/generated image.png", "").mapIndexed { index, path ->
-            codexItem(buildJsonObject {
-                put("id", "image-$index"); put("type", "imageGeneration"); put("status", "completed")
-                put("savedPath", path); put("result", "cG5n")
-            })
-        }
-        val turn = CodexTurn("turn", TurnStatus.Completed, images + CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer))
+        val images =
+            listOf("/fixture/generated image.png", "").mapIndexed { index, path ->
+                codexItem(
+                    buildJsonObject {
+                        put("id", "image-$index")
+                        put("type", "imageGeneration")
+                        put("status", "completed")
+                        put("savedPath", path)
+                        put("result", "cG5n")
+                    }
+                )
+            }
+        val turn =
+            CodexTurn(
+                "turn",
+                TurnStatus.Completed,
+                images + CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer),
+            )
         val output = IosViewStateProjector().conversation(state(listOf(turn)))!!.turns.flatMap { it.responses }
         assertEquals(listOf("image-0", "image-1", "answer"), output.map { it.id })
         assertEquals(listOf("/fixture/generated image.png"), output[0].imageSources)
@@ -30,12 +41,18 @@ class IosAppViewStateTest {
     @Test
     fun loading_deferred_details_invalidates_the_cached_item() {
         val projector = IosViewStateProjector()
-        val command = CodexItem.CommandExecution("command", "pwd", output = "/fixture", status = CommandExecutionStatus.Completed)
-        val turn = CodexTurn("live", TurnStatus.InProgress, listOf(command), raw = buildJsonObject {
-            put("deferredItemIds", JsonArray(listOf(JsonPrimitive(command.id))))
-        })
+        val command =
+            CodexItem.CommandExecution("command", "pwd", output = "/fixture", status = CommandExecutionStatus.Completed)
+        val turn =
+            CodexTurn(
+                "live",
+                TurnStatus.InProgress,
+                listOf(command),
+                raw = buildJsonObject { put("deferredItemIds", JsonArray(listOf(JsonPrimitive(command.id)))) },
+            )
         val before = projector.conversation(state(listOf(turn)))!!.turns.single().activityItems.single()
-        val loaded = projector.conversation(state(listOf(turn.copy(raw = null))))!!.turns.single().activityItems.single()
+        val loaded =
+            projector.conversation(state(listOf(turn.copy(raw = null))))!!.turns.single().activityItems.single()
         assertEquals(true, before.isDeferred)
         assertEquals(false, loaded.isDeferred)
         assertNotSame(before, loaded)
@@ -83,9 +100,30 @@ class IosAppViewStateTest {
         val original = projector.thread!!
         val profile = initial.cache.profile("host")
         val snapshot = profile.snapshots.getValue("conversation")
-        val updated = initial.copy(cache = MobileCache(mapOf("host" to profile.copy(snapshots = mapOf(
-            "conversation" to snapshot.copy(turns = listOf(turn.copy(items = listOf(CodexItem.AgentMessage("answer", "after!"))))),
-        )))))
+        val updated =
+            initial.copy(
+                cache =
+                    MobileCache(
+                        mapOf(
+                            "host" to
+                                profile.copy(
+                                    snapshots =
+                                        mapOf(
+                                            "conversation" to
+                                                snapshot.copy(
+                                                    turns =
+                                                        listOf(
+                                                            turn.copy(
+                                                                items =
+                                                                    listOf(CodexItem.AgentMessage("answer", "after!"))
+                                                            )
+                                                        )
+                                                )
+                                        )
+                                )
+                        )
+                    )
+            )
         assertSame(navigation, projector.project(updated))
         assertNotSame(original, projector.thread)
         assertEquals("after!", projector.thread!!.turns.single().responses.single().expandedBody())
@@ -96,24 +134,41 @@ class IosAppViewStateTest {
     @Test
     fun open_conversation_keeps_its_upload_directory_when_recent_titles_drop_it() {
         val host = HostProfile("runner", "Mac", "wss://relay.example.test", "host", "device-ref")
-        val summary = ThreadSummary(
-            id = "conversation", preview = "", workingDirectory = WorkingDirectory("/workspace/chat"),
-            createdAtMs = 1, updatedAtMs = 1, status = ThreadStatus.Idle,
-        )
-        val state = AppState(
-            profiles = listOf(host), selectedProfileId = host.id,
-            profileViews = mapOf(host.id to ProfileViewState(
-                connection = ConnectionPhase.Connected, selectedThreadId = summary.id,
-            )),
-            cache = MobileCache(mapOf(host.id to ProfileMobileCache(
-                snapshots = mapOf(summary.id to ThreadSnapshot(summary = summary)),
-            ))),
-        )
+        val summary =
+            ThreadSummary(
+                id = "conversation",
+                preview = "",
+                workingDirectory = WorkingDirectory("/workspace/chat"),
+                createdAtMs = 1,
+                updatedAtMs = 1,
+                status = ThreadStatus.Idle,
+            )
+        val state =
+            AppState(
+                profiles = listOf(host),
+                selectedProfileId = host.id,
+                profileViews =
+                    mapOf(
+                        host.id to
+                            ProfileViewState(connection = ConnectionPhase.Connected, selectedThreadId = summary.id)
+                    ),
+                cache =
+                    MobileCache(
+                        mapOf(
+                            host.id to
+                                ProfileMobileCache(snapshots = mapOf(summary.id to ThreadSnapshot(summary = summary)))
+                        )
+                    ),
+            )
         val projector = IosViewStateProjector()
         assertEquals("/workspace/chat", projector.project(state).workingDirectory)
-        val newChat = state.copy(profileViews = mapOf(host.id to state.selectedView.copy(
-            selectedThreadId = null, newThreadCwd = "/workspace/other",
-        )))
+        val newChat =
+            state.copy(
+                profileViews =
+                    mapOf(
+                        host.id to state.selectedView.copy(selectedThreadId = null, newThreadCwd = "/workspace/other")
+                    )
+            )
         assertEquals("/workspace/other", projector.project(newChat).workingDirectory)
     }
 
@@ -140,9 +195,7 @@ class IosAppViewStateTest {
 
         val view = projector.conversation(state(listOf(first, second)))!!
 
-        assertEquals(listOf("first", "second"), view.turns.flatMap { turn ->
-            turn.responses.map { it.expandedBody() }
-        })
+        assertEquals(listOf("first", "second"), view.turns.flatMap { turn -> turn.responses.map { it.expandedBody() } })
     }
 
     @Test
@@ -156,7 +209,8 @@ class IosAppViewStateTest {
         val echoed = turn.copy(items = turn.items + CodexItem.UserMessage("native", "additional", "client"))
         val reconciled = projector.conversation(state(listOf(echoed)))!!
         assertEquals(listOf("client"), reconciled.turns.flatMap { it.userMessages }.map { it.id })
-        val queued = projector.conversation(state(listOf(echoed), listOf(pending.copy(clientId = "queue", turnId = null))))!!
+        val queued =
+            projector.conversation(state(listOf(echoed), listOf(pending.copy(clientId = "queue", turnId = null))))!!
         assertEquals(listOf("queue"), queued.queuedMessages.map { it.id })
     }
 
@@ -188,12 +242,29 @@ class IosAppViewStateTest {
         hostId: String = "host",
     ): AppState {
         val host = HostProfile("runner", "Mac", "wss://relay.example.test", hostId, "device-ref")
-        val summary = ThreadSummary(id = "conversation", preview = "", workingDirectory = WorkingDirectory("/fixture"),
-            createdAtMs = 1, updatedAtMs = 1, status = ThreadStatus.Idle)
-        return AppState(profiles = listOf(host), selectedProfileId = host.id,
+        val summary =
+            ThreadSummary(
+                id = "conversation",
+                preview = "",
+                workingDirectory = WorkingDirectory("/fixture"),
+                createdAtMs = 1,
+                updatedAtMs = 1,
+                status = ThreadStatus.Idle,
+            )
+        return AppState(
+            profiles = listOf(host),
+            selectedProfileId = host.id,
             profileViews = mapOf(host.id to ProfileViewState(selectedThreadId = summary.id)),
-            cache = MobileCache(mapOf(host.id to ProfileMobileCache(snapshots = mapOf(
-                summary.id to ThreadSnapshot(summary, turns, submittedMessages = submissions),
-            )))))
+            cache =
+                MobileCache(
+                    mapOf(
+                        host.id to
+                            ProfileMobileCache(
+                                snapshots =
+                                    mapOf(summary.id to ThreadSnapshot(summary, turns, submittedMessages = submissions))
+                            )
+                    )
+                ),
+        )
     }
 }

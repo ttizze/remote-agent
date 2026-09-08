@@ -44,17 +44,7 @@ defmodule RemoteAgentServer.RelayRoutes do
         if Map.has_key?(state.members, pid) do
           {:reply, {:error, "already_joined"}, state}
         else
-          client_id = :crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)
-
-          case deliver(runner.pid, {:relay_open, client_id}) do
-            :ok ->
-              state = put_in(state.runners[runner_id].clients[client_id], pid)
-              state = monitor_member(state, pid, {:mobile, runner_id, client_id})
-              {:reply, {:ok, client_id}, state}
-
-            {:error, reason} ->
-              {:reply, {:error, reason}, state}
-          end
+          join_mobile(state, runner_id, runner.pid, pid)
         end
 
       {:ok, _runner} ->
@@ -111,6 +101,20 @@ defmodule RemoteAgentServer.RelayRoutes do
     case Map.pop(state.monitors, ref) do
       {nil, _} -> {:noreply, state}
       {pid, monitors} -> {:noreply, remove_member(%{state | monitors: monitors}, pid)}
+    end
+  end
+
+  defp join_mobile(state, runner_id, runner_pid, pid) do
+    client_id = :crypto.strong_rand_bytes(16) |> Base.url_encode64(padding: false)
+
+    case deliver(runner_pid, {:relay_open, client_id}) do
+      :ok ->
+        state = put_in(state.runners[runner_id].clients[client_id], pid)
+        state = monitor_member(state, pid, {:mobile, runner_id, client_id})
+        {:reply, {:ok, client_id}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 

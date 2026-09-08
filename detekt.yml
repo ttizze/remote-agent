@@ -1,0 +1,12 @@
+config:
+  validation: true
+  warningsAsErrors: true
+
+# Compose functions returning Unit use PascalCase, as in the official guide.
+naming:
+  FunctionNaming:
+    ignoreAnnotated: ['Composable']
+
+complexity:
+  LongParameterList:
+    ignoreDefaultParameters: true

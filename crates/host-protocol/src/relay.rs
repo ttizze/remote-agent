@@ -26,11 +26,18 @@ impl fmt::Debug for RelayEndpoint {
 impl RelayEndpoint {
     pub fn validate(&self) -> Result<(), RelayEndpointError> {
         self.parsed_url()?;
-        if self.runner_id.is_empty() || self.runner_id.len() > 512 || self.runner_id.chars().any(char::is_control) {
-            return Err(RelayEndpointError("runner ID must contain 1 to 512 non-control bytes"));
+        if self.runner_id.is_empty()
+            || self.runner_id.len() > 512
+            || self.runner_id.chars().any(char::is_control)
+        {
+            return Err(RelayEndpointError(
+                "runner ID must contain 1 to 512 non-control bytes",
+            ));
         }
         if self.relay_token.is_empty() || self.relay_token.len() > 512 {
-            return Err(RelayEndpointError("relay token must contain 1 to 512 bytes"));
+            return Err(RelayEndpointError(
+                "relay token must contain 1 to 512 bytes",
+            ));
         }
         Ok(())
     }
@@ -47,17 +54,35 @@ impl RelayEndpoint {
     }
 
     fn parsed_url(&self) -> Result<Url, RelayEndpointError> {
-        let url = Url::parse(&self.relay_url).map_err(|_| RelayEndpointError("invalid relay URL"))?;
-        let authority = self.relay_url.split_once("://")
+        let url =
+            Url::parse(&self.relay_url).map_err(|_| RelayEndpointError("invalid relay URL"))?;
+        let authority = self
+            .relay_url
+            .split_once("://")
             .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
             .unwrap_or_default();
-        if !matches!(url.scheme(), "ws" | "wss") || url.host_str().is_none() || authority.is_empty()
-            || !url.username().is_empty() || url.password().is_some() || url.fragment().is_some()
-            || self.relay_url.chars().any(|c| c.is_whitespace() || c.is_control()) {
-            return Err(RelayEndpointError("relay URL must be ws:// or wss:// with a host and no userinfo or fragment"));
+        if !matches!(url.scheme(), "ws" | "wss")
+            || url.host_str().is_none()
+            || authority.is_empty()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+            || self
+                .relay_url
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(RelayEndpointError(
+                "relay URL must be ws:// or wss:// with a host and no userinfo or fragment",
+            ));
         }
-        if url.query_pairs().any(|(key, _)| matches!(key.as_ref(), "token" | "runner_id" | "role" | "vsn")) {
-            return Err(RelayEndpointError("relay URL must not contain authentication or protocol query parameters"));
+        if url
+            .query_pairs()
+            .any(|(key, _)| matches!(key.as_ref(), "token" | "runner_id" | "role" | "vsn"))
+        {
+            return Err(RelayEndpointError(
+                "relay URL must not contain authentication or protocol query parameters",
+            ));
         }
         Ok(url)
     }
@@ -73,11 +98,24 @@ mod tests {
 
     #[test]
     fn credentials_are_encoded_once_and_url_cannot_override_them() {
-        let mut endpoint = RelayEndpoint { relay_url: "ws://localhost/socket/websocket?region=local".into(), relay_token: "a?b&c".into(), runner_id: "runner/one".into() };
+        let mut endpoint = RelayEndpoint {
+            relay_url: "ws://localhost/socket/websocket?region=local".into(),
+            relay_token: "a?b&c".into(),
+            runner_id: "runner/one".into(),
+        };
         let url = endpoint.socket_url("mobile").unwrap();
-        assert_eq!(url.query_pairs().find(|(k, _)| k == "token").unwrap().1, "a?b&c");
+        assert_eq!(
+            url.query_pairs().find(|(k, _)| k == "token").unwrap().1,
+            "a?b&c"
+        );
         assert!(!format!("{endpoint:?}").contains("a?b&c"));
-        for bad in ["ws:///socket", "https://localhost/socket", "ws://localhost/socket?token=other", "ws://user:pass@localhost/socket", "ws://localhost/socket#secret"] {
+        for bad in [
+            "ws:///socket",
+            "https://localhost/socket",
+            "ws://localhost/socket?token=other",
+            "ws://user:pass@localhost/socket",
+            "ws://localhost/socket#secret",
+        ] {
             endpoint.relay_url = bad.into();
             assert!(endpoint.validate().is_err(), "{bad}");
         }

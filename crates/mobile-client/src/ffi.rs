@@ -460,21 +460,45 @@ pub unsafe extern "C" fn mobile_client_string_free(value: *mut c_char) {
 pub(crate) fn transfer_json(handle: &Handle, params: &str) -> Result<String, String> {
     use std::path::PathBuf;
     #[derive(Deserialize)]
-    #[serde(tag="direction", rename_all="camelCase")]
+    #[serde(tag = "direction", rename_all = "camelCase")]
     enum Transfer {
-        Upload { source: PathBuf, directory: PathBuf, #[serde(rename="fileName")] file_name: String },
-        Download { source: PathBuf, destination: PathBuf },
+        Upload {
+            source: PathBuf,
+            directory: PathBuf,
+            #[serde(rename = "fileName")]
+            file_name: String,
+        },
+        Download {
+            source: PathBuf,
+            destination: PathBuf,
+        },
     }
-    let params: Transfer = serde_json::from_str(params).map_err(|_| "invalid transfer parameters")?;
-    let result = handle.runtime.block_on(async {
-        match params {
-            Transfer::Upload { source, directory, file_name } => handle.client.upload_file(&source, &directory, &file_name).await,
-            Transfer::Download { source, destination } => {
-                handle.client.download_file(&source, &destination).await?;
-                Ok(serde_json::json!({"path":destination}))
+    let params: Transfer =
+        serde_json::from_str(params).map_err(|_| "invalid transfer parameters")?;
+    let result = handle
+        .runtime
+        .block_on(async {
+            match params {
+                Transfer::Upload {
+                    source,
+                    directory,
+                    file_name,
+                } => {
+                    handle
+                        .client
+                        .upload_file(&source, &directory, &file_name)
+                        .await
+                }
+                Transfer::Download {
+                    source,
+                    destination,
+                } => {
+                    handle.client.download_file(&source, &destination).await?;
+                    Ok(serde_json::json!({"path":destination}))
+                }
             }
-        }
-    }).map_err(encode_mobile_error)?;
+        })
+        .map_err(encode_mobile_error)?;
     serde_json::to_string(&result).map_err(|_| "failed to encode transfer result".into())
 }
 
@@ -484,18 +508,36 @@ pub(crate) fn transfer_json(handle: &Handle, params: &str) -> Result<String, Str
 /// The handle must remain live until this blocking call returns. Inputs must
 /// be NUL-terminated UTF-8 and error_out, if non-null, writable for one pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mobile_client_transfer(handle: *mut Handle, params_json: *const c_char, error_out: *mut *mut c_char) -> *mut c_char {
-    if !error_out.is_null() { unsafe { *error_out = ptr::null_mut(); } }
-    if handle.is_null() { set_error(error_out, "null mobile client handle"); return ptr::null_mut(); }
+pub unsafe extern "C" fn mobile_client_transfer(
+    handle: *mut Handle,
+    params_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if !error_out.is_null() {
+        unsafe {
+            *error_out = ptr::null_mut();
+        }
+    }
+    if handle.is_null() {
+        set_error(error_out, "null mobile client handle");
+        return ptr::null_mut();
+    }
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<CString, String> {
         let params = input_string(params_json)?;
         let handle = unsafe { &*handle };
-        CString::new(transfer_json(handle, params)?).map_err(|_| "transfer result contains NUL".into())
+        CString::new(transfer_json(handle, params)?)
+            .map_err(|_| "transfer result contains NUL".into())
     }));
     match result {
         Ok(Ok(value)) => value.into_raw(),
-        Ok(Err(error)) => { set_error(error_out, error); ptr::null_mut() }
-        Err(_) => { set_error(error_out, "mobile client panicked"); ptr::null_mut() }
+        Ok(Err(error)) => {
+            set_error(error_out, error);
+            ptr::null_mut()
+        }
+        Err(_) => {
+            set_error(error_out, "mobile client panicked");
+            ptr::null_mut()
+        }
     }
 }
 
@@ -519,8 +561,14 @@ pub unsafe extern "C" fn mobile_client_present_conversation(
     });
     match result {
         Ok(Ok(value)) => value.into_raw(),
-        Ok(Err(error)) => { set_error(error_out, error); ptr::null_mut() }
-        Err(_) => { set_error(error_out, "conversation presentation panicked"); ptr::null_mut() }
+        Ok(Err(error)) => {
+            set_error(error_out, error);
+            ptr::null_mut()
+        }
+        Err(_) => {
+            set_error(error_out, "conversation presentation panicked");
+            ptr::null_mut()
+        }
     }
 }
 
@@ -537,7 +585,8 @@ mod presentation_tests {
             let result = mobile_client_present_conversation(request.as_ptr(), &mut error);
             assert!(error.is_null());
             assert!(!result.is_null());
-            let value: serde_json::Value = serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap();
             assert_eq!(value["title"], "思考");
             mobile_client_string_free(result);
             let invalid = [0xffu8, 0];

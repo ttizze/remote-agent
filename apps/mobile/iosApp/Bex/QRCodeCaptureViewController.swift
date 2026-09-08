@@ -8,9 +8,9 @@ enum BexQrCaptureError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .cameraUnavailable: return "This device has no camera available for QR scanning."
-        case .permissionDenied: return "Camera access is required to scan the pairing QR code."
-        case .sessionConfigurationFailed: return "The QR scanner could not be configured."
+        case .cameraUnavailable: "This device has no camera available for QR scanning."
+        case .permissionDenied: "Camera access is required to scan the pairing QR code."
+        case .sessionConfigurationFailed: "The QR scanner could not be configured."
         }
     }
 }
@@ -26,7 +26,9 @@ final class BexQrCaptureViewController: UIViewController, AVCaptureMetadataOutpu
         super.init(nibName: nil, bundle: nil)
     }
 
-    required init?(coder: NSCoder) { nil }
+    required init?(coder _: NSCoder) {
+        nil
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -55,7 +57,11 @@ final class BexQrCaptureViewController: UIViewController, AVCaptureMetadataOutpu
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    granted ? self.configureAndStart() : self.finish(.failure(.permissionDenied))
+                    if granted {
+                        self.configureAndStart()
+                    } else {
+                        self.finish(.failure(.permissionDenied))
+                    }
                 }
             }
         case .denied, .restricted:
@@ -89,14 +95,14 @@ final class BexQrCaptureViewController: UIViewController, AVCaptureMetadataOutpu
     }
 
     func metadataOutput(
-        _ output: AVCaptureMetadataOutput,
+        _: AVCaptureMetadataOutput,
         didOutput metadataObjects: [AVMetadataObject],
-        from connection: AVCaptureConnection
+        from _: AVCaptureConnection
     ) {
         guard
             !hasCompleted,
             let code = metadataObjects.compactMap({ $0 as? AVMetadataMachineReadableCodeObject })
-                .first?.stringValue,
+            .first?.stringValue,
             !code.isEmpty
         else { return }
         finish(.success(code))

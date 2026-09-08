@@ -65,7 +65,8 @@ impl RpcPeer {
         }
 
         let (outbound, outbound_rx) = mpsc::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
-        let (notifications, initial_notifications) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
+        let (notifications, initial_notifications) =
+            broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
         let (server_requests, initial_requests) = broadcast::channel(MAX_OUTBOUND_QUEUE_MESSAGES);
         let state = Arc::new(StdMutex::new(PeerState {
             pending: HashMap::new(),
@@ -127,7 +128,8 @@ impl RpcPeer {
         let id = numeric_id.to_string();
         let state = &self.state;
         let operation = async {
-            let _permit = self.permits
+            let _permit = self
+                .permits
                 .acquire()
                 .await
                 .map_err(|_| disconnected_or(state, "request limiter closed"))?;
@@ -213,7 +215,9 @@ fn lock_state(state: &SharedState) -> MutexGuard<'_, PeerState> {
 
 fn notification_receiver(state: &SharedState) -> broadcast::Receiver<Notification> {
     let mut state = lock_state(state);
-    if let Some(receiver) = state.initial_notifications.take() { return receiver; }
+    if let Some(receiver) = state.initial_notifications.take() {
+        return receiver;
+    }
     state
         .notifications
         .as_ref()
@@ -223,7 +227,9 @@ fn notification_receiver(state: &SharedState) -> broadcast::Receiver<Notificatio
 
 fn server_request_receiver(state: &SharedState) -> broadcast::Receiver<ServerRequest> {
     let mut state = lock_state(state);
-    if let Some(receiver) = state.initial_requests.take() { return receiver; }
+    if let Some(receiver) = state.initial_requests.take() {
+        return receiver;
+    }
     state
         .server_requests
         .as_ref()

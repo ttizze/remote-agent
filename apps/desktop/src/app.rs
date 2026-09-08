@@ -107,7 +107,9 @@ struct ImageGallery {
 
 impl ImageGallery {
     fn current_image(&self) -> &(std::sync::Arc<String>, bool) {
-        self.selected.and_then(|index| self.entries.get(index)).unwrap_or(&self.initial)
+        self.selected
+            .and_then(|index| self.entries.get(index))
+            .unwrap_or(&self.initial)
     }
 }
 
@@ -235,7 +237,7 @@ pub(crate) struct Desktop {
     editor: Value,
     review: Value,
     review_error: String,
-    requests: HashMap<String, RequestInputs>,
+    requests: HashMap<Value, RequestInputs>,
     list: ListState,
     _subscriptions: Vec<Subscription>,
     diffs: HashMap<String, Entity<DiffView>>,
@@ -313,7 +315,9 @@ impl Desktop {
                 .auto_grow(3, 6)
         });
         let worktree_copy_paths = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder(".env\n.env.local\nconfig/local").auto_grow(3, 8)
+            TextareaState::new(window, cx)
+                .placeholder(".env\n.env.local\nconfig/local")
+                .auto_grow(3, 8)
         });
         let invitation_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 6));
         let mut error = String::new();
@@ -376,13 +380,12 @@ impl Desktop {
                 if matches!(event, InputEvent::Change) { s.worktree_saved = false; cx.notify(); }
             }),
             cx.subscribe(&effort_slider, |s, _, event, cx| {
-                if let slider::SliderEvent::Change(slider::SliderValue::Single(index)) = event {
-                    if let Some(model) = s.selected_model() {
-                        if let Some(effort) = array(&model["supportedReasoningEfforts"]).get(*index as usize) {
-                            s.effort = text(effort, "reasoningEffort").to_owned();
-                            cx.notify();
-                        }
-                    }
+                if let slider::SliderEvent::Change(slider::SliderValue::Single(index)) = event
+                    && let Some(model) = s.selected_model()
+                    && let Some(effort) = array(&model["supportedReasoningEfforts"]).get(*index as usize)
+                {
+                    s.effort = text(effort, "reasoningEffort").to_owned();
+                    cx.notify();
                 }
             }),
             cx.subscribe_in(&composer,window,|this,input,event,_,cx| {if matches!(event,InputEvent::Change){let key=this.draft_key();this.cache["messages"][key]=json!(input.read(cx).value().as_ref());this.persist();cx.notify();}}),
@@ -961,23 +964,49 @@ impl Desktop {
         })
     }
     fn refresh_worktree_settings(&mut self) {
-        if !self.connected { return; }
-        self.request(false, "host/worktree/settings/read", json!({}), false, |s, value, w, cx| {
-            let paths = array(&value["copyPaths"]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
-            s.worktree_copy_paths.update(cx, |input, cx| input.set_value(paths, w, cx));
-            s.worktree_settings = value;
-            s.worktree_saved = false;
-        });
+        if !self.connected {
+            return;
+        }
+        self.request(
+            false,
+            "host/worktree/settings/read",
+            json!({}),
+            false,
+            |s, value, w, cx| {
+                let paths = array(&value["copyPaths"])
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                s.worktree_copy_paths
+                    .update(cx, |input, cx| input.set_value(paths, w, cx));
+                s.worktree_settings = value;
+                s.worktree_saved = false;
+            },
+        );
     }
 
     fn save_worktree_settings(&mut self, cx: &mut Context<Self>) {
         let mut settings = self.worktree_settings.clone();
-        settings["copyPaths"] = json!(self.worktree_copy_paths.read(cx).value().lines()
-            .map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>());
-        self.request(false, "host/worktree/settings/update", settings, true, |s, value, _, _| {
-            s.worktree_settings = value;
-            s.worktree_saved = true;
-        });
+        settings["copyPaths"] = json!(
+            self.worktree_copy_paths
+                .read(cx)
+                .value()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+        );
+        self.request(
+            false,
+            "host/worktree/settings/update",
+            settings,
+            true,
+            |s, value, _, _| {
+                s.worktree_settings = value;
+                s.worktree_saved = true;
+            },
+        );
     }
 
     fn refresh_manager(&mut self) {
@@ -1026,8 +1055,11 @@ impl Desktop {
                         },
                     )?;
                     if let Value::Array(mut page) = result["data"].take() {
-                        if models.is_empty() { models = page; }
-                        else { models.append(&mut page); }
+                        if models.is_empty() {
+                            models = page;
+                        } else {
+                            models.append(&mut page);
+                        }
                     }
                     cursor = result["nextCursor"].take();
                     if cursor.is_null() {
@@ -1037,16 +1069,26 @@ impl Desktop {
                 Ok(Value::Array(models))
             },
             |s, v, _, cx| {
-                s.models = match v { Value::Array(models) => models, _ => Vec::new() };
-                let selected = s.models.iter().find(|m| m["model"] == s.model)
+                s.models = match v {
+                    Value::Array(models) => models,
+                    _ => Vec::new(),
+                };
+                let selected = s
+                    .models
+                    .iter()
+                    .find(|m| m["model"] == s.model)
                     .or_else(|| s.models.iter().find(|m| m["isDefault"] == true))
-                    .or(s.models.first()).map(|m| text(m, "model").to_owned()).unwrap_or_default();
+                    .or(s.models.first())
+                    .map(|m| text(m, "model").to_owned())
+                    .unwrap_or_default();
                 s.select_model(&selected, cx);
             },
         );
     }
     fn selected_model(&self) -> Option<&Value> {
-        self.models.iter().find(|model| model["model"] == self.model)
+        self.models
+            .iter()
+            .find(|model| model["model"] == self.model)
     }
     fn select_model(&mut self, id: &str, cx: &mut Context<Self>) {
         let changed = self.model != id;
@@ -1059,11 +1101,16 @@ impl Desktop {
         self.effort.replace_range(.., effort);
         self.service_tier.replace_range(.., tier);
         self.model.replace_range(.., id);
-        let steps = model.map(|m| array(&m["supportedReasoningEfforts"]).len()).unwrap_or(0)
-            .saturating_sub(1).max(1);
+        let steps = model
+            .map(|m| array(&m["supportedReasoningEfforts"]).len())
+            .unwrap_or(0)
+            .saturating_sub(1)
+            .max(1);
         self.effort_slider.update(cx, |slider, cx| {
-            *slider = slider::SliderState::new().max(steps as f32)
-                .step(1.).default_value(index as f32);
+            *slider = slider::SliderState::new()
+                .max(steps as f32)
+                .step(1.)
+                .default_value(index as f32);
             cx.notify();
         });
     }
@@ -1332,7 +1379,8 @@ impl Desktop {
         self.connected = false;
         self.worktree_settings = Value::Null;
         self.worktree_saved = false;
-        self.worktree_copy_paths.update(cx, |input, cx| input.set_value("", window, cx));
+        self.worktree_copy_paths
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.models.clear();
         self.select_model("", cx);
         self.projects.clear();
@@ -1412,7 +1460,8 @@ impl Desktop {
                     if generation == s.load_generation {
                         s.selected = id.clone();
                         s.cwd = text(&v["thread"], "cwd").to_owned();
-                        s.path.update(cx, |input, cx| input.set_value(s.cwd.clone(), w, cx));
+                        s.path
+                            .update(cx, |input, cx| input.set_value(s.cwd.clone(), w, cx));
                         s.terminal = None;
                         s.side_chat = None;
                         s.entries.clear();
@@ -1458,8 +1507,12 @@ impl Desktop {
         if let Some(turn) = running {
             params["expectedTurnId"] = turn;
         } else {
-            if !submission.model.is_empty() { params["model"] = json!(submission.model); }
-            if !submission.effort.is_empty() { params["effort"] = json!(submission.effort); }
+            if !submission.model.is_empty() {
+                params["model"] = json!(submission.model);
+            }
+            if !submission.effort.is_empty() {
+                params["effort"] = json!(submission.effort);
+            }
             params["serviceTierForTurn"] = json!(submission.service_tier);
         }
         self.request_result(false, method, params, true, move |s, result, w, cx| {
@@ -1754,15 +1807,11 @@ impl Desktop {
         );
     }
     fn sync_requests(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.requests.retain(|key, _| {
-            self.conversation
-                .requests
-                .iter()
-                .any(|r| r["id"].to_string() == *key)
-        });
+        self.requests
+            .retain(|key, _| self.conversation.requests.iter().any(|r| r["id"] == *key));
         for request in &self.conversation.requests {
-            let key = request["id"].to_string();
-            if self.requests.contains_key(&key) {
+            let key = &request["id"];
+            if self.requests.contains_key(key) {
                 continue;
             }
             let questions = array(&request["params"]["questions"])
@@ -1778,7 +1827,7 @@ impl Desktop {
                 })
                 .collect();
             self.requests.insert(
-                key,
+                key.clone(),
                 RequestInputs {
                     questions,
                     raw: cx.new(|cx| {
@@ -1793,7 +1842,7 @@ impl Desktop {
     }
     fn respond(&mut self, id: Value, result: Value) {
         let client = self.rpc.clone();
-        let key = id.to_string();
+        let key = id.clone();
         self.work(
             true,
             move || client.respond(id, result).map(|_| Value::Null),
@@ -1807,20 +1856,40 @@ impl Desktop {
 }
 
 // Keep valid choices on catalog refresh; changed models pass empty choices to use defaults.
-fn supported_model_settings<'a>(model: Option<&'a Value>, effort: &str, tier: &str) -> (&'a str, &'a str, usize) {
-    let Some(model) = model else { return ("", "default", 0); };
+fn supported_model_settings<'a>(
+    model: Option<&'a Value>,
+    effort: &str,
+    tier: &str,
+) -> (&'a str, &'a str, usize) {
+    let Some(model) = model else {
+        return ("", "default", 0);
+    };
     let efforts = array(&model["supportedReasoningEfforts"]);
-    let index = efforts.iter().position(|e| e["reasoningEffort"] == effort)
-        .or_else(|| efforts.iter().position(|e| e["reasoningEffort"] == model["defaultReasoningEffort"]))
+    let index = efforts
+        .iter()
+        .position(|e| e["reasoningEffort"] == effort)
+        .or_else(|| {
+            efforts
+                .iter()
+                .position(|e| e["reasoningEffort"] == model["defaultReasoningEffort"])
+        })
         .unwrap_or(0);
     let tiers = array(&model["serviceTiers"]);
     let supported_tier = |id: &str| {
-        if id == "default" { Some("default") }
-        else { tiers.iter().find(|t| t["id"] == id).map(|t| text(t, "id")) }
+        if id == "default" {
+            Some("default")
+        } else {
+            tiers.iter().find(|t| t["id"] == id).map(|t| text(t, "id"))
+        }
     };
     (
-        efforts.get(index).map(|e| text(e, "reasoningEffort")).unwrap_or_default(),
-        supported_tier(tier).or_else(|| supported_tier(text(model, "defaultServiceTier"))).unwrap_or("default"),
+        efforts
+            .get(index)
+            .map(|e| text(e, "reasoningEffort"))
+            .unwrap_or_default(),
+        supported_tier(tier)
+            .or_else(|| supported_tier(text(model, "defaultServiceTier")))
+            .unwrap_or("default"),
         index,
     )
 }
@@ -1951,9 +2020,18 @@ mod model_settings_tests {
             "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"max"}],
             "serviceTiers":[{"id":"priority"}]
         });
-        assert_eq!(supported_model_settings(Some(&model), "max", "default"), ("max", "default", 1));
-        model["supportedReasoningEfforts"].as_array_mut().unwrap().reverse();
-        assert_eq!(supported_model_settings(Some(&model), "max", "priority"), ("max", "priority", 0));
+        assert_eq!(
+            supported_model_settings(Some(&model), "max", "default"),
+            ("max", "default", 1)
+        );
+        model["supportedReasoningEfforts"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        assert_eq!(
+            supported_model_settings(Some(&model), "max", "priority"),
+            ("max", "priority", 0)
+        );
     }
 
     #[test]
@@ -1963,17 +2041,32 @@ mod model_settings_tests {
             "supportedReasoningEfforts":[{"reasoningEffort":"low"}],
             "serviceTiers":[{"id":"priority"}]
         });
-        assert_eq!(supported_model_settings(Some(&model), "", ""), ("low", "priority", 0));
+        assert_eq!(
+            supported_model_settings(Some(&model), "", ""),
+            ("low", "priority", 0)
+        );
         model["serviceTiers"] = json!([]);
-        assert_eq!(supported_model_settings(Some(&model), "max", "priority"), ("low", "default", 0));
+        assert_eq!(
+            supported_model_settings(Some(&model), "max", "priority"),
+            ("low", "default", 0)
+        );
         model["defaultReasoningEffort"] = json!("max");
-        assert_eq!(supported_model_settings(Some(&model), "", ""), ("low", "default", 0));
+        assert_eq!(
+            supported_model_settings(Some(&model), "", ""),
+            ("low", "default", 0)
+        );
     }
 
     #[test]
     fn no_model_or_no_options_clears_effort_and_fast() {
-        assert_eq!(supported_model_settings(None, "max", "priority"), ("", "default", 0));
-        assert_eq!(supported_model_settings(Some(&json!({})), "max", "priority"), ("", "default", 0));
+        assert_eq!(
+            supported_model_settings(None, "max", "priority"),
+            ("", "default", 0)
+        );
+        assert_eq!(
+            supported_model_settings(Some(&json!({})), "max", "priority"),
+            ("", "default", 0)
+        );
     }
 }
 
@@ -2032,7 +2125,7 @@ mod composer_tests {
     #[gpui::test]
     fn enter_submits_only_committed_text_at_the_end(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let input = cx.add_window(|window, cx| TextareaState::new(window, cx));
+        let input = cx.add_window(TextareaState::new);
         input
             .update(cx, |input, window, cx| {
                 let enter = gpui_kit::component::input::Enter {

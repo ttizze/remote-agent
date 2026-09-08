@@ -52,6 +52,9 @@
               kotlin-language-server
               nodejs_22
               androidSdk
+            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+              pkgs.swiftlint
+              pkgs.swiftformat
             ];
 
             JAVA_HOME = pkgs.jdk21.home;

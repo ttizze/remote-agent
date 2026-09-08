@@ -48,15 +48,35 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
     let mut diff = run_git(&cwd, &["diff", "--no-ext-diff", "--no-color", "HEAD", "--"])
         .or_else(|_| run_git(&cwd, &["diff", "--no-ext-diff", "--no-color", "--"]))?;
     for file in files.iter().filter(|file| file.status == "untracked") {
-        let output = Command::new("git").args(["diff", "--no-index", "--numstat", "--patch", "--no-ext-diff", "--no-color", "--", "/dev/null", &file.path]).current_dir(&cwd).output().map_err(|error| error.to_string())?;
-        if !matches!(output.status.code(), Some(0 | 1)) { return Err("cannot read untracked file diff".into()); }
+        let output = Command::new("git")
+            .args([
+                "diff",
+                "--no-index",
+                "--numstat",
+                "--patch",
+                "--no-ext-diff",
+                "--no-color",
+                "--",
+                "/dev/null",
+                &file.path,
+            ])
+            .current_dir(&cwd)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            return Err("cannot read untracked file diff".into());
+        }
         let output = String::from_utf8_lossy(&output.stdout);
         let patch_start = output.find("diff --git ").unwrap_or(output.len());
         let (added, deleted) = parse_numstat(&output[..patch_start]);
         additions += added;
         deletions += deleted;
         diff.push_str(&output[patch_start..]);
-        if diff.len() > 8 * 1024 * 1024 { return Err("working-tree diff exceeds 8 MiB; select a smaller working directory".into()); }
+        if diff.len() > 8 * 1024 * 1024 {
+            return Err(
+                "working-tree diff exceeds 8 MiB; select a smaller working directory".into(),
+            );
+        }
     }
     Ok(WorkspaceReview {
         branch,

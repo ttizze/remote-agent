@@ -1,3 +1,8 @@
 [
-  inputs: ["{mix,.formatter}.exs", "config/*.exs", "lib/**/*.{ex,exs}", "test/**/*.{ex,exs}"]
+  inputs: [
+    "{mix,.formatter,.credo}.exs",
+    "config/*.exs",
+    "lib/**/*.{ex,exs}",
+    "test/**/*.{ex,exs}"
+  ]
 ]

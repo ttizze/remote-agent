@@ -7,7 +7,8 @@ import kotlin.test.assertNull
 
 class AppStateTest {
     private val mac = HostProfile("runner-mac", "Mac", "wss://relay.example.test/mac", "runner-mac", "device-key-ref")
-    private val linux = HostProfile("runner-linux", "Linux", "wss://relay.example.test/linux", "runner-linux", "device-key-ref")
+    private val linux =
+        HostProfile("runner-linux", "Linux", "wss://relay.example.test/linux", "runner-linux", "device-key-ref")
 
     @Test
     fun pairing_keys_profiles_by_host_identity_and_selects_the_new_profile() {
@@ -47,12 +48,17 @@ class AppStateTest {
 
     @Test
     fun disconnection_keeps_the_non_authoritative_cache_but_clears_only_live_control_state() {
-        val connected = AppState(
-            profiles = listOf(mac),
-            selectedProfileId = mac.id,
-            profileViews = mapOf(mac.id to ProfileViewState(connection = ConnectionPhase.Connected, interruptingTurnId = "turn-1")),
-            cache = reconcileThreadList(MobileCache(), mac.id, listOf(summary("thread-1")), MobileCacheLimits()),
-        )
+        val connected =
+            AppState(
+                profiles = listOf(mac),
+                selectedProfileId = mac.id,
+                profileViews =
+                    mapOf(
+                        mac.id to
+                            ProfileViewState(connection = ConnectionPhase.Connected, interruptingTurnId = "turn-1")
+                    ),
+                cache = reconcileThreadList(MobileCache(), mac.id, listOf(summary("thread-1")), MobileCacheLimits()),
+            )
 
         val disconnected = reduce(connected, AppAction.Disconnected(mac.id))
 
@@ -73,7 +79,11 @@ class AppStateTest {
         val selected = reduce(refreshed, AppAction.ThreadSelected(mac.id, "new"))
         val failed = reduce(selected, AppAction.ThreadReadFailed(mac.id, "offline"))
         assertEquals(setOf("new"), failed.selectedView.unreadCompletedThreadIds)
-        val read = reduce(failed, AppAction.SnapshotReceived(mac.id, ThreadReadResult(ThreadSnapshot(summary("new")), emptyList())))
+        val read =
+            reduce(
+                failed,
+                AppAction.SnapshotReceived(mac.id, ThreadReadResult(ThreadSnapshot(summary("new")), emptyList())),
+            )
         assertEquals(emptySet(), read.selectedView.unreadCompletedThreadIds)
     }
 
@@ -84,8 +94,17 @@ class AppStateTest {
         val failed = receive(idle, ThreadEvent.TurnCompleted("failed", "turn", TurnStatus.Failed))
         val interrupted = receive(failed, ThreadEvent.TurnCompleted("stopped", "turn", TurnStatus.Interrupted))
         assertEquals(emptySet(), interrupted.selectedView.unreadCompletedThreadIds)
-        val visible = reduce(interrupted, AppAction.SnapshotReceived(mac.id, ThreadReadResult(ThreadSnapshot(summary("visible")), emptyList())))
-        assertEquals(emptySet(), receive(visible, ThreadEvent.TurnCompleted("visible", "turn", TurnStatus.Completed)).selectedView.unreadCompletedThreadIds)
+        val visible =
+            reduce(
+                interrupted,
+                AppAction.SnapshotReceived(mac.id, ThreadReadResult(ThreadSnapshot(summary("visible")), emptyList())),
+            )
+        assertEquals(
+            emptySet(),
+            receive(visible, ThreadEvent.TurnCompleted("visible", "turn", TurnStatus.Completed))
+                .selectedView
+                .unreadCompletedThreadIds,
+        )
         val otherHost = reduce(visible, AppAction.ProfilePaired(linux))
         val completed = receive(otherHost, ThreadEvent.TurnCompleted("visible", "turn", TurnStatus.Completed))
         assertEquals(setOf("visible"), completed.profileViews.getValue(mac.id).unreadCompletedThreadIds)
@@ -94,16 +113,15 @@ class AppStateTest {
         assertEquals(emptySet(), restarted.profileViews.getValue(mac.id).unreadCompletedThreadIds)
     }
 
-    private fun receive(state: AppState, event: ThreadEvent) = reduce(state, AppAction.HostEventReceived(
-        mac.id, event,
-    ))
+    private fun receive(state: AppState, event: ThreadEvent) = reduce(state, AppAction.HostEventReceived(mac.id, event))
 
-    private fun summary(id: String) = ThreadSummary(
-        id = id,
-        preview = "preview",
-        workingDirectory = WorkingDirectory("/workspace"),
-        createdAtMs = 1,
-        updatedAtMs = 1,
-        status = ThreadStatus.Idle,
-    )
+    private fun summary(id: String) =
+        ThreadSummary(
+            id = id,
+            preview = "preview",
+            workingDirectory = WorkingDirectory("/workspace"),
+            createdAtMs = 1,
+            updatedAtMs = 1,
+            status = ThreadStatus.Idle,
+        )
 }

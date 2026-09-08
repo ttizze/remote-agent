@@ -1,4 +1,7 @@
-use std::{sync::{Arc, Mutex as StdMutex}, time::Duration};
+use std::{
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use host_protocol::{DEFAULT_MAX_MESSAGE_BYTES, Ed25519PublicKey, PairingToken, RelayEndpoint};
 use serde_json::Value;
@@ -20,9 +23,16 @@ pub struct MobileClientConfig {
 
 impl MobileClientConfig {
     pub fn validate(&self) -> Result<(), MobileClientError> {
-        self.relay.validate().map_err(|error| MobileClientError::InvalidRelayUrl(error.to_string()))?;
-        if self.device_name.is_empty() || self.device_name.len() > 128 || self.device_name.chars().any(char::is_control) {
-            return Err(MobileClientError::InvalidConfig("device name must contain 1 to 128 non-control bytes"));
+        self.relay
+            .validate()
+            .map_err(|error| MobileClientError::InvalidRelayUrl(error.to_string()))?;
+        if self.device_name.is_empty()
+            || self.device_name.len() > 128
+            || self.device_name.chars().any(char::is_control)
+        {
+            return Err(MobileClientError::InvalidConfig(
+                "device name must contain 1 to 128 non-control bytes",
+            ));
         }
         if self.request_timeout.is_zero() {
             return Err(MobileClientError::InvalidConfig(
@@ -60,7 +70,10 @@ pub struct MobileClient {
 impl MobileClient {
     /// Establishes SSH through the relay, verifies the pinned Host key, then
     /// proves possession of the caller's secure-storage device key.
-    pub async fn connect(config: MobileClientConfig, device_pkcs8: &[u8]) -> Result<Self, MobileClientError> {
+    pub async fn connect(
+        config: MobileClientConfig,
+        device_pkcs8: &[u8],
+    ) -> Result<Self, MobileClientError> {
         config.validate()?;
         let key = transport::decode_device_key(device_pkcs8)?;
         let transport::AuthenticatedChannel { session, stream } =
@@ -146,7 +159,11 @@ impl MobileClient {
     }
 
     pub(crate) fn connection(&self) -> Result<Arc<transport::Connection>, MobileClientError> {
-        self.session.lock().unwrap_or_else(|error| error.into_inner()).clone().ok_or_else(|| MobileClientError::Disconnected("connection is closed".into()))
+        self.session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+            .ok_or_else(|| MobileClientError::Disconnected("connection is closed".into()))
     }
 
     pub fn close(&self) {
@@ -200,5 +217,7 @@ pub enum MobileClientError {
 }
 
 impl Drop for MobileClient {
-    fn drop(&mut self) { self.close(); }
+    fn drop(&mut self) {
+        self.close();
+    }
 }

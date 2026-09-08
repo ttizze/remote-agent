@@ -1,0 +1,13 @@
+included:
+  - apps/mobile/iosApp/Bex
+  - apps/mobile/iosApp/BexUITests
+  - apps/desktop/macos
+
+strict: true
+check_for_updates: false
+
+# Keep the default rule set and thresholds. Formatting uses .swiftformat.
+opt_in_rules:
+  - empty_count
+  - empty_string
+  - unused_optional_binding

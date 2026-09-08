@@ -36,7 +36,6 @@ fn main() {
                             title: Some("Bex".into()),
                             appears_transparent: true,
                             traffic_light_position: Some(point(px(14.), px(14.))),
-                            ..Default::default()
                         }),
                         ..Default::default()
                     },

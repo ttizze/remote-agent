@@ -32,22 +32,39 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
     private var fileURL: URL?
     private var requestID: UUID?
     private var audioSessionActive = false
-    private var previousAudioCategory: (AVAudioSession.Category, AVAudioSession.Mode, AVAudioSession.CategoryOptions)?
+    private var previousAudioConfiguration: AudioSessionConfiguration?
     private var completion: ((Result<Data, Error>) -> Void)?
 
     override init() {
         super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(cancel), name: UIApplication.didEnterBackgroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(interrupted(_:)), name: AVAudioSession.interruptionNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(cancel),
+            name: UIApplication.didEnterBackgroundNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(interrupted(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: nil
+        )
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
         recorder?.stop()
-        if let fileURL { try? FileManager.default.removeItem(at: fileURL) }
-        if audioSessionActive { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
-        if let previousAudioCategory {
-            try? AVAudioSession.sharedInstance().setCategory(previousAudioCategory.0, mode: previousAudioCategory.1, options: previousAudioCategory.2)
+        if let fileURL {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        if audioSessionActive {
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
+        }
+        if let previousAudioConfiguration {
+            try? previousAudioConfiguration.restore()
         }
     }
 
@@ -67,15 +84,16 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
                 }
                 do {
                     let session = AVAudioSession.sharedInstance()
-                    self.previousAudioCategory = (session.category, session.mode, session.categoryOptions)
+                    self.previousAudioConfiguration = AudioSessionConfiguration(session)
                     try session.setCategory(.record, mode: .measurement)
                     try session.setActive(true)
                     self.audioSessionActive = true
-                    let url = FileManager.default.temporaryDirectory.appendingPathComponent("dictation-\(id.uuidString).wav")
+                    let url = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("dictation-\(id.uuidString).wav")
                     self.fileURL = url
                     let recorder = try AVAudioRecorder(url: url, settings: [
                         AVFormatIDKey: kAudioFormatLinearPCM,
-                        AVSampleRateKey: 24_000,
+                        AVSampleRateKey: 24000,
                         AVNumberOfChannelsKey: 1,
                         AVLinearPCMBitDepthKey: 16,
                         AVLinearPCMIsBigEndianKey: false,
@@ -90,7 +108,9 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
         }
     }
 
-    func finish() { recorder?.stop() }
+    func finish() {
+        recorder?.stop()
+    }
 
     @objc func cancel() {
         guard requestID != nil else { return }
@@ -101,7 +121,9 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
     @objc private func interrupted(_ notification: Notification) {
         guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
               type == AVAudioSession.InterruptionType.began.rawValue else { return }
-        if requestID != nil { complete(.failure(Self.error("録音が中断されました。もう一度録音してください。"))) }
+        if requestID != nil {
+            complete(.failure(Self.error("録音が中断されました。もう一度録音してください。")))
+        }
     }
 
     func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
@@ -110,7 +132,11 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
             guard flag else { throw Self.error("録音を完了できませんでした。") }
             let file = try AVAudioFile(forReading: recorder.url, commonFormat: .pcmFormatInt16, interleaved: true)
             guard file.length > 0, file.length <= Int64(AVAudioFrameCount.max),
-                  let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
+                  let buffer = AVAudioPCMBuffer(
+                      pcmFormat: file.processingFormat,
+                      frameCapacity: AVAudioFrameCount(file.length)
+                  )
+            else {
                 throw Self.error("音声を録音できませんでした。もう一度録音してください。")
             }
             try file.read(into: buffer)
@@ -138,19 +164,37 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
         recorder = nil
         isRecording = false
         requestingPermission = false
-        if let fileURL { try? FileManager.default.removeItem(at: fileURL) }
+        if let fileURL {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
         fileURL = nil
         if audioSessionActive {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             audioSessionActive = false
         }
-        if let previousAudioCategory {
-            try? AVAudioSession.sharedInstance().setCategory(previousAudioCategory.0, mode: previousAudioCategory.1, options: previousAudioCategory.2)
-            self.previousAudioCategory = nil
+        if let previousAudioConfiguration {
+            try? previousAudioConfiguration.restore()
+            self.previousAudioConfiguration = nil
         }
     }
 
     private static func error(_ message: String) -> Error {
         NSError(domain: "BexDictation", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+private struct AudioSessionConfiguration {
+    let category: AVAudioSession.Category
+    let mode: AVAudioSession.Mode
+    let options: AVAudioSession.CategoryOptions
+
+    init(_ session: AVAudioSession) {
+        category = session.category
+        mode = session.mode
+        options = session.categoryOptions
+    }
+
+    func restore() throws {
+        try AVAudioSession.sharedInstance().setCategory(category, mode: mode, options: options)
     }
 }

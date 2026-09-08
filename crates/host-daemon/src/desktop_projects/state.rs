@@ -112,11 +112,21 @@ impl Snapshot {
             );
         } else if self.projectless_thread_ids.contains(thread_id) {
             thread_object.insert("projectId".to_owned(), Value::Null);
-        } else if thread_object.get("projectId").and_then(Value::as_str).is_none() {
-            let project_id = self.workspace_root_hints.get(thread_id)
+        } else if thread_object
+            .get("projectId")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            let project_id = self
+                .workspace_root_hints
+                .get(thread_id)
                 .and_then(|root| self.project_for_workspace(root))
-                .or_else(|| thread_object.get("cwd").and_then(Value::as_str)
-                    .and_then(|cwd| self.project_for_workspace(cwd)));
+                .or_else(|| {
+                    thread_object
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .and_then(|cwd| self.project_for_workspace(cwd))
+                });
             if let Some(project_id) = project_id {
                 thread_object.insert("projectId".to_owned(), Value::String(project_id.to_owned()));
             }
@@ -125,18 +135,24 @@ impl Snapshot {
 
     fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
         let workspace = Path::new(workspace);
-        let mapped = self.worktree_roots.iter()
+        let mapped = self
+            .worktree_roots
+            .iter()
             .filter(|(root, _)| workspace.starts_with(root))
             .max_by_key(|(root, _)| root.len())
             .map(|(root, source)| Path::new(source).join(workspace.strip_prefix(root).unwrap()));
         let workspace = mapped.as_deref().unwrap_or(workspace);
-        if !workspace.is_absolute() { return None; }
+        if !workspace.is_absolute() {
+            return None;
+        }
         let mut matched: Option<(&str, usize)> = None;
         let mut ambiguous = false;
         for project in &self.projects {
             for root in &project.root_paths {
                 let root = Path::new(root);
-                if !root.is_absolute() || !workspace.starts_with(root) { continue; }
+                if !root.is_absolute() || !workspace.starts_with(root) {
+                    continue;
+                }
                 let depth = root.components().count();
                 match matched {
                     Some((_, previous_depth)) if depth < previous_depth => {}
@@ -150,7 +166,11 @@ impl Snapshot {
                 }
             }
         }
-        if ambiguous { None } else { matched.map(|(id, _)| id) }
+        if ambiguous {
+            None
+        } else {
+            matched.map(|(id, _)| id)
+        }
     }
 }
 
@@ -305,7 +325,8 @@ mod tests {
         assert_eq!(read["thread"]["projectId"], "project-a");
         let start = snapshot().enrich_threads(json!({"id": "assigned"}));
         assert_eq!(start["projectId"], "project-a");
-        let unassigned = snapshot().enrich_threads(json!({"thread": {"id": "new-thread", "cwd": "/work/a"}}));
+        let unassigned =
+            snapshot().enrich_threads(json!({"thread": {"id": "new-thread", "cwd": "/work/a"}}));
         assert_eq!(unassigned["thread"]["projectId"], "project-a");
         let started = snapshot().enrich_threads(json!({"id": "new-thread", "cwd": "/work/a"}));
         assert_eq!(started["projectId"], "project-a");
@@ -329,10 +350,13 @@ mod tests {
 
     #[test]
     fn workspace_membership_prefers_specific_roots_and_leaves_equal_matches_unassigned() {
-        let state = Snapshot::parse(br#"{"local-projects":{
+        let state = Snapshot::parse(
+            br#"{"local-projects":{
             "a":{"id":"a","name":"A","rootPaths":["/work","/work/shared"]},
             "b":{"id":"b","name":"B","rootPaths":["/work/shared","/work/shared/nested"]}
-        }}"#).unwrap();
+        }}"#,
+        )
+        .unwrap();
         let result = state.enrich_threads(json!({"data": [
             {"id":"unique", "cwd":"/work/other"},
             {"id":"ambiguous", "cwd":"/work/shared"},
@@ -352,13 +376,18 @@ mod tests {
     }
     #[test]
     fn worktree_membership_preserves_nested_project_roots() {
-        let mut snapshot = Snapshot::parse(br#"{
+        let mut snapshot = Snapshot::parse(
+            br#"{
             "local-projects": {
                 "repo": {"id":"repo","name":"Repo","rootPaths":["/repo"]},
                 "app": {"id":"app","name":"App","rootPaths":["/repo/packages/app"]}
             }
-        }"#).unwrap();
-        snapshot.worktree_roots.insert("/repo/.git/bex-worktrees/session-a".into(), "/repo".into());
+        }"#,
+        )
+        .unwrap();
+        snapshot
+            .worktree_roots
+            .insert("/repo/.git/bex-worktrees/session-a".into(), "/repo".into());
         let result = snapshot.enrich_threads(json!({"data":[
             {"id":"nested","cwd":"/repo/.git/bex-worktrees/session-a/packages/app"},
             {"id":"root","cwd":"/repo/.git/bex-worktrees/session-a"}
@@ -366,5 +395,4 @@ mod tests {
         assert_eq!(result["data"][0]["projectId"], "app");
         assert_eq!(result["data"][1]["projectId"], "repo");
     }
-
 }

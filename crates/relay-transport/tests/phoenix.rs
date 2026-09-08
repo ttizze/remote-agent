@@ -10,10 +10,14 @@ mod phoenix;
 
 async fn echo(mut stream: DuplexStream, slow: bool) {
     let mut bytes = [0; 32 * 1024];
-    if slow { tokio::time::sleep(Duration::from_millis(100)).await; }
+    if slow {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     loop {
         let count = stream.read(&mut bytes).await.unwrap();
-        if count == 0 { return; }
+        if count == 0 {
+            return;
+        }
         stream.write_all(&bytes[..count]).await.unwrap();
     }
 }
@@ -24,13 +28,18 @@ async fn round_trip(stream: DuplexStream, marker: u8) {
     let (mut reader, mut writer) = tokio::io::split(stream);
     let write = async {
         let bytes = [marker; BLOCK];
-        for _ in 0..BLOCKS { writer.write_all(&bytes).await.unwrap(); }
+        for _ in 0..BLOCKS {
+            writer.write_all(&bytes).await.unwrap();
+        }
     };
     let read = async {
         let mut bytes = [0; BLOCK];
         for _ in 0..BLOCKS {
             reader.read_exact(&mut bytes).await.unwrap();
-            assert!(bytes.iter().all(|byte| *byte == marker), "another client's bytes crossed routes");
+            assert!(
+                bytes.iter().all(|byte| *byte == marker),
+                "another client's bytes crossed routes"
+            );
         }
     };
     tokio::join!(write, read);
@@ -40,9 +49,15 @@ async fn round_trip(stream: DuplexStream, marker: u8) {
 async fn phoenix_isolates_concurrent_byte_streams_and_handles_backpressure_and_reconnect() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let (mut server, endpoint) = phoenix::start().await;
-        assert!(connect_client(&endpoint).await.is_err(), "offline runner must reject clients");
+        assert!(
+            connect_client(&endpoint).await.is_err(),
+            "offline runner must reject clients"
+        );
         let (mut incoming, runner) = connect_runner(&endpoint).await.unwrap();
-        assert!(connect_runner(&endpoint).await.is_err(), "runner ownership must be exclusive");
+        assert!(
+            connect_runner(&endpoint).await.is_err(),
+            "runner ownership must be exclusive"
+        );
         let (first, first_task) = connect_client(&endpoint).await.unwrap();
         let first_route = incoming.recv().await.unwrap();
         let first_id = first_route.id.clone();
@@ -62,13 +77,19 @@ async fn phoenix_isolates_concurrent_byte_streams_and_handles_backpressure_and_r
         assert_ne!(first_id, reconnect_route.id);
         drop(runner);
         let mut byte = [0];
-        assert_eq!(reconnected.read(&mut byte).await.unwrap(), 0, "runner disconnect must close client stream");
+        assert_eq!(
+            reconnected.read(&mut byte).await.unwrap(),
+            0,
+            "runner disconnect must close client stream"
+        );
         drop(reconnect_task);
         drop(reconnect_route);
         drop(incoming);
         server.kill().await.unwrap();
         server.wait().await.unwrap();
-    }).await.expect("real relay test exceeded its deadline");
+    })
+    .await
+    .expect("real relay test exceeded its deadline");
 }
 
 #[tokio::test]
@@ -80,7 +101,11 @@ async fn wss_starts_tls_and_returns_an_error_when_the_peer_drops_the_handshake()
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut header = [0; 3];
             stream.read_exact(&mut header).await.unwrap();
-            assert_eq!(&header[..2], &[22, 3], "wss must send a TLS handshake, not plaintext");
+            assert_eq!(
+                &header[..2],
+                &[22, 3],
+                "wss must send a TLS handshake, not plaintext"
+            );
             // A peer that disappears during TLS negotiation is a connection
             // error. It must never panic the Host or mobile process.
         });
@@ -91,5 +116,7 @@ async fn wss_starts_tls_and_returns_an_error_when_the_peer_drops_the_handshake()
         };
         assert!(connect_runner(&endpoint).await.is_err());
         peer.await.unwrap();
-    }).await.expect("TLS failure test exceeded its deadline");
+    })
+    .await
+    .expect("TLS failure test exceeded its deadline");
 }

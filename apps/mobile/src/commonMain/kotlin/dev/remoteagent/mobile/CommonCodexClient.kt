@@ -1,16 +1,12 @@
 package dev.remoteagent.mobile
 
-import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-
-private const val MaxModelPages = 64
 
 data class CodexModel(
     val id: String,
@@ -25,83 +21,46 @@ data class CodexTurnOptions(val model: String? = null, val effort: String? = nul
 /**
  * Common, typed orchestration for Codex Desktop projects and Codex thread/turn operations.
  *
- * Platform gateways own pairing, transport, subscriptions, and the raw JSON
- * boundary. This class owns the protocol knowledge that would otherwise be
- * duplicated in Android and iOS.
+ * Platform gateways own pairing, transport, subscriptions, and the raw JSON boundary. This class owns the protocol
+ * knowledge that would otherwise be duplicated in Android and iOS.
  */
-class CommonCodexClient(
-    private val rawGateway: RawCodexGateway,
-    private val deferItemDetails: Boolean = false,
-) {
+class CommonCodexClient(internal val rawGateway: RawCodexGateway, private val deferItemDetails: Boolean = false) :
+    CodexGateway {
     private val turnOptions = mutableMapOf<String, CodexTurnOptions>()
 
     fun setTurnOptions(hostIdentity: String, options: CodexTurnOptions) {
         turnOptions[hostIdentity] = options
     }
 
-    suspend fun listModels(profile: HostProfile): GatewayResult<List<CodexModel>> {
-        val models = linkedMapOf<String, CodexModel>()
-        val cursors = mutableSetOf<String>()
-        var cursor: String? = null
-        do {
-            val page = request(profile, "model/list", buildJsonObject {
-                put("limit", 100)
-                cursor?.let { put("cursor", it) }
-            }).decode("model/list") { value ->
-                val objectValue = value as? JsonObject ?: invalid("model page must be an object")
-                val data = objectValue["data"] as? JsonArray ?: invalid("model data must be an array")
-                val entries = data.map { entry ->
-                    val model = entry as? JsonObject ?: invalid("model must be an object")
-                    val efforts = model["supportedReasoningEfforts"] as? JsonArray ?: invalid("reasoning efforts must be an array")
-                    CodexModel(
-                        model.string("id") ?: invalid("missing model id"),
-                        model.string("model") ?: invalid("missing model name"),
-                        model.string("displayName") ?: invalid("missing display name"),
-                        model.string("defaultReasoningEffort") ?: invalid("missing default reasoning effort"),
-                        efforts.map { (it as? JsonObject)?.string("reasoningEffort") ?: invalid("missing reasoning effort") },
+    override suspend fun listThreads(profile: HostProfile, query: ThreadListQuery): GatewayResult<ThreadListPage> =
+        rawGateway
+            .rawRequest(
+                profile,
+                "host/thread/list",
+                buildJsonObject {
+                    put("titleOnly", true)
+                    put("projectLimit", query.projectLimit)
+                    put("chatLimit", query.chatLimit)
+                    put(
+                        "projectThreadLimits",
+                        buildJsonObject { query.projectThreadLimits.forEach { (id, limit) -> put(id, limit) } },
                     )
-                }
-                entries to objectValue.string("nextCursor")?.takeIf(String::isNotBlank)
-            }
-            val result = when (page) {
-                is GatewayResult.Success -> page.value
-                is GatewayResult.Failure -> return page
-            }
-            result.first.forEach { models[it.id] = it }
-            cursor = result.second
-            if (cursor != null && (!cursors.add(cursor) || cursors.size >= MaxModelPages)) {
-                return GatewayResult.Failure("モデル一覧の続きを取得できませんでした")
-            }
-        } while (cursor != null)
-        return GatewayResult.Success(models.values.toList())
-    }
+                    if (query.searchTerm.isNotBlank()) put("searchTerm", query.searchTerm)
+                },
+            )
+            .decode("host/thread/list", ::parseThreadListPage)
 
-    suspend fun listThreads(
-        profile: HostProfile,
-        query: ThreadListQuery = ThreadListQuery(),
-    ): GatewayResult<ThreadListPage> = request(profile, "host/thread/list", buildJsonObject {
-        put("titleOnly", true)
-        put("projectLimit", query.projectLimit)
-        put("chatLimit", query.chatLimit)
-        put("projectThreadLimits", buildJsonObject {
-            query.projectThreadLimits.forEach { (id, limit) -> put(id, limit) }
-        })
-        if (query.searchTerm.isNotBlank()) put("searchTerm", query.searchTerm)
-    }).decode("host/thread/list", ::parseThreadListPage)
-
-    suspend fun readThread(
-        profile: HostProfile,
-        threadId: String,
-    ): GatewayResult<ThreadReadResult> {
+    override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> {
         val params = buildJsonObject {
             put("threadId", threadId)
             put("includeTurns", true)
             put("paginateHistory", true)
             if (deferItemDetails) put("deferItemDetails", true)
         }
-        val result = request(profile, "host/thread/read", params).decode("host/thread/read") { value ->
-            parseThreadReadResult(value, threadId)
-        }
+        val result =
+            rawGateway.rawRequest(profile, "host/thread/read", params).decode("host/thread/read") { value ->
+                parseThreadReadResult(value, threadId)
+            }
         return result
     }
 
@@ -110,143 +69,145 @@ class CommonCodexClient(
         threadId: String,
         cursor: String?,
         turnId: String? = null,
-    ): GatewayResult<ThreadSnapshot> = request(
-        profile, if (turnId == null) "host/thread/turns/list" else "host/thread/items/list",
-        buildJsonObject {
-            put("threadId", threadId)
-            cursor?.let { put("cursor", it) }
-            turnId?.let { put("turnId", it) }
-            if (deferItemDetails) put("deferItemDetails", true)
-        },
-    ).decode("history page") {
-        parseThreadSnapshot(it, threadId).also { page ->
-            if (turnId != null && (page.turns.size != 1 || page.turns.single().id != turnId)) invalid("turn ID does not match")
-        }
-    }
+    ): GatewayResult<ThreadSnapshot> =
+        rawGateway
+            .rawRequest(
+                profile,
+                if (turnId == null) "host/thread/turns/list" else "host/thread/items/list",
+                buildJsonObject {
+                    put("threadId", threadId)
+                    cursor?.let { put("cursor", it) }
+                    turnId?.let { put("turnId", it) }
+                    if (deferItemDetails) put("deferItemDetails", true)
+                },
+            )
+            .decode("history page") {
+                parseThreadSnapshot(it, threadId).also { page ->
+                    if (turnId != null && (page.turns.size != 1 || page.turns.single().id != turnId))
+                        invalid("turn ID does not match")
+                }
+            }
 
     suspend fun readItemDetails(
         profile: HostProfile,
         threadId: String,
         turnId: String,
         itemId: String,
-    ): GatewayResult<String> = request(profile, "host/thread/item/read", buildJsonObject {
-        put("threadId", threadId)
-        put("turnId", turnId)
-        put("itemId", itemId)
-    }).decode("host/thread/item/read") { value ->
-        val item = (value as? JsonObject)?.get("item") as? JsonObject ?: invalid("item must be an object")
-        if (item.string("id") != itemId) invalid("item ID does not match")
-        codexItem(item).expandedThreadItemBody()
-    }
+    ): GatewayResult<String> =
+        rawGateway
+            .rawRequest(
+                profile,
+                "host/thread/item/read",
+                buildJsonObject {
+                    put("threadId", threadId)
+                    put("turnId", turnId)
+                    put("itemId", itemId)
+                },
+            )
+            .decode("host/thread/item/read") { value ->
+                val item = (value as? JsonObject)?.get("item") as? JsonObject ?: invalid("item must be an object")
+                if (item.string("id") != itemId) invalid("item ID does not match")
+                codexItem(item).expandedThreadItemBody()
+            }
 
-    suspend fun startThread(
-        profile: HostProfile,
-        cwd: String,
-    ): GatewayResult<ThreadSnapshot> {
+    override suspend fun startThread(profile: HostProfile, cwd: String): GatewayResult<ThreadSnapshot> {
         val options = turnOptions[profile.id]
         val params = buildJsonObject {
             if (cwd.isNotBlank()) put("cwd", cwd)
             options?.model?.let { put("model", it) }
         }
-        val result = request(profile, "host/thread/start", params).decode("host/thread/start") {
-            parseThreadSnapshot(it)
-        }
+        val result =
+            rawGateway.rawRequest(profile, "host/thread/start", params).decode("host/thread/start") {
+                parseThreadSnapshot(it)
+            }
         return result
     }
 
     /** A new/loaded thread has no history to resume before its first turn. */
-    suspend fun startTurn(
+    override suspend fun startTurn(
         profile: HostProfile,
         threadId: String,
         cwd: String,
-        text: String,
-        attachments: List<CodexAttachment> = emptyList(),
+        input: CodexTurnInput,
         resume: Boolean,
-        clientUserMessageId: String,
     ): GatewayResult<String> {
         val options = turnOptions[profile.id]
         if (resume) {
-            val resumed = request(profile, "thread/resume", buildJsonObject {
-                put("threadId", threadId)
-                put("cwd", cwd)
-            })
+            val resumed =
+                rawGateway.rawRequest(
+                    profile,
+                    "thread/resume",
+                    buildJsonObject {
+                        put("threadId", threadId)
+                        put("cwd", cwd)
+                    },
+                )
             if (resumed is GatewayResult.Failure) return resumed
         }
 
-        return request(
-            profile,
-            "turn/start",
-            buildJsonObject {
-                put("threadId", threadId)
-                put("clientUserMessageId", clientUserMessageId)
-                put("input", turnInput(text, attachments))
-                options?.model?.let { put("model", it) }
-                options?.effort?.let { put("effort", it) }
-            },
-        ).decode("turn/start") { value -> parseTurnId(value) }
+        return rawGateway
+            .rawRequest(
+                profile,
+                "turn/start",
+                buildJsonObject {
+                    put("threadId", threadId)
+                    put("clientUserMessageId", input.clientUserMessageId)
+                    put("input", turnInput(input.text, input.attachments))
+                    options?.model?.let { put("model", it) }
+                    options?.effort?.let { put("effort", it) }
+                },
+            )
+            .decode("turn/start") { value -> parseTurnId(value) }
     }
 
-    suspend fun steerTurn(
+    override suspend fun steerTurn(
         profile: HostProfile,
         threadId: String,
         turnId: String,
-        text: String,
-        attachments: List<CodexAttachment> = emptyList(),
-        clientUserMessageId: String,
-    ): GatewayResult<Unit> = request(
-        profile,
-        "turn/steer",
-        buildJsonObject {
-            put("threadId", threadId)
-            put("expectedTurnId", turnId)
-            put("clientUserMessageId", clientUserMessageId)
-            put("input", turnInput(text, attachments))
-        },
-    ).mapGateway { Unit }
+        input: CodexTurnInput,
+    ): GatewayResult<Unit> =
+        rawGateway
+            .rawRequest(
+                profile,
+                "turn/steer",
+                buildJsonObject {
+                    put("threadId", threadId)
+                    put("expectedTurnId", turnId)
+                    put("clientUserMessageId", input.clientUserMessageId)
+                    put("input", turnInput(input.text, input.attachments))
+                },
+            )
+            .mapGateway { Unit }
 
-    suspend fun queueTurn(
+    override suspend fun queueTurn(
         profile: HostProfile,
         threadId: String,
-        text: String,
-        attachments: List<CodexAttachment> = emptyList(),
-        clientUserMessageId: String,
+        input: CodexTurnInput,
     ): GatewayResult<String> {
-        return request(
-            profile,
-            "thread/queue/add",
-            buildJsonObject {
-                put("threadId", threadId)
-                put("clientUserMessageId", clientUserMessageId)
-                put("input", turnInput(text, attachments))
-            },
-        ).decode("thread/queue/add", ::parseQueuedSubmissionId)
+        return rawGateway
+            .rawRequest(
+                profile,
+                "thread/queue/add",
+                buildJsonObject {
+                    put("threadId", threadId)
+                    put("clientUserMessageId", input.clientUserMessageId)
+                    put("input", turnInput(input.text, input.attachments))
+                },
+            )
+            .decode("thread/queue/add", ::parseQueuedSubmissionId)
     }
 
-    suspend fun interrupt(
-        profile: HostProfile,
-        threadId: String,
-        turnId: String,
-    ): GatewayResult<Unit> = request(
-        profile,
-        "turn/interrupt",
-        buildJsonObject {
-            put("threadId", threadId)
-            put("turnId", turnId)
-        },
-    ).mapGateway { Unit }
-
-    private suspend fun request(
-        profile: HostProfile,
-        method: String,
-        params: JsonElement,
-    ): GatewayResult<JsonElement> = try {
-        rawGateway.rawRequest(profile, method, params)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (failure: Throwable) {
-        GatewayResult.Failure(failure.message ?: "Codex request failed.")
-    }
-
+    override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> =
+        rawGateway
+            .rawRequest(
+                profile,
+                "turn/interrupt",
+                buildJsonObject {
+                    put("threadId", threadId)
+                    put("turnId", turnId)
+                },
+            )
+            .mapGateway { Unit }
 }
 
 data class ThreadListQuery(
@@ -273,10 +234,14 @@ private fun parseThreadListPage(value: JsonElement): ThreadListPage {
             if (summary.id.isBlank()) invalid("thread data entry is missing id")
         }
     }
-    val projects = (root["projects"] as? JsonArray ?: invalid("projects must be an array"))
-        .map { entry -> codexProject(entry).also { if (it.id.isBlank()) invalid("project is missing id") } }
-    val moreProjectIds = (root["moreProjectIds"] as? JsonArray ?: invalid("moreProjectIds must be an array"))
-        .mapTo(mutableSetOf()) { (it as? JsonPrimitive)?.stringOrNull() ?: invalid("project id must be a string") }
+    val projects =
+        (root["projects"] as? JsonArray ?: invalid("projects must be an array")).map { entry ->
+            codexProject(entry).also { if (it.id.isBlank()) invalid("project is missing id") }
+        }
+    val moreProjectIds =
+        (root["moreProjectIds"] as? JsonArray ?: invalid("moreProjectIds must be an array")).mapTo(mutableSetOf()) {
+            (it as? JsonPrimitive)?.stringOrNull() ?: invalid("project id must be a string")
+        }
     val hasMoreChats = root.boolean("hasMoreChats") ?: invalid("hasMoreChats must be a boolean")
     val hasMoreProjects = root.boolean("hasMoreProjects") ?: invalid("hasMoreProjects must be a boolean")
     return ThreadListPage(threads, projects, moreProjectIds, hasMoreChats, hasMoreProjects)
@@ -315,38 +280,43 @@ private fun parseTurnId(value: JsonElement): String {
 
 private fun parseQueuedSubmissionId(value: JsonElement): String {
     val root = value as? JsonObject ?: invalid("expected an object")
-    val queuedSubmission = root["queuedSubmission"] as? JsonObject
-        ?: invalid("queuedSubmission must be an object")
+    val queuedSubmission = root["queuedSubmission"] as? JsonObject ?: invalid("queuedSubmission must be an object")
     return queuedSubmission.string("id")?.takeIf(String::isNotBlank)
         ?: invalid("thread/queue/add response is missing queued submission id")
 }
 
-private fun invalid(message: String): Nothing = throw IllegalArgumentException(message)
+internal fun invalid(message: String): Nothing = throw IllegalArgumentException(message)
 
-private fun <T> GatewayResult<JsonElement>.decode(
-    method: String,
-    transform: (JsonElement) -> T,
-): GatewayResult<T> = when (this) {
-    is GatewayResult.Failure -> this
-    is GatewayResult.Success -> try {
-        GatewayResult.Success(transform(value))
-    } catch (failure: Throwable) {
-        GatewayResult.Failure(
-            message = "Invalid $method response: ${failure.message ?: "malformed payload"}",
-            rawError = value,
-        )
+internal fun <T> GatewayResult<JsonElement>.decode(method: String, transform: (JsonElement) -> T): GatewayResult<T> =
+    when (this) {
+        is GatewayResult.Failure -> this
+        is GatewayResult.Success ->
+            try {
+                GatewayResult.Success(transform(value))
+            } catch (failure: IllegalArgumentException) {
+                GatewayResult.Failure(
+                    message = "Invalid $method response: ${failure.message ?: "malformed payload"}",
+                    rawError = value,
+                )
+            }
     }
-}
 
 private fun turnInput(text: String, attachments: List<CodexAttachment>) = buildJsonArray {
-    if (text.isNotBlank()) add(buildJsonObject {
-        put("type", "text")
-        put("text", text)
-        put("text_elements", buildJsonArray {})
-    })
-    attachments.forEach { attachment -> add(buildJsonObject {
-        put("type", if (attachment.isImage) "localImage" else "mention")
-        put("path", attachment.path)
-        if (!attachment.isImage) put("name", attachment.name)
-    }) }
+    if (text.isNotBlank())
+        add(
+            buildJsonObject {
+                put("type", "text")
+                put("text", text)
+                put("text_elements", buildJsonArray {})
+            }
+        )
+    attachments.forEach { attachment ->
+        add(
+            buildJsonObject {
+                put("type", if (attachment.isImage) "localImage" else "mention")
+                put("path", attachment.path)
+                if (!attachment.isImage) put("name", attachment.name)
+            }
+        )
+    }
 }

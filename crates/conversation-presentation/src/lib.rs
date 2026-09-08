@@ -396,7 +396,8 @@ fn tool_title(item: &Value) -> String {
             "inProgress" => "画像を生成中…",
             "failed" => "画像を生成できませんでした",
             _ => "生成画像",
-        }.into(),
+        }
+        .into(),
         "contextCompaction" => "コンテキストを圧縮しました".into(),
         "automaticApprovalReview" => match text(&item["review"], "status") {
             "inProgress" => "承認を自動確認中",

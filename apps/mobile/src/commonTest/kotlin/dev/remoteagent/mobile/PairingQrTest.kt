@@ -9,7 +9,8 @@ class PairingQrTest {
     private val runnerId = "runner-1"
     private val relayToken = "relay-token-for-fixture"
 
-    private val hostGeneratedPayload = """
+    private val hostGeneratedPayload =
+        """
         {
           "protocolVersion": 4,
           "relayUrl": "$relayUrl",
@@ -20,7 +21,8 @@ class PairingQrTest {
           "ticket": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
           "expiresAtMs": 200
         }
-    """.trimIndent()
+    """
+            .trimIndent()
 
     @Test
     fun accepts_current_unexpired_payload() {
@@ -80,7 +82,8 @@ class PairingQrTest {
         relayUrl: String = this.relayUrl,
         runnerId: String = this.runnerId,
         relayToken: String = this.relayToken,
-    ): String = """
+    ): String =
+        """
         {
           "protocolVersion": $protocolVersion,
           "relayUrl": "$relayUrl",
@@ -91,5 +94,6 @@ class PairingQrTest {
           "ticket": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
           "expiresAtMs": $expiresAtMs
         }
-    """.trimIndent()
+    """
+            .trimIndent()
 }

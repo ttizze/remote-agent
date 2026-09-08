@@ -14,11 +14,7 @@ class MainActivity : ComponentActivity() {
         gateway = AndroidHostGateway(applicationContext)
         setContent {
             val requestQrScan = rememberAndroidQrScanner(this)
-            RemoteAgentApp(
-                gateway = gateway,
-                repository = repository,
-                requestQrScan = requestQrScan,
-            )
+            RemoteAgentApp(gateway = gateway, repository = repository, requestQrScan = requestQrScan)
         }
     }
 }

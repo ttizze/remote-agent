@@ -41,7 +41,11 @@ impl StartupConfig {
                     "--runner-id",
                     next_non_empty_value(&mut arguments, "--runner-id")?,
                 )?,
-                "--state-dir" => set_once(&mut state_dir, "--state-dir", next_non_empty_value(&mut arguments, "--state-dir")?)?,
+                "--state-dir" => set_once(
+                    &mut state_dir,
+                    "--state-dir",
+                    next_non_empty_value(&mut arguments, "--state-dir")?,
+                )?,
                 "--codex" => set_once(
                     &mut codex,
                     "--codex",
@@ -51,7 +55,9 @@ impl StartupConfig {
             }
         }
 
-        let relay = if relay_url.is_none() && relay_token.is_none() && runner_id.is_none() { None } else {
+        let relay = if relay_url.is_none() && relay_token.is_none() && runner_id.is_none() {
+            None
+        } else {
             Some(host_protocol::RelayEndpoint {
                 relay_url: relay_url.ok_or(ConfigError::MissingRelayUrl)?,
                 relay_token: relay_token.ok_or(ConfigError::MissingRelayToken)?,
@@ -132,7 +138,11 @@ mod tests {
             ])
             .unwrap(),
             StartupConfig {
-                relay: Some(host_protocol::RelayEndpoint { relay_url: "wss://relay.example.test/socket/websocket".to_owned(), relay_token: "secret".to_owned(), runner_id: "runner-1".to_owned() }),
+                relay: Some(host_protocol::RelayEndpoint {
+                    relay_url: "wss://relay.example.test/socket/websocket".to_owned(),
+                    relay_token: "secret".to_owned(),
+                    runner_id: "runner-1".to_owned()
+                }),
                 configure: false,
                 codex: PathBuf::from(DEFAULT_CODEX),
                 state_dir: None,

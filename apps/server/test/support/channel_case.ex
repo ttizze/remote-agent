@@ -1,4 +1,5 @@
 defmodule RemoteAgentServerWeb.ChannelCase do
+  @moduledoc "Shared endpoint and Phoenix channel helpers for relay tests."
   use ExUnit.CaseTemplate
 
   using do

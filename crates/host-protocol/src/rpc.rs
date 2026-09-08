@@ -283,7 +283,10 @@ mod tests {
             Err(RpcMessageError::NotObject)
         ));
         for malformed in [r#"{"id":1,"result":[}"#, r#"{"id":1,"result":{}} {}"#] {
-            assert!(matches!(classify_message(malformed), Err(RpcMessageError::Json(_))));
+            assert!(matches!(
+                classify_message(malformed),
+                Err(RpcMessageError::Json(_))
+            ));
         }
     }
 

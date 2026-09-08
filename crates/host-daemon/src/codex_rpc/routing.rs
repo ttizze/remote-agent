@@ -231,7 +231,11 @@ impl SessionRouter {
         }) else {
             return ResponseRoute::Unknown;
         };
-        let State { pending, proxy_to_upstream, .. } = &mut *state;
+        let State {
+            pending,
+            proxy_to_upstream,
+            ..
+        } = &mut *state;
         let Some(request) = pending.get_mut(&upstream_id) else {
             return ResponseRoute::Unknown;
         };
@@ -469,10 +473,19 @@ mod tests {
             .unwrap()
             .to_owned();
 
-        assert_eq!(router.resolve_response(first.id(), &first_id), ResponseRoute::Forward(r#""codex-1""#.to_owned()));
-        assert_eq!(router.resolve_response(second.id(), &second_id), ResponseRoute::Unknown);
+        assert_eq!(
+            router.resolve_response(first.id(), &first_id),
+            ResponseRoute::Forward(r#""codex-1""#.to_owned())
+        );
+        assert_eq!(
+            router.resolve_response(second.id(), &second_id),
+            ResponseRoute::Unknown
+        );
         let mut after_answer = router.open_session(4);
-        assert!(after_answer.receiver.try_recv().is_err(), "an answered request must not be replayed while Codex resolves it");
+        assert!(
+            after_answer.receiver.try_recv().is_err(),
+            "an answered request must not be replayed while Codex resolves it"
+        );
 
         router.handle_server_line(
             r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#,

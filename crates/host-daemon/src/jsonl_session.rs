@@ -29,70 +29,73 @@ where
     let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
     let mut tasks = JoinSet::<Result<(), String>>::new();
 
-    let result = async { loop {
-        let mut task_error = None;
-        while let Some(result) = tasks.try_join_next() {
-            match result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    task_error = Some(error);
-                    break;
-                }
-                Err(error) => {
-                    task_error = Some(format!("request task failed: {error}"));
-                    break;
+    let result = async {
+        loop {
+            let mut task_error = None;
+            while let Some(result) = tasks.try_join_next() {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        task_error = Some(error);
+                        break;
+                    }
+                    Err(error) => {
+                        task_error = Some(format!("request task failed: {error}"));
+                        break;
+                    }
                 }
             }
-        }
-        if let Some(error) = task_error {
-            break Err(error);
-        }
+            if let Some(error) = task_error {
+                break Err(error);
+            }
 
-        tokio::select! {
-            biased;
-            _ = disconnect.cancelled() => break Ok(()),
-            incoming = reader.read_line() => {
-                let Some(line) = incoming.map_err(|error| error.to_string())? else {
-                    break Ok(());
-                };
-                let message = classify_message(&line)
-                    .map_err(|error| format!("invalid JSONL message: {error}"))?;
-                match message.kind() {
-                    RpcMessageKind::Request => {
-                        let Ok(permit) = permits.clone().try_acquire_owned() else {
-                            break Err("maximum in-flight request count reached".to_owned());
-                        };
-                        let service = service.clone();
-                        tasks.spawn(async move {
-                            let _permit = permit;
+            tokio::select! {
+                biased;
+                _ = disconnect.cancelled() => break Ok(()),
+                incoming = reader.read_line() => {
+                    let Some(line) = incoming.map_err(|error| error.to_string())? else {
+                        break Ok(());
+                    };
+                    let message = classify_message(&line)
+                        .map_err(|error| format!("invalid JSONL message: {error}"))?;
+                    match message.kind() {
+                        RpcMessageKind::Request => {
+                            let Ok(permit) = permits.clone().try_acquire_owned() else {
+                                break Err("maximum in-flight request count reached".to_owned());
+                            };
+                            let service = service.clone();
+                            tasks.spawn(async move {
+                                let _permit = permit;
+                                service
+                                    .dispatch_request(session_id, line)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            });
+                        }
+                        RpcMessageKind::Response => {
                             service
-                                .dispatch_request(session_id, line)
+                                .dispatch_response(session_id, line)
                                 .await
-                                .map_err(|error| error.to_string())
-                        });
-                    }
-                    RpcMessageKind::Response => {
-                        service
-                            .dispatch_response(session_id, line)
-                            .await
-                            .map_err(|error| error.to_string())?;
-                    }
-                    RpcMessageKind::Notification => {
-                        service
-                            .dispatch_notification(session_id, line)
-                            .await
-                            .map_err(|error| error.to_string())?;
+                                .map_err(|error| error.to_string())?;
+                        }
+                        RpcMessageKind::Notification => {
+                            service
+                                .dispatch_notification(session_id, line)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                        }
                     }
                 }
-            }
-            outgoing = session.recv() => {
-                let Some(line) = outgoing else {
-                    break Err("session outbound queue closed".to_owned());
-                };
-                writer.write_line(&line).await.map_err(|error| error.to_string())?;
+                outgoing = session.recv() => {
+                    let Some(line) = outgoing else {
+                        break Err("session outbound queue closed".to_owned());
+                    };
+                    writer.write_line(&line).await.map_err(|error| error.to_string())?;
+                }
             }
         }
-    }}.await;
+    }
+    .await;
 
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}

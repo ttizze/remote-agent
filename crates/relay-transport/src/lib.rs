@@ -11,7 +11,7 @@ use serde_json::value::RawValue;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
     net::TcpStream,
-    sync::{mpsc, Semaphore},
+    sync::{Semaphore, mpsc},
     task::JoinHandle,
     time::{self, Instant, MissedTickBehavior},
 };
@@ -55,18 +55,27 @@ pub struct RelayTask(Option<JoinHandle<Result<(), RelayError>>>);
 
 impl RelayTask {
     pub fn abort(&self) {
-        if let Some(task) = &self.0 { task.abort(); }
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
     }
 
     pub async fn wait(&mut self) -> Result<(), RelayError> {
-        let result = self.0.as_mut().ok_or(RelayError::Closed)?.await.map_err(|_| RelayError::Task)?;
+        let result = self
+            .0
+            .as_mut()
+            .ok_or(RelayError::Closed)?
+            .await
+            .map_err(|_| RelayError::Task)?;
         self.0.take();
         result
     }
 }
 
 impl Drop for RelayTask {
-    fn drop(&mut self) { self.abort(); }
+    fn drop(&mut self) {
+        self.abort();
+    }
 }
 
 pub struct IncomingConnection {
@@ -75,7 +84,9 @@ pub struct IncomingConnection {
     pub disconnect: CancellationToken,
 }
 
-pub async fn connect_runner(endpoint: &RelayEndpoint) -> Result<(mpsc::Receiver<IncomingConnection>, RelayTask), RelayError> {
+pub async fn connect_runner(
+    endpoint: &RelayEndpoint,
+) -> Result<(mpsc::Receiver<IncomingConnection>, RelayTask), RelayError> {
     let (socket, _) = connect(endpoint, "runner").await?;
     let (incoming, receiver) = mpsc::channel(CONNECTION_QUEUE);
     let topic = format!("runner:{}", endpoint.runner_id);
@@ -83,16 +94,23 @@ pub async fn connect_runner(endpoint: &RelayEndpoint) -> Result<(mpsc::Receiver<
     Ok((receiver, RelayTask(Some(task))))
 }
 
-pub async fn connect_client(endpoint: &RelayEndpoint) -> Result<(DuplexStream, RelayTask), RelayError> {
+pub async fn connect_client(
+    endpoint: &RelayEndpoint,
+) -> Result<(DuplexStream, RelayTask), RelayError> {
     let (socket, client_id) = connect(endpoint, "mobile").await?;
-    let id: Arc<str> = client_id.ok_or(RelayError::Protocol("join response has no client ID"))?.into();
+    let id: Arc<str> = client_id
+        .ok_or(RelayError::Protocol("join response has no client ID"))?
+        .into();
     let (stream, bridge) = tokio::io::duplex(PEER_BUFFER_BYTES);
     let topic = format!("runner:{}", endpoint.runner_id);
     let task = tokio::spawn(run(socket, topic, None, Some((id, bridge))));
     Ok((stream, RelayTask(Some(task))))
 }
 
-async fn connect(endpoint: &RelayEndpoint, role: &str) -> Result<(Socket, Option<String>), RelayError> {
+async fn connect(
+    endpoint: &RelayEndpoint,
+    role: &str,
+) -> Result<(Socket, Option<String>), RelayError> {
     let url = endpoint.socket_url(role)?;
     // Workspace dependencies can enable both TLS backends. Match dictation's
     // default selection while preserving a provider installed by the caller.
@@ -102,10 +120,24 @@ async fn connect(endpoint: &RelayEndpoint, role: &str) -> Result<(Socket, Option
     let config = WebSocketConfig::default()
         .max_message_size(Some(100_000))
         .max_frame_size(Some(100_000));
-    let (mut socket, _) = time::timeout(IO_DEADLINE, connect_async_with_config(url.as_str(), Some(config), true))
-        .await.map_err(|_| RelayError::Timeout)??;
+    let (mut socket, _) = time::timeout(
+        IO_DEADLINE,
+        connect_async_with_config(url.as_str(), Some(config), true),
+    )
+    .await
+    .map_err(|_| RelayError::Timeout)??;
     let topic = format!("runner:{}", endpoint.runner_id);
-    send(&mut socket, &(JOIN_REF, JOIN_REF, &topic, "phx_join", serde_json::json!({}))).await?;
+    send(
+        &mut socket,
+        &(
+            JOIN_REF,
+            JOIN_REF,
+            &topic,
+            "phx_join",
+            serde_json::json!({}),
+        ),
+    )
+    .await?;
     let id = time::timeout(IO_DEADLINE, async {
         loop {
             match socket.next().await.ok_or(RelayError::Closed)?? {
@@ -114,18 +146,26 @@ async fn connect(endpoint: &RelayEndpoint, role: &str) -> Result<(Socket, Option
                     if frame.0 != Some(JOIN_REF) || frame.1 != Some(JOIN_REF) || frame.2 != topic {
                         continue;
                     }
-                    if frame.3 != "phx_reply" { return Err(RelayError::Protocol("unexpected join response")); }
+                    if frame.3 != "phx_reply" {
+                        return Err(RelayError::Protocol("unexpected join response"));
+                    }
                     let payload = Payload::parse(frame.4)?;
-                    if payload.status != Some("ok") { return Err(rejected(&payload)); }
-                    let response = payload.response.ok_or(RelayError::Protocol("join reply has no response"))?;
+                    if payload.status != Some("ok") {
+                        return Err(rejected(&payload));
+                    }
+                    let response = payload
+                        .response
+                        .ok_or(RelayError::Protocol("join reply has no response"))?;
                     return Ok(Payload::parse(response)?.client_id.map(str::to_owned));
                 }
                 Message::Ping(bytes) => send_message(&mut socket, Message::Pong(bytes)).await?,
-                Message::Pong(_) => {},
+                Message::Pong(_) => {}
                 _ => return Err(RelayError::Closed),
             }
         }
-    }).await.map_err(|_| RelayError::Timeout)??;
+    })
+    .await
+    .map_err(|_| RelayError::Timeout)??;
     Ok((socket, id))
 }
 
@@ -163,10 +203,19 @@ impl<'a> Payload<'a> {
 }
 
 fn rejected(payload: &Payload<'_>) -> RelayError {
-    let reason = payload.response.and_then(|raw| Payload::parse(raw).ok())
-        .and_then(|response| response.reason).unwrap_or("operation rejected");
+    let reason = payload
+        .response
+        .and_then(|raw| Payload::parse(raw).ok())
+        .and_then(|response| response.reason)
+        .unwrap_or("operation rejected");
     // Relay-controlled strings are bounded before they enter diagnostics.
-    RelayError::Rejected(reason.chars().filter(|c| !c.is_control()).take(128).collect())
+    RelayError::Rejected(
+        reason
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(128)
+            .collect(),
+    )
 }
 
 #[derive(Serialize)]
@@ -179,7 +228,9 @@ struct Data<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ClientId<'a> { client_id: &'a str }
+struct ClientId<'a> {
+    client_id: &'a str,
+}
 
 enum Outbound {
     Data(Arc<str>, String),
@@ -215,17 +266,31 @@ fn bridge(id: Arc<str>, stream: DuplexStream, outgoing: mpsc::Sender<Outbound>) 
     let read_disconnect = disconnect.clone();
     let reader = tokio::spawn(async move {
         let mut buffer = [0; CHUNK_BYTES];
-        let transfer = async { loop {
-            let Ok(permit) = read_credits.clone().acquire_owned().await else { break };
-            let Ok(count) = input.read(&mut buffer).await else { break };
-            if count == 0 { break; }
-            let data = STANDARD.encode(&buffer[..count]);
-            if read_outgoing.send(Outbound::Data(read_id.clone(), data)).await.is_err() { return; }
-            // Each chunk consumes one credit until the opposite endpoint has
-            // written it to its own bounded SSH stream. Reading and writing run
-            // independently so two full-duplex peers cannot deadlock.
-            permit.forget();
-        }};
+        let transfer = async {
+            loop {
+                let Ok(permit) = read_credits.clone().acquire_owned().await else {
+                    break;
+                };
+                let Ok(count) = input.read(&mut buffer).await else {
+                    break;
+                };
+                if count == 0 {
+                    break;
+                }
+                let data = STANDARD.encode(&buffer[..count]);
+                if read_outgoing
+                    .send(Outbound::Data(read_id.clone(), data))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                // Each chunk consumes one credit until the opposite endpoint has
+                // written it to its own bounded SSH stream. Reading and writing run
+                // independently so two full-duplex peers cannot deadlock.
+                permit.forget();
+            }
+        };
         tokio::select! { _ = transfer => {}, _ = read_disconnect.cancelled() => {} }
         let _ = read_outgoing.send(Outbound::Closed(read_id)).await;
     });
@@ -233,17 +298,28 @@ fn bridge(id: Arc<str>, stream: DuplexStream, outgoing: mpsc::Sender<Outbound>) 
     let writer_id = id.clone();
     let writer_outgoing = outgoing.clone();
     let writer = tokio::spawn(async move {
-        let transfer = async { while let Some(data) = receiver.recv().await {
-            if output.write_all(&data).await.is_err() {
-                let _ = outgoing.send(Outbound::Closed(id)).await;
-                return;
+        let transfer = async {
+            while let Some(data) = receiver.recv().await {
+                if output.write_all(&data).await.is_err() {
+                    let _ = outgoing.send(Outbound::Closed(id)).await;
+                    return;
+                }
+                if outgoing.send(Outbound::Ack(id.clone())).await.is_err() {
+                    return;
+                }
             }
-            if outgoing.send(Outbound::Ack(id.clone())).await.is_err() { return; }
-        }};
+        };
         tokio::select! { _ = transfer => {}, _ = write_disconnect.cancelled() => {} }
         let _ = writer_outgoing.send(Outbound::Closed(writer_id)).await;
     });
-    Bridge { incoming, credits, in_flight: 0, reader, writer, disconnect }
+    Bridge {
+        incoming,
+        credits,
+        in_flight: 0,
+        reader,
+        writer,
+        disconnect,
+    }
 }
 
 async fn run(
@@ -367,22 +443,39 @@ async fn run(
 }
 
 fn checked_client_id(id: Option<&str>) -> Result<&str, RelayError> {
-    id.filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-        .ok_or(RelayError::Protocol("invalid client ID"))
+    id.filter(|id| {
+        !id.is_empty()
+            && id.len() <= 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    })
+    .ok_or(RelayError::Protocol("invalid client ID"))
 }
 
-async fn event(socket: &mut Socket, topic: &str, reference: &mut u64, event: &str, payload: &impl Serialize) -> Result<(), RelayError> {
+async fn event(
+    socket: &mut Socket,
+    topic: &str,
+    reference: &mut u64,
+    event: &str,
+    payload: &impl Serialize,
+) -> Result<(), RelayError> {
     let current = reference.to_string();
-    *reference = reference.checked_add(1).ok_or(RelayError::Protocol("frame reference exhausted"))?;
+    *reference = reference
+        .checked_add(1)
+        .ok_or(RelayError::Protocol("frame reference exhausted"))?;
     send(socket, &(JOIN_REF, current, topic, event, payload)).await
 }
 
 async fn send(socket: &mut Socket, value: &impl Serialize) -> Result<(), RelayError> {
-    let text = serde_json::to_string(value).map_err(|_| RelayError::Protocol("failed to encode frame"))?;
+    let text =
+        serde_json::to_string(value).map_err(|_| RelayError::Protocol("failed to encode frame"))?;
     send_message(socket, Message::text(text)).await
 }
 
 async fn send_message(socket: &mut Socket, message: Message) -> Result<(), RelayError> {
-    time::timeout(IO_DEADLINE, socket.send(message)).await.map_err(|_| RelayError::Timeout)??;
+    time::timeout(IO_DEADLINE, socket.send(message))
+        .await
+        .map_err(|_| RelayError::Timeout)??;
     Ok(())
 }

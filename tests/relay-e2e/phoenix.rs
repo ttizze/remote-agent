@@ -1,7 +1,10 @@
-use std::{path::Path, process::Stdio};
 use host_protocol::RelayEndpoint;
 use ring::rand::{SecureRandom, SystemRandom};
-use tokio::{io::{AsyncBufReadExt, AsyncReadExt, BufReader}, process::{Child, Command}};
+use std::{path::Path, process::Stdio};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    process::{Child, Command},
+};
 
 pub async fn start() -> (Child, RelayEndpoint) {
     let mut token = [0; 32];
@@ -26,7 +29,10 @@ pub async fn start() -> (Child, RelayEndpoint) {
         let Some(line) = output.next_line().await.unwrap() else {
             let status = child.wait().await.unwrap();
             let errors = error_log.await.unwrap();
-            panic!("Phoenix exited {status}: {}", String::from_utf8_lossy(&errors));
+            panic!(
+                "Phoenix exited {status}: {}",
+                String::from_utf8_lossy(&errors)
+            );
         };
         if let Some(port) = line.strip_prefix("BEX_RELAY_PORT ") {
             break port.parse::<u16>().unwrap();
@@ -35,6 +41,12 @@ pub async fn start() -> (Child, RelayEndpoint) {
     tokio::spawn(async move { while output.next_line().await.ok().flatten().is_some() {} });
     // The child owns the pipe. Kill-on-drop closes it and lets the log reader
     // finish even when an assertion or the outer timeout fails.
-    (child, RelayEndpoint { relay_url: format!("ws://127.0.0.1:{port}/socket/websocket"), relay_token: token, runner_id: "one".into() })
+    (
+        child,
+        RelayEndpoint {
+            relay_url: format!("ws://127.0.0.1:{port}/socket/websocket"),
+            relay_token: token,
+            runner_id: "one".into(),
+        },
+    )
 }
-

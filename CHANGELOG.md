@@ -2,9 +2,15 @@
 
 ## Unreleased
 
+- Add reproducible quality checks through `cargo xtask quality`: Clippy/rustfmt, strict Credo and Dialyxir, ktfmt and detekt over all Kotlin source sets, and SwiftLint/SwiftFormat over handwritten Swift. Pin tools through Nix, Gradle, and Mix; share local checks with a read-only GitHub Actions workflow. Resolve existing violations while preserving default thresholds, without baselines.
+
+- Split mobile controller, native transport ownership, conversation rendering, and UI tests by responsibility. Preserve state ownership, cancellation, history ordering, and stale-response guards. Route typed Codex calls through one client, propagate known transport failures, and handle Swift JSON serialization errors. Match the Android JNI connection key parameter to Kotlin’s byte array.
+
+- Fix desktop Clippy diagnostics after merging main. Retain typed JSON request IDs without repeated serialization and update diff views without copying the workspace patch on each render.
+
 - Move project-owned Python and Shell development tooling into Rust `cargo xtask` commands: Mac builds and signing, isolated iOS E2E orchestration, Codex scenarios, pairing controls, and Fly secret generation. Run the current encrypted relay tests through `cargo xtask relay-e2e`; remove the obsolete plaintext Python harness and the explicit Python development dependency. Preserve fixture behavior and signing identities. Preserve the original per-run Simulator and Host lifecycle and reject failed or skipped tests.
 
-- Share Simulator fixture HTTP controls and project expansion setup across UI tests; complete the dictation fixture draft before the next test. Exercise production TLS provider initialization directly when workspace features enable multiple backends.
+- Share Simulator fixture HTTP controls and project expansion setup across UI tests; complete the dictation fixture draft before the next test. Restore temporary list fixtures through XCTest teardown even after a failed assertion, and restart title traversal after page insertions. Exercise production TLS provider initialization directly when workspace features enable multiple backends.
 
 - Remove unused Rust dependencies and error variants, replace the manual JSON ID scanner with serde traversal, and borrow JSONL source lines and raw payloads. Move desktop RPC results without cloning, consolidate request cancellation cleanup, and remove temporary notification and disconnect collections.
 

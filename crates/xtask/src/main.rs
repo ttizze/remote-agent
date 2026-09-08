@@ -1,11 +1,12 @@
 mod command;
 mod ios;
 mod macos;
+mod quality;
 
 use std::process::ExitCode;
 use xtask::{Result, repository_root};
 
-const USAGE: &str = "Usage: cargo xtask <command>\n\nCommands:\n  build-host-macos       Build and verify the signed Host executable\n  build-desktop-macos    Build and verify target/Bex.app\n  ios-e2e [TEST ...]     Run isolated Simulator E2E tests (all by default)\n  relay-e2e             Run the real Phoenix transport and encrypted Host tests\n  relay-secrets         Emit Fly secrets using REMOTE_AGENT_RELAY_TOKEN\n";
+const USAGE: &str = "Usage: cargo xtask <command>\n\nCommands:\n  build-host-macos       Build and verify the signed Host executable\n  build-desktop-macos    Build and verify target/Bex.app\n  ios-e2e [TEST ...]     Run isolated Simulator E2E tests (all by default)\n  relay-e2e             Run the real Phoenix transport and encrypted Host tests\n  relay-secrets         Emit Fly secrets using REMOTE_AGENT_RELAY_TOKEN\n  quality [LANGUAGE]    Check rust, elixir, kotlin, swift (all by default)\n";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -34,6 +35,8 @@ async fn execute(arguments: &[String]) -> Result<()> {
         ("build-desktop-macos", []) => macos::build_desktop().await,
         ("ios-e2e", tests) => ios::run(tests).await,
         ("relay-secrets", []) => relay_secrets(),
+        ("quality", []) => quality::run(None).await,
+        ("quality", [language]) => quality::run(Some(language)).await,
         ("relay-e2e", []) => {
             command::run(command::cargo().args([
                 "test",

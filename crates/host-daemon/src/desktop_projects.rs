@@ -75,7 +75,8 @@ impl DesktopProjectStore {
             return Err(DesktopProjectError::TooLarge(bytes_read as u64));
         }
         let mut snapshot = state::Snapshot::parse(&bytes).map_err(map_state_error)?;
-        snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path).await
+        snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path)
+            .await
             .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?;
         Ok(snapshot)
     }
