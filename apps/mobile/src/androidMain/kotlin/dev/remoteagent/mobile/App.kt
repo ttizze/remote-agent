@@ -74,7 +74,7 @@ fun RemoteAgentApp(
     if (activity != null) {
         DisposableEffect(controller, activity) {
             val lifecycleObserver = AndroidConnectionLifecycle(
-                onForeground = { controller.openApp(scope) },
+                onForeground = { controller.restoreConnection(scope) },
                 // Keep the authenticated transport alive while the Activity is
                 // backgrounded. Reconnect on the next foreground event.
                 onBackground = { persistenceScope.launch { controller.flushPersistence() } },
