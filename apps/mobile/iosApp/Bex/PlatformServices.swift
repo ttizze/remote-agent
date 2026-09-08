@@ -83,7 +83,7 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
                     ])
                     self.recorder = recorder
                     recorder.delegate = self
-                    guard recorder.record(forDuration: 30) else { throw Self.error("録音を開始できませんでした。") }
+                    guard recorder.record() else { throw Self.error("録音を開始できませんでした。") }
                     self.isRecording = true
                 } catch { self.complete(.failure(error)) }
             }
@@ -109,7 +109,7 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
         complete(Result {
             guard flag else { throw Self.error("録音を完了できませんでした。") }
             let file = try AVAudioFile(forReading: recorder.url, commonFormat: .pcmFormatInt16, interleaved: true)
-            guard file.length > 0, file.length <= 24_000 * 30,
+            guard file.length > 0, file.length <= Int64(AVAudioFrameCount.max),
                   let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
                 throw Self.error("音声を録音できませんでした。もう一度録音してください。")
             }

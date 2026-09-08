@@ -9,9 +9,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{WebSocketStream, tungstenite::{Message, client::IntoClientRequest, http::HeaderValue}};
 use zeroize::Zeroizing;
 
-// Matches the PCM16, mono capture format on the phone. Limit one recording to
-// 30 seconds; the dictation service also bounds individual utterances to 30s.
-const MAX_AUDIO_BYTES: usize = 24_000 * 2 * 30;
 // 100ms of PCM16 at 24kHz. Base64 and sample boundaries both remain aligned.
 const AUDIO_CHUNK_BASE64_BYTES: usize = 6_400;
 const DICTATION_URL: &str = "wss://chatgpt.com/backend-api/dictation/stream";
@@ -23,11 +20,8 @@ pub(crate) async fn transcribe(app_server: &CodexAppServer, params: &Value) -> R
 
 async fn transcribe_request(app_server: &CodexAppServer, params: &Value) -> Result<Value, String> {
     let audio = params.get("audio").and_then(Value::as_str).ok_or("録音データがありません。")?;
-    if audio.is_empty() || audio.len() > MAX_AUDIO_BYTES.div_ceil(3) * 4 {
-        return Err("音声は30秒以内で録音してください。".into());
-    }
     let pcm = Zeroizing::new(STANDARD.decode(audio).map_err(|_| "録音データが無効です。")?);
-    if pcm.is_empty() || pcm.len() > MAX_AUDIO_BYTES || pcm.len() % 2 != 0 {
+    if pcm.is_empty() || pcm.len() % 2 != 0 {
         return Err("録音データが無効です。".into());
     }
     drop(pcm);
@@ -205,7 +199,7 @@ mod tests {
 
     #[tokio::test]
     async fn sends_a_full_recording_in_lossless_sample_aligned_chunks() {
-        let pcm: Vec<u8> = (0..MAX_AUDIO_BYTES).map(|index| index as u8).collect();
+        let pcm: Vec<u8> = (0..24_000 * 2 * 65).map(|index| index as u8).collect();
         let text = recording_result(&STANDARD.encode(pcm), vec![
             json!({"type":"transcript.final", "utterance_id":"first", "revision":1, "text":"長い録音"}),
         ], CloseCode::Normal).await.unwrap();

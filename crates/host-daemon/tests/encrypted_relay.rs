@@ -238,6 +238,12 @@ async fn local_management_and_relay_share_one_codex_and_shutdown_releases_sessio
         let invitation: PairingQrPayload = serde_json::from_value(invitation["result"].clone()).unwrap();
         let device_key = key();
         let mobile = MobileClient::connect(config(&endpoint, invitation.host_identity, Some(invitation.ticket)), &device_key).await.unwrap();
+        // A recording longer than the former phone limit must reach Host
+        // dictation, never the Codex request parser. This fixture has no account.
+        let audio = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, vec![0_u8; 24_000 * 2 * 31]);
+        let error = mobile.request("host/dictation/transcribe", json!({"audio":audio})).await.unwrap_err().to_string();
+        assert!(error.contains("dictation_failed"), "dictation escaped the Host route: {error}");
+        assert!(error.contains("ChatGPT"), "long recording did not reach authentication: {error}");
         let document = directory.path().join("document.txt");
         std::fs::write(&document, b"\xef\xbb\xbfalpha\r\nbeta\r\n").unwrap();
         std::fs::set_permissions(&document, std::fs::Permissions::from_mode(0o640)).unwrap();

@@ -1183,7 +1183,7 @@ private struct ThreadScreen: View {
             }
             if let error = model.transferError { BexNotice(text: error) }
             if dictation.isRecording {
-                Text("録音中（最大30秒）").font(.caption).foregroundColor(.red)
+                Text("録音中").font(.caption).foregroundColor(.red)
                     .accessibilityIdentifier("dictation.recording")
             }
             if model.transcribing {
@@ -1233,13 +1233,6 @@ private struct ThreadScreen: View {
                     }
                     .accessibilityLabel("モデル設定")
                     .accessibilityIdentifier("model.settings")
-                    if dictation.isRecording || dictation.requestingPermission {
-                        Button { dictation.cancel() } label: {
-                            Image(systemName: "xmark").frame(width: 40, height: 40)
-                        }
-                        .accessibilityLabel("録音を中止")
-                        .accessibilityIdentifier("dictation.cancel")
-                    }
                     Button {
                         if dictation.isRecording { dictation.finish() }
                         else { startDictation() }

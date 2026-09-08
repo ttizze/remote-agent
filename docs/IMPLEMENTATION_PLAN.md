@@ -463,3 +463,13 @@ The existing isolated Simulator relaunch/foreground/model-restoration UI scenari
 Version 1.0 build 27 passed archive and strict signature verification, was installed over Wi-Fi on the paired iPhone, and launched successfully. CoreDevice confirmed installed build 27. Physical screen interaction was not exercised. No TestFlight upload was performed.
 
 The subsequent list-loading change removes the project/task loading row and keeps the list-header spinner active during data fetching. The isolated return-to-list refresh scenario passed (1 passed, 0 failed, 0 skipped). Temporarily pausing only the fixture Codex process during app relaunch showed cached titles and header progress without loading text; resuming it populated project rows and restored the green indicator. Both screenshots were visually inspected (`target/qa/list-header-loading.png`, `target/qa/list-header-loaded.png`). The fixture and Simulator were cleaned up, and raw pairing-bearing results were removed. Build 28 passed archive/signature verification, was installed over Wi-Fi, and launched on the paired iPhone; CoreDevice confirmed version 1.0 build 28. Physical interaction and older iOS runtimes were not exercised.
+
+
+
+### Voice routing and recording controls — 2026-09-08
+
+The running Host still forwarded `host/dictation/transcribe` to Codex, which returned `unknown variant`. The signed Host built from `codex/fix-mobile-dictation` replaced the executable in the Mac bundle; after the approved restart, an empty-audio request to the live local socket returned Host-owned `dictation_failed` / `録音データがありません。`, and management reported `relayConnected: true`. The bundle passed deep, strict signature verification.
+
+Remove the phone and Host 30-second recording checks and the separate cancel button. The 31-second encrypted-relay assertion failed against the old limit and passed after its removal. Six dictation protocol tests passed, including 65-second lossless chunk delivery. The Kotlin Simulator suite passed 157 tests with no failures, errors or skips. `target/qa/Bex-20260908-072656.xcresult` passed one XCUITest with zero failures and skips: recording persisted beyond 32 seconds, Send delivered the recorded PCM through the mobile bridge and encrypted relay to the isolated Host's account check, and the existing draft survived the expected account error. Its exported screenshot was visually inspected and contains Stop and Send without a cancel button or duration limit.
+
+No physical iPhone update was performed in this task. Actual speech transcription against the authenticated provider and physical-device recording remain unverified; the isolated provider tests cover stream completion and recording-upload fallback.

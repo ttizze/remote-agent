@@ -87,6 +87,7 @@ if [ "$#" -eq 0 ]; then
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorCanStartAConversationInAProject \
         testSimulatorDictationPermissionDenialPreservesDraftAndSend \
+        testSimulatorDictationContinuesPastThirtySecondsAndReachesHost \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorApprovalEditorAndDraftSurviveReconnect \
         testSimulatorKeepsInputRequestVisibleUntilResolved \
