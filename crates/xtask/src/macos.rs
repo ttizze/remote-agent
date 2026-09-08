@@ -141,6 +141,30 @@ pub async fn build_desktop() -> Result<()> {
         ("CFBundlePackageType", "APPL"),
     ]))
     .to_file_xml(picker.join("Contents/Info.plist"))?;
+    let dictation = resources.join("Bex Dictation.app");
+    fs::create_dir_all(dictation.join("Contents/MacOS"))?;
+    command::run(
+        Command::new("xcrun")
+            .args(["swiftc", "-O", "apps/desktop/macos/Dictation.swift", "-o"])
+            .arg(dictation.join("Contents/MacOS/Dictation")),
+    )
+    .await?;
+    plist::Value::from(
+        dictionary(&[
+            ("CFBundleIdentifier", "app.bex.dictation"),
+            ("CFBundleName", "Bex"),
+            ("CFBundleExecutable", "Dictation"),
+            ("CFBundlePackageType", "APPL"),
+            (
+                "NSMicrophoneUsageDescription",
+                "音声を録音し、接続先のHostを通じて文字起こしして入力します。",
+            ),
+        ])
+        .into_iter()
+        .chain([("LSUIElement".into(), plist::Value::Boolean(true))])
+        .collect::<plist::Dictionary>(),
+    )
+    .to_file_xml(dictation.join("Contents/Info.plist"))?;
     plist::Value::from(
         dictionary(&[
             ("CFBundleIdentifier", "app.bex.desktop"),
@@ -152,6 +176,10 @@ pub async fn build_desktop() -> Result<()> {
             ("CFBundleShortVersionString", "0.1.0"),
             ("CFBundleVersion", "1"),
             ("LSMinimumSystemVersion", "13.0"),
+            (
+                "NSMicrophoneUsageDescription",
+                "音声を録音し、接続先のHostを通じて文字起こしして入力します。",
+            ),
         ])
         .into_iter()
         .chain([(
@@ -162,6 +190,7 @@ pub async fn build_desktop() -> Result<()> {
     )
     .to_file_xml(bundle.join("Contents/Info.plist"))?;
     sign(&picker, &identity, None).await?;
+    sign(&dictation, &identity, None).await?;
     sign(&executables.join("Bex"), &identity, None).await?;
     sign(
         &executables.join("host-daemon"),

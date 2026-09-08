@@ -1267,21 +1267,21 @@ impl Desktop {
     }
     fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
-        let model = self.selected_model();
-        let label = model
-            .map(|m| text(m, "displayName"))
-            .filter(|s| !s.is_empty())
-            .unwrap_or("モデル");
         popover::Popover::new("model-controls")
             .bg(rgb(0x2b2b2b))
             .rounded(px(16.))
             .border_color(rgb(0x3b3b3b))
-            .anchor(Anchor::BottomLeft)
+            // Open toward the conversation. Native terminal/browser views in
+            // the right panel sit above GPUI's in-window popup layer.
+            .anchor(Anchor::BottomRight)
             .trigger(
                 Button::new("model-select")
-                    .label(label.to_owned())
-                    .dropdown_caret(true)
-                    .small()
+                    .icon(Icon::default().path("bex/gauge.svg").size(px(23.)))
+                    .accessibility_label("モデル設定")
+                    .tooltip("モデル設定")
+                    .large()
+                    .w(px(44.))
+                    .h(px(44.))
                     .ghost(),
             )
             .content(move |_, _, cx| {
@@ -1315,7 +1315,7 @@ impl Desktop {
             .dropdown_caret(true)
             .small()
             .ghost()
-            .dropdown_menu(move |mut menu, _, cx| {
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
                 if let Some(owner) = entity.upgrade() {
                     let s = owner.read(cx);
                     for model in &s.models {
@@ -1396,7 +1396,7 @@ impl Desktop {
             .child(model_effort_slider(&self.effort_slider, efforts.len(), cx))
             .into_any_element()
     }
-    fn host_menu(&self, cx: &Context<Self>) -> AnyElement {
+    fn host_menu(&self, id: &'static str, cx: &Context<Self>) -> AnyElement {
         let mut hosts = vec![(String::new(), "この Mac".to_owned())];
         hosts.extend(
             self.hosts
@@ -1411,11 +1411,12 @@ impl Desktop {
             .map(|(_, name)| name.as_str())
             .unwrap_or("Host")
             .to_owned();
-        Button::new("host-select")
+        Button::new(id)
             .label(label)
             .dropdown_caret(true)
             .small()
             .ghost()
+            .disabled(self.busy > 0 || self.dictation.is_some())
             .dropdown_menu(move |mut menu, _, _| {
                 for (id, name) in &hosts {
                     let entity = entity.clone();
@@ -1435,57 +1436,101 @@ impl Desktop {
             })
             .into_any_element()
     }
+    fn composer_folder(&self, cx: &Context<Self>) -> AnyElement {
+        let entity = cx.entity().downgrade();
+        Button::new("composer-folder")
+            .label(if self.cwd.is_empty() {
+                "チャット".into()
+            } else {
+                basename(&self.cwd)
+            })
+            .accessibility_label(if self.cwd.is_empty() {
+                "フォルダ: チャット".into()
+            } else {
+                format!("フォルダ: {}", self.cwd)
+            })
+            .icon(IconName::Folder)
+            .dropdown_caret(true)
+            .h(px(44.))
+            .ghost()
+            .disabled(self.busy > 0 || self.dictation.is_some())
+            .dropdown_menu(move |mut menu, _, cx| {
+                let Some(owner) = entity.upgrade() else {
+                    return menu;
+                };
+                let state = owner.read(cx);
+                let unassigned = entity.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("チャット")
+                        .checked(state.cwd.is_empty())
+                        .on_click(move |_, w, cx| {
+                            let _ = unassigned.update(cx, |s, cx| {
+                                s.new_thread(String::new(), w, cx);
+                                cx.notify();
+                            });
+                        }),
+                );
+                for project in &state.projects {
+                    for root in array(&project["roots"]) {
+                        let Some(path) = root["path"].as_str() else {
+                            continue;
+                        };
+                        let path = path.to_owned();
+                        let label = if array(&project["roots"]).len() == 1 {
+                            text(project, "name").to_owned()
+                        } else {
+                            path.clone()
+                        };
+                        let target = entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(label)
+                                .checked(path == state.cwd)
+                                .on_click(move |_, w, cx| {
+                                    let _ = target.update(cx, |s, cx| {
+                                        s.new_thread(path.clone(), w, cx);
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                }
+                if state.more["hasMoreProjects"] == true {
+                    let target = entity.clone();
+                    menu = menu.item(PopupMenuItem::new("さらにプロジェクトを読み込む").on_click(
+                        move |_, _, cx| {
+                            let _ = target.update(cx, |s, cx| {
+                                s.query["projectLimit"] =
+                                    json!(s.query["projectLimit"].as_u64().unwrap_or(10) + 10);
+                                s.refresh_threads();
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+                if state.remote.is_empty() {
+                    let target = entity.clone();
+                    menu = menu.item(PopupMenuItem::new("別のフォルダを選択…").on_click(
+                        move |_, _, cx| {
+                            let _ = target.update(cx, |s, _| s.pick_folder());
+                        },
+                    ));
+                }
+                menu
+            })
+            .into_any_element()
+    }
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut navigation = SidebarMenu::new()
+        let navigation = SidebarMenu::new()
             .gap_1()
             .child(
                 SidebarMenuItem::new("新しいチャット")
                     .icon(IconName::Plus)
                     .disable(!self.connected)
                     .on_click(cx.listener(|s, _, w, cx| {
-                        let cwd = if s.cwd.is_empty() {
-                            s.projects.first().map(project_root).unwrap_or_default()
-                        } else {
-                            s.cwd.clone()
-                        };
-                        s.new_thread(cwd, w, cx);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                SidebarMenuItem::new("ファイル")
-                    .icon(IconName::Folder)
-                    .active(self.panel_open && self.panel == Panel::Files)
-                    .disable(!self.connected || self.cwd.is_empty())
-                    .on_click(cx.listener(|s, _, _, cx| {
-                        s.browse(s.cwd.clone());
-                        cx.notify();
-                    })),
-            )
-            .child(
-                SidebarMenuItem::new("変更")
-                    .icon(IconName::Replace)
-                    .active(self.panel_open && self.panel == Panel::Diff)
-                    .disable(!self.connected || self.cwd.is_empty())
-                    .on_click(cx.listener(|s, _, _, cx| {
-                        s.panel = Panel::Diff;
-                        s.panel_open = true;
-                        s.tab = Tab::Chat;
-                        s.refresh_review();
+                        s.new_thread(String::new(), w, cx);
                         cx.notify();
                     })),
             );
-        navigation = navigation.child(
-            SidebarMenuItem::new("設定")
-                .icon(IconName::Settings)
-                .active(self.tab == Tab::Settings)
-                .on_click(cx.listener(|s, _, _, cx| {
-                    s.tab = Tab::Settings;
-                    s.refresh_manager();
-                    s.refresh_worktree_settings();
-                    cx.notify();
-                })),
-        );
         let mut projects = SidebarMenu::new().gap_1();
         for project in &self.projects {
             let id = text(project, "id").to_owned();
@@ -1635,7 +1680,35 @@ impl Desktop {
                     } else {
                         0x999999
                     })))
-                    .child(div().flex_1().min_w_0().child(self.host_menu(cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                self.button(
+                                    "sidebar-settings",
+                                    if self.remote.is_empty() {
+                                        "この Mac".to_owned()
+                                    } else {
+                                        self.hosts
+                                            .iter()
+                                            .find(|host| text(host, "id") == self.remote)
+                                            .map(|host| text(host, "hostName"))
+                                            .unwrap_or("Host")
+                                            .to_owned()
+                                    },
+                                    cx,
+                                    |s, _, _| {
+                                        s.tab = Tab::Settings;
+                                        s.refresh_manager();
+                                        s.refresh_worktree_settings();
+                                    },
+                                )
+                                .accessibility_label("設定を開く")
+                                .tooltip("設定を開く")
+                                .selected(self.tab == Tab::Settings),
+                            ),
+                    )
                     .child(self.icon_button(
                         "refresh-threads",
                         IconName::RotateCw,
@@ -1760,7 +1833,7 @@ impl Desktop {
                     .gap_4()
                     .child(div().text_2xl().child("何から始めましょうか？"))
                     .child(if self.cwd.is_empty() {
-                        "プロジェクトを選んで、作業を始めましょう。".into()
+                        "メッセージを入力して、作業を始めましょう。".into()
                     } else {
                         basename(&self.cwd)
                     }),
@@ -1790,47 +1863,93 @@ impl Desktop {
         }
         let running = self.conversation.active();
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
-        let send = if let Some(turn) = running.filter(|_| empty) {
+        let phase = self.dictation.as_ref().map(|d| d.phase);
+        let recording = phase == Some(Phase::Recording);
+        let processing = matches!(phase, Some(Phase::Permission | Phase::Transcribing));
+        let send = if let Some(turn) = running.filter(|_| empty && phase.is_none()) {
             let id = turn["id"].clone();
-            self.icon_button(
-                "stop",
-                IconName::Pause,
-                "生成を停止",
-                cx,
-                move |s, _, _| {
-                    s.request(
-                        false,
-                        "turn/interrupt",
-                        json!({"threadId":s.selected,"turnId":id}),
-                        true,
-                        |_, _, _, _| {},
-                    )
-                },
-            )
-        } else {
-            self.icon_button("send", IconName::ArrowUp, "送信", cx, |s, _, cx| {
-                s.send(cx)
+            self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
+                s.request(
+                    false,
+                    "turn/interrupt",
+                    json!({"threadId":s.selected,"turnId":id}),
+                    true,
+                    |_, _, _, _| {},
+                )
             })
-            .disabled(!self.connected || self.busy > 0 || empty || self.cwd.is_empty())
+            .icon(Icon::default().path("bex/stop.svg"))
+            .disabled(!self.connected || self.busy > 0)
+        } else {
+            self.icon_button(
+                "send",
+                IconName::ArrowUp,
+                if recording {
+                    "文字起こしして送信"
+                } else {
+                    "送信"
+                },
+                cx,
+                |s, _, cx| s.send(cx),
+            )
+            .disabled(!self.connected || self.busy > 0 || (empty && !recording) || processing)
         };
+        let microphone = Button::new("dictation-toggle")
+            .icon(
+                Icon::default()
+                    .path(if recording {
+                        "bex/stop.svg"
+                    } else {
+                        "bex/microphone.svg"
+                    })
+                    .size(px(23.)),
+            )
+            .ghost()
+            .w(px(40.))
+            .h(px(40.))
+            .large()
+            .tooltip(if recording {
+                "録音を終了して文字起こし"
+            } else {
+                "音声をCodexで文字起こし"
+            })
+            .accessibility_label(if recording {
+                "録音を終了して文字起こし"
+            } else {
+                "音声をCodexで文字起こし"
+            })
+            .when(recording, |button| button.text_color(rgb(0xff6666)))
+            .disabled(!self.connected || self.busy > 0 || processing)
+            .on_click(cx.listener(|s, _, _, cx| {
+                if s.dictation
+                    .as_ref()
+                    .is_some_and(|d| d.phase == Phase::Recording)
+                {
+                    s.finish_dictation(false, cx);
+                } else {
+                    s.start_dictation();
+                }
+                cx.notify();
+            }));
         let composer = v_flex()
             .key_context("ChatComposer")
             .capture_action(cx.listener(Self::paste_image))
             .capture_action(cx.listener(Self::composer_enter))
             .w_full()
             .max_w(px(CHAT_WIDTH))
-            .p_3()
+            .p(px(7.))
             .gap_2()
-            .rounded(px(24.))
+            .rounded(px(30.))
             .bg(rgb(0x2b2b2b))
             .border_1()
             .border_color(rgb(0x363636))
-            .child(files)
             .child(
-                Textarea::new(&self.composer)
-                    .appearance(false)
-                    .bordered(false)
-                    .aria_label("Codex に依頼する"),
+                div().px_2().pt(px(10.)).pb_1().child(
+                    Textarea::new(&self.composer)
+                        .appearance(false)
+                        .bordered(false)
+                        .text_size(px(18.))
+                        .aria_label("Codex に依頼する"),
+                ),
             )
             .child(
                 h_flex()
@@ -1843,32 +1962,59 @@ impl Desktop {
                             cx,
                             |s, _, _| s.attach(),
                         )
-                        .disabled(!self.connected || self.cwd.is_empty() || self.busy > 0),
-                    )
-                    .child(
-                        self.button(
-                            "composer-folder",
-                            if self.cwd.is_empty() {
-                                "フォルダを選択".into()
-                            } else {
-                                basename(&self.cwd)
-                            },
-                            cx,
-                            |s, _, _| s.pick_folder(),
-                        )
-                        .disabled(!self.remote.is_empty()),
+                        .w(px(40.))
+                        .h(px(40.))
+                        .large()
+                        .disabled(
+                            !self.connected
+                                || (!self.remote.is_empty() && self.cwd.is_empty())
+                                || self.busy > 0
+                                || phase.is_some(),
+                        ),
                     )
                     .child(div().flex_1())
                     .child(self.model_menu(cx))
-                    .child(send.rounded(px(18.)).w_8().h_8().primary()),
+                    .child(microphone)
+                    .child(send.large().rounded(px(22.)).w(px(44.)).h(px(44.)).primary()),
             );
+        let controls = v_flex()
+            .w_full()
+            .max_w(px(CHAT_WIDTH))
+            .gap_3()
+            .when(self.selected.is_empty(), |column| {
+                column.child(
+                    v_flex()
+                        .items_start()
+                        .gap_1()
+                        .child(self.host_menu("composer-host", cx))
+                        .child(self.composer_folder(cx)),
+                )
+            })
+            .when(phase.is_some(), |column| {
+                column.child(
+                    div()
+                        .text_sm()
+                        .text_color(if recording {
+                            rgb(0xff6666)
+                        } else {
+                            rgb(0xaaaaaa)
+                        })
+                        .child(match phase {
+                            Some(Phase::Permission) => "マイクの許可を確認中…",
+                            Some(Phase::Recording) => "録音中",
+                            _ => "文字起こし中…",
+                        }),
+                )
+            })
+            .child(files)
+            .child(composer);
         body.child(
             h_flex()
                 .justify_center()
                 .px_6()
                 .pt_2()
                 .pb_4()
-                .child(composer),
+                .child(controls),
         )
         .into_any_element()
     }
@@ -2035,7 +2181,7 @@ impl Desktop {
             .gap_4()
             .p_7()
             .child(div().text_2xl().child("設定"))
-            .child(self.host_menu(cx));
+            .child(self.host_menu("settings-host", cx));
         body = body.child(
             v_flex().gap_3()
                 .child(div().text_xl().child("ワークツリー"))
@@ -2047,6 +2193,7 @@ impl Desktop {
                     .on_click(cx.listener(|s, checked, _, cx| {
                         s.worktree_settings["createOnNewSession"] = json!(*checked);
                         s.worktree_saved = false;
+                        s.save_worktree_settings(cx);
                         cx.notify();
                     })))
                 .child("ワークツリーの保存先")
@@ -2060,6 +2207,7 @@ impl Desktop {
                     .on_click(cx.listener(|s, checked, _, cx| {
                         s.worktree_settings["copyOnCreate"] = json!(*checked);
                         s.worktree_saved = false;
+                        s.save_worktree_settings(cx);
                         cx.notify();
                     })))
                 .child("コピー対象（リポジトリからの相対パスを1行に1つ）")
@@ -2385,7 +2533,7 @@ impl Desktop {
                     cx,
                     |s, w, cx| {
                         if let Some(chat) = &s.side_chat {
-                            chat.update(cx, |chat, cx| chat.new_thread(s.cwd.clone(), w, cx));
+                            chat.update(cx, |chat, cx| chat.new_thread(String::new(), w, cx));
                         }
                     },
                 ))
@@ -2506,6 +2654,19 @@ impl Desktop {
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.image_gallery.is_none() && self.panel_open && self.tab == Tab::Chat;
+        let composer_visible = self.image_gallery.is_none()
+            && self.tab == Tab::Chat
+            && (self.side_chat_mode
+                || !self.panel_open
+                || window.viewport_size().width >= px(1080.));
+        if !composer_visible {
+            self.cancel_recording();
+        }
+        if let Some(chat) = &self.side_chat {
+            if !active || self.panel != Panel::SideChat {
+                chat.update(cx, |chat, _| chat.cancel_recording());
+            }
+        }
         if let Some(view) = self.browser.clone() {
             view.update(cx, |v, cx| {
                 v.set_visible(active && self.panel == Panel::Browser, cx)
@@ -2568,28 +2729,20 @@ impl Render for Desktop {
                 |s, _, _| s.tab = Tab::Chat,
             ));
         }
-        header = header
-            .child(self.icon_button(
-                "header-new-thread",
-                IconName::Plus,
-                "新しいチャット",
+        header = header.child(
+            self.icon_button(
+                "panel-toggle",
+                if self.panel_open {
+                    IconName::PanelRightClose
+                } else {
+                    IconName::PanelRightOpen
+                },
+                "右パネルを切り替え",
                 cx,
-                |s, w, cx| s.new_thread(s.cwd.clone(), w, cx),
-            ))
-            .child(
-                self.icon_button(
-                    "panel-toggle",
-                    if self.panel_open {
-                        IconName::PanelRightClose
-                    } else {
-                        IconName::PanelRightOpen
-                    },
-                    "右パネルを切り替え",
-                    cx,
-                    |s, _, _| s.panel_open = !s.panel_open,
-                )
-                .selected(self.panel_open),
-            );
+                |s, _, _| s.panel_open = !s.panel_open,
+            )
+            .selected(self.panel_open),
+        );
         let content = if self.side_chat_mode {
             self.chat(cx)
         } else if self.tab == Tab::Settings {

@@ -94,7 +94,7 @@ final class BexAppViewModel: ObservableObject {
     }
 
     var cwd: String {
-        state.threads.first { $0.id == state.selectedThreadId }?.workingDirectory ?? state.workingDirectory
+        state.workingDirectory
     }
 
     var workspace: IosWorkspaceActions {

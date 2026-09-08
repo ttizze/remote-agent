@@ -123,6 +123,7 @@ fn route(state: &Path, method: &Method, path: &str) -> Result<(u16, Vec<u8>)> {
     }
     let root = state.parent().ok_or("fixture state has no parent")?;
     match path {
+        "/worktree-conversation" => worktree_conversation(root)?,
         "/long-conversation" => write_json(
             root.join("list-fixture.json"),
             &json!([{
@@ -174,6 +175,54 @@ fn route(state: &Path, method: &Method, path: &str) -> Result<(u16, Vec<u8>)> {
         _ => return Ok((404, Vec::new())),
     }
     Ok((204, Vec::new()))
+}
+
+fn worktree_conversation(root: &Path) -> Result<()> {
+    let repository = root.join("review-repository");
+    let worktree = root.join("review-worktree");
+    fs::create_dir(&repository)?;
+    let git = |arguments: &[&str]| -> Result<()> {
+        let output = std::process::Command::new("git")
+            .current_dir(&repository)
+            .args(arguments)
+            .output()?;
+        if !output.status.success() {
+            return Err("worktree fixture Git command failed".into());
+        }
+        Ok(())
+    };
+    git(&["init", "--initial-branch=main"])?;
+    fs::write(repository.join("tracked.txt"), "original\n")?;
+    git(&["add", "tracked.txt"])?;
+    git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-m",
+        "Initial",
+    ])?;
+    git(&[
+        "worktree",
+        "add",
+        "-b",
+        "session",
+        worktree.to_str().ok_or("fixture path is not UTF-8")?,
+    ])?;
+    fs::write(repository.join("tracked.txt"), "Project-only change\n")?;
+    fs::write(
+        worktree.join("tracked.txt"),
+        "Session worktree first\nSession worktree second\n",
+    )?;
+    write_json(
+        root.join("list-fixture.json"),
+        &json!([{
+            "id":"fixture-worktree-thread", "cwd":root.join("project"),
+            "readCwd":worktree, "name":"Worktree conversation", "createdAt":10000,
+            "updatedAt":10000,"status":{"type":"idle"}
+        }]),
+    )
 }
 
 fn list_fixture(root: &Path, path: &str) -> Result<()> {

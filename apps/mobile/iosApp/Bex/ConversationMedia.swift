@@ -247,15 +247,19 @@ struct ConversationPreview: View {
                 ToolbarItem(placement: .confirmationAction) {
                     HStack(spacing: 20) {
                         if isImage {
-                            Button(saved ? "保存済み" : "保存") {
+                            Button {
                                 saving = true
                                 Task { await save() }
+                            } label: {
+                                Image(systemName: saved ? "checkmark" : "arrow.down.to.line")
                             }
                             .disabled(saving || saved || displayedURL == nil)
+                            .accessibilityLabel(saved ? "保存済み" : "保存")
                             .accessibilityIdentifier("conversation.preview.save")
                         }
-                        Button("閉じる", action: close)
+                        Button(action: close) { Image(systemName: "xmark") }
                             .disabled(saving)
+                            .accessibilityLabel("閉じる")
                             .accessibilityIdentifier("conversation.preview.close")
                     }
                 }

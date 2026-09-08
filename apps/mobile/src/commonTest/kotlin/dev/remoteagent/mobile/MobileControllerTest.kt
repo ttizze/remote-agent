@@ -39,6 +39,35 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
     }
 
     @Test
+    fun returning_to_list_after_disconnect_clears_detail_and_allows_reopening() = runBlocking {
+        val gateway =
+            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val controller = controller(gateway)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            repeat(3) {
+                controller.connect(profile, scope)
+                controller.readThread(profile, "thread-1")
+                assertEquals("thread-1", controller.state.selectedView.selectedThreadId)
+                controller.disconnect(profile)
+                val lists = gateway.listQueries.size
+
+                controller.showThreadList(profile)
+
+                assertNull(controller.state.selectedView.selectedThreadId)
+                assertNull(controller.state.selectedView.newThreadCwd)
+                assertEquals(lists, gateway.listQueries.size)
+                controller.openNewThread(profile, "/workspace")
+                assertEquals("/workspace", controller.state.selectedView.newThreadCwd)
+                controller.showThreadList(profile)
+                assertNull(controller.state.selectedView.newThreadCwd)
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun returning_to_list_preserves_expanded_sections_and_search() {
         val gateway =
             FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }

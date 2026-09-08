@@ -11,7 +11,13 @@
 - Move project-owned Python and Shell development tooling into Rust `cargo xtask` commands: Mac builds and signing, isolated iOS E2E orchestration, Codex scenarios, pairing controls, and Fly secret generation. Run the current encrypted relay tests through `cargo xtask relay-e2e`; remove the obsolete plaintext Python harness and the explicit Python development dependency. Preserve fixture behavior and signing identities. Preserve the original per-run Simulator and Host lifecycle and reject failed or skipped tests.
 
 - Share Simulator fixture HTTP controls and project expansion setup across UI tests; complete the dictation fixture draft before the next test. Restore temporary list fixtures through XCTest teardown even after a failed assertion, and restart title traversal after page insertions. Exercise production TLS provider initialization directly when workspace features enable multiple backends.
+- Align the shared Mac main/Side Chat composer with iPhone and add native voice input through the existing Host transcription route. Keep Stop-to-draft and Send-directly behavior, preserve drafts on failure, and cancel hidden recordings. Open global new chats without a project, add the project/folder menu above the input, remove the top-right new-chat button, and open model menus toward the conversation to keep them clear of native right-panel views.
+
+- Use the open iPhone session's current working directory for change counts, diffs, and workspace files, preserving its worktree when refreshed task titles contain a different directory.
+
 - Add iPhone worktree settings to the task list's top-right menu, with Host-backed loading/saving, cancel, and error handling. Let Mac and iPhone configure an absolute Host directory for new worktrees; an empty directory preserves the existing Git-directory default, and existing worktrees keep their locations and project membership.
+
+- Clear mobile conversation and new-task selection when returning to the list even if the Host disconnected. Prevent native back navigation from leaving the detail route active and blocking subsequent task/new-task openings. Cover disconnected returns and reconnection in shared tests, plus repeated native back, cancelled edge swipes, and existing/new-task openings on iOS Simulator.
 
 - Remove unused Rust dependencies and error variants, replace the manual JSON ID scanner with serde traversal, and borrow JSONL source lines and raw payloads. Move desktop RPC results without cloning, consolidate request cancellation cleanup, and remove temporary notification and disconnect collections.
 

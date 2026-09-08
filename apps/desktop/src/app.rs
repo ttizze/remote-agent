@@ -1,5 +1,7 @@
 mod clipboard;
+mod dictation;
 mod view;
+use dictation::{Dictation, DictationEvent, Phase};
 
 use crate::{
     conversation::{self, Conversation, array, text},
@@ -29,6 +31,7 @@ use std::{
 type Apply =
     Box<dyn FnOnce(&mut Desktop, Result<Value, String>, &mut Window, &mut Context<Desktop>) + Send>;
 enum Event {
+    Dictation(uuid::Uuid, DictationEvent),
     Rpc {
         epoch: u64,
         manager: bool,
@@ -66,6 +69,7 @@ struct Submission {
     id: String,
     key: String,
     message: String,
+    dictated_text: Option<String>,
     files: Vec<Value>,
     input: Vec<Value>,
     model: String,
@@ -223,6 +227,7 @@ pub(crate) struct Desktop {
     conversation: Conversation,
     outgoing: Vec<OutgoingMessage>,
     composer: Entity<TextareaState>,
+    dictation: Option<Dictation>,
     search: Entity<InputState>,
     path: Entity<InputState>,
     editor_input: Entity<EditorState>,
@@ -460,6 +465,7 @@ impl Desktop {
             conversation: Conversation::default(),
             outgoing: Vec::new(),
             composer,
+            dictation: None,
             search,
             path,
             editor_input,
@@ -666,6 +672,7 @@ impl Desktop {
     }
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
+            Event::Dictation(id, event) => self.dictation_event(id, event, window, cx),
             Event::Done {
                 epoch,
                 result,
@@ -734,6 +741,7 @@ impl Desktop {
                                     self.open_thread(self.selected.clone(), window, cx);
                                 }
                             } else {
+                                self.cancel_recording();
                                 self.error = reason;
                             }
                         }
@@ -1169,6 +1177,7 @@ impl Desktop {
         }
     }
     fn new_thread(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_recording();
         self.load_generation += 1;
         self.release_content();
         self.selected.clear();
@@ -1180,6 +1189,7 @@ impl Desktop {
         self.refresh_review();
     }
     fn open_thread(&mut self, id: String, _: &mut Window, _: &mut Context<Self>) {
+        self.cancel_recording();
         self.load_generation += 1;
         let generation = self.load_generation;
         self.request(
@@ -1408,16 +1418,36 @@ impl Desktop {
         self.new_thread(String::new(), window, cx);
     }
     fn send(&mut self, cx: &mut Context<Self>) {
+        if let Some(dictation) = &self.dictation {
+            if dictation.phase == Phase::Recording {
+                self.finish_dictation(true, cx);
+            }
+            return;
+        }
         if !self.connected || self.busy > 0 {
             return;
         }
         let message = self.composer.read(cx).value().to_string();
         let key = self.draft_key();
         let files = array(&self.cache["attachments"][&key]).to_vec();
-        if message.trim().is_empty() && files.is_empty() {
+        self.submit(message, files, None, cx);
+    }
+    fn submit(
+        &mut self,
+        message: String,
+        files: Vec<Value>,
+        dictated_text: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = self.draft_key();
+        if message.trim().is_empty() && files.is_empty() && dictated_text.is_none() {
             return;
         }
-        let input = message_input(&message, &files);
+        let input = if let Some(text) = &dictated_text {
+            message_input(&dictation::append_text(&message, text), &files)
+        } else {
+            message_input(&message, &files)
+        };
         let outgoing_id = uuid::Uuid::new_v4().to_string();
         self.outgoing.push(OutgoingMessage {
             id: outgoing_id.clone(),
@@ -1431,6 +1461,7 @@ impl Desktop {
             id: outgoing_id,
             key,
             message,
+            dictated_text,
             files,
             input,
             model: self.model.clone(),
@@ -1442,7 +1473,10 @@ impl Desktop {
         cx.notify();
         if self.selected.is_empty() {
             let generation = self.load_generation;
-            let mut params = json!({"cwd":self.cwd});
+            let mut params = json!({});
+            if !self.cwd.is_empty() {
+                params["cwd"] = json!(self.cwd);
+            }
             if !self.model.is_empty() {
                 params["model"] = json!(self.model);
             }
@@ -1455,13 +1489,13 @@ impl Desktop {
                     let mut v = match result {
                         Ok(value) => value,
                         Err(error) => {
-                            s.fail_send(&submission.id, error);
+                            s.fail_send(&submission, error, w, cx);
                             return;
                         }
                     };
                     let id = text(&v["thread"], "id").to_owned();
                     if id.is_empty() {
-                        s.fail_send(&submission.id, "Host が会話IDを返しませんでした".into());
+                        s.fail_send(&submission, "Host が会話IDを返しませんでした".into(), w, cx);
                         return;
                     }
                     let target = s.thread_draft_key(&id);
@@ -1502,9 +1536,9 @@ impl Desktop {
                     "thread/resume",
                     json!({"threadId":id}),
                     true,
-                    move |s, result, _, _| match result {
+                    move |s, result, w, cx| match result {
                         Ok(_) => s.send_turn(id, None, submission),
-                        Err(error) => s.fail_send(&submission.id, error),
+                        Err(error) => s.fail_send(&submission, error, w, cx),
                     },
                 );
             }
@@ -1517,7 +1551,8 @@ impl Desktop {
             "turn/start"
         };
         let mut params = json!({"threadId":id,"clientUserMessageId":submission.id});
-        params["input"] = Value::Array(submission.input);
+        let mut submission = submission;
+        params["input"] = Value::Array(std::mem::take(&mut submission.input));
         if let Some(turn) = running {
             params["expectedTurnId"] = turn;
         } else {
@@ -1533,7 +1568,7 @@ impl Desktop {
             let response = match result {
                 Ok(value) => value,
                 Err(error) => {
-                    s.fail_send(&submission.id, error);
+                    s.fail_send(&submission, error, w, cx);
                     return;
                 }
             };
@@ -1571,8 +1606,31 @@ impl Desktop {
             s.refresh_threads();
         });
     }
-    fn fail_send(&mut self, id: &str, error: String) {
-        self.outgoing.retain(|message| message.id != id);
+    fn fail_send(
+        &mut self,
+        submission: &Submission,
+        error: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(transcript) = &submission.dictated_text {
+            let target = self
+                .outgoing
+                .iter()
+                .find(|m| m.id == submission.id)
+                .map(|m| m.key.clone());
+            for key in std::iter::once(&submission.key)
+                .chain(target.as_ref().filter(|key| *key != &submission.key))
+            {
+                self.cache["messages"][key] = json!(dictation::append_text(
+                    text(&self.cache["messages"], key),
+                    transcript
+                ));
+            }
+            self.persist();
+            self.restore_draft(window, cx);
+        }
+        self.outgoing.retain(|message| message.id != submission.id);
         self.error = error;
         self.sync_list(false);
     }
@@ -1630,9 +1688,7 @@ impl Desktop {
         });
         if submit {
             cx.stop_propagation();
-            if !self.cwd.is_empty() {
-                self.send(cx);
-            }
+            self.send(cx);
         }
     }
     fn paste_image(

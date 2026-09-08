@@ -365,7 +365,19 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     let Some(thread) = threads.get(params["threadId"].as_str().unwrap_or("")) else {
                         context.error(id, -32602, "thread not found")?; continue;
                     };
-                    let thread = thread.borrow();
+                    let stored_thread = thread.borrow();
+                    let overridden = stored_thread.metadata.get("readCwd").map(|cwd| {
+                        let mut metadata = stored_thread.metadata.clone();
+                        metadata.insert("cwd".into(), cwd.clone());
+                        let notification = json!({"threadId":metadata["id"], "threadName":metadata["name"]});
+                        let context = context.clone();
+                        tokio::task::spawn_local(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            context.notify("thread/name/updated", &notification)
+                        });
+                        Thread { metadata, turns: stored_thread.turns.clone() }
+                    });
+                    let thread = overridden.as_ref().unwrap_or(&stored_thread);
                     let include = params["includeTurns"] == true;
                     if method == "thread/read" && include && thread.metadata.get("historyMode").and_then(Value::as_str) == Some("paginated") {
                         context.error(id, -32603, "Full history hydration is unavailable; use pagination")?;
@@ -377,9 +389,9 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     } else {
                         #[derive(Serialize)] struct Read<'a, T> { thread: &'a T }
                         if include {
-                            if let Some(persisted) = history::persisted(&thread) {
+                            if let Some(persisted) = history::persisted(thread) {
                                 context.respond(id, &Read { thread: &persisted })?;
-                            } else { context.respond(id, &Read { thread: &*thread })?; }
+                            } else { context.respond(id, &Read { thread })?; }
                         } else {
                             context.respond(id, &Read { thread: &ThreadView { metadata: &thread.metadata,
                                 turns: if method == "thread/read" { &[] } else { &thread.turns } } })?;

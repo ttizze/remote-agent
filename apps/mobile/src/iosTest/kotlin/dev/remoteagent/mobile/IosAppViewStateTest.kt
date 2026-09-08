@@ -132,7 +132,7 @@ class IosAppViewStateTest {
     }
 
     @Test
-    fun open_conversation_keeps_its_upload_directory_when_recent_titles_drop_it() {
+    fun open_conversation_uses_its_current_directory_when_recent_titles_differ_or_drop_it() {
         val host = HostProfile("runner", "Mac", "wss://relay.example.test", "host", "device-ref")
         val summary =
             ThreadSummary(
@@ -156,12 +156,27 @@ class IosAppViewStateTest {
                     MobileCache(
                         mapOf(
                             host.id to
-                                ProfileMobileCache(snapshots = mapOf(summary.id to ThreadSnapshot(summary = summary)))
+                                ProfileMobileCache(
+                                    threadList =
+                                        listOf(summary.copy(workingDirectory = WorkingDirectory("/workspace/project"))),
+                                    snapshots = mapOf(summary.id to ThreadSnapshot(summary = summary)),
+                                )
                         )
                     ),
             )
         val projector = IosViewStateProjector()
         assertEquals("/workspace/chat", projector.project(state).workingDirectory)
+        assertEquals("/workspace/project", projector.project(state).threads.single().workingDirectory)
+        val movedSnapshot =
+            ThreadSnapshot(summary = summary.copy(workingDirectory = WorkingDirectory("/workspace/worktree")))
+        val movedCache = state.cache.profile(host.id).copy(snapshots = mapOf(summary.id to movedSnapshot))
+        val moved = state.copy(cache = MobileCache(mapOf(host.id to movedCache)))
+        assertEquals("/workspace/worktree", projector.project(moved).workingDirectory)
+        val unlisted =
+            moved.copy(
+                cache = MobileCache(mapOf(host.id to moved.cache.profile(host.id).copy(threadList = emptyList())))
+            )
+        assertEquals("/workspace/worktree", projector.project(unlisted).workingDirectory)
         val newChat =
             state.copy(
                 profileViews =

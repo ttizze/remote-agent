@@ -9,9 +9,31 @@ use gpui_kit::{
     component::{Root, Theme, ThemeMode},
     *,
 };
+struct DesktopAssets;
+impl AssetSource for DesktopAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let bytes: &'static [u8] = match path {
+            "bex/microphone.svg" => include_bytes!("../assets/microphone.svg"),
+            "bex/gauge.svg" => include_bytes!("../assets/gauge.svg"),
+            "bex/stop.svg" => include_bytes!("../assets/stop.svg"),
+            _ => return gpui_kit::assets::Assets.load(path),
+        };
+        Ok(Some(std::borrow::Cow::Borrowed(bytes)))
+    }
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(
+            ["bex/microphone.svg", "bex/gauge.svg", "bex/stop.svg"]
+                .into_iter()
+                .filter(|item| item.starts_with(path))
+                .map(SharedString::from),
+        );
+        Ok(paths)
+    }
+}
 fn main() {
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(DesktopAssets)
         .with_http_client(std::sync::Arc::new(gpui_http::ReqwestClient::new()))
         .run(|cx| {
             gpui_kit::init(cx);

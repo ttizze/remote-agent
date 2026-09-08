@@ -1,8 +1,9 @@
 package dev.remoteagent.mobile
 
 internal suspend fun MobileController.showThreadList(profile: HostProfile) {
+    // Native back navigation must commit even while the transport is disconnected.
+    dispatch(AppAction.ThreadListOpened(profile.id))
     val generation = sessions.currentGeneration(profile.id) ?: return
-    dispatchIfCurrent(profile.id, generation) { AppAction.ThreadListOpened(profile.id) }
     listThreads(profile, generation)
 }
 

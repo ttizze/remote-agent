@@ -85,4 +85,34 @@ extension BexLaunchUITests {
         // SwiftUI exposes the label and switch as one wide accessibility element.
         control.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
     }
+
+    func testSimulatorReviewsTheOpenSessionsWorktree() throws {
+        let app = try connectedSimulatorApp(expandProject: false)
+        try useSimulatorListFixture("worktree-conversation")
+        app.buttons["tasks.menu"].tap()
+        app.buttons["tasks.refresh"].tap()
+        let project = app.buttons["tasks.project.simulator-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10)); project.tap()
+        let row = app.descendants(matching: .any)["tasks.row.fixture-worktree-thread"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        let changes = app.buttons["task.diff"]
+        XCTAssertTrue(changes.waitForExistence(timeout: 15))
+        let staleWorkspace = expectation(for: NSPredicate(format: "exists == true"),
+                                         evaluatedWith: app.staticTexts["検証プロジェクト · 検証 Mac"])
+        staleWorkspace.isInverted = true
+        wait(for: [staleWorkspace], timeout: 3)
+        XCTAssertTrue(changes.label.contains("1件のファイル"), changes.label)
+        XCTAssertTrue(changes.label.contains("+2"), changes.label)
+        XCTAssertTrue(changes.label.contains("−1"), changes.label)
+        openFiles(app)
+        let diff = app.buttons["files.diff"]
+        XCTAssertTrue(diff.waitForExistence(timeout: 10)); diff.tap()
+        XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["+Session worktree second"].exists)
+        XCTAssertTrue(app.staticTexts["-original"].exists)
+        XCTAssertFalse(app.staticTexts["+Project-only change"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Open session worktree diff"
+        screenshot.lifetime = .keepAlways; add(screenshot)
+    }
 }
