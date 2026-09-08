@@ -201,7 +201,7 @@ fun reduce(
     }
 
     is AppAction.ThreadListOpened -> state.updateView(action.hostIdentity) {
-        it.copy(loadingHistory = false, selectedThreadId = null, newThreadCwd = null, threadDetail = LoadPhase.Idle, notice = null, visibleProjectCount = 5, visibleChatCount = 5, projectThreadLimits = emptyMap(), threadSearchTerm = "")
+        it.copy(loadingHistory = false, selectedThreadId = null, newThreadCwd = null, threadDetail = LoadPhase.Idle, notice = null)
     }
 
     is AppAction.ThreadReadLoading -> state.updateViewIfConnected(action.hostIdentity) {

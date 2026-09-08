@@ -73,9 +73,6 @@ async fn phoenix_isolates_concurrent_byte_streams_and_handles_backpressure_and_r
 
 #[tokio::test]
 async fn wss_starts_tls_and_returns_an_error_when_the_peer_drops_the_handshake() {
-    // A workspace test run can enable both GPUI's and the Host's providers.
-    // This process owns TLS initialization, just as an application does.
-    let _ = rustls::crypto::ring::default_provider().install_default();
     tokio::time::timeout(Duration::from_secs(5), async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

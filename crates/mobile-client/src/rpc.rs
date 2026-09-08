@@ -125,34 +125,31 @@ impl RpcPeer {
         ensure_active(&self.state)?;
         let numeric_id = allocate_request_id(&self.next_id)?;
         let id = numeric_id.to_string();
-        let state = self.state.clone();
-        let outbound = self.outbound.clone();
-        let permits = self.permits.clone();
-        let deadline = self.request_timeout;
-        let operation = async move {
-            let _permit = permits
-                .acquire_owned()
+        let state = &self.state;
+        let operation = async {
+            let _permit = self.permits
+                .acquire()
                 .await
-                .map_err(|_| disconnected_or(&state, "request limiter closed"))?;
+                .map_err(|_| disconnected_or(state, "request limiter closed"))?;
 
             let (tx, rx) = oneshot::channel();
-            register_pending(&state, id.clone(), tx)?;
+            register_pending(state, id.clone(), tx)?;
             let _registration = PendingRegistration {
                 state: state.clone(),
-                id: id.clone(),
+                id,
             };
 
-            ensure_active(&state)?;
+            ensure_active(state)?;
             let line = request_line(numeric_id, &method, &params)?;
-            outbound
+            self.outbound
                 .send(line)
                 .await
-                .map_err(|_| disconnected_or(&state, "JSONL writer stopped"))?;
+                .map_err(|_| disconnected_or(state, "JSONL writer stopped"))?;
             rx.await
-                .map_err(|_| disconnected_or(&state, "JSONL reader stopped"))?
+                .map_err(|_| disconnected_or(state, "JSONL reader stopped"))?
         };
 
-        timeout(deadline, operation)
+        timeout(self.request_timeout, operation)
             .await
             .map_err(|_| MobileClientError::RequestTimeout { id: numeric_id })?
     }
@@ -289,14 +286,17 @@ fn allocate_request_id(next_id: &AtomicU64) -> Result<u64, MobileClientError> {
 }
 
 fn request_line(id: u64, method: &str, params: &str) -> Result<String, MobileClientError> {
-    let id: Box<RawValue> = serde_json::from_str(&id.to_string())?;
-    let method: Box<RawValue> = serde_json::from_str(&serde_json::to_string(method)?)?;
-    let params: Box<RawValue> = serde_json::from_str(params)?;
-    let mut object = BTreeMap::new();
-    object.insert("id", id);
-    object.insert("method", method);
-    object.insert("params", params);
-    Ok(serde_json::to_string(&object)?)
+    #[derive(serde::Serialize)]
+    struct Request<'a> {
+        id: u64,
+        method: &'a str,
+        params: &'a RawValue,
+    }
+    Ok(serde_json::to_string(&Request {
+        id,
+        method,
+        params: serde_json::from_str(params)?,
+    })?)
 }
 
 fn response_line(
@@ -304,8 +304,8 @@ fn response_line(
     field: &'static str,
     payload: &str,
 ) -> Result<String, MobileClientError> {
-    let id: Box<RawValue> = serde_json::from_str(id)?;
-    let payload: Box<RawValue> = serde_json::from_str(payload)?;
+    let id: &RawValue = serde_json::from_str(id)?;
+    let payload: &RawValue = serde_json::from_str(payload)?;
     let mut object = BTreeMap::new();
     object.insert("id", id);
     object.insert(field, payload);
@@ -364,20 +364,20 @@ async fn read_loop<R>(
             RpcMessageKind::Notification => {
                 let state = lock_state(&state);
                 if let Some(sender) = state.notifications.as_ref() {
-                    let _ = sender.send(message.into_raw_line());
+                    let _ = sender.send(line);
                 }
             }
             RpcMessageKind::Request => {
                 let state = lock_state(&state);
                 if let Some(sender) = state.server_requests.as_ref() {
-                    let _ = sender.send(message.into_raw_line());
+                    let _ = sender.send(line);
                 }
             }
         }
     }
 }
 
-fn handle_response(state: &SharedState, message: RpcMessage) {
+fn handle_response(state: &SharedState, message: RpcMessage<'_>) {
     let Some(id) = message.raw_id() else {
         return;
     };
@@ -410,7 +410,7 @@ fn terminate(state: &SharedState, permits: &Arc<Semaphore>, reason: String) {
         }
         state.terminal = Some(reason.clone());
         (
-            state.pending.drain().map(|(_, tx)| tx).collect::<Vec<_>>(),
+            std::mem::take(&mut state.pending),
             state.notifications.take(),
             state.server_requests.take(),
         )
@@ -419,7 +419,7 @@ fn terminate(state: &SharedState, permits: &Arc<Semaphore>, reason: String) {
     permits.close();
     drop(notifications);
     drop(server_requests);
-    for tx in pending {
+    for tx in pending.into_values() {
         let _ = tx.send(Err(MobileClientError::Disconnected(reason.clone())));
     }
 }
@@ -441,6 +441,13 @@ mod tests {
             object["params"].get(),
             r#"{"future": {"id": "nested"}, "text": "hello"}"#
         );
+        let method = "custom/\"日本語\\method";
+        let line = request_line(u64::MAX, method, "null").unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["id"], u64::MAX);
+        assert_eq!(value["method"], method);
+        assert!(value["params"].is_null());
+        assert!(request_line(1, method, "{} []").is_err());
     }
 
     #[test]
@@ -454,6 +461,13 @@ mod tests {
         let object = raw_object(&line).unwrap();
         assert_eq!(object["id"].get(), r#""request-7""#);
         assert_eq!(object["result"].get(), r#"{"unknown":[1,{"future":true}]}"#);
+        let error = r#"{ "code": -1, "message": "失敗", "data": [null,{"id":7}] }"#;
+        let line = response_line("7", "error", error).unwrap();
+        let object = raw_object(&line).unwrap();
+        assert_eq!(object["id"].get(), "7");
+        assert_eq!(object["error"].get(), error);
+        assert!(response_line("7 8", "result", "null").is_err());
+        assert!(response_line("7", "error", "{").is_err());
     }
 
     #[test]

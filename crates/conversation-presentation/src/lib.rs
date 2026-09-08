@@ -528,7 +528,7 @@ mod presentation_tests {
             .flat_map(|part| {
                 rows(&part, turn, Role::User)
                     .chain(rows(&part, turn, Role::Activity))
-                    .chain(rows(&part, &turn, Role::Response))
+                    .chain(rows(&part, turn, Role::Response))
                     .map(|item| text(item, "id").to_owned())
                     .collect::<Vec<_>>()
             })

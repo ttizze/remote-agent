@@ -187,7 +187,10 @@ internal class MobileController(
     }
 
     fun openApp(scope: CoroutineScope) {
-        state.selectedProfileId?.let { dispatch(AppAction.ThreadListOpened(it)) }
+        state.selectedProfileId?.let {
+            dispatch(AppAction.ThreadListSearchChanged(it, ""))
+            dispatch(AppAction.ThreadListOpened(it))
+        }
         restoreConnection(scope)
     }
 

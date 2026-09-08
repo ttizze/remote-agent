@@ -19,7 +19,6 @@ host-protocol = { path = "../host-protocol" }
 relay-transport = { path = "../relay-transport" }
 ring.workspace = true
 russh.workspace = true
-futures-util.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true
@@ -27,4 +26,3 @@ tokio = { workspace = true, features = ["fs"] }
 tempfile = "3"
 tokio-util.workspace = true
 zeroize.workspace = true
-

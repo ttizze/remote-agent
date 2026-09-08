@@ -709,7 +709,6 @@ dependencies = [
  "lb-wry",
  "pulldown-cmark",
  "qrcode",
- "serde",
  "serde_json",
  "similar",
  "tempfile",
@@ -5370,7 +5369,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "conversation-presentation",
- "futures-util",
  "host-protocol",
  "jni 0.21.1",
  "relay-transport",

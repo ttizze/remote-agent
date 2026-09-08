@@ -74,7 +74,10 @@ impl DesktopProjectStore {
         if bytes_read > MAX_STATE_BYTES as usize {
             return Err(DesktopProjectError::TooLarge(bytes_read as u64));
         }
-        state::Snapshot::parse(&bytes).map_err(map_state_error)
+        let mut snapshot = state::Snapshot::parse(&bytes).map_err(map_state_error)?;
+        snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path).await
+            .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?;
+        Ok(snapshot)
     }
 
     pub fn path(&self) -> &Path {

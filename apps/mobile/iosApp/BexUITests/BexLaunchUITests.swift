@@ -102,7 +102,7 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
     }
 
-    func testSimulatorOpensListAndKeepsModelAfterRelaunchAndForeground() throws {
+    func testSimulatorStartsOnListAndPreservesDetailOnForeground() throws {
 #if !targetEnvironment(simulator)
         throw XCTSkip("This test uses the isolated Simulator fixture")
 #endif
@@ -161,11 +161,9 @@ final class BexLaunchUITests: XCTestCase {
         app.buttons["model.effort"].tap(); app.buttons["high"].tap()
         app.buttons["model.close"].tap()
         XCUIDevice.shared.press(.home); app.activate()
-        XCTAssertTrue(taskList.waitForExistence(timeout: 15))
-        XCTAssertFalse(detail.exists)
-        let listScreenshot = XCTAttachment(screenshot: app.screenshot())
-        listScreenshot.name = "Task list on foreground return"; listScreenshot.lifetime = .keepAlways; add(listScreenshot)
-        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 15))
+        let foregroundScreenshot = XCTAttachment(screenshot: app.screenshot())
+        foregroundScreenshot.name = "Open conversation retained on foreground"; foregroundScreenshot.lifetime = .keepAlways; add(foregroundScreenshot)
         XCTAssertTrue(app.descendants(matching: .any)[finalID].waitForExistence(timeout: 20))
         let composer = app.textFields["task.message"]
         XCTAssertTrue(composer.waitForExistence(timeout: 10)); composer.tap()
@@ -329,7 +327,7 @@ final class BexLaunchUITests: XCTestCase {
         screenshot.name = "External conversation updates with draft retained"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
 
-    func testSimulatorFetchesLatestReplyWhenOpeningTaskAfterForeground() throws {
+    func testSimulatorKeepsOpenTaskAndFetchesLatestReplyAfterForeground() throws {
 #if !targetEnvironment(simulator)
         throw XCTSkip("This test uses the isolated Simulator fixture")
 #endif
@@ -337,15 +335,16 @@ final class BexLaunchUITests: XCTestCase {
         try startSimulatorConversation(app, promptText: "[success] Open before background update")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
         let detail = app.descendants(matching: .any)["task.detail"]
+        let composer = app.textFields["task.message"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.tap(); composer.typeText("Keep this foreground draft")
         XCUIDevice.shared.press(.home)
         try simulatorFixture("background-reply")
         app.activate()
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
-        XCTAssertFalse(detail.exists)
-        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
-        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)["item.fixture-external-final"].waitForExistence(timeout: 20),
                       "Foreground return did not fetch the conversation changed by another client")
+        XCTAssertEqual(composer.value as? String, "Keep this foreground draft")
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Latest conversation fetched on foreground"; screenshot.lifetime = .keepAlways; add(screenshot)
     }
@@ -437,6 +436,19 @@ final class BexLaunchUITests: XCTestCase {
         expandedScreenshot.name = "One project's oldest titles after expansion"; expandedScreenshot.lifetime = .keepAlways; add(expandedScreenshot)
         oldest.tap()
         XCTAssertTrue(app.descendants(matching: .any)["item.answer-pagination-project-thread-26-1"].waitForExistence(timeout: 15))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
+        seen.removeAll(); ordered.removeAll()
+        for _ in 0..<30 {
+            if firstProject.exists && firstProject.isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertEqual(firstProject.value as? String, "開いています")
+        scrollTo(oldest)
+        XCTAssertFalse(more.exists)
+        XCTAssertEqual(ordered.filter { $0.hasPrefix("tasks.row.pagination-project-thread-26-") }, (1...18).reversed().map { "tasks.row.pagination-project-thread-26-\($0)" })
+        let returnedScreenshot = XCTAttachment(screenshot: app.screenshot())
+        returnedScreenshot.name = "Expanded titles retained after returning from detail"; returnedScreenshot.lifetime = .keepAlways; add(returnedScreenshot)
     }
 
     func testSimulatorPaginatesRecentProjectsAndUnassignedChats() throws {

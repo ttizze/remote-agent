@@ -25,8 +25,6 @@ pub enum DispatchError {
     Upstream(#[source] Box<AppServerError>),
     #[error("invalid raw JSONL message: {0}")]
     InvalidMessage(String),
-    #[error("message has no top-level id")]
-    MissingId,
     #[error("method {method} is owned by the Host daemon")]
     DaemonOwnedMethod { method: String },
 }
@@ -51,6 +49,7 @@ struct ServiceInner {
     router: SessionRouter,
     event_pump_started: OnceLock<()>,
     files: crate::workspace_files::WorkspaceFiles,
+    worktrees: crate::worktrees::Worktrees,
     thread_watches: super::thread_watch::ThreadWatches,
 }
 
@@ -59,6 +58,7 @@ impl CodexRpcService {
         Self {
             inner: Arc::new(ServiceInner {
                 app_server,
+                worktrees: crate::worktrees::Worktrees::new(desktop_projects.path()),
                 desktop_projects,
                 router: SessionRouter::new(),
                 event_pump_started: OnceLock::new(),
@@ -129,7 +129,14 @@ impl CodexRpcService {
             HOST_THREAD_READ_METHOD => self.host_thread_request(&line, "thread/read", true).await?,
             "host/thread/turns/list" => self.host_thread_history_page(&line, false).await?,
             "host/thread/items/list" => self.host_thread_history_page(&line, true).await?,
-            HOST_THREAD_START_METHOD => {
+            "host/worktree/settings/read" | "host/worktree/settings/update" => {
+                let update = if method.ends_with("/update") { Some(parse_params(&line)?) } else { None };
+                match self.inner.worktrees.settings(update).await {
+                    Ok(result) => response_with_result(&line, result)?,
+                    Err(error) => response_with_error(&line, "worktree_settings_failed", &error)?,
+                }
+            }
+            HOST_THREAD_START_METHOD | "thread/start" => {
                 self.host_thread_request(&line, "thread/start", false)
                     .await?
             }
@@ -251,7 +258,7 @@ impl CodexRpcService {
         loop {
             let mut page = snapshot.project_list(&json!({"limit":512,"cursor":project_cursor}))
                 .map_err(|_| DispatchError::InvalidMessage("invalid project cursor".into()))?;
-            projects.extend(page["data"].as_array_mut().unwrap().drain(..));
+            projects.append(page["data"].as_array_mut().unwrap());
             project_cursor = page["nextCursor"].take();
             if project_cursor.is_null() { break; }
         }
@@ -299,12 +306,19 @@ impl CodexRpcService {
     ) -> Result<String, DispatchError> {
         let mut upstream_line = replace_method(line, upstream_method)?;
         let mut params = parse_params(line)?;
+        let worktree = if upstream_method == "thread/start" {
+            match self.inner.worktrees.prepare(params["cwd"].as_str()).await {
+                Ok(worktree) => worktree,
+                Err(error) => return response_with_error(line, "worktree_creation_failed", &error),
+            }
+        } else { None };
+        if let Some(cwd) = &worktree { params["cwd"] = json!(cwd); }
         let paginate = params.as_object_mut().and_then(|params| params.remove("paginateHistory")) == Some(Value::Bool(true));
         let defer_setting = params.as_object_mut().and_then(|params| params.remove("deferItemDetails"));
         let defer_details = defer_setting == Some(Value::Bool(true));
         let hydrate = upstream_method == "thread/read" && params["includeTurns"] == true;
         if hydrate { params["includeTurns"] = Value::Bool(false); }
-        if defer_setting.is_some() || hydrate || paginate {
+        if defer_setting.is_some() || hydrate || paginate || worktree.is_some() {
             let mut request = raw_object(&upstream_line).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
             request.insert("params".into(), raw_value(params)?);
             upstream_line = serde_json::to_string(&request).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
@@ -358,8 +372,11 @@ impl CodexRpcService {
                 }
             } else {
                 result = history;
-                if !paginate && let Some(turns) = result.pointer_mut("/thread/turns").and_then(Value::as_array_mut) {
-                    if turns.len() > 10 { *turns = turns.split_off(turns.len() - 10); }
+                if !paginate
+                    && let Some(turns) = result.pointer_mut("/thread/turns").and_then(Value::as_array_mut)
+                    && turns.len() > 10
+                {
+                    turns.drain(..turns.len() - 10);
                 }
             }
         }

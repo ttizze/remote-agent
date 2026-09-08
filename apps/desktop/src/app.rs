@@ -188,6 +188,9 @@ pub(crate) struct Desktop {
     remote: String,
     hosts: Vec<Value>,
     status: Value,
+    worktree_settings: Value,
+    worktree_copy_paths: Entity<TextareaState>,
+    worktree_saved: bool,
     projects: Vec<Value>,
     threads: Vec<Value>,
     task_indicators: TaskIndicators,
@@ -309,6 +312,9 @@ impl Desktop {
                 .placeholder("相手の Mac で発行した招待を貼り付け")
                 .auto_grow(3, 6)
         });
+        let worktree_copy_paths = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder(".env\n.env.local\nconfig/local").auto_grow(3, 8)
+        });
         let invitation_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 6));
         let mut error = String::new();
         let cache = match std::fs::read(platform::state_dir().join(cache_file)) {
@@ -366,9 +372,12 @@ impl Desktop {
         .detach();
         let effort_slider = cx.new(|_| slider::SliderState::new().max(1.).step(1.));
         let subscriptions = vec![
+            cx.subscribe(&worktree_copy_paths, |s, _, event, cx| {
+                if matches!(event, InputEvent::Change) { s.worktree_saved = false; cx.notify(); }
+            }),
             cx.subscribe(&effort_slider, |s, _, event, cx| {
                 if let slider::SliderEvent::Change(slider::SliderValue::Single(index)) = event {
-                    if let Some(model) = s.models.iter().find(|m| m["model"] == s.model) {
+                    if let Some(model) = s.selected_model() {
                         if let Some(effort) = array(&model["supportedReasoningEfforts"]).get(*index as usize) {
                             s.effort = text(effort, "reasoningEffort").to_owned();
                             cx.notify();
@@ -408,6 +417,9 @@ impl Desktop {
             remote,
             hosts: vec![],
             status: Value::Null,
+            worktree_settings: Value::Null,
+            worktree_copy_paths,
+            worktree_saved: false,
             projects: vec![],
             threads: vec![],
             task_indicators: TaskIndicators::default(),
@@ -706,6 +718,7 @@ impl Desktop {
                                 self.conversation.requests.clear();
                                 self.refresh_threads();
                                 self.refresh_models();
+                                self.refresh_worktree_settings();
                                 if !self.selected.is_empty() {
                                     self.open_thread(self.selected.clone(), window, cx);
                                 }
@@ -947,6 +960,26 @@ impl Desktop {
                 || r["params"]["threadId"] == self.conversation.thread["id"]
         })
     }
+    fn refresh_worktree_settings(&mut self) {
+        if !self.connected { return; }
+        self.request(false, "host/worktree/settings/read", json!({}), false, |s, value, w, cx| {
+            let paths = array(&value["copyPaths"]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n");
+            s.worktree_copy_paths.update(cx, |input, cx| input.set_value(paths, w, cx));
+            s.worktree_settings = value;
+            s.worktree_saved = false;
+        });
+    }
+
+    fn save_worktree_settings(&mut self, cx: &mut Context<Self>) {
+        let mut settings = self.worktree_settings.clone();
+        settings["copyPaths"] = json!(self.worktree_copy_paths.read(cx).value().lines()
+            .map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>());
+        self.request(false, "host/worktree/settings/update", settings, true, |s, value, _, _| {
+            s.worktree_settings = value;
+            s.worktree_saved = true;
+        });
+    }
+
     fn refresh_manager(&mut self) {
         self.request(true, "host/status", json!({}), false, |s, v, _, _| {
             s.status = v
@@ -984,7 +1017,7 @@ impl Desktop {
                 let mut models = Vec::new();
                 let mut cursor = Value::Null;
                 loop {
-                    let result = rpc.request(
+                    let mut result = rpc.request(
                         "model/list",
                         if cursor.is_null() {
                             json!({})
@@ -992,16 +1025,19 @@ impl Desktop {
                             json!({"cursor":cursor})
                         },
                     )?;
-                    models.extend(array(&result["data"]).iter().cloned());
-                    cursor = result["nextCursor"].clone();
+                    if let Value::Array(mut page) = result["data"].take() {
+                        if models.is_empty() { models = page; }
+                        else { models.append(&mut page); }
+                    }
+                    cursor = result["nextCursor"].take();
                     if cursor.is_null() {
                         break;
                     }
                 }
-                Ok(json!(models))
+                Ok(Value::Array(models))
             },
             |s, v, _, cx| {
-                s.models = v.as_array().cloned().unwrap_or_default();
+                s.models = match v { Value::Array(models) => models, _ => Vec::new() };
                 let selected = s.models.iter().find(|m| m["model"] == s.model)
                     .or_else(|| s.models.iter().find(|m| m["isDefault"] == true))
                     .or(s.models.first()).map(|m| text(m, "model").to_owned()).unwrap_or_default();
@@ -1009,16 +1045,24 @@ impl Desktop {
             },
         );
     }
+    fn selected_model(&self) -> Option<&Value> {
+        self.models.iter().find(|model| model["model"] == self.model)
+    }
     fn select_model(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.model = id.to_owned();
+        let changed = self.model != id;
         let model = self.models.iter().find(|m| m["model"] == id);
-        self.effort = model.map(|m| text(m, "defaultReasoningEffort")).unwrap_or_default().to_owned();
-        self.service_tier = model.and_then(|m| m["defaultServiceTier"].as_str()).unwrap_or("default").to_owned();
-        let efforts = model.map(|m| array(&m["supportedReasoningEfforts"])).unwrap_or_default();
-        let index = efforts.iter().position(|e| e["reasoningEffort"] == self.effort).unwrap_or(0);
-        self.effort = efforts.get(index).map(|e| text(e, "reasoningEffort")).unwrap_or_default().to_owned();
+        let (effort, tier, index) = supported_model_settings(
+            model,
+            if changed { "" } else { &self.effort },
+            if changed { "" } else { &self.service_tier },
+        );
+        self.effort.replace_range(.., effort);
+        self.service_tier.replace_range(.., tier);
+        self.model.replace_range(.., id);
+        let steps = model.map(|m| array(&m["supportedReasoningEfforts"]).len()).unwrap_or(0)
+            .saturating_sub(1).max(1);
         self.effort_slider.update(cx, |slider, cx| {
-            *slider = slider::SliderState::new().max(efforts.len().saturating_sub(1).max(1) as f32)
+            *slider = slider::SliderState::new().max(steps as f32)
                 .step(1.).default_value(index as f32);
             cx.notify();
         });
@@ -1094,7 +1138,7 @@ impl Desktop {
                 s.cwd = text(&v["thread"], "cwd").into();
                 s.conversation.thread = v["thread"].take();
                 if let Some(model) = v["model"].as_str() {
-                    s.model = model.into();
+                    s.select_model(model, cx);
                 }
                 s.tab = Tab::Chat;
                 s.restore_draft(w, cx);
@@ -1286,8 +1330,11 @@ impl Desktop {
         self.remote = id;
         self.rpc = Self::connect(&self.tx, self.epoch, false, &self.remote);
         self.connected = false;
+        self.worktree_settings = Value::Null;
+        self.worktree_saved = false;
+        self.worktree_copy_paths.update(cx, |input, cx| input.set_value("", window, cx));
         self.models.clear();
-        self.model.clear();
+        self.select_model("", cx);
         self.projects.clear();
         self.threads.clear();
         self.task_indicators = TaskIndicators::default();
@@ -1364,6 +1411,15 @@ impl Desktop {
                     s.persist();
                     if generation == s.load_generation {
                         s.selected = id.clone();
+                        s.cwd = text(&v["thread"], "cwd").to_owned();
+                        s.path.update(cx, |input, cx| input.set_value(s.cwd.clone(), w, cx));
+                        s.terminal = None;
+                        s.side_chat = None;
+                        s.entries.clear();
+                        s.editor = Value::Null;
+                        s.review = Value::Null;
+                        s.review_error.clear();
+                        s.refresh_review();
                         s.conversation.thread = v["thread"].take();
                         s.restore_draft(w, cx);
                         s.sync_list(true);
@@ -1750,6 +1806,25 @@ impl Desktop {
     }
 }
 
+// Keep valid choices on catalog refresh; changed models pass empty choices to use defaults.
+fn supported_model_settings<'a>(model: Option<&'a Value>, effort: &str, tier: &str) -> (&'a str, &'a str, usize) {
+    let Some(model) = model else { return ("", "default", 0); };
+    let efforts = array(&model["supportedReasoningEfforts"]);
+    let index = efforts.iter().position(|e| e["reasoningEffort"] == effort)
+        .or_else(|| efforts.iter().position(|e| e["reasoningEffort"] == model["defaultReasoningEffort"]))
+        .unwrap_or(0);
+    let tiers = array(&model["serviceTiers"]);
+    let supported_tier = |id: &str| {
+        if id == "default" { Some("default") }
+        else { tiers.iter().find(|t| t["id"] == id).map(|t| text(t, "id")) }
+    };
+    (
+        efforts.get(index).map(|e| text(e, "reasoningEffort")).unwrap_or_default(),
+        supported_tier(tier).or_else(|| supported_tier(text(model, "defaultServiceTier"))).unwrap_or("default"),
+        index,
+    )
+}
+
 fn basename(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -1862,6 +1937,44 @@ fn reconcile_outgoing(outgoing: &mut Vec<OutgoingMessage>, key: &str, thread: &V
         index += 1;
         keep
     });
+}
+
+#[cfg(test)]
+mod model_settings_tests {
+    use super::supported_model_settings;
+    use serde_json::json;
+
+    #[test]
+    fn refreshed_catalog_preserves_supported_choices_and_tracks_reordered_efforts() {
+        let mut model = json!({
+            "defaultReasoningEffort":"medium", "defaultServiceTier":"priority",
+            "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"max"}],
+            "serviceTiers":[{"id":"priority"}]
+        });
+        assert_eq!(supported_model_settings(Some(&model), "max", "default"), ("max", "default", 1));
+        model["supportedReasoningEfforts"].as_array_mut().unwrap().reverse();
+        assert_eq!(supported_model_settings(Some(&model), "max", "priority"), ("max", "priority", 0));
+    }
+
+    #[test]
+    fn changed_model_or_removed_options_use_supported_defaults() {
+        let mut model = json!({
+            "defaultReasoningEffort":"low", "defaultServiceTier":"priority",
+            "supportedReasoningEfforts":[{"reasoningEffort":"low"}],
+            "serviceTiers":[{"id":"priority"}]
+        });
+        assert_eq!(supported_model_settings(Some(&model), "", ""), ("low", "priority", 0));
+        model["serviceTiers"] = json!([]);
+        assert_eq!(supported_model_settings(Some(&model), "max", "priority"), ("low", "default", 0));
+        model["defaultReasoningEffort"] = json!("max");
+        assert_eq!(supported_model_settings(Some(&model), "", ""), ("low", "default", 0));
+    }
+
+    #[test]
+    fn no_model_or_no_options_clears_effort_and_fast() {
+        assert_eq!(supported_model_settings(None, "max", "priority"), ("", "default", 0));
+        assert_eq!(supported_model_settings(Some(&json!({})), "max", "priority"), ("", "default", 0));
+    }
 }
 
 #[cfg(test)]

@@ -46,27 +46,15 @@ struct PendingRequest {
 /// and is ignored instead of being delivered to another request.
 struct PendingCleanup {
     pending: Arc<Mutex<HashMap<u64, PendingRequest>>>,
-    id: Option<u64>,
-}
-
-impl PendingCleanup {
-    fn new(pending: Arc<Mutex<HashMap<u64, PendingRequest>>>, id: u64) -> Self {
-        Self {
-            pending,
-            id: Some(id),
-        }
-    }
+    id: u64,
 }
 
 impl Drop for PendingCleanup {
     fn drop(&mut self) {
-        let Some(id) = self.id.take() else {
-            return;
-        };
         self.pending
             .lock()
             .expect("pending request mutex poisoned")
-            .remove(&id);
+            .remove(&self.id);
     }
 }
 
@@ -174,22 +162,16 @@ impl RpcPeer {
             original_id: original_id.clone(),
             response: response_tx,
         });
+        let _cleanup = PendingCleanup {
+            pending: self.pending.clone(),
+            id: upstream_id,
+        };
         let upstream_id_text = upstream_id.to_string();
         let outbound_line = if original_id == upstream_id_text {
             line.to_owned()
         } else {
-            match rewrite_top_level_id(line, &upstream_id_text) {
-                Ok(line) => line,
-                Err(error) => {
-                    self.pending
-                        .lock()
-                        .expect("pending request mutex poisoned")
-                        .remove(&upstream_id);
-                    return Err(invalid_message(error));
-                }
-            }
+            rewrite_top_level_id(line, &upstream_id_text).map_err(invalid_message)?
         };
-        let _cleanup = PendingCleanup::new(self.pending.clone(), upstream_id);
 
         let exchange = async {
             self.enqueue(outbound_line).await?;

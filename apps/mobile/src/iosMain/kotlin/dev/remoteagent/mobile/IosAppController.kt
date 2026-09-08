@@ -109,7 +109,7 @@ class IosAppController {
         dependencies.gateway.setTurnOptions(hostIdentity, CodexTurnOptions(model, effort))
     }
 
-    fun restoreAfterForeground() = controller.openApp(scope)
+    fun restoreAfterForeground() = controller.restoreConnection(scope)
 
     fun refreshTaskList() = withSelectedProfile { profile ->
         controller.listThreads(profile)
