@@ -119,14 +119,7 @@ public self-service requires per-Host/user relay credentials and admission limit
 ```sh
 read -r -s REMOTE_AGENT_RELAY_TOKEN
 export REMOTE_AGENT_RELAY_TOKEN
-python3 - <<'PY' | fly secrets import --app "$BEX_FLY_APP" --stage
-import os, secrets
-token = os.environ["REMOTE_AGENT_RELAY_TOKEN"]
-if not token or len(token.encode()) > 512 or any(c in token for c in "\r\n"):
-    raise SystemExit("Invalid relay token")
-print("REMOTE_AGENT_RELAY_TOKEN=" + token)
-print("SECRET_KEY_BASE=" + secrets.token_urlsafe(64))
-PY
+cargo xtask relay-secrets | fly secrets import --app "$BEX_FLY_APP" --stage
 unset REMOTE_AGENT_RELAY_TOKEN
 fly ips allocate-v4 --shared --app "$BEX_FLY_APP"
 fly ips allocate-v6 --app "$BEX_FLY_APP"

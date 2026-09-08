@@ -7,6 +7,7 @@ members = [
     "crates/host-protocol",
     "crates/mobile-client",
     "crates/relay-transport",
+    "crates/xtask",
 ]
 resolver = "2"
 

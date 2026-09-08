@@ -51,7 +51,7 @@ Use a private random token shared only with your Hosts. Binding `0.0.0.0` makes 
 Build and open the Mac app from the repository root:
 
 ```sh
-nix develop . --command scripts/build-desktop-macos.sh
+nix develop . --command cargo xtask build-desktop-macos
 open target/Bex.app
 ```
 
@@ -75,7 +75,7 @@ The iPhone microphone button starts voice input and records until Stop or Send i
 
 Voice input requires the updated iPhone app and Host, with Codex signed in to ChatGPT on the Host. The Host's `host/dictation/transcribe` operation forwards PCM16 mono audio to the Codex desktop dictation service and returns text. As in the desktop, it first uses `/dictation/stream` and submits the original recording to `/transcribe` if streaming fails. Both transports send the `userAgent` returned by the running App Server's initialization; omitting it caused Cloudflare to reject native transcription requests. The recording upload wraps the phone's unchanged samples in a WAV file, sends it as multipart `file`, and uses the Codex bearer token and its account ID. Stream completion follows the service's `session.updated` closed event; nonfatal session errors do not discard a transcript. Account credentials stay on the Host; no separate API key or browser-cookie sharing is used. These internal endpoints can change independently of the public App Server API.
 
-An `unknown variant` error naming `host/dictation/transcribe` means the connected Host predates the dictation route and forwarded it to Codex. Rebuild the Host with `nix develop . --command scripts/build-host-macos.sh`, replace the Host executable used by the Mac app, and restart that Host. Updating the iPhone alone or rebuilding a file while leaving the old Host process running does not activate the route. Restart only after accounting for active tasks.
+An `unknown variant` error naming `host/dictation/transcribe` means the connected Host predates the dictation route and forwarded it to Codex. Rebuild the Host with `nix develop . --command cargo xtask build-host-macos`, replace the Host executable used by the Mac app, and restart that Host. Updating the iPhone alone or rebuilding a file while leaving the old Host process running does not activate the route. Restart only after accounting for active tasks.
 
 The iPhone composer's **＋** menu offers **写真・動画**, **カメラ**, and **ファイル**. Select multiple photos and videos together, or capture a photo/video with the camera. Library selections upload in selection order; sending stays disabled until the batch finishes. If an export or upload fails, already attached files remain and the remaining selection stops with an error. Photos use image inputs, while videos use uploaded file references. Camera capture requires camera permission; recording sound requires microphone permission. The existing upload limit is 512 MiB per file. Media exports stay in temporary storage until upload completes, then the local copies are removed.
 
@@ -98,10 +98,20 @@ open apps/mobile/iosApp/Bex.xcodeproj
 
 Select the Bex scheme and an iPhone Simulator. Physical-device signing and installation are separate from this Simulator workflow. Before a physical-device Release archive, rebuild the device framework from the same checkout with `nix develop . --command ./gradlew :apps:mobile:linkReleaseFrameworkIosArm64`. Xcode links this prebuilt framework; building the Simulator framework or archiving Swift alone does not update the device's shared Kotlin code.
 
-The isolated end-to-end runner builds the app, starts a real Phoenix relay and encrypted Host with a deterministic Codex fixture, creates a fresh Simulator, exercises mobile UI flows and checks the xcresult for failures and skips:
+The isolated end-to-end runner builds the app, starts a real Phoenix relay and encrypted Host with a deterministic Codex fixture, creates a fresh Simulator for the run, exercises mobile UI flows and checks the xcresult for failures and skips:
 
 ```sh
-nix develop . --command apps/mobile/iosApp/BexUITests/Fixtures/run_relay_ui_test.sh
+nix develop . --command cargo xtask ios-e2e
+```
+
+Development commands, the Codex subprocess fixture, and the pairing HTTP fixture live in the Rust `crates/xtask` package. Run `cargo xtask --help` inside the Nix shell for available commands. Project-owned build and test tooling requires no Python or Shell scripts; the upstream Gradle wrapper remains the entry point for Kotlin builds.
+
+`ios-e2e` runs the existing 36-test selection by default. Append Simulator test method names to run a specific selection. Each run builds the app once and owns one fresh Host, loopback pairing server, and Simulator shared by the selected tests, matching the former shell runner. The runner removes these fixtures and its Xcode build products on completion or interruption. Results and their JSON summaries remain under `target/qa`; `BEX_RELAY_RESULT_BUNDLE` selects an explicit result bundle path. A nonzero Xcode exit, failed or skipped test, or unexpected pass count fails the command.
+
+The headless relay command runs the real Phoenix transport tests and the encrypted Host/Codex integration tests:
+
+```sh
+nix develop . --command cargo xtask relay-e2e
 ```
 
 Other verification commands:

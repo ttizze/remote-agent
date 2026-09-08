@@ -1,31 +1,74 @@
-use std::{path::Path, sync::{Arc, Mutex as StdMutex, atomic::{AtomicBool, Ordering}}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    path::Path,
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use futures_util::{SinkExt, StreamExt};
-use host_daemon::{CodexRpcService, DesktopProjectStore, DeviceAuthenticationState, EncryptedGateway, HostIdentity};
+use host_daemon::{
+    CodexRpcService, DesktopProjectStore, DeviceAuthenticationState, EncryptedGateway, HostIdentity,
+};
 use host_protocol::{Ed25519PublicKey, PairingToken, RelayEndpoint};
 use mobile_client::{MobileClient, MobileClientConfig, MobileClientError};
-use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair}};
+use ring::{
+    rand::SystemRandom,
+    signature::{Ed25519KeyPair, KeyPair},
+};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinSet};
-use tokio_tungstenite::{accept_hdr_async, connect_async, tungstenite::{Message, handshake::server::{Request, Response}}};
+use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message};
 
 #[path = "../../../tests/relay-e2e/phoenix.rs"]
 mod phoenix;
 
-fn key() -> Vec<u8> { Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap().as_ref().to_vec() }
-fn public_key(key: &[u8]) -> Ed25519PublicKey {
-    Ed25519PublicKey::from_bytes(Ed25519KeyPair::from_pkcs8(key).unwrap().public_key().as_ref().try_into().unwrap())
+fn key() -> Vec<u8> {
+    Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .unwrap()
+        .as_ref()
+        .to_vec()
 }
-fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 }
-fn config(relay: &RelayEndpoint, host: Ed25519PublicKey, ticket: Option<PairingToken>) -> MobileClientConfig {
-    MobileClientConfig { relay: relay.clone(), host_identity: host, device_name: "isolated iPhone".into(), pairing_ticket: ticket, request_timeout: Duration::from_secs(5) }
+fn public_key(key: &[u8]) -> Ed25519PublicKey {
+    Ed25519PublicKey::from_bytes(
+        Ed25519KeyPair::from_pkcs8(key)
+            .unwrap()
+            .public_key()
+            .as_ref()
+            .try_into()
+            .unwrap(),
+    )
+}
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+fn config(
+    relay: &RelayEndpoint,
+    host: Ed25519PublicKey,
+    ticket: Option<PairingToken>,
+) -> MobileClientConfig {
+    MobileClientConfig {
+        relay: relay.clone(),
+        host_identity: host,
+        device_name: "isolated iPhone".into(),
+        pairing_ticket: ticket,
+        request_timeout: Duration::from_secs(5),
+    }
 }
 
 /// The proxy can read and replace the same decoded Phoenix payloads the relay
 /// operator can see. WebSocket masking is removed before confidentiality checks.
-async fn observing_proxy(endpoint: &RelayEndpoint, captured: Arc<StdMutex<Vec<u8>>>, tamper: Arc<AtomicBool>) -> (RelayEndpoint, tokio::task::JoinHandle<()>) {
+async fn observing_proxy(
+    endpoint: &RelayEndpoint,
+    captured: Arc<StdMutex<Vec<u8>>>,
+    tamper: Arc<AtomicBool>,
+) -> (RelayEndpoint, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut client_endpoint = endpoint.clone();
     client_endpoint.relay_url = format!("ws://{}/socket/websocket", listener.local_addr().unwrap());
@@ -38,7 +81,7 @@ async fn observing_proxy(endpoint: &RelayEndpoint, captured: Arc<StdMutex<Vec<u8
             let tamper = tamper.clone();
             let actual = actual.clone();
             connections.spawn(async move {
-                let mut downstream = accept_hdr_async(stream, |_request: &Request, response: Response| Ok(response)).await.unwrap();
+                let mut downstream = accept_async(stream).await.unwrap();
                 let (mut upstream, _) = connect_async(actual).await.unwrap();
                 loop {
                     tokio::select! {
@@ -67,7 +110,10 @@ fn observe(message: Message, captured: &StdMutex<Vec<u8>>, tamper: Option<&Atomi
         if frame[3] == "data" {
             let mut bytes = STANDARD.decode(frame[4]["data"].as_str().unwrap()).unwrap();
             let mut capture = captured.lock().unwrap();
-            assert!(capture.len() + bytes.len() < 2 * 1024 * 1024, "bounded test capture exceeded");
+            assert!(
+                capture.len() + bytes.len() < 2 * 1024 * 1024,
+                "bounded test capture exceeded"
+            );
             capture.extend_from_slice(&bytes);
             if tamper.is_some_and(|flag| flag.swap(false, Ordering::SeqCst)) {
                 let last = bytes.last_mut().unwrap();
@@ -81,13 +127,12 @@ fn observe(message: Message, captured: &StdMutex<Vec<u8>>, tamper: Option<&Atomi
 }
 
 fn fixture_program(directory: &Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fixtures/fake-codex-app-server.py").canonicalize().unwrap();
-    let program = directory.join("codex-fixture.py");
-    let source = format!("#!/usr/bin/env python3\nimport os,runpy\nos.environ.pop('BEX_FAKE_CODEX_TRACE', None)\nos.environ.pop('BEX_FAKE_CODEX_EXPECTED_CWD', None)\nos.environ['CODEX_HOME'] = {}\nrunpy.run_path({}, run_name='__main__')\n", serde_json::to_string(&directory.to_string_lossy()).unwrap(), serde_json::to_string(&fixture.to_string_lossy()).unwrap());
-    std::fs::write(&program, source).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-    program
+    xtask::fixture::Config::default()
+        .install(
+            Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")),
+            directory,
+        )
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -140,12 +185,13 @@ async fn encrypted_relay_authenticates_devices_isolates_ids_rejects_tampering_an
         assert_eq!(a["thread"]["cwd"], first_cwd.to_string_lossy().as_ref());
         assert_eq!(b["thread"]["cwd"], second_cwd.to_string_lossy().as_ref());
         assert_ne!(a["thread"]["id"], b["thread"]["id"]);
-        let capture = capture.lock().unwrap();
-        assert!(capture.len() > 1000);
-        for plaintext in ["private-alpha-7da76fbedf25447b", "thread/start", "fixture-thread"] {
-            assert!(!capture.windows(plaintext.len()).any(|bytes| bytes == plaintext.as_bytes()), "relay could read application content");
+        {
+            let capture = capture.lock().unwrap();
+            assert!(capture.len() > 1000);
+            for plaintext in ["private-alpha-7da76fbedf25447b", "thread/start", "fixture-thread"] {
+                assert!(!capture.windows(plaintext.len()).any(|bytes| bytes == plaintext.as_bytes()), "relay could read application content");
+            }
         }
-        drop(capture);
 
         let mut messages = first.subscribe();
         let thread_id = &a["thread"]["id"];
@@ -204,9 +250,12 @@ async fn encrypted_relay_authenticates_devices_isolates_ids_rejects_tampering_an
 async fn local_management_and_relay_share_one_codex_and_shutdown_releases_sessions() {
     use host_daemon::{HostRuntime, LocalListener};
     use host_protocol::{JsonlReader, JsonlWriter, PairingQrPayload};
-    use tokio::{io::{AsyncWriteExt, split}, net::UnixStream};
-    use tokio_util::sync::CancellationToken;
     use std::os::unix::fs::PermissionsExt;
+    use tokio::{
+        io::{AsyncWriteExt, split},
+        net::UnixStream,
+    };
+    use tokio_util::sync::CancellationToken;
     tokio::time::timeout(Duration::from_secs(45), async {
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("state");
@@ -315,12 +364,16 @@ async fn local_management_and_relay_share_one_codex_and_shutdown_releases_sessio
     }).await.expect("local/relay runtime exceeded its deadline");
 }
 
-
 #[derive(Default)]
 struct MemoryCredentials(StdMutex<Option<zeroize::Zeroizing<Vec<u8>>>>);
 impl host_daemon::RemoteCredentialStore for MemoryCredentials {
-    fn load(&self) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> { Ok(self.0.lock().unwrap().clone()) }
-    fn save(&self, bytes: &[u8]) -> Result<(), String> { *self.0.lock().unwrap() = Some(zeroize::Zeroizing::new(bytes.to_vec())); Ok(()) }
+    fn load(&self) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn save(&self, bytes: &[u8]) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(zeroize::Zeroizing::new(bytes.to_vec()));
+        Ok(())
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Move project-owned Python and Shell development tooling into Rust `cargo xtask` commands: Mac builds and signing, isolated iOS E2E orchestration, Codex scenarios, pairing controls, and Fly secret generation. Run the current encrypted relay tests through `cargo xtask relay-e2e`; remove the obsolete plaintext Python harness and the explicit Python development dependency. Preserve fixture behavior and signing identities. Preserve the original per-run Simulator and Host lifecycle and reject failed or skipped tests.
+
+- Share Simulator fixture HTTP controls and project expansion setup across UI tests; complete the dictation fixture draft before the next test. Select the relay TLS test provider explicitly so workspace feature unification does not make test initialization ambiguous.
+
 - Start iPhone task-list project folders collapsed; preserve manual expansion during refresh and conversation navigation.
 
 - Add a left thumbnail rail to iPhone and Mac image viewers for all generated images in the current session, including older paginated history. Switch the main image by selecting a thumbnail; keep Save then Close at the top right. Save the selected original to Photos on iPhone or a chosen file on Mac. Keep uploaded attachments out of the generated-image list.

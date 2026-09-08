@@ -415,7 +415,7 @@ Physical verification caught an intermediate archive linked against an old devic
   Remote Host runs on the same Mac.
 - Final release executable: reopen the same remote history and restore Japanese
   composer text plus uploaded attachments, then send them and observe live work and final completion.
-- `scripts/build-desktop-macos.sh` produces the native `target/Bex.app`; the
+- `cargo xtask build-desktop-macos` is the current entry point for the native `target/Bex.app`; the
   build verifies the complete bundle with strict code-signature verification.
   The Host keeps its existing certificate identity.
 - No physical second Mac or mobile surface was exercised for this migration.

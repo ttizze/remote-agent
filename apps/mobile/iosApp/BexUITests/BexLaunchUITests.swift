@@ -62,6 +62,9 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertEqual(prompt.value as? String, "Keep this draft after transcription failure")
         XCTAssertTrue(microphone.isEnabled)
         XCTAssertTrue(app.buttons["task.send"].isEnabled)
+        // Finish this fixture conversation so the next test cannot inherit its draft.
+        app.buttons["task.send"].tap()
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
     }
 
     func testSimulatorDictationPermissionDenialPreservesDraftAndSend() throws {
@@ -306,20 +309,8 @@ final class BexLaunchUITests: XCTestCase {
         throw XCTSkip("This test uses the isolated Simulator fixture")
 #endif
         let app = try connectedSimulatorApp()
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        func updateFixture(_ path: String) {
-            var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
-            request.httpMethod = "POST"
-            let updated = expectation(description: "Other Codex process changed persisted history")
-            URLSession.shared.dataTask(with: request) { _, response, error in
-                XCTAssertNil(error)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
-                updated.fulfill()
-            }.resume()
-            wait(for: [updated], timeout: 10)
-        }
-        updateFixture("external-conversation")
-        defer { updateFixture("list-fixture/reset") }
+        try simulatorFixture("external-conversation")
+        defer { _ = try? simulatorFixture("list-fixture/reset") }
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
         let row = app.descendants(matching: .any)["tasks.row.fixture-external-thread"]
@@ -329,7 +320,7 @@ final class BexLaunchUITests: XCTestCase {
         let composer = app.textFields["task.message"]
         XCTAssertTrue(composer.waitForExistence(timeout: 10)); composer.tap()
         composer.typeText("Keep this unsent draft")
-        updateFixture("background-reply")
+        try simulatorFixture("background-reply")
         XCTAssertTrue(app.descendants(matching: .any)["item.fixture-external-final"].waitForExistence(timeout: 20),
                       "The open conversation did not update after another process persisted its reply")
         XCTAssertEqual(composer.value as? String, "Keep this unsent draft")
@@ -347,16 +338,7 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
         let detail = app.descendants(matching: .any)["task.detail"]
         XCUIDevice.shared.press(.home)
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        let updateURL = pairingURL.deletingLastPathComponent().appendingPathComponent("background-reply")
-        var request = URLRequest(url: updateURL); request.httpMethod = "POST"
-        let updated = expectation(description: "Other client updated the isolated conversation")
-        URLSession.shared.dataTask(with: request) { _, response, error in
-            XCTAssertNil(error)
-            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
-            updated.fulfill()
-        }.resume()
-        wait(for: [updated], timeout: 10)
+        try simulatorFixture("background-reply")
         app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
         XCTAssertFalse(detail.exists)
@@ -374,21 +356,9 @@ final class BexLaunchUITests: XCTestCase {
 #endif
         let app = try connectedSimulatorApp()
         XCUIDevice.shared.press(.home)
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent("background-task"))
-        request.httpMethod = "POST"
-        var threadID: String?
-        let created = expectation(description: "Other client created an isolated conversation")
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            XCTAssertNil(error)
-            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-            if let data, let result = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-                threadID = result["threadId"]
-            }
-            created.fulfill()
-        }.resume()
-        wait(for: [created], timeout: 15)
-        let identifier = try XCTUnwrap(threadID)
+        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
+        let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
+        let identifier = try XCTUnwrap(created?["threadId"])
         app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)["tasks.row.\(identifier)"].waitForExistence(timeout: 20),
@@ -402,18 +372,6 @@ final class BexLaunchUITests: XCTestCase {
         throw XCTSkip("This test uses the isolated Simulator fixture")
 #endif
         let app = try connectedSimulatorApp()
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        func updateFixture(_ path: String) {
-            var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
-            request.httpMethod = "POST"
-            let updated = expectation(description: "Update isolated title fixture")
-            URLSession.shared.dataTask(with: request) { _, response, error in
-                XCTAssertNil(error)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
-                updated.fulfill()
-            }.resume()
-            wait(for: [updated], timeout: 10)
-        }
         let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row.pagination-"))
         var seen = Set<String>()
         var ordered: [String] = []
@@ -430,8 +388,8 @@ final class BexLaunchUITests: XCTestCase {
             }
             XCTFail("Title did not become visible: \(element.identifier)")
         }
-        updateFixture("title-fixture")
-        defer { updateFixture("list-fixture/reset") }
+        try simulatorFixture("title-fixture")
+        defer { _ = try? simulatorFixture("list-fixture/reset") }
         let started = Date()
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
@@ -486,18 +444,6 @@ final class BexLaunchUITests: XCTestCase {
         throw XCTSkip("This test uses the isolated Simulator fixture")
 #endif
         let app = try connectedSimulatorApp()
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        func updateFixture(_ path: String) {
-            var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
-            request.httpMethod = "POST"
-            let updated = expectation(description: "Update isolated list fixture")
-            URLSession.shared.dataTask(with: request) { _, response, error in
-                XCTAssertNil(error)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
-                updated.fulfill()
-            }.resume()
-            wait(for: [updated], timeout: 10)
-        }
         let projects = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.project.pagination-project-"))
         let chats = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row.pagination-chat-"))
         var seenProjects = Set<String>()
@@ -520,8 +466,8 @@ final class BexLaunchUITests: XCTestCase {
             }
             XCTFail("List element did not become visible: \(element.identifier)")
         }
-        updateFixture("list-fixture")
-        defer { updateFixture("list-fixture/reset") }
+        try simulatorFixture("list-fixture")
+        defer { _ = try? simulatorFixture("list-fixture/reset") }
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
         let newest = app.buttons["tasks.project.pagination-project-26"]
@@ -572,21 +518,9 @@ final class BexLaunchUITests: XCTestCase {
         throw XCTSkip("This test uses the isolated Simulator fixture")
 #endif
         let app = try connectedSimulatorApp()
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent("background-task"))
-        request.httpMethod = "POST"
-        var threadID: String?
-        let created = expectation(description: "Other client created an isolated conversation")
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            XCTAssertNil(error)
-            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-            if let data, let result = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-                threadID = result["threadId"]
-            }
-            created.fulfill()
-        }.resume()
-        wait(for: [created], timeout: 15)
-        let identifier = try XCTUnwrap(threadID)
+        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
+        let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
+        let identifier = try XCTUnwrap(created?["threadId"])
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
@@ -610,21 +544,9 @@ final class BexLaunchUITests: XCTestCase {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[success] Keep another conversation open")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent("background-task"))
-        request.httpMethod = "POST"
-        var threadID: String?
-        let created = expectation(description: "Other client created an isolated conversation")
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            XCTAssertNil(error)
-            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
-            if let data, let result = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
-                threadID = result["threadId"]
-            }
-            created.fulfill()
-        }.resume()
-        wait(for: [created], timeout: 15)
-        let identifier = try XCTUnwrap(threadID)
+        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
+        let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
+        let identifier = try XCTUnwrap(created?["threadId"])
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)["tasks.row.\(identifier)"].waitForExistence(timeout: 20),
@@ -651,6 +573,7 @@ final class BexLaunchUITests: XCTestCase {
         let unread = XCTAttachment(screenshot: app.screenshot())
         unread.name = "White dot for unseen completion"; unread.lifetime = .keepAlways; add(unread)
         app.terminate(); app.launch()
+        expandSimulatorProject(app)
         XCTAssertTrue(row.waitForExistence(timeout: 20))
         XCTAssertEqual(row.value as? String, "完了・未確認")
         row.tap()
@@ -843,21 +766,10 @@ final class BexLaunchUITests: XCTestCase {
         throw XCTSkip("Simulator-only isolated long-history fixture")
 #endif
         let app = try connectedSimulatorApp()
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        func fixture(_ path: String) throws {
-            let done = expectation(description: path)
-            var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
-            request.httpMethod = "POST"
-            URLSession.shared.dataTask(with: request) { _, response, error in
-                XCTAssertNil(error)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
-                done.fulfill()
-            }.resume()
-            wait(for: [done], timeout: 10)
-        }
-        try fixture("long-conversation")
-        defer { try? fixture("list-fixture/reset") }
+        try simulatorFixture("long-conversation")
+        defer { _ = try? simulatorFixture("list-fixture/reset") }
         app.terminate(); app.launch()
+        expandSimulatorProject(app)
         let row = app.descendants(matching: .any)["tasks.row.fixture-long-history"]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
@@ -892,21 +804,10 @@ final class BexLaunchUITests: XCTestCase {
         throw XCTSkip("Simulator-only isolated scroll-position fixture")
 #endif
         let app = try connectedSimulatorApp()
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        func fixture(_ path: String) throws {
-            let done = expectation(description: path)
-            var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
-            request.httpMethod = "POST"
-            URLSession.shared.dataTask(with: request) { _, response, error in
-                XCTAssertNil(error)
-                XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
-                done.fulfill()
-            }.resume()
-            wait(for: [done], timeout: 10)
-        }
-        try fixture("long-conversation")
-        defer { try? fixture("list-fixture/reset") }
+        try simulatorFixture("long-conversation")
+        defer { _ = try? simulatorFixture("list-fixture/reset") }
         app.terminate(); app.launch()
+        expandSimulatorProject(app)
 
         let row = app.descendants(matching: .any)["tasks.row.fixture-long-history"]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
@@ -939,7 +840,7 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertGreaterThan(readingPosition - beforeDrag, 5)
         XCTAssertLessThan(readingPosition - beforeDrag, 80)
         XCTAssertFalse(latestButton.exists, "The small drag must stay within the near-bottom threshold")
-        try fixture("release-inputs")
+        try simulatorFixture("release-inputs")
 
         let updated = expectation(for: NSPredicate(format: "value != %@", initialDetailValue), evaluatedWith: detail)
         wait(for: [updated], timeout: 30)
@@ -1113,16 +1014,7 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-steer-recorded-").exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Accepted additional input before native echo"; screenshot.lifetime = .keepAlways; add(screenshot)
-        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent("release-inputs"))
-        request.httpMethod = "POST"
-        let released = expectation(description: "Release the held native user-message echo")
-        URLSession.shared.dataTask(with: request) { _, response, error in
-            XCTAssertNil(error)
-            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 204)
-            released.fulfill()
-        }.resume()
-        wait(for: [released], timeout: 10)
+        try simulatorFixture("release-inputs")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-steer-recorded-").waitForExistence(timeout: 10))
         XCTAssertEqual(app.staticTexts.matching(NSPredicate(format: "label == %@", "Show this additional input immediately")).count, 1)
         prefixedButton(app, prefix: "turn.interrupt.").tap()
@@ -1565,15 +1457,40 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
     }
 
+    private func expandSimulatorProject(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let project = app.buttons["tasks.project.simulator-project"]
+        guard project.waitForExistence(timeout: 10) else {
+            XCTFail("The fixture project did not appear", file: file, line: line)
+            return
+        }
+        if project.value as? String == "閉じています" { project.tap() }
+    }
+
+    @discardableResult
+    private func simulatorFixture(_ path: String, expectedStatus: Int = 204, timeout: TimeInterval = 10,
+                                  file: StaticString = #filePath, line: UInt = #line) throws -> Data {
+        let pairingURL = try XCTUnwrap(URL(string: try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
+        var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        let completed = expectation(description: "Fixture POST \(path)")
+        var body = Data()
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            XCTAssertNil(error, file: file, line: line)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, expectedStatus, file: file, line: line)
+            if let data { body = data }
+            completed.fulfill()
+        }.resume()
+        wait(for: [completed], timeout: timeout)
+        return body
+    }
+
     private func connectedSimulatorApp(expandProject: Bool = true) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launch()
         defer {
             if expandProject {
-                let project = app.buttons["tasks.project.simulator-project"]
-                if project.waitForExistence(timeout: 10), project.value as? String == "閉じています" {
-                    project.tap()
-                }
+                expandSimulatorProject(app)
             }
         }
 

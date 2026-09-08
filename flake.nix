@@ -50,7 +50,6 @@
               beamPackages.elixir
               beamPackages.elixir-ls
               kotlin-language-server
-              python3
               nodejs_22
               androidSdk
             ];
