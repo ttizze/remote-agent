@@ -157,8 +157,6 @@ struct ThreadMessageRow: View {
     var forkTurnId: String?
     @State private var forking = false
     @State private var forkError: String?
-    @State private var sharing = false
-    @State private var expanded = false
     @State private var copied = false
 
     var body: some View {
@@ -195,10 +193,6 @@ struct ThreadMessageRow: View {
                     Button { UIPasteboard.general.string = item.collapsedBody; copied = true } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     }.accessibilityLabel(copied ? "コピーしました" : "回答をコピー")
-                    Button { sharing = true } label: { Image(systemName: "square.and.arrow.up") }
-                        .accessibilityLabel("回答を共有")
-                    Button { expanded = true } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
-                        .accessibilityLabel("回答を広げて表示")
                     if let forkTurnId {
                         Button { fork(through: forkTurnId) } label: {
                             Image(systemName: "arrow.triangle.branch")
@@ -216,14 +210,6 @@ struct ThreadMessageRow: View {
             }
         }
         .padding(.bottom, isUser ? 12 : 8)
-        .sheet(isPresented: $sharing) { ResponseShareSheet(text: item.collapsedBody) }
-        .sheet(isPresented: $expanded) {
-            NavigationView {
-                ScrollView { ConversationMarkdown(text: item.collapsedBody, model: model).padding(20) }
-                    .navigationTitle("回答").navigationBarTitleDisplayMode(.inline)
-                    .toolbar { Button("閉じる") { expanded = false } }
-            }.preferredColorScheme(.dark)
-        }
     }
 
     private func fork(through turnId: String) {
@@ -241,15 +227,6 @@ struct ThreadMessageRow: View {
             }
         }
     }
-}
-
-private struct ResponseShareSheet: UIViewControllerRepresentable {
-    let text: String
-    func makeUIViewController(context _: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: [text], applicationActivities: nil)
-    }
-
-    func updateUIViewController(_: UIActivityViewController, context _: Context) {}
 }
 
 struct ThreadItemRow: View {

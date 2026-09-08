@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep only Copy and Branch beneath iPhone answers; remove Share and Expand along with their dedicated sheets.
+
 - Add iPhone Codex account and model selection with device-code login, Host-side credential refresh, and persisted account selection. Keep one shared App Server and conversation history across accounts; retain original Codex credentials and store added credentials through Codex's Keychain support. Keep history accessible if saved authentication needs renewal, and report generation errors until account selection succeeds.
 - Add a branch action beneath completed iPhone answers. Fork through the selected native turn into a new conversation, open its inherited history, and preserve later turns in the original conversation.
 - Use icon-only Save and Close controls in iPhone image previews while retaining accessible labels and the original image-saving behavior.
