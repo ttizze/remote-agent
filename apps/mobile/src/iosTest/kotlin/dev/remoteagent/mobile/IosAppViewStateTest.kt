@@ -8,8 +8,25 @@ import kotlin.test.assertEquals
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 class IosAppViewStateTest {
+    @Test
+    fun generated_images_survive_projection_with_a_saved_path_or_inline_result() {
+        val images = listOf("/fixture/generated image.png", "").mapIndexed { index, path ->
+            codexItem(buildJsonObject {
+                put("id", "image-$index"); put("type", "imageGeneration"); put("status", "completed")
+                put("savedPath", path); put("result", "cG5n")
+            })
+        }
+        val turn = CodexTurn("turn", TurnStatus.Completed, images + CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer))
+        val output = IosViewStateProjector().conversation(state(listOf(turn)))!!.turns.flatMap { it.responses }
+        assertEquals(listOf("image-0", "image-1", "answer"), output.map { it.id })
+        assertEquals(listOf("/fixture/generated image.png"), output[0].imageSources)
+        assertEquals(listOf("data:image/png;base64,cG5n"), output[1].imageSources)
+        assertEquals(false, output[0].isCollapsible)
+    }
+
     @Test
     fun loading_deferred_details_invalidates_the_cached_item() {
         val projector = IosViewStateProjector()

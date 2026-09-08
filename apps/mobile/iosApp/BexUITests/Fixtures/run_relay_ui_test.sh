@@ -58,6 +58,8 @@ derived_data="$qa_directory/DerivedData"
 xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex -sdk iphonesimulator -configuration Debug \
     -derivedDataPath "$derived_data" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=YES build-for-testing
 xcrun simctl install "$simulator_id" "$derived_data/Build/Products/Debug-iphonesimulator/Bex.app"
+# Grant only the isolated test app permission to save its fixture image.
+xcrun simctl privacy "$simulator_id" grant photos-add dev.remoteagent.mobile.ios
 app_container=$(xcrun simctl get_app_container "$simulator_id" dev.remoteagent.mobile.ios data)
 mkdir -p "$app_container/Documents"
 printf 'Isolated attachment upload fixture.\n' > "$app_container/Documents/attachment-fixture.txt"
@@ -86,6 +88,7 @@ if [ "$#" -eq 0 ]; then
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorCanStartAConversationInAProject \
+        testSimulatorMarksUnseenCompletionUntilOpened \
         testSimulatorDictationPermissionDenialPreservesDraftAndSend \
         testSimulatorDictationContinuesPastThirtySecondsAndReachesHost \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
@@ -106,7 +109,8 @@ if [ "$#" -eq 0 ]; then
         testSimulatorCanAttachDownloadAndPrepareAIEdit \
         testSimulatorCanAddASecondPhoto \
         testSimulatorCanAttachPhotosAndVideos \
-        testSimulatorDisplaysImagesInMessagesAndMarkdownAfterReopening
+        testSimulatorDisplaysImagesInMessagesAndMarkdownAfterReopening \
+        testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening
 fi
 expected_tests=$#
 for method do

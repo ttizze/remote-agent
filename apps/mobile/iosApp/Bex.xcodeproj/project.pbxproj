@@ -220,7 +220,7 @@
 			buildSettings = {
 				ARCHS = arm64;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 36;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/debugFramework";
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/debugFramework";
@@ -246,7 +246,7 @@
 			buildSettings = {
 				ARCHS = arm64;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 34;
+				CURRENT_PROJECT_VERSION = 36;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/releaseFramework";
 				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/releaseFramework";

@@ -23,7 +23,7 @@ async fn main() {
     let (mut relay,endpoint)=phoenix::start().await;
     let fixture=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/fixtures/fake-codex-app-server.py").canonicalize().unwrap();
     let program=directory.join("codex-fixture.py");
-    let source=format!("#!/usr/bin/env python3\nimport os,runpy\nos.environ.pop('BEX_FAKE_CODEX_TRACE',None)\nos.environ.pop('BEX_FAKE_CODEX_EXPECTED_CWD',None)\nos.environ['CODEX_HOME']={}\nrunpy.run_path({},run_name='__main__')\n",serde_json::to_string(&directory.to_string_lossy()).unwrap(),serde_json::to_string(&fixture.to_string_lossy()).unwrap());
+    let source=format!("#!/usr/bin/env python3\nimport os,runpy\nos.environ['BEX_FAKE_CODEX_TRACE']={}\nos.environ.pop('BEX_FAKE_CODEX_EXPECTED_CWD',None)\nos.environ['CODEX_HOME']={}\nrunpy.run_path({},run_name='__main__')\n",serde_json::to_string(&directory.join("rpc-trace.jsonl").to_string_lossy()).unwrap(),serde_json::to_string(&directory.to_string_lossy()).unwrap(),serde_json::to_string(&fixture.to_string_lossy()).unwrap());
     std::fs::write(&program,source).unwrap();std::fs::set_permissions(&program,std::fs::Permissions::from_mode(0o700)).unwrap();
     let projects=directory.join("projects.json");
     std::fs::write(&projects,serde_json::to_vec(&serde_json::json!({"local-projects":{"simulator-project":{"id":"simulator-project","name":"検証プロジェクト","rootPaths":[workspace],"createdAt":1,"updatedAt":1}},"project-order":["simulator-project"]})).unwrap()).unwrap();

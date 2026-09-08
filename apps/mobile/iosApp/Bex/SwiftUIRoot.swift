@@ -1,7 +1,9 @@
 import AVFoundation
 import Combine
 import ImageIO
+import Photos
 import PhotosUI
+import QuickLook
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -237,6 +239,10 @@ final class BexAppViewModel: ObservableObject {
                 continuation.resume(returning: (body, error))
             }
         }
+    }
+
+    func readSessionImages(_ threadId: String, completion: @escaping ([String]?, String?) -> Void) {
+        controller.readSessionImages(threadId: threadId, completion: completion)
     }
 
     func download(_ path: String, completion: @escaping (URL?, String?) -> Void) {
@@ -672,12 +678,20 @@ private struct ThreadListRow: View {
             HStack(spacing: 10) {
                 Text(thread.title).font(.title3).foregroundColor(.primary).lineLimit(1)
                 Spacer()
-                if thread.isActive { ProgressView().controlSize(.small) }
+                if thread.isActive {
+                    ProgressView().controlSize(.small)
+                        .accessibilityIdentifier("tasks.running.\(thread.id)")
+                } else if thread.hasUnreadCompletion {
+                    Circle().fill(Color.white).frame(width: 8, height: 8)
+                        .accessibilityLabel("完了・未確認")
+                        .accessibilityIdentifier("tasks.completed.\(thread.id)")
+                }
             }
             .padding(.leading, indented ? 40 : 0)
             .contentShape(Rectangle())
         }
         .accessibilityIdentifier("tasks.row.\(thread.id)")
+        .accessibilityValue(thread.isActive ? "実行中" : thread.hasUnreadCompletion ? "完了・未確認" : "")
         .taskListRowStyle()
     }
 }
@@ -1355,10 +1369,7 @@ private struct ThreadActivityHeader: View {
     let expanded: Bool
     var body: some View {
         HStack(spacing: 5) {
-            Text((turn.activitySummary ?? "").replacingOccurrences(of: "h", with: "時間")
-                .replacingOccurrences(of: "m", with: "分")
-                .replacingOccurrences(of: "s", with: "秒")
-                .replacingOccurrences(of: "間作業", with: " 作業"))
+            Text(turn.activitySummary ?? "")
                 .font(.system(size: 16)).foregroundColor(.secondary)
                 .lineLimit(1).truncationMode(.tail)
             if turn.activityCanCollapse {
@@ -1493,7 +1504,7 @@ private struct ThreadMessageRow: View {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
                 let sources = item.imageSources
                 ForEach(sources.indices, id: \.self) { index in
-                    ConversationImage(source: sources[index], label: "添付画像", identifier: "message.image.\(item.id).\(index)", model: model)
+                    ConversationImage(source: sources[index], label: item.kind == "imageGeneration" ? "生成画像" : "添付画像", identifier: "message.image.\(item.id).\(index)", model: model)
                 }
                 if !item.collapsedBody.isEmpty {
                     if isUser { Text(item.collapsedBody).font(.system(size: 18)).textSelection(.enabled) }
@@ -1583,7 +1594,7 @@ private struct ThreadItemRow: View {
                     }
                 } label: {
                     Label {
-                        Text(item.kind == "command" && item.title.hasPrefix("$ ") ? String(item.title.dropFirst(2)) : item.title)
+                        Text(item.title)
                             .lineLimit(1)
                     } icon: { Image(systemName: icon) }
                     .font(.system(size: 17))
@@ -1613,12 +1624,34 @@ private struct ThreadItemRow: View {
 }
 
 /// Host paths always use the authenticated transfer; never read a Host path from the phone's filesystem.
+private func conversationFileURL(_ source: String, cwd: String) throws -> URL {
+    var source = source
+    if let line = source.range(of: ":[0-9]+$", options: .regularExpression) {
+        source.removeSubrange(line)
+    }
+    let base = URL(fileURLWithPath: cwd, isDirectory: true)
+    guard let url = URL(string: source, relativeTo: base)?.absoluteURL,
+          url.isFileURL,
+          url.host == nil || url.host == "" || url.host == "localhost",
+          var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else {
+        throw URLError(.unsupportedURL)
+    }
+    components.fragment = nil
+    components.query = nil
+    guard let resolved = components.url else { throw URLError(.badURL) }
+    return resolved
+}
+
 private struct ConversationImage: View {
     let source: String
     let label: String
     let identifier: String
     @ObservedObject var model: BexAppViewModel
+    var onSelect: (() -> Void)? = nil
     @State private var image: UIImage?
+    @State private var original: Data?
+    @State private var previewURL: URL?
+    @State private var preparingPreview = false
     @State private var error: String?
     private struct LoadID: Equatable {
         let host: String?
@@ -1633,6 +1666,20 @@ private struct ConversationImage: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .accessibilityLabel(label.isEmpty ? "画像" : label)
                     .accessibilityIdentifier(identifier)
+                    .onTapGesture {
+                        if let onSelect { onSelect(); return }
+                        guard !preparingPreview, let original else { return }
+                        preparingPreview = true
+                        Task {
+                            do {
+                                previewURL = try await Task.detached(priority: .userInitiated) {
+                                    try writeConversationImage(original)
+                                }.value
+                            } catch { self.error = error.localizedDescription }
+                            preparingPreview = false
+                        }
+                    }
+                    .accessibilityHint("タップして拡大")
             } else if let error {
                 Label("画像を表示できません: \(error)", systemImage: "photo")
                     .font(.caption).foregroundColor(.secondary)
@@ -1640,19 +1687,35 @@ private struct ConversationImage: View {
                 ProgressView("画像を読み込み中…").frame(height: 120)
             }
         }
+        .alert("画像を開けません", isPresented: Binding(get: { image != nil && error != nil }, set: { if !$0 { error = nil } })) {
+            Button("OK") { error = nil }
+        } message: { Text(error ?? "") }
+        .fullScreenCover(isPresented: Binding(get: { previewURL != nil }, set: { if !$0 { dismissPreview() } })) {
+            if let previewURL {
+                ConversationPreview(url: previewURL, isImage: true, model: model, source: source) { dismissPreview() }
+            }
+        }
         .task(id: LoadID(host: model.state.selectedProfileId, source: source)) {
-            image = nil; error = nil
+            image = nil; original = nil; error = nil
             do {
-                let loaded = try await loadImage()
+                let loaded = try await loadConversationImage(source, model: model, maxPixelSize: onSelect == nil ? 1600 : 160)
                 try Task.checkCancellation()
-                image = loaded
+                image = loaded.0
+                original = onSelect == nil ? loaded.1 : nil
             } catch {
                 if !Task.isCancelled { self.error = error.localizedDescription }
             }
         }
     }
 
-    @MainActor private func loadImage() async throws -> UIImage {
+    private func dismissPreview() {
+        if let previewURL { try? FileManager.default.removeItem(at: previewURL.deletingLastPathComponent()) }
+        previewURL = nil
+    }
+
+}
+
+@MainActor private func conversationImageData(_ source: String, model: BexAppViewModel) async throws -> Data {
         let data: Data
         if source.hasPrefix("data:image/"), let comma = source.firstIndex(of: ",") {
             let header = source[..<comma]
@@ -1668,12 +1731,7 @@ private struct ConversationImage: View {
             }
             data = downloaded
         } else {
-            let path: String
-            if let url = URL(string: source), url.isFileURL { path = url.path }
-            else if source.hasPrefix("/") { path = source }
-            else if let url = URL(string: source), url.scheme == nil {
-                path = URL(fileURLWithPath: model.cwd, isDirectory: true).appendingPathComponent(url.path).path
-            } else { throw URLError(.unsupportedURL) }
+            let path = try conversationFileURL(source, cwd: model.cwd).path
             let (url, message) = await withCheckedContinuation { continuation in
                 model.download(path) { url, message in continuation.resume(returning: (url, message)) }
             }
@@ -1683,15 +1741,180 @@ private struct ConversationImage: View {
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
             data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
         }
+        return data
+}
+
+@MainActor private func loadConversationImage(_ source: String, model: BexAppViewModel, maxPixelSize: Int = 1600) async throws -> (UIImage, Data) {
+        let data = try await conversationImageData(source, model: model)
         return try await Task.detached(priority: .userInitiated) {
             guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                   let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 1600,
+                    kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
                   ] as CFDictionary) else { throw CocoaError(.fileReadCorruptFile) }
-            return UIImage(cgImage: thumbnail)
+            return (UIImage(cgImage: thumbnail), data)
         }.value
+    }
+
+private func writeConversationImage(_ data: Data) throws -> URL {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    do {
+        let image = CGImageSourceCreateWithData(data as CFData, nil)
+        let type = image.flatMap { CGImageSourceGetType($0) }.flatMap { UTType($0 as String) }
+        let local = directory.appendingPathComponent("image").appendingPathExtension(type?.preferredFilenameExtension ?? "png")
+        try data.write(to: local)
+        return local
+    } catch {
+        try? FileManager.default.removeItem(at: directory)
+        throw error
+    }
+}
+
+private struct ConversationPreview: View {
+    let url: URL
+    let isImage: Bool
+    var model: BexAppViewModel? = nil
+    var source: String? = nil
+    let close: () -> Void
+    @State private var sources: [String] = []
+    @State private var selected: String?
+    @State private var selectedURL: URL?
+    @State private var downloaded: [String: URL] = [:]
+    @State private var galleryError: String?
+    private var displayedURL: URL? { selected == nil || selected == source ? url : selectedURL }
+    @State private var saving = false
+    @State private var saved = false
+    @State private var saveError: String?
+
+    var body: some View {
+        NavigationView {
+            HStack(spacing: 0) {
+                if isImage, let model, !sources.isEmpty {
+                    ScrollView {
+                        LazyVStack(spacing: 12) {
+                            ForEach(sources.indices, id: \.self) { index in
+                                let item = sources[index]
+                                ConversationImage(source: item, label: "生成画像 \(index + 1)", identifier: "conversation.preview.thumbnail.\(index)", model: model, onSelect: {
+                                    guard !saving else { return }
+                                    selected = item
+                                })
+                                .frame(width: 56, height: 64).clipped()
+                                .padding(4)
+                                .background((selected ?? source) == item ? Color.accentColor.opacity(0.3) : Color.clear)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke((selected ?? source) == item ? Color.accentColor : Color.clear, lineWidth: 2))
+                            }
+                        }.padding(8)
+                    }.frame(width: 80)
+                }
+                VStack {
+                    if let galleryError { Text(galleryError).font(.caption).foregroundColor(.red) }
+                    if let displayedURL {
+                        ConversationFilePreview(url: displayedURL)
+                    } else { ProgressView("画像を読み込み中…") }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        if let index = sources.firstIndex(of: selected ?? source ?? "") {
+                            Text("\(index + 1) / \(sources.count)")
+                                .accessibilityIdentifier("conversation.preview.position")
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        HStack(spacing: 20) {
+                            if isImage {
+                                Button(saved ? "保存済み" : "保存") {
+                                    saving = true
+                                    Task { await save() }
+                                }
+                                .disabled(saving || saved || displayedURL == nil)
+                                .accessibilityIdentifier("conversation.preview.save")
+                            }
+                            Button("閉じる", action: close)
+                                .disabled(saving)
+                                .accessibilityIdentifier("conversation.preview.close")
+                        }
+                    }
+                }
+                .alert("画像を保存できません", isPresented: Binding(get: { saveError != nil }, set: { if !$0 { saveError = nil } })) {
+                    Button("OK") { saveError = nil }
+                } message: { Text(saveError ?? "") }
+        }
+        .interactiveDismissDisabled(saving)
+        .task {
+            guard isImage, let model, let thread = model.conversation.thread else { return }
+            let (images, error) = await withCheckedContinuation { continuation in
+                model.readSessionImages(thread.id) { images, error in
+                    continuation.resume(returning: (images, error))
+                }
+            }
+            guard !Task.isCancelled else { return }
+            sources = images ?? []
+            galleryError = error
+        }
+        .task(id: selected) {
+            saved = false
+            selectedURL = nil
+            guard let selected, selected != source, let model else { return }
+            if let cached = downloaded[selected] { selectedURL = cached; return }
+            do {
+                let data = try await conversationImageData(selected, model: model)
+                try Task.checkCancellation()
+                let local = try await Task.detached(priority: .userInitiated) {
+                    try writeConversationImage(data)
+                }.value
+                if Task.isCancelled { try? FileManager.default.removeItem(at: local.deletingLastPathComponent()); return }
+                downloaded[selected] = local
+                selectedURL = local
+                galleryError = nil
+            } catch { if !Task.isCancelled { galleryError = error.localizedDescription } }
+        }
+        .onDisappear {
+            for local in downloaded.values { try? FileManager.default.removeItem(at: local.deletingLastPathComponent()) }
+            downloaded.removeAll()
+        }
+    }
+
+    @MainActor private func save() async {
+        defer { saving = false }
+        guard let displayedURL else { return }
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        guard status == .authorized || status == .limited else {
+            saveError = "設定でBexの写真への追加を許可してください。"
+            return
+        }
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: displayedURL, options: nil)
+            }
+            saved = true
+        } catch { saveError = error.localizedDescription }
+    }
+}
+
+private struct ConversationFilePreview: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator { Coordinator(url: url) }
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        return controller
+    }
+    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        if context.coordinator.url != url {
+            context.coordinator.url = url
+            controller.reloadData()
+        }
+    }
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var url: URL
+        init(url: URL) { self.url = url }
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem { url as NSURL }
     }
 }
 
@@ -1702,6 +1925,11 @@ private struct ConversationMarkdown: View {
     @State private var blocks: [Block] = []
     @State private var pendingText: String?
     @State private var parsing: Task<Void, Never>?
+    @State private var linkTarget: URL?
+    @State private var previewURL: URL?
+    @State private var previewDirectory: URL?
+    @State private var previewSource: String?
+    @State private var linkError: String?
     private struct Block: Identifiable, Sendable {
         let id: Int
         let content: AttributedString
@@ -1735,9 +1963,48 @@ private struct ConversationMarkdown: View {
                     }
                 }
             }
+            if let linkError { Text(linkError).font(.caption).foregroundColor(.red) }
         }
         .font(.system(size: 18))
-        .tint(.primary)
+        .tint(.accentColor)
+        .environment(\.openURL, OpenURLAction { url in
+            if url.scheme == "https" || url.scheme == "http" { return .systemAction }
+            do {
+                linkError = nil
+                linkTarget = try conversationFileURL(url.absoluteString, cwd: model.cwd)
+            } catch { linkError = "リンクを開けません: \(error.localizedDescription)" }
+            return .handled
+        })
+        .sheet(isPresented: Binding(get: { previewURL != nil }, set: { if !$0 { previewURL = nil } })) {
+            if let url = previewURL {
+                ConversationPreview(url: url, isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true, model: model, source: previewSource) {
+                    previewURL = nil
+                }
+            }
+        }
+        .onChange(of: previewURL) { value in
+            if value == nil, let directory = previewDirectory {
+                try? FileManager.default.removeItem(at: directory)
+                previewDirectory = nil
+            }
+        }
+        .task(id: linkTarget) {
+            guard let target = linkTarget else { return }
+            let host = model.state.selectedProfileId
+            let (downloaded, error) = await withCheckedContinuation { continuation in
+                model.download(target.path) { url, error in continuation.resume(returning: (url, error)) }
+            }
+            guard !Task.isCancelled, host == model.state.selectedProfileId else {
+                if let downloaded { try? FileManager.default.removeItem(at: downloaded.deletingLastPathComponent()) }
+                return
+            }
+            if let downloaded {
+                previewDirectory = downloaded.deletingLastPathComponent()
+                previewSource = target.path
+                previewURL = downloaded
+            } else { linkError = error ?? "ファイルを取得できません" }
+            linkTarget = nil
+        }
         .task(id: text) { enqueue(text) }
         .onDisappear {
             parsing?.cancel()

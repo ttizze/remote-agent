@@ -4,6 +4,7 @@ package dev.remoteagent.mobile
 object NativeHostTransport {
     init { System.loadLibrary("mobile_client") }
 
+    external fun presentConversation(requestJson: String): String
     external fun generateDeviceKey(): String
     external fun connect(configJson: String, devicePkcs8: ByteArray): Long
     external fun transfer(handle: Long, paramsJson: String): String
@@ -14,3 +15,6 @@ object NativeHostTransport {
     external fun respondError(handle: Long, requestIdJson: String, errorJson: String): Boolean
     external fun close(handle: Long)
 }
+
+internal actual fun nativeConversationPresentation(request: String): String =
+    NativeHostTransport.presentConversation(request)

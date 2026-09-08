@@ -505,3 +505,58 @@ pub unsafe extern "C" fn mobile_client_transfer(handle: *mut Handle, params_json
         Err(_) => { set_error(error_out, "mobile client panicked"); ptr::null_mut() }
     }
 }
+
+/// Projects conversation metadata through the shared desktop/mobile policy.
+///
+/// # Safety
+/// `request_json` must be valid NUL-terminated UTF-8 for this call. If non-null,
+/// `error_out` must be writable. Release returned strings with string_free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mobile_client_present_conversation(
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    if !error_out.is_null() {
+        // SAFETY: guaranteed writable by the caller.
+        unsafe { *error_out = ptr::null_mut() };
+    }
+    let result = std::panic::catch_unwind(|| {
+        let result = conversation_presentation::present_json(input_string(request_json)?)?;
+        CString::new(result).map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(Ok(value)) => value.into_raw(),
+        Ok(Err(error)) => { set_error(error_out, error); ptr::null_mut() }
+        Err(_) => { set_error(error_out, "conversation presentation panicked"); ptr::null_mut() }
+    }
+}
+
+#[cfg(test)]
+mod presentation_tests {
+    use super::*;
+    #[test]
+    fn presentation_ffi_returns_owned_utf8_and_reports_invalid_input() {
+        let request = CString::new(r#"{"operation":"item","item":{"type":"reasoning"}}"#).unwrap();
+        let mut error = ptr::null_mut();
+        // SAFETY: all inputs and output pointers remain valid, each returned
+        // allocation is freed exactly once through its matching ABI.
+        unsafe {
+            let result = mobile_client_present_conversation(request.as_ptr(), &mut error);
+            assert!(error.is_null());
+            assert!(!result.is_null());
+            let value: serde_json::Value = serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap();
+            assert_eq!(value["title"], "思考");
+            mobile_client_string_free(result);
+            let invalid = [0xffu8, 0];
+            let malformed = CString::new("{").unwrap();
+            for input in [ptr::null(), invalid.as_ptr().cast(), malformed.as_ptr()] {
+                let result = mobile_client_present_conversation(input, &mut error);
+                assert!(result.is_null());
+                assert!(!error.is_null());
+                assert!(!CStr::from_ptr(error).to_bytes().is_empty());
+                mobile_client_string_free(error);
+            }
+            assert!(mobile_client_present_conversation(ptr::null(), ptr::null_mut()).is_null());
+        }
+    }
+}

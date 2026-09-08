@@ -134,6 +134,12 @@ def persisted_thread(thread):
             for item in turn["items"]:
                 if item["type"] == "commandExecution":
                     item["aggregatedOutput"] = "DEFERRED_DETAIL_FULL_TEXT\n" + "fixture output\n" * 500
+    if thread.get("gallery"):
+        latest = thread["turns"][-1]
+        # Exhaust the newest-page item budget so older turns begin with a
+        # null items cursor. Gallery readers must still fetch those turns.
+        filler = [{"id": f"gallery-new-command-{index}", "type": "commandExecution", "status": "completed", "command": "inspect", "aggregatedOutput": "done"} for index in range(600)]
+        thread = dict(thread, turns=[*thread["turns"][:-1], dict(latest, items=[*latest["items"], *filler])])
     return thread
 
 
@@ -190,12 +196,34 @@ def run_turn_scenario(thread: dict[str, object], turn: dict[str, object], inputs
 
     image_path = None
     image_url = None
-    if "[images]" in prompt:
+    if "[images]" in prompt or "[generated-images]" in prompt:
         image_path = Path(os.environ["CODEX_HOME"]) / "fixture image.png"
         image_bytes = (Path(__file__).resolve().parents[2] / "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png").read_bytes()
         image_path.write_bytes(image_bytes)
         image_url = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
-        inputs = [*inputs, {"type": "localImage", "path": str(image_path)}]
+        if "[images]" in prompt:
+            inputs = [*inputs, {"type": "localImage", "path": str(image_path)}]
+
+    if "[gallery]" in prompt:
+        thread["historyMode"] = "paginated"
+        thread["gallery"] = True
+        # Older than the initial five turns; the oldest image also sits beyond
+        # the 500-item window. Distinct colors make thumbnail selection visible.
+        import struct, zlib
+        def chunk(kind, data):
+            return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        older = []
+        for index in range(6):
+            color = bytes((35 + index * 32, 55 + index * 20, 180 - index * 22))
+            pixels = (b"\x00" + color * 128) * 128
+            png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 128, 128, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b"")
+            path = Path(os.environ["CODEX_HOME"]) / f"gallery-{index}.png"
+            path.write_bytes(png)
+            items = [{"id": f"gallery-image-{index}", "type": "imageGeneration", "status": "completed", "savedPath": str(path), "result": ""}]
+            if index == 0:
+                items.extend({"id": f"gallery-command-{number}", "type": "commandExecution", "status": "completed", "command": "inspect", "aggregatedOutput": "done"} for number in range(600))
+            older.append({"id": f"gallery-old-{index}", "status": "completed", "items": items})
+        thread["turns"][0:0] = older
 
     notify("turn/started", {"threadId": thread_id, "turn": turn})
     if "[delayed-input]" in prompt and not wait_for_input_release(stop):
@@ -330,6 +358,14 @@ def run_turn_scenario(thread: dict[str, object], turn: dict[str, object], inputs
     )
     if image_path is not None:
         response_text = f"Hostの画像です。\n\n![Hostから読み込んだ画像](<{image_path}>)\n\nインライン画像です。\n\n![インライン画像]({image_url})"
+    if "[generated-images]" in prompt:
+        for name, path in [("saved", str(image_path)), ("inline", None)]:
+            generated = {"id": f"fixture-generated-{name}-{suffix}", "type": "imageGeneration",
+                         "status": "inProgress", "result": "", "savedPath": None}
+            stream_item(thread_id, turn, generated)
+            generated.update(status="completed", savedPath=path, result=image_url.split(",", 1)[1])
+            complete_item(thread_id, turn, generated)
+        response_text = f"生成画像を表示しました。\n\n[生成画像を開く](<{image_path}>)\n\n[ファイルを開く](hello.txt:1)\n\n[Webサイトを開く](https://example.com)"
     stream_item(thread_id, turn, final_item)
     if "[long-markdown]" in prompt:
         chunks = ["```text\n"] + ["Markdown stream fixture " * 80 + "\n" for _ in range(36)] + ["\n```\n\n**MARKDOWN_STREAM_COMPLETE**"]
@@ -396,6 +432,10 @@ def run_server() -> int:
                 },
             )
         elif method == "model/list":
+            catalog = Path(os.environ.get("CODEX_HOME", "/tmp")) / "models-fixture.json"
+            if catalog.exists():
+                respond(request_id, result={"data": json.loads(catalog.read_text()), "nextCursor": None})
+                continue
             respond(request_id, result={"data": [{
                 "id": "fixture-model", "model": "fixture-model", "displayName": "Fixture Model",
                 "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [
@@ -477,6 +517,9 @@ def run_server() -> int:
                 method,
                 threadExists=thread_id in threads,
                 hasTextInput=has_text_input,
+                model=params.get("model"),
+                effort=params.get("effort"),
+                serviceTierForTurn=params.get("serviceTierForTurn"),
             )
             if thread_id not in threads or not has_text_input:
                 respond(request_id, error={"code": -32602, "message": "invalid turn input"})

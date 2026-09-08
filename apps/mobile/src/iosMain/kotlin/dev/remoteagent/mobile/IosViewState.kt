@@ -2,6 +2,7 @@ package dev.remoteagent.mobile
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 enum class IosScreen {
     Pairing,
@@ -25,6 +26,7 @@ data class IosThreadSummaryView(
     val workingDirectory: String,
     val projectId: String?,
     val isActive: Boolean,
+    val hasUnreadCompletion: Boolean,
 )
 
 data class IosProjectView(
@@ -178,7 +180,7 @@ internal class IosViewStateProjector {
                     submissions.mapTo(retained) { it.clientId }
                     items.keys.retainAll(retained)
                 }
-                val views = turn.toIosTurnViews(submissions, source.summary) { item, deferred ->
+                val views = turn.toIosTurnViews(submissions) { item, deferred ->
                     val cached = items[item.id]
                     if (cached != null && cached.source === item && cached.isDeferred == deferred) cached else
                         item.toIosItemView(deferred).also { items[item.id] = it }
@@ -240,6 +242,7 @@ private fun AppState.toIosViewState(): IosAppViewState {
                 workingDirectory = summary.workingDirectory.path,
                 projectId = summary.projectId,
                 isActive = summary.status is ThreadStatus.Active,
+                hasUnreadCompletion = summary.id in view.unreadCompletedThreadIds,
             )
         },
         hasMoreProjects = view.hasMoreProjects,
@@ -264,13 +267,11 @@ private fun LoadPhase.toIosLoadState(): IosLoadState = when (this) {
 
 private inline fun CodexTurn.toIosTurnViews(
     submissions: List<SubmittedMessage>,
-    summary: ThreadSummary,
     itemView: (CodexItem, Boolean) -> IosItemView,
 ): List<IosTurnView> {
     val deferredIds = (raw?.get("deferredItemIds") as? JsonArray).orEmpty()
         .mapNotNull { (it as? JsonPrimitive)?.content }.toSet()
-    val segments = if (submissions.isEmpty()) toThreadTurnPresentations() else
-        ThreadSnapshot(summary, listOf(this), submittedMessages = submissions).conversationSegments()
+    val segments = toThreadTurnPresentations(submissions)
     return segments.map { presentation ->
         IosTurnView(
             id = presentation.id,
@@ -307,13 +308,21 @@ private inline fun CodexTurn.toIosTurnViews(
 private fun CodexItem.toIosItemView(isDeferred: Boolean = false): IosItemView = toThreadItemPresentation().let { presentation ->
     IosItemView(
         id = (this as? CodexItem.UserMessage)?.clientId ?: presentation.id,
-        kind = if (this is CodexItem.AgentMessage && phase == AgentMessagePhase.Commentary) "commentary" else presentation.kind,
+        kind = presentation.kind,
         title = presentation.title,
         collapsedBody = presentation.collapsedBody,
         isCollapsible = presentation.isCollapsible,
         contentVersion = "${threadItemContentVersion()}:$isDeferred",
         isDeferred = isDeferred,
-        imageSources = (this as? CodexItem.UserMessage)?.imageSources.orEmpty(),
+        imageSources = when (this) {
+            is CodexItem.UserMessage -> imageSources
+            is CodexItem.Unknown -> if (codexType == "imageGeneration") {
+                val path = (raw["savedPath"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                val result = (raw["result"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                listOfNotNull(path ?: result?.let { "data:image/png;base64,$it" })
+            } else emptyList()
+            else -> emptyList()
+        },
         source = this,
     )
 }

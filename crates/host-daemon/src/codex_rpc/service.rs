@@ -658,8 +658,9 @@ fn defer_large_item_details(result: &mut Value) {
         let Some(items) = turn.get_mut("items").and_then(Value::as_array_mut) else { continue; };
         let mut deferred = Vec::new();
         for item in items {
-            // Conversation text is always inline; only expandable activities defer.
-            if matches!(item["type"].as_str(), Some("userMessage" | "agentMessage")) || fits_inline(item) { continue; }
+            // Visible responses must remain complete, including image bytes and paths.
+            // Only expandable activities defer their details.
+            if matches!(item["type"].as_str(), Some("userMessage" | "agentMessage" | "imageGeneration")) || fits_inline(item) { continue; }
             let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else { continue; };
             deferred.push(Value::String(id.to_owned()));
             let Some(object) = item.as_object_mut() else { continue; };
@@ -722,6 +723,16 @@ mod tests {
         assert_eq!(items[4]["tool"], "inspect");
         assert_eq!(items[5]["summary"], json!(["short"]));
         assert_eq!(turn["deferredItemIds"], json!(["command","files","future"]));
+    }
+
+    #[test]
+    fn generated_image_output_is_not_truncated_as_an_activity_detail() {
+        let image = json!({"id":"image","type":"imageGeneration","status":"completed",
+            "result":"A".repeat(8192),"savedPath":format!("/{} image.png", "directory/".repeat(40))});
+        let mut result = json!({"thread":{"turns":[{"items":[image]}]}});
+        defer_large_item_details(&mut result);
+        assert_eq!(result["thread"]["turns"][0]["items"][0], image);
+        assert!(result["thread"]["turns"][0]["deferredItemIds"].is_null());
     }
 
     #[test]

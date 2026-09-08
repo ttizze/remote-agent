@@ -28,6 +28,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import cnames.structs.MobileClientHandle
+import mobile_client.mobile_client_present_conversation
 import mobile_client.mobile_client_transfer
 import mobile_client.mobile_client_close
 import mobile_client.mobile_client_connect
@@ -416,8 +417,6 @@ internal class IosHostGateway : HostGateway {
         return GatewayResult.Failure(message, rawError)
     }
 
-    private fun takeString(value: CPointer<ByteVar>): String = value.toKString().also { mobile_client_string_free(value) }
-    private fun takeError(value: CPointer<ByteVar>?): String = value?.let(::takeString) ?: "mobile-client call failed"
 }
 
 /** Keychain owns opaque Rust PKCS#8 bytes, never a Swift CryptoKit key. */
@@ -561,4 +560,20 @@ internal class IosMobileRepository : MobileRepository {
     } catch (_: Throwable) {
         AppState()
     }
+}
+
+@OptIn(ExperimentalForeignApi::class)
+private fun takeString(value: CPointer<ByteVar>): String =
+    try { value.toKString() } finally { mobile_client_string_free(value) }
+
+@OptIn(ExperimentalForeignApi::class)
+private fun takeError(value: CPointer<ByteVar>?): String = value?.let(::takeString) ?: "mobile-client call failed"
+
+@OptIn(ExperimentalForeignApi::class)
+internal actual fun nativeConversationPresentation(request: String): String = memScoped {
+    val failure = alloc<CPointerVar<ByteVar>>()
+    failure.value = null
+    val result = mobile_client_present_conversation(request, failure.ptr)
+        ?: error(takeError(failure.value))
+    takeString(result)
 }

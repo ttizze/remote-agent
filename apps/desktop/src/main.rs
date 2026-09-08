@@ -15,6 +15,11 @@ fn main() {
         .with_http_client(std::sync::Arc::new(gpui_http::ReqwestClient::new()))
         .run(|cx| {
             gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new(
+                "ctrl-v",
+                gpui_kit::component::input::Paste,
+                Some("ChatComposer > Input"),
+            )]);
             Theme::change(ThemeMode::Dark, None, cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {

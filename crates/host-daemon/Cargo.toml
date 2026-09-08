@@ -11,6 +11,8 @@ codex-app-server = { path = "../codex-app-server" }
 host-protocol = { path = "../host-protocol" }
 relay-transport = { path = "../relay-transport" }
 ring.workspace = true
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "multipart", "json", "http2", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 russh.workspace = true
 futures-util.workspace = true
 serde.workspace = true

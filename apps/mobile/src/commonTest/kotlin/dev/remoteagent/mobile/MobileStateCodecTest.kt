@@ -162,6 +162,7 @@ class MobileStateCodecTest {
                     threadDetail = LoadPhase.Loading,
                     interruptingTurnId = "turn-1",
                     notice = "transient notice",
+                    unreadCompletedThreadIds = setOf("unread-thread"),
                 ),
             ),
             cache = cache,
@@ -180,6 +181,7 @@ class MobileStateCodecTest {
                 threadList = LoadPhase.Idle,
                 selectedThreadId = summary.id,
                 threadDetail = LoadPhase.Idle,
+                unreadCompletedThreadIds = setOf("unread-thread"),
             ),
             restored.profileViews.getValue(profile.id),
         )
