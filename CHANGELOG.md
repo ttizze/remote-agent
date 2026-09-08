@@ -6,6 +6,8 @@
 - Add a branch action beneath completed iPhone answers. Fork through the selected native turn into a new conversation, open its inherited history, and preserve later turns in the original conversation.
 - Use icon-only Save and Close controls in iPhone image previews while retaining accessible labels and the original image-saving behavior.
 
+- Open Mac settings directly from the sidebar Host name and remove the Files, Changes, and Settings navigation rows. Replace the composer file-count button with an expandable file change card, per-file additions/deletions, and a review action. Preserve rename destinations and binary counts in the Host response. Automatically save worktree switches on toggle and text fields on blur (or Enter for the destination); remove the Save button and serialize writes without disabling text input.
+
 - Add reproducible quality checks through `cargo xtask quality`: Clippy/rustfmt, strict Credo and Dialyxir, ktfmt and detekt over all Kotlin source sets, and SwiftLint/SwiftFormat over handwritten Swift. Pin tools through Nix, Gradle, and Mix; share local checks with a read-only GitHub Actions workflow. Resolve existing violations while preserving default thresholds, without baselines.
 
 - Split mobile controller, native transport ownership, conversation rendering, and UI tests by responsibility. Preserve state ownership, cancellation, history ordering, and stale-response guards. Route typed Codex calls through one client, propagate known transport failures, and handle Swift JSON serialization errors. Match the Android JNI connection key parameter to Kotlin’s byte array.

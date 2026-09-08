@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -20,6 +21,8 @@ pub struct WorkspaceReview {
 struct WorkspaceFileChange {
     path: String,
     status: &'static str,
+    additions: Option<u64>,
+    deletions: Option<u64>,
 }
 
 pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview, String> {
@@ -41,18 +44,30 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
         .trim()
         .to_owned();
     let status = run_git_output(&cwd, &["status", "--porcelain=v1", "-z"])?.stdout;
-    let files = parse_git_status(&status);
-    let numstat = run_git(&cwd, &["diff", "--numstat", "HEAD", "--"])
-        .or_else(|_| run_git(&cwd, &["diff", "--numstat", "--"]))?;
-    let (mut additions, mut deletions) = parse_numstat(&numstat);
+    let mut files = parse_git_status(&status);
+    let numstat = run_git_output(&cwd, &["diff", "--numstat", "-z", "HEAD", "--"])
+        .or_else(|_| run_git_output(&cwd, &["diff", "--numstat", "-z", "--"]))?;
+    let (mut additions, mut deletions) = {
+        let mut counts: HashMap<_, _> = files
+            .iter_mut()
+            .map(|file| (file.path.as_bytes(), (&mut file.additions, &mut file.deletions)))
+            .collect();
+        parse_numstat(&numstat.stdout, |path, added, deleted| {
+            if let Some((additions, deletions)) = counts.get_mut(path) {
+                **additions = added;
+                **deletions = deleted;
+            }
+        })
+    };
     let mut diff = run_git(&cwd, &["diff", "--no-ext-diff", "--no-color", "HEAD", "--"])
         .or_else(|_| run_git(&cwd, &["diff", "--no-ext-diff", "--no-color", "--"]))?;
-    for file in files.iter().filter(|file| file.status == "untracked") {
+    for file in files.iter_mut().filter(|file| file.status == "untracked") {
         let output = Command::new("git")
             .args([
                 "diff",
                 "--no-index",
                 "--numstat",
+                "-z",
                 "--patch",
                 "--no-ext-diff",
                 "--no-color",
@@ -68,7 +83,10 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
         }
         let output = String::from_utf8_lossy(&output.stdout);
         let patch_start = output.find("diff --git ").unwrap_or(output.len());
-        let (added, deleted) = parse_numstat(&output[..patch_start]);
+        let (added, deleted) = parse_numstat(output[..patch_start].as_bytes(), |_, added, deleted| {
+            file.additions = added;
+            file.deletions = deleted;
+        });
         additions += added;
         deletions += deleted;
         diff.push_str(&output[patch_start..]);
@@ -133,25 +151,42 @@ fn parse_git_status(output: &[u8]) -> Vec<WorkspaceFileChange> {
         } else {
             "modified"
         };
-        files.push(WorkspaceFileChange { path, status });
+        files.push(WorkspaceFileChange {
+            path,
+            status,
+            additions: Some(0),
+            deletions: Some(0),
+        });
         index += 1;
     }
     files
 }
 
-fn parse_numstat(output: &str) -> (u64, u64) {
-    output.lines().fold((0, 0), |(added, deleted), line| {
-        let mut fields = line.split('\t');
-        let line_added = fields
-            .next()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
-        let line_deleted = fields
-            .next()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
-        (added + line_added, deleted + line_deleted)
-    })
+fn parse_numstat(
+    output: &[u8],
+    mut file: impl FnMut(&[u8], Option<u64>, Option<u64>),
+) -> (u64, u64) {
+    let mut entries = output.split(|byte| *byte == 0);
+    let (mut additions, mut deletions) = (0, 0);
+    while let Some(entry) = entries.next() {
+        let mut fields = entry.splitn(3, |byte| *byte == b'\t');
+        let count = |field: Option<&[u8]>| {
+            field.and_then(|value| std::str::from_utf8(value).ok()?.parse::<u64>().ok())
+        };
+        let added = count(fields.next());
+        let deleted = count(fields.next());
+        let Some(mut path) = fields.next() else { continue };
+        if path.is_empty() {
+            // With -z, renames contain separate source and destination records.
+            entries.next();
+            let Some(destination) = entries.next() else { break };
+            path = destination;
+        }
+        additions += added.unwrap_or(0);
+        deletions += deleted.unwrap_or(0);
+        file(path, added, deleted);
+    }
+    (additions, deletions)
 }
 
 #[cfg(test)]
@@ -169,6 +204,7 @@ mod tests {
         assert!(review.diff.starts_with("diff --git "));
         assert!(review.diff.contains("+first\n+second\n"));
         assert_eq!(review.files[0].status, "untracked");
+        assert_eq!((review.files[0].additions, review.files[0].deletions), (Some(2), Some(0)));
     }
 
     #[test]
@@ -181,18 +217,26 @@ mod tests {
                 WorkspaceFileChange {
                     path: "src/main.rs".to_owned(),
                     status: "modified",
+                    additions: Some(0),
+                    deletions: Some(0),
                 },
                 WorkspaceFileChange {
                     path: "notes.txt".to_owned(),
                     status: "untracked",
+                    additions: Some(0),
+                    deletions: Some(0),
                 },
                 WorkspaceFileChange {
                     path: "new.rs".to_owned(),
                     status: "renamed",
+                    additions: Some(0),
+                    deletions: Some(0),
                 },
                 WorkspaceFileChange {
                     path: "gone.rs".to_owned(),
                     status: "deleted",
+                    additions: Some(0),
+                    deletions: Some(0),
                 },
             ]
         );
@@ -201,8 +245,39 @@ mod tests {
     #[test]
     fn sums_text_changes_and_ignores_binary_counts() {
         assert_eq!(
-            parse_numstat("10\t2\ta.rs\n-\t-\timage.png\n3\t0\tb.rs\n"),
+            parse_numstat(b"10\t2\ta.rs\0-\t-\timage.png\03\t0\tb.rs\0", |_, _, _| {}),
             (13, 2)
         );
+    }
+
+    #[test]
+    fn file_counts_follow_renames_deletions_and_binary_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let cwd = directory.path();
+        run_git(cwd, &["init", "--initial-branch=main"]).unwrap();
+        std::fs::write(cwd.join("old.txt"), "first\nsecond\nthird\n").unwrap();
+        std::fs::write(cwd.join("gone\tfile\n.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(cwd.join("binary.dat"), b"before\0").unwrap();
+        run_git(cwd, &["add", "."]).unwrap();
+        run_git(cwd, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-m", "initial"]).unwrap();
+        run_git(cwd, &["mv", "old.txt", "new\tname\n.txt"]).unwrap();
+        std::fs::write(cwd.join("new\tname\n.txt"), "first\nsecond\nthird\nfourth\n").unwrap();
+        std::fs::remove_file(cwd.join("gone\tfile\n.txt")).unwrap();
+        std::fs::write(cwd.join("binary.dat"), b"after\0").unwrap();
+        let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
+        assert_eq!((review.additions, review.deletions), (1, 2));
+        let counts = |path: &str| {
+            let file = review.files.iter().find(|file| file.path == path).unwrap();
+            (file.additions, file.deletions)
+        };
+        assert_eq!(counts("new\tname\n.txt"), (Some(1), Some(0)));
+        assert_eq!(counts("gone\tfile\n.txt"), (Some(0), Some(2)));
+        assert_eq!(counts("binary.dat"), (None, None));
+        let json = serde_json::to_value(&review).unwrap();
+        let renamed = json["files"].as_array().unwrap().iter()
+            .find(|file| file["path"] == "new\tname\n.txt").unwrap();
+        assert_eq!(renamed["additions"], 1);
+        assert_eq!(renamed["deletions"], 0);
     }
 }

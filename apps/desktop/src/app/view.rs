@@ -8,6 +8,20 @@ use std::path::PathBuf;
 
 const CHAT_WIDTH: f32 = 780.;
 
+fn review_counts(change: &Value) -> AnyElement {
+    let counts = h_flex().gap_1().text_xs();
+    match (change["additions"].as_u64(), change["deletions"].as_u64()) {
+        (Some(added), Some(deleted)) => counts
+            .child(div().text_color(rgb(0x37cf77)).child(format!("+{added}")))
+            .child(div().text_color(rgb(0xff6259)).child(format!("−{deleted}")))
+            .into_any_element(),
+        _ => counts
+            .text_color(rgb(0x999999))
+            .child(if change.get("additions").is_some() { "バイナリ" } else { "—" })
+            .into_any_element(),
+    }
+}
+
 fn model_effort_slider(
     state: &Entity<slider::SliderState>,
     effort_count: usize,
@@ -1990,6 +2004,9 @@ impl Desktop {
                         .child(self.composer_folder(cx)),
                 )
             })
+            .when(!self.selected.is_empty() && !array(&self.review["files"]).is_empty(), |column| {
+                column.child(self.review_card(cx))
+            })
             .when(phase.is_some(), |column| {
                 column.child(
                     div()
@@ -2017,6 +2034,62 @@ impl Desktop {
                 .child(controls),
         )
         .into_any_element()
+    }
+    fn review_card(&self, cx: &Context<Self>) -> AnyElement {
+        let files = array(&self.review["files"]);
+        let visible = if self.review_expanded { files.len() } else { files.len().min(3) };
+        v_flex()
+            .w_full()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(rgb(0x383838))
+            .overflow_hidden()
+            .bg(rgb(0x191919))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .p_3()
+                    .bg(rgb(0x232323))
+                    .border_b_1()
+                    .border_color(rgb(0x383838))
+                    .child(div().p_2().rounded(px(9.)).bg(rgb(0x141414))
+                        .child(Icon::new(IconName::Replace).size_4()))
+                    .child(v_flex().flex_1().min_w_0().gap_1()
+                        .child(div().text_sm().child(format!("{} 件のファイルを変更", files.len())))
+                        .child(review_counts(&self.review)))
+                    .child(self.button("review-changes", "レビューする", cx, |s, _, _| {
+                        s.panel = Panel::Diff;
+                        s.panel_open = true;
+                        s.tab = Tab::Chat;
+                        s.refresh_review();
+                    }).border_1().rounded(px(8.)).disabled(!self.connected)),
+            )
+            .child(
+                v_flex()
+                    .id("review-file-list")
+                    .max_h(px(252.))
+                    .overflow_y_scroll()
+                    .py_1()
+                    .children(files.iter().take(visible).map(|file| {
+                        h_flex().px_3().h(px(36.)).flex_shrink_0().gap_3()
+                            .child(div().flex_1().min_w_0().text_sm().text_ellipsis()
+                                .child(text(file, "path").to_owned()))
+                            .child(review_counts(file))
+                    })),
+            )
+            .when(files.len() > 3, |card| {
+                card.child(
+                    div().px_2().py_1().bg(rgb(0x232323)).child(
+                        self.button("expand-review-files", if self.review_expanded {
+                            "折りたたむ".to_owned()
+                        } else {
+                            format!("あと {} 個のファイルを表示", files.len() - 3)
+                        }, cx, |s, _, _| s.review_expanded = !s.review_expanded)
+                        .icon(if self.review_expanded { IconName::ChevronUp } else { IconName::ChevronDown }),
+                    ),
+                )
+            })
+            .into_any_element()
     }
     fn files(&self, cx: &Context<Self>) -> AnyElement {
         let mut entries = v_flex().gap_1();
@@ -2189,11 +2262,9 @@ impl Desktop {
                 .child(switch::Switch::new("worktree-create")
                     .label("新規セッションをワークツリーで開始")
                     .checked(self.worktree_settings["createOnNewSession"] == true)
-                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0)
+                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0 || self.worktree_saving)
                     .on_click(cx.listener(|s, checked, _, cx| {
-                        s.worktree_settings["createOnNewSession"] = json!(*checked);
-                        s.worktree_saved = false;
-                        s.save_worktree_settings(cx);
+                        s.save_worktree_settings(Some(("createOnNewSession", *checked)), cx);
                         cx.notify();
                     })))
                 .child("ワークツリーの保存先")
@@ -2203,11 +2274,9 @@ impl Desktop {
                 .child(switch::Switch::new("worktree-copy")
                     .label("ワークツリー作成時にファイルをコピー")
                     .checked(self.worktree_settings["copyOnCreate"] == true)
-                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0)
+                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0 || self.worktree_saving)
                     .on_click(cx.listener(|s, checked, _, cx| {
-                        s.worktree_settings["copyOnCreate"] = json!(*checked);
-                        s.worktree_saved = false;
-                        s.save_worktree_settings(cx);
+                        s.save_worktree_settings(Some(("copyOnCreate", *checked)), cx);
                         cx.notify();
                     })))
                 .child("コピー対象（リポジトリからの相対パスを1行に1つ）")
@@ -2215,10 +2284,11 @@ impl Desktop {
                     .readonly(!self.connected || self.worktree_settings.is_null() || self.busy > 0))
                 .child("例: .env、.env.local、config/local。存在しないパスはスキップします。指定したファイルはコピー元の内容で置き換えます。シンボリックリンクはコピーできません。")
                 .child("最初のメッセージ送信時に現在の HEAD から作成します。既存セッションを開き直しても作成・コピーしません。")
-                .child(h_flex().gap_3()
-                    .child(self.button("worktree-save", "ワークツリー設定を保存", cx, |s, _, cx| s.save_worktree_settings(cx))
-                        .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0))
-                    .when(self.worktree_saved, |row| row.child("保存しました")))
+                .child(div().text_sm().text_color(rgb(0x999999)).child(if self.worktree_saved {
+                    "保存しました"
+                } else {
+                    "スイッチは切り替え時、入力欄は入力を終えると自動保存します。"
+                }))
         );
         if !self.manager_connected {
             body=body.child("この Mac の Host を起動").child(Input::new(&self.relay_url)).child(Input::new(&self.relay_token)).child(Input::new(&self.runner)).child(self.button("start-host","接続して起動",cx,|s,_,cx|{let endpoint=json!({"relayUrl":s.relay_url.read(cx).value().as_ref(),"relayToken":s.relay_token.read(cx).value().as_ref(),"runnerId":s.runner.read(cx).value().as_ref()});s.work(true,move||platform::start_host(Some(endpoint)).map(|_|Value::Null),|_,_,_,_|{});}));

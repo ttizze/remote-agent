@@ -198,6 +198,8 @@ pub(crate) struct Desktop {
     worktree_copy_paths: Entity<TextareaState>,
     worktree_directory: Entity<InputState>,
     worktree_saved: bool,
+    worktree_saving: bool,
+    worktree_save_pending: Option<Value>,
     projects: Vec<Value>,
     threads: Vec<Value>,
     task_indicators: TaskIndicators,
@@ -243,6 +245,7 @@ pub(crate) struct Desktop {
     editor: Value,
     review: Value,
     review_error: String,
+    review_expanded: bool,
     requests: HashMap<Value, RequestInputs>,
     list: ListState,
     _subscriptions: Vec<Subscription>,
@@ -387,9 +390,11 @@ impl Desktop {
         let subscriptions = vec![
             cx.subscribe(&worktree_copy_paths, |s, _, event, cx| {
                 if matches!(event, InputEvent::Change) { s.worktree_saved = false; cx.notify(); }
+                if matches!(event, InputEvent::Blur) { s.save_worktree_settings(None, cx); }
             }),
             cx.subscribe(&worktree_directory, |s, _, event, cx| {
                 if matches!(event, InputEvent::Change) { s.worktree_saved = false; cx.notify(); }
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) { s.save_worktree_settings(None, cx); }
             }),
             cx.subscribe(&effort_slider, |s, _, event, cx| {
                 if let slider::SliderEvent::Change(slider::SliderValue::Single(index)) = event
@@ -436,6 +441,8 @@ impl Desktop {
             worktree_copy_paths,
             worktree_directory,
             worktree_saved: false,
+            worktree_saving: false,
+            worktree_save_pending: None,
             projects: vec![],
             threads: vec![],
             task_indicators: TaskIndicators::default(),
@@ -481,6 +488,7 @@ impl Desktop {
             editor: Value::Null,
             review: Value::Null,
             review_error: String::new(),
+            review_expanded: false,
             requests: HashMap::new(),
             list,
             _subscriptions: subscriptions,
@@ -980,7 +988,7 @@ impl Desktop {
         })
     }
     fn refresh_worktree_settings(&mut self) {
-        if !self.connected {
+        if !self.connected || self.worktree_saving {
             return;
         }
         self.request(
@@ -1005,8 +1013,15 @@ impl Desktop {
         );
     }
 
-    fn save_worktree_settings(&mut self, cx: &mut Context<Self>) {
-        let mut settings = self.worktree_settings.clone();
+    fn save_worktree_settings(&mut self, toggle: Option<(&str, bool)>, cx: &mut Context<Self>) {
+        if !self.connected || self.worktree_settings.is_null() {
+            return;
+        }
+        let previous = self.worktree_save_pending.as_ref().unwrap_or(&self.worktree_settings);
+        let mut settings = previous.clone();
+        if let Some((field, checked)) = toggle {
+            settings[field] = json!(checked);
+        }
         settings["copyPaths"] = json!(
             self.worktree_copy_paths
                 .read(cx)
@@ -1017,14 +1032,48 @@ impl Desktop {
                 .collect::<Vec<_>>()
         );
         settings["worktreeDirectory"] = json!(self.worktree_directory.read(cx).value().trim());
-        self.request(
+        if settings == *previous {
+            return;
+        }
+        self.worktree_saved = false;
+        if self.worktree_saving {
+            self.worktree_save_pending = Some(settings);
+        } else {
+            self.persist_worktree_settings(settings);
+        }
+    }
+
+    fn persist_worktree_settings(&mut self, settings: Value) {
+        self.worktree_saving = true;
+        self.error.clear();
+        let previous = std::mem::replace(&mut self.worktree_settings, settings.clone());
+        self.request_result(
             false,
             "host/worktree/settings/update",
             settings,
-            true,
-            |s, value, _, _| {
-                s.worktree_settings = value;
-                s.worktree_saved = true;
+            false,
+            move |s, result, _, cx| {
+                s.worktree_saving = false;
+                match result {
+                    Ok(value) => {
+                        s.worktree_settings = value;
+                        s.worktree_saved = s.worktree_directory.read(cx).value().trim()
+                            == text(&s.worktree_settings, "worktreeDirectory")
+                            && s.worktree_copy_paths.read(cx).value().lines()
+                                .map(str::trim).filter(|line| !line.is_empty())
+                                .eq(array(&s.worktree_settings["copyPaths"]).iter().filter_map(Value::as_str));
+                    }
+                    Err(error) => {
+                        s.worktree_settings = previous;
+                        s.error = error;
+                    }
+                }
+                if let Some(pending) = s.worktree_save_pending.take()
+                    && pending != s.worktree_settings
+                {
+                    s.worktree_saved = false;
+                    s.persist_worktree_settings(pending);
+                }
             },
         );
     }
@@ -1171,6 +1220,7 @@ impl Desktop {
         self.diffs.clear();
         self.expanded_work.clear();
         self.expanded_items.clear();
+        self.review_expanded = false;
         match tempfile::Builder::new().prefix("bex-images-").tempdir() {
             Ok(directory) => self.image_dir = directory,
             Err(e) => self.error = e.to_string(),
@@ -1401,6 +1451,8 @@ impl Desktop {
         self.connected = false;
         self.worktree_settings = Value::Null;
         self.worktree_saved = false;
+        self.worktree_saving = false;
+        self.worktree_save_pending = None;
         self.worktree_copy_paths
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.worktree_directory
