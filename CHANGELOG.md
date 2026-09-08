@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Remove unused Rust dependencies and error variants, replace the manual JSON ID scanner with serde traversal, and borrow JSONL source lines and raw payloads. Move desktop RPC results without cloning, consolidate request cancellation cleanup, and remove temporary notification and disconnect collections.
+
+- Initialize the relay's TLS provider using the Host's existing ring selection pattern. Preserve an explicitly installed provider and prevent WSS connection panics when workspace dependencies enable both TLS backends.
+
 - Preserve supported Mac model settings across reconnects, synchronize effort and speed when opening a different model or switching Hosts, and show standard speed only once. Consolidate model lookup and settings normalization; move model-catalog pages into UI state without copying their JSON bodies.
 
 - Add Host-persisted Mac settings for automatic worktrees on new sessions and optional file/directory copying, including `.env`. Apply both switches to Mac and iPhone session starts, keep worktree tasks in their original projects, and update the Mac workspace path and branch after creation. Defaults remain off; reopening existing sessions does not create or copy again.

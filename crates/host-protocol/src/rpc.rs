@@ -12,21 +12,21 @@ pub enum RpcMessageKind {
 
 /// A classified Codex JSONL line.
 ///
-/// The original line is retained verbatim (apart from the line delimiter
+/// The original line is borrowed verbatim (apart from the line delimiter
 /// removed by the JSONL reader). raw_id is the original top-level JSON
 /// representation, not a parsed integer/string DTO. method is decoded only
 /// because routing needs the method name; params, result, error, and unknown
 /// fields are never deserialized here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpcMessage {
+pub struct RpcMessage<'a> {
     kind: RpcMessageKind,
-    raw_line: String,
-    raw_id: Option<String>,
+    raw_line: &'a str,
+    raw_id: Option<&'a str>,
     method: Option<String>,
 }
 
-impl RpcMessage {
-    pub fn parse(line: &str) -> Result<Self, RpcMessageError> {
+impl<'a> RpcMessage<'a> {
+    pub fn parse(line: &'a str) -> Result<Self, RpcMessageError> {
         let object = parse_object(line)?;
         classify_object(line, object)
     }
@@ -37,7 +37,7 @@ impl RpcMessage {
 
     /// Returns the top-level id exactly as it appeared in the source JSON.
     pub fn raw_id(&self) -> Option<&str> {
-        self.raw_id.as_deref()
+        self.raw_id
     }
 
     pub fn method(&self) -> Option<&str> {
@@ -46,31 +46,29 @@ impl RpcMessage {
 
     /// Returns the original JSON object without its trailing JSONL newline.
     pub fn raw_line(&self) -> &str {
-        &self.raw_line
-    }
-
-    pub fn into_raw_line(self) -> String {
         self.raw_line
     }
 }
 
 /// Classifies one already-delimited JSONL message without decoding its
 /// params/result/error values.
-pub fn classify_message(line: &str) -> Result<RpcMessage, RpcMessageError> {
+pub fn classify_message(line: &str) -> Result<RpcMessage<'_>, RpcMessageError> {
     RpcMessage::parse(line)
 }
 
-fn parse_object(line: &str) -> Result<BTreeMap<String, Box<RawValue>>, RpcMessageError> {
+fn parse_object<'a, T: serde::Deserialize<'a>>(
+    line: &'a str,
+) -> Result<BTreeMap<String, T>, RpcMessageError> {
     // Parsing to RawValue validates the complete JSON document without
     // materializing nested values. A second parse then checks the root shape.
-    let raw: Box<RawValue> = serde_json::from_str(line)?;
+    let raw: &RawValue = serde_json::from_str(line)?;
     serde_json::from_str(raw.get()).map_err(|_| RpcMessageError::NotObject)
 }
 
-fn classify_object(
-    line: &str,
-    object: BTreeMap<String, Box<RawValue>>,
-) -> Result<RpcMessage, RpcMessageError> {
+fn classify_object<'a>(
+    line: &'a str,
+    object: BTreeMap<String, &'a RawValue>,
+) -> Result<RpcMessage<'a>, RpcMessageError> {
     let has_id = object.contains_key("id");
     let has_method = object.contains_key("method");
     let has_result = object.contains_key("result");
@@ -111,11 +109,11 @@ fn classify_object(
             })
         })
         .transpose()?;
-    let raw_id = object.get("id").map(|raw| raw.get().to_owned());
+    let raw_id = object.get("id").copied().map(RawValue::get);
 
     Ok(RpcMessage {
         kind,
-        raw_line: line.to_owned(),
+        raw_line: line,
         raw_id,
         method,
     })
@@ -153,8 +151,8 @@ pub fn rewrite_top_level_id(line: &str, replacement_id: &str) -> Result<String, 
         return Err(RpcMessageError::MissingIdForRewrite);
     }
 
-    let _: Box<RawValue> = serde_json::from_str(replacement_id)?;
-    let spans = top_level_member_value_spans(line, "id");
+    let _: &RawValue = serde_json::from_str(replacement_id)?;
+    let spans = top_level_member_value_spans(line, "id")?;
     if spans.is_empty() {
         return Err(RpcMessageError::MissingIdForRewrite);
     }
@@ -175,123 +173,43 @@ pub fn rewrite_top_level_id(line: &str, replacement_id: &str) -> Result<String, 
     Ok(rewritten)
 }
 
-/// Locates source spans for a top-level object's member value.
-///
-/// The caller has already validated the complete JSON with serde_json, so
-/// this scanner only has to preserve source offsets; it does not duplicate
-/// JSON validation or materialize nested values.
-fn top_level_member_value_spans(line: &str, wanted: &str) -> Vec<(usize, usize)> {
-    let bytes = line.as_bytes();
-    let mut cursor = skip_whitespace(bytes, 0);
-    if bytes.get(cursor) != Some(&b'{') {
-        return Vec::new();
-    }
-    cursor += 1;
-    let mut spans = Vec::new();
+/// Collects every matching top-level value, including duplicate and escaped keys.
+/// Borrowed raw values give source offsets without a second JSON scanner.
+fn top_level_member_value_spans(
+    line: &str,
+    wanted: &str,
+) -> Result<Vec<(usize, usize)>, serde_json::Error> {
+    use serde::de::{Deserializer as _, MapAccess, Visitor};
 
-    loop {
-        cursor = skip_whitespace(bytes, cursor);
-        if bytes.get(cursor) == Some(&b'}') {
-            return spans;
-        }
-        let key_start = cursor;
-        let Some(key_end) = scan_string(bytes, cursor) else {
-            return Vec::new();
-        };
-        let Ok(key) = serde_json::from_str::<String>(&line[key_start..key_end]) else {
-            return Vec::new();
-        };
-        cursor = skip_whitespace(bytes, key_end);
-        if bytes.get(cursor) != Some(&b':') {
-            return Vec::new();
-        }
-        cursor = skip_whitespace(bytes, cursor + 1);
-        let value_start = cursor;
-        let Some(value_end) = scan_value(bytes, cursor) else {
-            return Vec::new();
-        };
-        if key == wanted {
-            spans.push((value_start, value_end));
-        }
-        cursor = skip_whitespace(bytes, value_end);
-        match bytes.get(cursor) {
-            Some(b',') => cursor += 1,
-            Some(b'}') => return spans,
-            _ => return Vec::new(),
-        }
+    struct ValueSpans<'a> {
+        source: &'a str,
+        wanted: &'a str,
     }
-}
 
-fn skip_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
-    while bytes
-        .get(cursor)
-        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
-    {
-        cursor += 1;
-    }
-    cursor
-}
+    impl<'de> Visitor<'de> for ValueSpans<'_> {
+        type Value = Vec<(usize, usize)>;
 
-fn scan_string(bytes: &[u8], start: usize) -> Option<usize> {
-    if bytes.get(start) != Some(&b'"') {
-        return None;
-    }
-    let mut cursor = start + 1;
-    while let Some(byte) = bytes.get(cursor) {
-        match byte {
-            b'\\' => cursor = cursor.checked_add(2)?,
-            b'"' => return Some(cursor + 1),
-            _ => cursor += 1,
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON object")
         }
-    }
-    None
-}
 
-fn scan_value(bytes: &[u8], start: usize) -> Option<usize> {
-    match bytes.get(start)? {
-        b'"' => scan_string(bytes, start),
-        b'{' | b'[' => scan_container(bytes, start),
-        _ => {
-            let mut cursor = start;
-            while bytes.get(cursor).is_some_and(|byte| {
-                !matches!(byte, b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r')
-            }) {
-                cursor += 1;
-            }
-            (cursor > start).then_some(cursor)
-        }
-    }
-}
-
-fn scan_container(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut stack = vec![match bytes.get(start)? {
-        b'{' => b'}',
-        b'[' => b']',
-        _ => return None,
-    }];
-    let mut cursor = start + 1;
-    while let Some(byte) = bytes.get(cursor) {
-        match byte {
-            b'"' => cursor = scan_string(bytes, cursor)?,
-            b'{' => {
-                stack.push(b'}');
-                cursor += 1;
-            }
-            b'[' => {
-                stack.push(b']');
-                cursor += 1;
-            }
-            byte if Some(byte) == stack.last() => {
-                stack.pop();
-                cursor += 1;
-                if stack.is_empty() {
-                    return Some(cursor);
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut spans = Vec::new();
+            while let Some((key, value)) = map.next_entry::<String, &'de RawValue>()? {
+                if key == self.wanted {
+                    // from_str borrows RawValue directly from this source slice.
+                    let start = value.get().as_ptr() as usize - self.source.as_ptr() as usize;
+                    spans.push((start, start + value.get().len()));
                 }
             }
-            _ => cursor += 1,
+            Ok(spans)
         }
     }
-    None
+
+    serde_json::Deserializer::from_str(line).deserialize_map(ValueSpans {
+        source: line,
+        wanted,
+    })
 }
 
 /// Returns the top-level object as raw values for code that needs to inspect
@@ -364,6 +282,9 @@ mod tests {
             classify_message(r#"["method","nested"]"#),
             Err(RpcMessageError::NotObject)
         ));
+        for malformed in [r#"{"id":1,"result":[}"#, r#"{"id":1,"result":{}} {}"#] {
+            assert!(matches!(classify_message(malformed), Err(RpcMessageError::Json(_))));
+        }
     }
 
     #[test]
@@ -390,6 +311,12 @@ mod tests {
             rewrite_top_level_id(original, r#""proxy""#).unwrap(),
             r#"{"\u0069d": "proxy", "method":"turn/start", "nested":{"id":2}, "id":"proxy"}"#
         );
+        let original = r#" {"先頭":"値\\\"}]", "id" : [1,{"id":2}], "method":"x", "params":[{"text":"[{}]"}], "\u0069d": {"nested":true} } "#;
+        assert_eq!(
+            rewrite_top_level_id(original, "null").unwrap(),
+            r#" {"先頭":"値\\\"}]", "id" : null, "method":"x", "params":[{"text":"[{}]"}], "\u0069d": null } "#,
+        );
+        assert!(rewrite_top_level_id(original, "1 2").is_err());
     }
 
     #[test]

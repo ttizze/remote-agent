@@ -181,8 +181,6 @@ pub enum MobileClientError {
     Io(#[from] std::io::Error),
     #[error("relay connection did not complete before the deadline")]
     ConnectionTimeout,
-    #[error("relay rejected the runner topic join: {0}")]
-    RelayJoinRejected(String),
     #[error("JSONL transport failed: {0}")]
     Jsonl(#[from] host_protocol::JsonlError),
     #[error("invalid Codex JSONL message: {0}")]

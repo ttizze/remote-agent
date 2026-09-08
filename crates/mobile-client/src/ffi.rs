@@ -29,17 +29,15 @@ pub(crate) struct CConfig {
     request_timeout_ms: u64,
 }
 
-impl TryFrom<CConfig> for MobileClientConfig {
-    type Error = MobileClientError;
-
-    fn try_from(value: CConfig) -> Result<Self, Self::Error> {
-        Ok(Self {
+impl From<CConfig> for MobileClientConfig {
+    fn from(value: CConfig) -> Self {
+        Self {
             relay: value.relay,
             host_identity: value.host_identity,
             device_name: value.device_name,
             pairing_ticket: value.pairing_ticket,
             request_timeout: Duration::from_millis(value.request_timeout_ms),
-        })
+        }
     }
 }
 
@@ -114,12 +112,7 @@ pub(crate) fn connect_handle(config: CConfig, key: &[u8]) -> Result<*mut Handle,
         .build()
         .map_err(|_| "failed to create Tokio runtime")?;
     let client = runtime
-        .block_on(MobileClient::connect(
-            config
-                .try_into()
-                .map_err(|error: MobileClientError| error.to_string())?,
-            key,
-        ))
+        .block_on(MobileClient::connect(config.into(), key))
         .map_err(|error| error.to_string())?;
     let notifications = client.subscribe();
     let server_requests = client.subscribe_server_requests();

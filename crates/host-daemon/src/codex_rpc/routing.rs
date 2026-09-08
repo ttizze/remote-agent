@@ -287,12 +287,8 @@ fn fanout_request_locked(state: &mut State, upstream_id: &str, line: &str) {
 }
 
 fn broadcast_line_locked(state: &mut State, line: &str) {
-    let sessions = state.sessions.keys().copied().collect::<Vec<_>>();
     let mut failed = Vec::new();
-    for session in sessions {
-        let Some(sender) = state.sessions.get(&session).cloned() else {
-            continue;
-        };
+    for (&session, sender) in &state.sessions {
         if sender.try_send(line.to_owned()).is_err() {
             failed.push(session);
         }
@@ -317,7 +313,7 @@ fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &s
     let Some(pending) = state.pending.remove(upstream_id) else {
         return false;
     };
-    let Ok(base) = serde_json::from_str::<Value>(line) else {
+    let Ok(mut notification) = serde_json::from_str::<Value>(line) else {
         state.pending.insert(upstream_id.to_owned(), pending);
         return false;
     };
@@ -327,14 +323,13 @@ fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &s
             session,
             id: proxy_id.clone(),
         });
-        let Some(sender) = state.sessions.get(&session).cloned() else {
+        let Some(sender) = state.sessions.get(&session) else {
             continue;
         };
         let Ok(proxy_value) = serde_json::from_str::<Value>(&proxy_id) else {
             failed.push(session);
             continue;
         };
-        let mut notification = base.clone();
         let Some(request_id) = notification
             .get_mut("params")
             .and_then(Value::as_object_mut)

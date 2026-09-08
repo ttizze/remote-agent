@@ -76,7 +76,7 @@ impl Rpc {
                         if count > 256 * 1024 * 1024 {
                             return Err("受信サイズが上限を超えました".into());
                         }
-                        let message: Value =
+                        let mut message: Value =
                             serde_json::from_slice(&line).map_err(|_| "Host の応答が不正です")?;
                         if message["ready"] == true {
                             worker.connection.lock().unwrap().ready = true;
@@ -92,7 +92,7 @@ impl Rpc {
                                         .unwrap_or("Host request failed")
                                         .into())
                                 } else {
-                                    Ok(message["result"].clone())
+                                    Ok(message["result"].take())
                                 };
                                 sender(result);
                             }

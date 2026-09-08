@@ -25,8 +25,6 @@ pub enum DispatchError {
     Upstream(#[source] Box<AppServerError>),
     #[error("invalid raw JSONL message: {0}")]
     InvalidMessage(String),
-    #[error("message has no top-level id")]
-    MissingId,
     #[error("method {method} is owned by the Host daemon")]
     DaemonOwnedMethod { method: String },
 }
@@ -260,7 +258,7 @@ impl CodexRpcService {
         loop {
             let mut page = snapshot.project_list(&json!({"limit":512,"cursor":project_cursor}))
                 .map_err(|_| DispatchError::InvalidMessage("invalid project cursor".into()))?;
-            projects.extend(page["data"].as_array_mut().unwrap().drain(..));
+            projects.append(page["data"].as_array_mut().unwrap());
             project_cursor = page["nextCursor"].take();
             if project_cursor.is_null() { break; }
         }
@@ -374,8 +372,11 @@ impl CodexRpcService {
                 }
             } else {
                 result = history;
-                if !paginate && let Some(turns) = result.pointer_mut("/thread/turns").and_then(Value::as_array_mut) {
-                    if turns.len() > 10 { *turns = turns.split_off(turns.len() - 10); }
+                if !paginate
+                    && let Some(turns) = result.pointer_mut("/thread/turns").and_then(Value::as_array_mut)
+                    && turns.len() > 10
+                {
+                    turns.drain(..turns.len() - 10);
                 }
             }
         }

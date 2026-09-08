@@ -9,7 +9,7 @@ use mobile_client::{MobileClient, MobileClientConfig, MobileClientError};
 use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair}};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinSet};
-use tokio_tungstenite::{accept_hdr_async, connect_async, tungstenite::{Message, handshake::server::{Request, Response}}};
+use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message};
 
 #[path = "../../../tests/relay-e2e/phoenix.rs"]
 mod phoenix;
@@ -38,7 +38,7 @@ async fn observing_proxy(endpoint: &RelayEndpoint, captured: Arc<StdMutex<Vec<u8
             let tamper = tamper.clone();
             let actual = actual.clone();
             connections.spawn(async move {
-                let mut downstream = accept_hdr_async(stream, |_request: &Request, response: Response| Ok(response)).await.unwrap();
+                let mut downstream = accept_async(stream).await.unwrap();
                 let (mut upstream, _) = connect_async(actual).await.unwrap();
                 loop {
                     tokio::select! {
@@ -140,12 +140,13 @@ async fn encrypted_relay_authenticates_devices_isolates_ids_rejects_tampering_an
         assert_eq!(a["thread"]["cwd"], first_cwd.to_string_lossy().as_ref());
         assert_eq!(b["thread"]["cwd"], second_cwd.to_string_lossy().as_ref());
         assert_ne!(a["thread"]["id"], b["thread"]["id"]);
-        let capture = capture.lock().unwrap();
-        assert!(capture.len() > 1000);
-        for plaintext in ["private-alpha-7da76fbedf25447b", "thread/start", "fixture-thread"] {
-            assert!(!capture.windows(plaintext.len()).any(|bytes| bytes == plaintext.as_bytes()), "relay could read application content");
+        {
+            let capture = capture.lock().unwrap();
+            assert!(capture.len() > 1000);
+            for plaintext in ["private-alpha-7da76fbedf25447b", "thread/start", "fixture-thread"] {
+                assert!(!capture.windows(plaintext.len()).any(|bytes| bytes == plaintext.as_bytes()), "relay could read application content");
+            }
         }
-        drop(capture);
 
         let mut messages = first.subscribe();
         let thread_id = &a["thread"]["id"];

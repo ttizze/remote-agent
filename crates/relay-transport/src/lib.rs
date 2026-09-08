@@ -94,6 +94,11 @@ pub async fn connect_client(endpoint: &RelayEndpoint) -> Result<(DuplexStream, R
 
 async fn connect(endpoint: &RelayEndpoint, role: &str) -> Result<(Socket, Option<String>), RelayError> {
     let url = endpoint.socket_url(role)?;
+    // Workspace dependencies can enable both TLS backends. Match dictation's
+    // default selection while preserving a provider installed by the caller.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
     let config = WebSocketConfig::default()
         .max_message_size(Some(100_000))
         .max_frame_size(Some(100_000));
