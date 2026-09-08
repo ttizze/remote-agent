@@ -129,6 +129,10 @@ final class BexLaunchUITests: XCTestCase {
         let taskList = app.descendants(matching: .any)["tasks.list"]
         XCTAssertTrue(taskList.waitForExistence(timeout: 30))
         XCTAssertFalse(detail.exists)
+        let project = app.buttons["tasks.project.simulator-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        XCTAssertEqual(project.value as? String, "閉じています")
+        project.tap()
         let threadNumber = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
         let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(threadNumber)"]
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
@@ -229,13 +233,12 @@ final class BexLaunchUITests: XCTestCase {
     }
 
     func testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject() throws {
-        let app = try connectedSimulatorApp()
+        let app = try connectedSimulatorApp(expandProject: false)
         let search = app.searchFields.firstMatch
         XCTAssertTrue(search.waitForExistence(timeout: 10))
         XCTAssertGreaterThan(search.frame.midY, app.frame.height * 0.8)
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.exists)
-        project.tap()
         XCTAssertEqual(project.value as? String, "閉じています")
         let compose = app.buttons["tasks.new.project.simulator-project"]
         XCTAssertTrue(compose.isHittable)
@@ -256,6 +259,14 @@ final class BexLaunchUITests: XCTestCase {
         project.tap()
         let expanded = XCTAttachment(screenshot: app.screenshot())
         expanded.name = "Expanded project rows"; expanded.lifetime = .keepAlways; add(expanded)
+        XCTAssertEqual(project.value as? String, "開いています")
+        app.buttons["tasks.menu"].tap()
+        app.buttons["tasks.refresh"].tap()
+        XCTAssertEqual(project.value as? String, "開いています")
+        compose.tap()
+        XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(project.value as? String, "開いています")
         app.buttons["tasks.new.chat"].tap()
         XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
     }
@@ -424,6 +435,18 @@ final class BexLaunchUITests: XCTestCase {
         let started = Date()
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
+        for number in (22...26).reversed() {
+            let project = app.buttons["tasks.project.pagination-project-\(number)"]
+            scrollTo(project)
+            XCTAssertEqual(project.value as? String, "閉じています")
+            project.tap()
+        }
+        for _ in 0..<30 {
+            let first = app.buttons["tasks.project.pagination-project-26"]
+            if first.exists && first.isHittable { break }
+            app.swipeDown()
+        }
+        seen.removeAll(); ordered.removeAll()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.row.pagination-project-thread-26-18"].waitForExistence(timeout: 15))
         print("Latest title visible after refresh: \(Date().timeIntervalSince(started)) seconds")
         let firstScreenshot = XCTAttachment(screenshot: app.screenshot())
@@ -1286,6 +1309,8 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["PCとペアリング"].exists)
 
         let notice = app.staticTexts["notice"]
+        let project = prefixedButton(app, prefix: "tasks.project.")
+        if project.exists, project.value as? String == "閉じています" { project.tap() }
         let firstTask = app
             .descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row."))
@@ -1337,6 +1362,7 @@ final class BexLaunchUITests: XCTestCase {
         let reconnectTaskDetail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Relaunch did not open the task list")
         XCTAssertFalse(reconnectTaskDetail.exists)
+        if project.exists, project.value as? String == "閉じています" { project.tap() }
         XCTAssertTrue(firstTask.waitForExistence(timeout: 30)); firstTask.tap()
         XCTAssertTrue(firstItem.waitForExistence(timeout: 30))
     }
@@ -1354,6 +1380,8 @@ final class BexLaunchUITests: XCTestCase {
         if taskDetail.exists { app.navigationBars.buttons.element(boundBy: 0).tap() }
         XCTAssertTrue(taskList.waitForExistence(timeout: 30))
 
+        let project = prefixedButton(app, prefix: "tasks.project.")
+        if project.exists, project.value as? String == "閉じています" { project.tap() }
         let firstTask = app
             .descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row."))
@@ -1418,9 +1446,17 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
     }
 
-    private func connectedSimulatorApp() throws -> XCUIApplication {
+    private func connectedSimulatorApp(expandProject: Bool = true) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launch()
+        defer {
+            if expandProject {
+                let project = app.buttons["tasks.project.simulator-project"]
+                if project.waitForExistence(timeout: 10), project.value as? String == "閉じています" {
+                    project.tap()
+                }
+            }
+        }
 
         let taskList = app.descendants(matching: .any)["tasks.list"]
         let taskDetail = app.descendants(matching: .any)["task.detail"]

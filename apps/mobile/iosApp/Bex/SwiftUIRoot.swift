@@ -438,7 +438,7 @@ private struct ThreadsScreen: View {
     let state: IosAppViewState
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
-    @State private var collapsedProjectIds = Set<String>()
+    @State private var expandedProjectIds = Set<String>()
 
     @ViewBuilder var body: some View {
         if #available(iOS 26.0, *) {
@@ -494,8 +494,8 @@ private struct ThreadsScreen: View {
                 Section {
                     HStack(spacing: 16) {
                         Button {
-                            if collapsedProjectIds.contains(project.id) { collapsedProjectIds.remove(project.id) }
-                            else { collapsedProjectIds.insert(project.id) }
+                            if expandedProjectIds.contains(project.id) { expandedProjectIds.remove(project.id) }
+                            else { expandedProjectIds.insert(project.id) }
                         } label: {
                             HStack(spacing: 16) {
                                 Image(systemName: "folder")
@@ -508,7 +508,7 @@ private struct ThreadsScreen: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("tasks.project.\(project.id)")
-                        .accessibilityValue(collapsedProjectIds.contains(project.id) ? "閉じています" : "開いています")
+                        .accessibilityValue(expandedProjectIds.contains(project.id) ? "開いています" : "閉じています")
                         Button { model.openNewThread(cwd: project.roots.first ?? "") } label: {
                             Image(systemName: "square.and.pencil").font(.title3)
                                 .foregroundColor(.secondary).frame(width: 44, height: 44)
@@ -518,7 +518,7 @@ private struct ThreadsScreen: View {
                         .accessibilityIdentifier("tasks.new.project.\(project.id)")
                     }
                     .taskListRowStyle()
-                    if !collapsedProjectIds.contains(project.id) {
+                    if expandedProjectIds.contains(project.id) {
                         let threads = groupedThreads[project.id] ?? []
                         ForEach(threads, id: \.id) { thread in
                             ThreadListRow(thread: thread, indented: true) { model.openThread(thread.id) }

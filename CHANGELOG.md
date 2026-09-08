@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Start iPhone task-list project folders collapsed; preserve manual expansion during refresh and conversation navigation.
+
 - Update and restart the signed Mac Host to activate `host/dictation/transcribe` instead of forwarding it to Codex. Remove the iPhone and Host 30-second voice-recording limit and the separate recording-cancel button. Keep Stop-to-draft and Send-directly behavior; verify longer recordings through the encrypted relay and iOS Simulator.
 
 - Install and launch iPhone build 34. Reuse unchanged item display objects within streamed turns and parse Markdown off the UI thread with coalesced updates. Remove duplicate raw bodies, unused notification logs, and obsolete mobile state APIs; retain paging metadata and normalize existing version 2 caches on load.
