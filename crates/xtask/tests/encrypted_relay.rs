@@ -618,7 +618,8 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         }
         let initial = request(&service, &mut session, "thread/start", json!({"cwd":workspace})).await;
         assert_eq!(initial["thread"]["cwd"], workspace.to_str().unwrap());
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"]});
+        let destination = root.join("worktree storage");
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":destination});
         assert_eq!(request(&service, &mut session, "host/worktree/settings/update", settings.clone()).await, settings);
         let mut ids = Vec::new();
         let mut paths = Vec::new();
@@ -627,6 +628,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
             let thread = &started["thread"];
             let cwd = std::path::PathBuf::from(thread["cwd"].as_str().unwrap());
             assert_ne!(cwd, workspace);
+            assert_eq!(cwd.parent().unwrap(), destination);
             assert_eq!(std::fs::read(cwd.join(".env")).unwrap(), std::fs::read(workspace.join(".env")).unwrap());
             assert_eq!(thread["projectId"], "workspace");
             assert_eq!(thread["model"], "fixture-model");

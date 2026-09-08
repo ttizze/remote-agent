@@ -97,6 +97,10 @@ final class BexAppViewModel: ObservableObject {
         state.threads.first { $0.id == state.selectedThreadId }?.workingDirectory ?? state.workingDirectory
     }
 
+    var workspace: IosWorkspaceActions {
+        controller.workspace
+    }
+
     private let controller = IosAppController()
 
     init() {
@@ -355,10 +359,7 @@ extension BexAppViewModel {
     }
 
     func readSessionImages(_ threadId: String, completion: @escaping ([String]?, String?) -> Void) {
-        controller.conversation.readSessionImages(
-            threadId: threadId,
-            completion: completion
-        )
+        controller.conversation.readSessionImages(threadId: threadId, completion: completion)
     }
 
     func download(_ path: String, completion: @escaping (URL?, String?) -> Void) {

@@ -4,6 +4,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 
 class IosWorkspaceActions
 internal constructor(
@@ -29,6 +30,24 @@ internal constructor(
                     dependencies.gateway.rawRequest(profile, method, Json.parseToJsonElement(paramsJson)),
                     completion,
                 )
+            } catch (failure: IllegalArgumentException) {
+                completion(null, failure.message ?: "JSONが無効です")
+            }
+        }
+    }
+
+    fun worktreeSettings(hostIdentity: String, updateJson: String?, completion: (String?, String?) -> Unit) {
+        val profile =
+            controller.state.selectedProfile?.takeIf { it.hostIdentity == hostIdentity }
+                ?: run {
+                    completion(null, "接続先が変更されました。設定を開き直してください。")
+                    return
+                }
+        scope.launch {
+            try {
+                val method = if (updateJson == null) "host/worktree/settings/read" else "host/worktree/settings/update"
+                val params = updateJson?.let(Json::parseToJsonElement) ?: JsonObject(emptyMap())
+                completeJson(dependencies.gateway.rawRequest(profile, method, params), completion)
             } catch (failure: IllegalArgumentException) {
                 completion(null, failure.message ?: "JSONが無効です")
             }

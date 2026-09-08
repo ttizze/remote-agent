@@ -6,6 +6,7 @@ struct ThreadsScreen: View {
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
     @State private var expandedProjectIds = Set<String>()
+    @State private var worktreeHost: WorktreeSettingsHost?
 
     var body: some View {
         if #available(iOS 26.0, *) {
@@ -206,12 +207,20 @@ struct ThreadsScreen: View {
                     Button { model.refreshTaskList() } label: { Label("更新", systemImage: "arrow.clockwise") }
                         .disabled(state.threadLoadState == .loading)
                         .accessibilityIdentifier("tasks.refresh")
+                    Button {
+                        if let id = state.selectedProfileId {
+                            worktreeHost = WorktreeSettingsHost(id: id, name: state.selectedProfileName ?? "PC Host")
+                        }
+                    } label: { Label("ワークツリー設定", systemImage: "arrow.triangle.branch") }
+                        .disabled(!state.isConnected)
+                        .accessibilityIdentifier("tasks.worktree-settings")
                     Button { model.showProfiles() } label: { Label("PC一覧", systemImage: "laptopcomputer") }
                 } label: { Image(systemName: "ellipsis") }
                     .accessibilityLabel("その他")
                     .accessibilityIdentifier("tasks.menu")
             }
         }
+        .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(model: model, host: host) }
     }
 
     private var visibleThreads: [IosThreadSummaryView] {

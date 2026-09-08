@@ -192,6 +192,7 @@ pub(crate) struct Desktop {
     status: Value,
     worktree_settings: Value,
     worktree_copy_paths: Entity<TextareaState>,
+    worktree_directory: Entity<InputState>,
     worktree_saved: bool,
     projects: Vec<Value>,
     threads: Vec<Value>,
@@ -319,6 +320,9 @@ impl Desktop {
                 .placeholder(".env\n.env.local\nconfig/local")
                 .auto_grow(3, 8)
         });
+        let worktree_directory = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("接続先Mac上の絶対パス（空欄で既定）")
+        });
         let invitation_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(3, 6));
         let mut error = String::new();
         let cache = match std::fs::read(platform::state_dir().join(cache_file)) {
@@ -379,6 +383,9 @@ impl Desktop {
             cx.subscribe(&worktree_copy_paths, |s, _, event, cx| {
                 if matches!(event, InputEvent::Change) { s.worktree_saved = false; cx.notify(); }
             }),
+            cx.subscribe(&worktree_directory, |s, _, event, cx| {
+                if matches!(event, InputEvent::Change) { s.worktree_saved = false; cx.notify(); }
+            }),
             cx.subscribe(&effort_slider, |s, _, event, cx| {
                 if let slider::SliderEvent::Change(slider::SliderValue::Single(index)) = event
                     && let Some(model) = s.selected_model()
@@ -422,6 +429,7 @@ impl Desktop {
             status: Value::Null,
             worktree_settings: Value::Null,
             worktree_copy_paths,
+            worktree_directory,
             worktree_saved: false,
             projects: vec![],
             threads: vec![],
@@ -980,6 +988,9 @@ impl Desktop {
                     .join("\n");
                 s.worktree_copy_paths
                     .update(cx, |input, cx| input.set_value(paths, w, cx));
+                s.worktree_directory.update(cx, |input, cx| {
+                    input.set_value(text(&value, "worktreeDirectory"), w, cx)
+                });
                 s.worktree_settings = value;
                 s.worktree_saved = false;
             },
@@ -997,6 +1008,7 @@ impl Desktop {
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
         );
+        settings["worktreeDirectory"] = json!(self.worktree_directory.read(cx).value().trim());
         self.request(
             false,
             "host/worktree/settings/update",
@@ -1380,6 +1392,8 @@ impl Desktop {
         self.worktree_settings = Value::Null;
         self.worktree_saved = false;
         self.worktree_copy_paths
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.worktree_directory
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.models.clear();
         self.select_model("", cx);

@@ -10,6 +10,7 @@ use tokio::process::Command;
 use xtask::{Result, pairing::PairingServer, repository_root};
 
 const DEFAULT_TESTS: &[&str] = &[
+    "testSimulatorEditsHostWorktreeSettingsFromTaskMenu",
     "testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject",
     "testSimulatorLoadsLatestFiveTitlesPerProjectAndExpandsOneProject",
     "testSimulatorPaginatesRecentProjectsAndUnassignedChats",

@@ -11,6 +11,7 @@
 - Move project-owned Python and Shell development tooling into Rust `cargo xtask` commands: Mac builds and signing, isolated iOS E2E orchestration, Codex scenarios, pairing controls, and Fly secret generation. Run the current encrypted relay tests through `cargo xtask relay-e2e`; remove the obsolete plaintext Python harness and the explicit Python development dependency. Preserve fixture behavior and signing identities. Preserve the original per-run Simulator and Host lifecycle and reject failed or skipped tests.
 
 - Share Simulator fixture HTTP controls and project expansion setup across UI tests; complete the dictation fixture draft before the next test. Restore temporary list fixtures through XCTest teardown even after a failed assertion, and restart title traversal after page insertions. Exercise production TLS provider initialization directly when workspace features enable multiple backends.
+- Add iPhone worktree settings to the task list's top-right menu, with Host-backed loading/saving, cancel, and error handling. Let Mac and iPhone configure an absolute Host directory for new worktrees; an empty directory preserves the existing Git-directory default, and existing worktrees keep their locations and project membership.
 
 - Remove unused Rust dependencies and error variants, replace the manual JSON ID scanner with serde traversal, and borrow JSONL source lines and raw payloads. Move desktop RPC results without cloning, consolidate request cancellation cleanup, and remove temporary notification and disconnect collections.
 
