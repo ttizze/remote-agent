@@ -35,10 +35,10 @@ fn resolve_from(
         return Err(Error::ExecutableNotFound(program.to_path_buf()));
     }
 
-    if program == Path::new(DEFAULT_CODEX_PROGRAM) {
-        if let Some(resolved) = resolve_candidate(bundled_codex)? {
-            return Ok(resolved);
-        }
+    if program == Path::new(DEFAULT_CODEX_PROGRAM)
+        && let Some(resolved) = resolve_candidate(bundled_codex)?
+    {
+        return Ok(resolved);
     }
 
     let path = path.ok_or_else(|| Error::ExecutableNotFound(program.to_path_buf()))?;
