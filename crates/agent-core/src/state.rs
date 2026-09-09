@@ -1722,6 +1722,19 @@ fn notification(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, 
         if old.items.as_ref().unwrap()[index].kind.as_deref() != Some(expected) {
             return (next, Vec::new());
         }
+        if expected == "fileChange"
+            && old.items.as_ref().unwrap()[index]
+                .extra
+                .get("changes")
+                .is_some_and(|changes| {
+                    changes.as_array().is_none_or(|changes| {
+                        changes.last().is_some_and(|change| !change.is_object())
+                    })
+                })
+        {
+            next.error = Some("invalid file change delta target".into());
+            return (next, Vec::new());
+        }
         let item = Arc::make_mut(
             &mut mutable_turn(&mut next, &params.thread_id, turn_index)
                 .items
@@ -1740,14 +1753,13 @@ fn notification(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, 
                     .extra
                     .entry("changes")
                     .or_insert_with(|| Value::Array(Vec::new()));
-                if !changes.is_array() {
-                    *changes = Value::Array(Vec::new());
-                }
                 let changes = changes.as_array_mut().unwrap();
                 if changes.is_empty() {
                     changes.push(serde_json::json!({"path":"","kind":"update","diff":""}));
                 }
-                append_text(&mut changes.last_mut().unwrap()["diff"], &delta);
+                if let Some(change) = changes.last_mut().and_then(Value::as_object_mut) {
+                    append_text(change.entry("diff").or_insert(Value::Null), &delta);
+                }
             }
             _ => unreachable!(),
         }

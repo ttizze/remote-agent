@@ -343,26 +343,45 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
 #[test]
 fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
     use agent_core::state::{FileDraft, Intent, Navigation, Workspace};
-    let file: Arc<agent_core::models::FileContent> = Arc::new(serde_json::from_value(json!({
-        "path":"/old/file", "revision":"r1", "text":"saved", "bom":false,
-        "lineEnding":"lf", "size":5
-    })).unwrap());
-    let directory: Arc<agent_core::models::FileList> = Arc::new(serde_json::from_value(json!({
-        "path":"/old", "entries":[], "truncated":false
-    })).unwrap());
-    let review: Arc<agent_core::models::WorkspaceReview> = Arc::new(serde_json::from_value(json!({
-        "branch":"main", "additions":1, "deletions":0, "files":[], "diff":"old"
-    })).unwrap());
+    let file: Arc<agent_core::models::FileContent> = Arc::new(
+        serde_json::from_value(json!({
+            "path":"/old/file", "revision":"r1", "text":"saved", "bom":false,
+            "lineEnding":"lf", "size":5
+        }))
+        .unwrap(),
+    );
+    let directory: Arc<agent_core::models::FileList> = Arc::new(
+        serde_json::from_value(json!({
+            "path":"/old", "entries":[], "truncated":false
+        }))
+        .unwrap(),
+    );
+    let review: Arc<agent_core::models::WorkspaceReview> = Arc::new(
+        serde_json::from_value(json!({
+            "branch":"main", "additions":1, "deletions":0, "files":[], "diff":"old"
+        }))
+        .unwrap(),
+    );
     let previous = Snapshot {
-        navigation: Arc::new(Navigation { cwd: "/old".into(), ..Default::default() }),
-        workspace: Arc::new(Workspace {
-            file: Some(file.clone()), directory: Some(directory.clone()),
-            review: Some(review.clone()), review_cwd: Some("/old".into()),
-            settings: Some(Arc::default()), ..Default::default()
+        navigation: Arc::new(Navigation {
+            cwd: "/old".into(),
+            ..Default::default()
         }),
-        file_drafts: Arc::new(BTreeMap::from([("/old/file".into(), FileDraft {
-            revision: "r1".into(), text: "unsaved".into()
-        })])),
+        workspace: Arc::new(Workspace {
+            file: Some(file.clone()),
+            directory: Some(directory.clone()),
+            review: Some(review.clone()),
+            review_cwd: Some("/old".into()),
+            settings: Some(Arc::default()),
+            ..Default::default()
+        }),
+        file_drafts: Arc::new(BTreeMap::from([(
+            "/old/file".into(),
+            FileDraft {
+                revision: "r1".into(),
+                text: "unsaved".into(),
+            },
+        )])),
         ..Default::default()
     };
     for cwd in ["/old", "/new"] {
@@ -373,7 +392,9 @@ fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
                     thread: serde_json::from_value(json!({"id":"thread", "cwd":cwd})).unwrap(),
                     model: None,
                 }
-            } else { Event::Intent(Intent::NewChat(cwd.into())) };
+            } else {
+                Event::Intent(Intent::NewChat(cwd.into()))
+            };
             let (next, _) = reduce(&previous, event);
             assert!(Arc::ptr_eq(&previous.file_drafts, &next.file_drafts));
             assert!(next.workspace.settings.is_some());
@@ -381,17 +402,95 @@ fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
                 assert!(Arc::ptr_eq(&previous.workspace, &next.workspace));
                 continue;
             }
-            assert!(next.workspace.file.is_none(), "old file remains after navigation");
+            assert!(
+                next.workspace.file.is_none(),
+                "old file remains after navigation"
+            );
             assert!(next.workspace.directory.is_none());
             assert!(next.workspace.review.is_none());
             assert!(next.workspace.review_cwd.is_none());
             for response in [
-                Event::FileLoaded { request: 0, file: (*file).clone() },
-                Event::FilesLoaded { request: 0, files: (*directory).clone() },
-                Event::ReviewLoaded { request: 0, review: (*review).clone() },
+                Event::FileLoaded {
+                    request: 0,
+                    file: (*file).clone(),
+                },
+                Event::FilesLoaded {
+                    request: 0,
+                    files: (*directory).clone(),
+                },
+                Event::ReviewLoaded {
+                    request: 0,
+                    review: (*review).clone(),
+                },
             ] {
                 assert_eq!(reduce(&next, response).0.workspace, next.workspace);
             }
         }
+    }
+}
+
+#[test]
+fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
+    for changes in [
+        json!([false]),
+        json!([7]),
+        json!(["text"]),
+        json!([[]]),
+        json!([null]),
+        json!({}),
+        json!(null),
+    ] {
+        let previous = initial(
+            serde_json::from_value(json!({
+                "id":"thread", "turns":[{"id":"turn", "items":[{
+                    "id":"file", "type":"fileChange", "changes":changes
+                }]}]
+            }))
+            .unwrap(),
+        );
+        let (next, effects) = reduce(
+            &previous,
+            Event::Notification {
+                method: "item/fileChange/outputDelta".into(),
+                params: json!({"threadId":"thread","turnId":"turn","itemId":"file","delta":"tail"}),
+            },
+        );
+        assert_eq!(
+            next.error.as_deref(),
+            Some("invalid file change delta target")
+        );
+        assert!(effects.is_empty());
+        assert!(Arc::ptr_eq(&previous.conversations, &next.conversations));
+    }
+    for changes in [json!([]), json!([{}]), json!([{"diff":"prefix"}])] {
+        let expected = if changes[0]["diff"].is_string() {
+            "prefixtail"
+        } else {
+            "tail"
+        };
+        let previous = initial(
+            serde_json::from_value(json!({
+                "id":"thread", "turns":[{"id":"turn", "items":[{
+                    "id":"file", "type":"fileChange", "changes":changes
+                }]}]
+            }))
+            .unwrap(),
+        );
+        let (next, _) = reduce(
+            &previous,
+            Event::Notification {
+                method: "item/fileChange/outputDelta".into(),
+                params: json!({"threadId":"thread","turnId":"turn","itemId":"file","delta":"tail"}),
+            },
+        );
+        assert_eq!(next.error, None);
+        assert_eq!(
+            next.conversations["thread"].turns.as_ref().unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap()[0]
+                .extra["changes"][0]["diff"],
+            expected
+        );
     }
 }

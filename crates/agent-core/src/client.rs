@@ -44,13 +44,13 @@ impl Operation for ListRemoteHosts {
     const METHOD: &'static str = "host/listRemotes";
 }
 #[derive(Debug, Serialize)]
-pub struct PairRemoteHost<'a> {
-    pub invitation: &'a crate::models::Invitation,
+pub struct RegisterRemoteHost<'a> {
+    pub ticket: &'a str,
     pub name: &'a str,
 }
-impl Operation for PairRemoteHost<'_> {
+impl Operation for RegisterRemoteHost<'_> {
     type Output = crate::models::RemoteHost;
-    const METHOD: &'static str = "host/pairRemote";
+    const METHOD: &'static str = "host/registerRemote";
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

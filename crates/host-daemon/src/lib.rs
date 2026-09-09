@@ -13,7 +13,9 @@ pub use workspace_review::{WorkspaceReview, inspect_workspace};
 
 pub use host_runtime::HostRuntime;
 
-pub use host_identity::{CredentialStore, HostCredentials, KeyringStore, load_local_identity};
+pub use host_identity::{
+    CredentialStore, FileKeyStore, HostCredentials, KeyringStore, load_local_identity,
+};
 
 pub use codex_rpc::{CodexRpcService, CodexSession, DispatchError, ResponseDisposition, SessionId};
 pub use desktop_projects::{

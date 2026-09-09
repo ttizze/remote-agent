@@ -10,7 +10,7 @@ The core, headless CLI and daemon now use iroh and the same JSONL peer. Native U
 
 `RpcPeer` exposes one typed request and one raw request. One ordered stream carries notifications, server requests and response markers. Store uses the markers to apply typed responses before later deltas while allowing approval responses during other requests. Closing waits for stream shutdown; iroh streams wait for acknowledgment of the final data. Applications must also await endpoint closure before terminating their runtime.
 
-Only `agent-core::transport` knows iroh. It provides identities, native endpoint tickets, expiring single-use invitation data, pure NodeId authorization, and bidirectional streams. The state owner must commit pairing updates atomically before accepting another invitation use. A session uses one JSONL RPC stream; file transfers use separate streams on that session. Local fixtures disable public relays and address lookup.
+Only `agent-core::transport` exposes application transport through iroh. It provides identities, native endpoint tickets, expiring single-use invitation data, pure NodeId authorization, and bidirectional streams. Incoming connections expose only a node identity and a typed pairing request until the state owner persists trust and authorizes them. Failed handshakes close only that connection; endpoint shutdown ends the accept loop. The state owner commits pairing updates atomically before accepting another invitation use. A session uses one JSONL RPC stream; file transfers use separate streams on that session. Local fixtures disable public relays and address lookup.
 
 Run the migration gates through Nix:
 
@@ -30,7 +30,17 @@ agent-cli <connection-options> approve 7 --decision 2
 agent-cli <connection-options> approve '"request-id"' --decision 2
 ```
 
+Opening an iroh peer writes a blank JSONL line so a passive approval client registers without sending a dummy request. Host-originated approvals have no request deadline and remain pending until answered, resolved, or disconnected. Upstream App Server closure or lost events stops the Host and disconnects its clients.
+
 Approval IDs are JSON values, preserving the difference between numeric and string IDs. The decision index refers to the request's advertised choices; index 2 declines requests using the default choices. The `send` command reads current thread state, then chooses start, steer or queue and preserves failed drafts in Store.
+
+## Host credentials
+
+Host identity and local client identity occupy one fixed 64-byte keyring entry (`app.bex.host`, account = canonical state directory). Pairing invitations, the allowlist and remote Host tickets are committed atomically to `trust.json` in that directory, with Unix mode 0600. Keyring access and filesystem commits run on blocking workers; failed commits leave the live authorization state unchanged. Unpaired connections have a separate bounded admission pool and cannot consume the 64 authorized-session slots.
+
+On headless Linux without a keyring service, run `host-daemon --key-storage file --state-dir <private-directory>`. The explicit file backend keeps the same 64 key bytes in `identity.keys` (0600 on Unix). The default remains `--key-storage keyring`; an unavailable keyring is reported, never silently replaced. Windows state inherits the current user's application-data directory DACL. Back up both identity keys and `trust.json`; existing trust with missing keys fails startup.
+
+The old in-development combined JSON credential format is no longer accepted. These storage formats contain credentials and must not be logged or committed.
 
 ## Existing application behavior
 
@@ -76,7 +86,7 @@ nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
 
 `--state-dir` overrides the platform application data directory; `--codex-home` selects a separate Codex store. A process lock prevents two daemons from using the same state. Host and local-client private keys, invitations, paired NodeIds and registered remote Hosts are stored as one record through `keyring`. The public `host.ticket` file contains the current endpoint address. Unix state directories are owner-only; Windows directories inherit their parent DACL, with the default under the user's local application data directory.
 
-All clients connect directly through iroh. Management RPCs (`host/status`, `host/invite`, `host/revoke`, `host/listRemotes`, `host/pairRemote`, `host/removeRemote`) require the local client's NodeId. Invitations expire after five minutes and can be consumed once; persistence succeeds before authorization is published. Revocation closes active sessions. Remote registration pairs the local client's identity so the UI can connect directly to the remote Host.
+All clients connect directly through iroh. Management RPCs (`host/status`, `host/invite`, `host/revoke`, `host/listRemotes`, `host/registerRemote`, `host/removeRemote`) require the local client's NodeId. Invitations expire after five minutes and can be consumed once; persistence succeeds before authorization is published. Revocation closes active sessions. The client pairs through its existing endpoint, then registers the resulting ticket with its local Host. The daemon never starts a second endpoint using the client's identity.
 
 Public iroh relays are the default. `--relay-url` supplies a custom list; `--no-relay` restricts isolated fixtures to direct local addresses. SSH, the custom Phoenix relay, and their repository deployment scripts are removed. This source change does not decommission previously deployed Fly infrastructure.
 

@@ -41,13 +41,26 @@ pub(crate) fn state_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "application data directory unavailable".into())
 }
 
-fn local_identity(directory: &Path) -> Result<Identity, String> {
-    let directory = directory
-        .canonicalize()
-        .map_err(|error| error.to_string())?;
-    host_daemon::load_local_identity(&host_daemon::KeyringStore::new(
-        directory.to_str().ok_or("state directory is not UTF-8")?,
-    )?)
+async fn local_identity(directory: &Path) -> Result<Identity, String> {
+    let directory = directory.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let directory = directory
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        match std::env::var("BEX_KEY_STORAGE").as_deref() {
+            Ok("file") => host_daemon::load_local_identity(&host_daemon::FileKeyStore(
+                directory.join("identity.keys"),
+            )),
+            Err(_) | Ok("keyring") => {
+                host_daemon::load_local_identity(&host_daemon::KeyringStore::new(
+                    directory.to_str().ok_or("state directory is not UTF-8")?,
+                )?)
+            }
+            Ok(_) => Err("BEX_KEY_STORAGE must be keyring or file".into()),
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Each view owns its endpoint and session through Store. The local identity is
@@ -55,7 +68,7 @@ fn local_identity(directory: &Path) -> Result<Identity, String> {
 pub(crate) async fn connect(remote: Option<&str>, snapshot: Snapshot) -> Result<Store, String> {
     let directory = state_dir()?;
     if let Some(remote) = remote {
-        let identity = local_identity(&directory)?;
+        let identity = local_identity(&directory).await?;
         let ticket: Ticket = remote
             .parse()
             .map_err(|error: agent_core::transport::TransportError| error.to_string())?;
@@ -130,7 +143,7 @@ pub(crate) async fn connect(remote: Option<&str>, snapshot: Snapshot) -> Result<
         });
     }
     let ticket = ready?;
-    let identity = local_identity(&directory)?;
+    let identity = local_identity(&directory).await?;
     let endpoint = Endpoint::bind(identity, Relays::Disabled)
         .await
         .map_err(|error| error.to_string())?;
@@ -153,6 +166,8 @@ fn start_host(directory: &Path) -> Result<std::process::Child, String> {
     command
         .arg("--state-dir")
         .arg(directory)
+        .arg("--key-storage")
+        .arg(std::env::var_os("BEX_KEY_STORAGE").unwrap_or_else(|| "keyring".into()))
         .arg("--codex")
         .arg(std::env::var_os("BEX_CODEX").unwrap_or_else(|| "codex".into()))
         .stdin(Stdio::null())

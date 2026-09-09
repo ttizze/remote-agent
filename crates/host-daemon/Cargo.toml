@@ -27,6 +27,7 @@ futures-io = "0.3"
 tokio-util.workspace = true
 zeroize.workspace = true
 tempfile = "3"
+scopeguard = "1.2"
 atomicwrites = "0.4.4"
 notify = "8.2.0"
 

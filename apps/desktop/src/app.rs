@@ -712,7 +712,10 @@ impl Desktop {
         if let Some(file) = &self.snapshot.workspace.file {
             let changed = self.editor_path.as_deref() != Some(&file.path);
             if changed || self.editor_pending.is_none() {
-                let text = self.snapshot.file_drafts.get(&file.path)
+                let text = self
+                    .snapshot
+                    .file_drafts
+                    .get(&file.path)
                     .map_or(&file.text, |draft| &draft.text);
                 if changed || self.editor_value.as_ref() != text {
                     let value: SharedString = text.clone().into();
@@ -727,7 +730,8 @@ impl Desktop {
         if self.snapshot.workspace.file.is_none() && self.editor_path.take().is_some() {
             self.editor_pending = None;
             self.editor_value = SharedString::default();
-            self.editor_input.update(cx, |input, cx| input.set_value("", window, cx));
+            self.editor_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
         }
         if !self.worktree_dirty
             && !self.worktree_saving
@@ -798,7 +802,14 @@ impl Desktop {
         let cwd_changed = previous.navigation.cwd != self.snapshot.navigation.cwd;
         let turn_completed = !Arc::ptr_eq(&previous.activity, &self.snapshot.activity)
             && previous.activity.active.iter().any(|(id, active)| {
-                *active && !self.snapshot.activity.active.get(id).copied().unwrap_or(false)
+                *active
+                    && !self
+                        .snapshot
+                        .activity
+                        .active
+                        .get(id)
+                        .copied()
+                        .unwrap_or(false)
                     && self.snapshot.conversations.get(id).is_some_and(|thread| {
                         thread.cwd.as_deref() == Some(&self.snapshot.navigation.cwd)
                     })
@@ -808,7 +819,8 @@ impl Desktop {
         }
         if cwd_changed {
             let cwd = self.snapshot.navigation.cwd.clone();
-            self.path.update(cx, |input, cx| input.set_value(cwd, window, cx));
+            self.path
+                .update(cx, |input, cx| input.set_value(cwd, window, cx));
         }
         if changed && let Some(persistence) = &self.persistence {
             persistence.send_replace(self.snapshot.clone());
@@ -920,23 +932,35 @@ impl Desktop {
         })
     }
     fn project_turn(&mut self, turn: &Arc<Turn>) -> Rc<ProjectedTurn> {
-        let mut pending = self.snapshot.pending_submissions.iter().filter(|(_, pending)| {
-            pending.draft_key == self.draft_key()
-                && pending.turn_id.as_deref() == Some(&turn.id)
-        });
+        let mut pending = self
+            .snapshot
+            .pending_submissions
+            .iter()
+            .filter(|(_, pending)| {
+                pending.draft_key == self.draft_key()
+                    && pending.turn_id.as_deref() == Some(&turn.id)
+            });
         if let Some(cached) = self.projected_turns.get(&turn.id)
             && Arc::ptr_eq(&cached.turn, turn)
             && cached.pending.iter().all(|(id, previous)| {
-                pending.next().is_some_and(|(next, current)| id == next && Arc::ptr_eq(previous, current))
+                pending
+                    .next()
+                    .is_some_and(|(next, current)| id == next && Arc::ptr_eq(previous, current))
             })
             && pending.next().is_none()
         {
             return cached.clone();
         }
-        let pending: Vec<_> = self.snapshot.pending_submissions.iter()
-            .filter(|(_, pending)| pending.draft_key == self.draft_key()
-                && pending.turn_id.as_deref() == Some(&turn.id))
-            .map(|(id, pending)| (id.clone(), pending.clone())).collect();
+        let pending: Vec<_> = self
+            .snapshot
+            .pending_submissions
+            .iter()
+            .filter(|(_, pending)| {
+                pending.draft_key == self.draft_key()
+                    && pending.turn_id.as_deref() == Some(&turn.id)
+            })
+            .map(|(id, pending)| (id.clone(), pending.clone()))
+            .collect();
         let items = turn.items.as_deref().unwrap_or_default();
         let anchors: Vec<_> = pending
             .iter()
@@ -1012,7 +1036,10 @@ impl Desktop {
                 if let (ConversationRow::Turn(turn), ConversationRow::Turn(next)) = (a, b)
                     && let Some(first) = turn.items.as_ref().and_then(|items| items.first())
                     && next.items.as_ref().is_some_and(|items| {
-                        items.iter().position(|item| item.id == first.id).is_some_and(|index| index > 0)
+                        items
+                            .iter()
+                            .position(|item| item.id == first.id)
+                            .is_some_and(|index| index > 0)
                     })
                 {
                     Some((
@@ -1218,8 +1245,11 @@ impl Desktop {
         self.connect();
     }
     fn send(&mut self, cx: &Context<Self>) {
-        if !self.snapshot.connected || self.busy > 0
-            || self.dictation.as_ref().is_some_and(|dictation| matches!(dictation.phase, Phase::Permission | Phase::Transcribing))
+        if !self.snapshot.connected
+            || self.busy > 0
+            || self.dictation.as_ref().is_some_and(|dictation| {
+                matches!(dictation.phase, Phase::Permission | Phase::Transcribing)
+            })
         {
             return;
         }
@@ -1613,8 +1643,9 @@ fn composer_should_submit(
 
 #[cfg(test)]
 mod composer_tests {
-    use super::*;
+    use super::{TextareaState, composer_should_submit};
     use gpui_kit as gpui;
+    use gpui_kit::{EntityInputHandler, TestAppContext};
     #[gpui::test]
     fn enter_submits_only_committed_text_at_the_end(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);

@@ -1,7 +1,8 @@
 use crate::command_line::StartupConfig;
 use agent_core::transport::{Endpoint, Relays};
 use host_daemon::{
-    CodexRpcService, DesktopProjectStore, HostCredentials, HostRuntime, KeyringStore,
+    CodexRpcService, CredentialStore, DesktopProjectStore, FileKeyStore, HostCredentials,
+    HostRuntime, KeyringStore,
 };
 use std::{
     fs::{File, OpenOptions},
@@ -28,9 +29,15 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         .open(directory.join("host.lock"))
         .map_err(|e| e.to_string())?;
     lock.try_lock().map_err(|e| e.to_string())?;
-    let credentials = Arc::new(HostCredentials::load(Arc::new(KeyringStore::new(
-        directory.to_str().ok_or("state directory is not UTF-8")?,
-    )?))?);
+    let store: Arc<dyn CredentialStore> = match config.key_storage {
+        crate::command_line::KeyStorage::Keyring => Arc::new(KeyringStore::new(
+            directory.to_str().ok_or("state directory is not UTF-8")?,
+        )?),
+        crate::command_line::KeyStorage::File => {
+            Arc::new(FileKeyStore(directory.join("identity.keys")))
+        }
+    };
+    let credentials = Arc::new(HostCredentials::load(store, directory.clone()).await?);
     let relays = if config.no_relay {
         Relays::Disabled
     } else if config.relay_url.is_empty() {
@@ -38,7 +45,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     } else {
         Relays::Custom(config.relay_url)
     };
-    let endpoint = Endpoint::bind(credentials.host_identity().await, relays.clone())
+    let endpoint = Endpoint::bind(credentials.host_identity().await, relays)
         .await
         .map_err(|e| e.to_string())?;
     let app_server_config = codex_app_server::AppServerConfig {
@@ -62,8 +69,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         .enable_accounts(directory.join("codex-accounts"), app_server_config)
         .await?;
     service.start();
-    let runtime =
-        Arc::new(HostRuntime::new(service, endpoint, credentials, config.name, relays).await);
+    let runtime = Arc::new(HostRuntime::new(service, endpoint, credentials, config.name).await);
     // This file contains a public endpoint address, never a private key or invitation.
     std::fs::write(directory.join("host.ticket"), runtime.ticket().to_string())
         .map_err(|e| e.to_string())?;

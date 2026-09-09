@@ -68,6 +68,7 @@ struct ServiceInner {
     desktop_projects: DesktopProjectStore,
     router: SessionRouter,
     event_pump_started: OnceLock<()>,
+    stopped: tokio_util::sync::CancellationToken,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
     thread_watches: super::thread_watch::ThreadWatches,
@@ -83,6 +84,7 @@ impl CodexRpcService {
                 desktop_projects,
                 router: SessionRouter::new(),
                 event_pump_started: OnceLock::new(),
+                stopped: tokio_util::sync::CancellationToken::new(),
                 files: crate::workspace_files::WorkspaceFiles::default(),
                 thread_watches: super::thread_watch::ThreadWatches::default(),
             }),
@@ -114,6 +116,10 @@ impl CodexRpcService {
 
     /// Begin consuming Codex-originated lines before the first phone connects.
     /// This keeps server requests replayable across phone disconnects.
+    pub(crate) async fn stopped(&self) {
+        self.inner.stopped.cancelled().await;
+    }
+
     pub fn start(&self) {
         self.start_event_pump();
     }
@@ -854,6 +860,7 @@ impl CodexRpcService {
         let mut events = self.inner.app_server.subscribe();
         let router = self.inner.router.clone();
         let thread_watches = self.inner.thread_watches.clone();
+        let stopped = self.inner.stopped.clone();
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
             loop {
@@ -904,6 +911,7 @@ impl CodexRpcService {
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         thread_watches.clear_all();
                         router.close_all();
+                        stopped.cancel();
                         return;
                     }
                 }

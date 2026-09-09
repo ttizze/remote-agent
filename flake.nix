@@ -47,7 +47,6 @@
               rustToolchain
               cargo-ndk
               lefthook
-              flyctl
               kotlin-language-server
               nodejs_22
               androidSdk

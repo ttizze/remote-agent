@@ -207,7 +207,7 @@ impl Context {
 pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
     tokio::task::LocalSet::new().run_until(async move {
         let peer = Arc::new(RpcPeer::open(host_protocol::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
-            std::time::Duration::from_secs(120), 1024)?);
+            None, 1024)?);
         let mut lines = peer.subscribe();
         let (output, mut outbound) = mpsc::unbounded_channel();
         let writer_peer = peer.clone();
@@ -259,6 +259,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     context.respond(id, &json!({"data":models,"nextCursor":null}))?;
                 }
                 "thread/list" => {
+                    if context.home.join("exit-on-list").exists() { std::process::exit(0); }
                     let fixture = context.home.join("list-fixture.json");
                     let contents = if fixture.exists() { Some(fs::read(&fixture)?) } else { None };
                     if contents.is_some() && contents != list_contents {

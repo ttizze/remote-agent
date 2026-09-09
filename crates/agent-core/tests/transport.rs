@@ -69,3 +69,46 @@ async fn endpoint_ticket_and_identity_round_trip_with_public_services_disabled()
     );
     endpoint.close().await;
 }
+
+#[tokio::test]
+async fn incoming_session_requires_allowlist_and_shutdown_is_distinct() {
+    use agent_core::transport::{Endpoint, Relays};
+    use std::{collections::BTreeSet, time::Duration};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let ticket = host.ticket();
+        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), host.accept());
+        let incoming = incoming.unwrap().unwrap();
+        assert_eq!(incoming.node_id(), client.node_id());
+        assert!(matches!(
+            incoming.authorize(&Trust::default()),
+            Err(TransportError::Unauthorized)
+        ));
+        outgoing.unwrap().close();
+        client.close().await;
+
+        let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let trust = Trust {
+            allowed: BTreeSet::from([client.node_id()]),
+            ..Default::default()
+        };
+        let ticket = host.ticket();
+        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), host.accept());
+        let session = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+        assert_eq!(session.node_id(), client.node_id());
+        session.close();
+        outgoing.unwrap().close();
+        client.close().await;
+        host.close().await;
+        assert!(host.accept().await.is_none());
+    })
+    .await
+    .unwrap();
+}

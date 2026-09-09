@@ -733,9 +733,45 @@ async fn perform(
                     }
                 }
                 Intent::PairRemoteHost { invitation, name } => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if now >= invitation.expires_at {
+                        return Err(PeerError::InvalidMessage("invitation expired".into()));
+                    }
+                    let local = session.ok_or_else(|| {
+                        PeerError::InvalidMessage("pairing requires an iroh session".into())
+                    })?;
+                    let ticket = invitation.endpoint.parse().map_err(
+                        |error: crate::transport::TransportError| {
+                            PeerError::InvalidMessage(error.to_string())
+                        },
+                    )?;
+                    {
+                        let remote = scopeguard::guard(
+                            local
+                                .connect(&ticket)
+                                .await
+                                .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
+                            |session| session.close(),
+                        );
+                        let peer = remote
+                            .open_peer(std::time::Duration::from_secs(20), 8)
+                            .await
+                            .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
+                        peer.request::<_, <Pair as Operation>::Output>(
+                            Pair::METHOD,
+                            &Pair {
+                                invitation: invitation.invitation,
+                            },
+                        )
+                        .await?;
+                        peer.close().await?;
+                    }
                     let reply = client
-                        .call(&PairRemoteHost {
-                            invitation: &invitation,
+                        .call(&RegisterRemoteHost {
+                            ticket: &invitation.endpoint,
                             name: &name,
                         })
                         .await?;

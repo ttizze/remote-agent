@@ -159,7 +159,7 @@ impl CodexAppServer {
         let peer = RpcPeer::open(
             host_protocol::JsonlReader::new(stdout),
             stdin,
-            config.request_timeout,
+            Some(config.request_timeout),
             1024,
         )?;
         let initialize_response = parse_initialize_response(
