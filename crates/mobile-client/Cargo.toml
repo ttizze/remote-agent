@@ -12,6 +12,10 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 jni = ["dep:jni"]
 
 [dependencies]
+russh.workspace = true
+relay-transport = { path = "../relay-transport" }
+thiserror.workspace = true
+tokio-util.workspace = true
 agent-core = { path = "../agent-core" }
 conversation-presentation = { path = "../conversation-presentation" }
 jni = { version = "0.21.1", optional = true }
@@ -20,5 +24,5 @@ host-protocol = { path = "../host-protocol" }
 ring.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
-tokio = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["net", "fs"] }
 zeroize.workspace = true

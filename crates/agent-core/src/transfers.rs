@@ -6,7 +6,19 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
-use crate::{client::MobileClientError, peer::RpcPeer};
+use crate::peer::{PeerError, RpcPeer};
+
+#[derive(Debug, thiserror::Error)]
+pub enum TransferError {
+    #[error("transfer I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("invalid transfer JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Peer(#[from] PeerError),
+    #[error("transfer protocol violation: {0}")]
+    Protocol(String),
+}
 
 const LIMIT: u64 = 512 * 1024 * 1024;
 
@@ -18,7 +30,7 @@ struct Grant {
 }
 
 impl Grant {
-    fn parse(value: Value) -> Result<Self, MobileClientError> {
+    fn parse(value: Value) -> Result<Self, TransferError> {
         let grant: Self = serde_json::from_value(value)?;
         let mut digest = [0; 32];
         let mut token = [0; 32];
@@ -31,7 +43,7 @@ impl Grant {
                 != Some(32)
             || URL_SAFE_NO_PAD.decode_slice(&grant.token, &mut token).ok() != Some(32)
         {
-            return Err(MobileClientError::Protocol("invalid transfer grant".into()));
+            return Err(TransferError::Protocol("invalid transfer grant".into()));
         }
         Ok(grant)
     }
@@ -46,15 +58,15 @@ pub async fn upload_file<S, F, Fut>(
     source: &Path,
     directory: &Path,
     file_name: &str,
-) -> Result<Value, MobileClientError>
+) -> Result<Value, TransferError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<S, MobileClientError>>,
+    Fut: Future<Output = std::io::Result<S>>,
 {
     let mut file = tokio::fs::File::open(source).await?;
     if !file.metadata().await?.is_file() {
-        return Err(MobileClientError::Protocol(
+        return Err(TransferError::Protocol(
             "upload source is not a regular file".into(),
         ));
     }
@@ -68,9 +80,7 @@ where
         }
         size += read as u64;
         if size > LIMIT {
-            return Err(MobileClientError::Protocol(
-                "transfer exceeds 512 MiB".into(),
-            ));
+            return Err(TransferError::Protocol("transfer exceeds 512 MiB".into()));
         }
         digest.update(&buffer[..read]);
     }
@@ -84,7 +94,7 @@ where
         .await?,
     )?;
     if grant.size != size || grant.sha256 != sha256 {
-        return Err(MobileClientError::Protocol(
+        return Err(TransferError::Protocol(
             "upload grant changed content metadata".into(),
         ));
     }
@@ -97,7 +107,7 @@ where
     stream.shutdown().await?;
     let length = stream.read_u32().await?;
     if length > 65536 {
-        return Err(MobileClientError::Protocol(
+        return Err(TransferError::Protocol(
             "transfer response too large".into(),
         ));
     }
@@ -110,7 +120,7 @@ where
             .as_str()
             .is_some_and(|path| Path::new(path).is_absolute())
     {
-        return Err(MobileClientError::Protocol(
+        return Err(TransferError::Protocol(
             "upload acknowledgement changed content metadata".into(),
         ));
     }
@@ -124,11 +134,11 @@ pub async fn download_file<S, F, Fut>(
     open_stream: F,
     source: &Path,
     destination: &Path,
-) -> Result<(), MobileClientError>
+) -> Result<(), TransferError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<S, MobileClientError>>,
+    Fut: Future<Output = std::io::Result<S>>,
 {
     let grant = Grant::parse(
         peer.request("host/blob/download", &json!({"path":source}))
@@ -136,7 +146,7 @@ where
     )?;
     let parent = destination
         .parent()
-        .ok_or_else(|| MobileClientError::Protocol("download destination has no parent".into()))?;
+        .ok_or_else(|| TransferError::Protocol("download destination has no parent".into()))?;
     let output = tempfile::NamedTempFile::new_in(parent)?;
     let mut file = tokio::fs::File::from_std(output.reopen()?);
     let mut stream = open_stream().await?;
@@ -155,7 +165,7 @@ where
     if stream.read(&mut buffer[..1]).await? != 0
         || URL_SAFE_NO_PAD.encode(digest.finish().as_ref()) != grant.sha256
     {
-        return Err(MobileClientError::Protocol(
+        return Err(TransferError::Protocol(
             "download content digest or length mismatch".into(),
         ));
     }
@@ -163,6 +173,6 @@ where
     drop(file);
     output
         .persist_noclobber(destination)
-        .map_err(|error| MobileClientError::Io(error.error))?;
+        .map_err(|error| TransferError::Io(error.error))?;
     Ok(())
 }

@@ -9,10 +9,8 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-use crate::{
-    peer::{EventDelivery, PeerError, RpcPeer},
-    transport,
-};
+use crate::transport;
+use agent_core::peer::{EventDelivery, PeerError, RpcPeer};
 
 #[derive(Debug, Clone)]
 pub struct MobileClientConfig {
@@ -184,6 +182,8 @@ impl MobileClient {
 
 #[derive(Debug, Error)]
 pub enum MobileClientError {
+    #[error(transparent)]
+    Transfer(#[from] agent_core::transfers::TransferError),
     #[error("encrypted connection failed: {0}")]
     Ssh(#[from] russh::Error),
     #[error("device identity is not a valid Ed25519 private key")]
@@ -272,9 +272,13 @@ impl MobileClient {
         let connection = self.connection()?;
         tokio::time::timeout(
             Duration::from_secs(120),
-            crate::transfers::upload_file(
+            agent_core::transfers::upload_file(
                 &self.peer,
-                || transport::open_subsystem(&connection.ssh, host_protocol::BLOB_SUBSYSTEM),
+                || async {
+                    transport::open_subsystem(&connection.ssh, host_protocol::BLOB_SUBSYSTEM)
+                        .await
+                        .map_err(std::io::Error::other)
+                },
                 source,
                 directory,
                 file_name,
@@ -282,6 +286,7 @@ impl MobileClient {
         )
         .await
         .map_err(|_| MobileClientError::Protocol("upload timed out".into()))?
+        .map_err(Into::into)
     }
     pub async fn download_file(
         &self,
@@ -291,14 +296,19 @@ impl MobileClient {
         let connection = self.connection()?;
         tokio::time::timeout(
             Duration::from_secs(120),
-            crate::transfers::download_file(
+            agent_core::transfers::download_file(
                 &self.peer,
-                || transport::open_subsystem(&connection.ssh, host_protocol::BLOB_SUBSYSTEM),
+                || async {
+                    transport::open_subsystem(&connection.ssh, host_protocol::BLOB_SUBSYSTEM)
+                        .await
+                        .map_err(std::io::Error::other)
+                },
                 source,
                 destination,
             ),
         )
         .await
         .map_err(|_| MobileClientError::Protocol("download timed out".into()))?
+        .map_err(Into::into)
     }
 }

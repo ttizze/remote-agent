@@ -1,5 +1,5 @@
 //! Reconnecting stream adapters. Framing and request correlation live in peer.
-use crate::peer::{EventDelivery, PeerError, PeerEvent, RpcPeer, request_line};
+use agent_core::peer::{EventDelivery, PeerError, PeerEvent, RpcPeer, request_line};
 use serde_json::Value;
 use std::{
     path::PathBuf,
@@ -136,7 +136,7 @@ impl Rpc {
             peer.request_callback(&line, timeout, move |result| {
                 done(
                     result
-                        .and_then(|line| crate::peer::response_value(&line))
+                        .and_then(|line| agent_core::peer::response_value(&line))
                         .map_err(error_message),
                 );
             })

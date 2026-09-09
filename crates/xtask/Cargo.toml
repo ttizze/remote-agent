@@ -8,6 +8,7 @@ publish = false
 default-run = "xtask"
 
 [dependencies]
+mobile-client = { path = "../mobile-client" }
 agent-core = { path = "../agent-core" }
 base64.workspace = true
 codex-app-server = { path = "../codex-app-server" }

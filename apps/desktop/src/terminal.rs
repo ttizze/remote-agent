@@ -1,5 +1,5 @@
+use crate::rpc::{self, Rpc};
 use crate::{conversation::text, platform};
-use agent_core::rpc::{self, Rpc};
 use base64::Engine;
 use gpui_kit::{
     component::{h_flex, v_flex},

@@ -3,6 +3,7 @@ mod browser;
 mod conversation;
 mod diff;
 mod platform;
+mod rpc;
 mod terminal;
 use gpui_kit::{
     component::{Root, Theme, ThemeMode},

@@ -7,7 +7,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use agent_core::client::{MobileClient, MobileClientConfig, MobileClientError};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use futures_util::{SinkExt, StreamExt};
@@ -15,6 +14,7 @@ use host_daemon::{
     CodexRpcService, DesktopProjectStore, DeviceAuthenticationState, EncryptedGateway, HostIdentity,
 };
 use host_protocol::{Ed25519PublicKey, PairingToken, RelayEndpoint};
+use mobile_client::client::{MobileClient, MobileClientConfig, MobileClientError};
 use ring::{
     rand::SystemRandom,
     signature::{Ed25519KeyPair, KeyPair},

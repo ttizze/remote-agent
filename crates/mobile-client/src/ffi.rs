@@ -15,7 +15,7 @@ use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use agent_core::client::{MobileClient, MobileClientConfig, MobileClientError};
+use crate::client::{MobileClient, MobileClientConfig, MobileClientError};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

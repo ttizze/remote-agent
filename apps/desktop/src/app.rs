@@ -1,4 +1,4 @@
-use agent_core::rpc::{self, Rpc};
+use crate::rpc::{self, Rpc};
 mod clipboard;
 mod dictation;
 mod view;

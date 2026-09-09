@@ -65,12 +65,12 @@ async fn replayed_requests_and_initial_events_survive_until_the_first_subscriber
     use serde_json::json;
     let (client, server) = tokio::io::duplex(8192);
     let (reader, writer) = tokio::io::split(client);
-    let peer = crate::peer::RpcPeer::open(
+    let peer = agent_core::peer::RpcPeer::open(
         host_protocol::JsonlReader::with_max_message_bytes(reader, 8192),
         writer,
         Duration::from_secs(1),
         1024,
-        crate::peer::EventDelivery::SplitRequests,
+        agent_core::peer::EventDelivery::SplitRequests,
     )
     .unwrap();
     let host = tokio::spawn(async move {
