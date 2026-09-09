@@ -1,5 +1,7 @@
 # Remote Agent implementation plan
 
+Historical design and evidence. The Rust Store and iroh architecture in [ADR 0005](adr/0005-rust-store-and-one-iroh-client-path.md) supersedes the Kotlin, Phoenix, SSH and versioned-cache design below.
+
 ## Accepted scope — 2026-09-06
 
 Complete the Mac and iPhone applications against a locally running Phoenix relay.

@@ -52,16 +52,17 @@ struct ThreadScreen: View {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
-                List {
-                    ForEach(conversationRows(thread)) { row in
-                        conversationRow(row)
-                            .taskListRowStyle()
-                            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(conversationRows(thread)) { row in
+                            conversationRow(row)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
                 }
-                .listStyle(.plain)
                 .buttonStyle(.plain)
-                .environment(\.defaultMinListRowHeight, 0)
                 .background(ConversationScrollViewObserver(position: scrollPosition,
                                                            accessibilityValue: threadAccessibilityValue(thread),
                                                            onFollowingLatest: { isFollowingLatest = $0 },

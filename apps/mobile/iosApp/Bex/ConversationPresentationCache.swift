@@ -121,8 +121,10 @@ final class ConversationPresentationCache {
         let info = value["codexErrorInfo"]
         let kind = info?.string ?? info?.fields.keys.sorted().first
         let retrying = value["willRetry"]?.bool ?? false
+        let status = info?[kind ?? ""]?["httpStatusCode"]?.string
+        let overloaded = kind == "serverOverloaded" || status == "429" || status == "503"
         let title: String = if retrying {
-            kind == "serverOverloaded" ? "サーバーが混み合っています。再接続しています" : "再接続しています"
+            overloaded ? "サーバーが混み合っています。再接続しています" : "再接続しています"
         } else {
             errorTitles[kind ?? ""] ?? "エラー"
         }
