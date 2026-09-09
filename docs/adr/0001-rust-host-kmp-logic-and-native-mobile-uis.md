@@ -1,5 +1,7 @@
 # Rust Host, GPUI Mac UI, shared Kotlin and native iPhone UI
 
+Historical design and evidence. The Rust Store and iroh architecture in [ADR 0005](0005-rust-store-and-one-iroh-client-path.md) supersedes the Kotlin, Phoenix, SSH and versioned-cache design below.
+
 Bex uses a Rust Host daemon with one long-lived Codex App Server, a Rust/GPUI Mac UI, and SwiftUI on iPhone over shared Kotlin state. Closing a UI does not terminate Codex work.
 
 Host and remote clients connect outbound to Phoenix. Each client receives its own bounded byte route; embedded SSH runs inside that route using the `remote-agent-v4` subsystem. Host keys are pinned from single-use invitations and devices authenticate with individual public keys. Shell, PTY, exec and forwarding channels are rejected. Phoenix sees routing metadata and ciphertext, never application JSONL.

@@ -1,4 +1,4 @@
-use crate::{Runtime, platform};
+use crate::Runtime;
 use agent_core::{
     models::{Invitation, RemoteHost},
     state::{Intent, Snapshot},
@@ -50,18 +50,27 @@ pub(super) struct Hosts {
 impl EventEmitter<HostEvent> for Hosts {}
 impl Drop for Hosts {
     fn drop(&mut self) {
-        if let Some(store) = self.store.take() {
-            self.runtime.closing.spawn_on(
-                async move {
-                    let _ = store.close().await;
-                },
-                &self.runtime.handle,
-            );
-        }
+        self.close();
     }
 }
 impl Hosts {
+    fn close(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let store = self.store.take()?;
+        Some(self.runtime.closing.spawn_on(
+            async move {
+                let _ = store.close().await;
+            },
+            &self.runtime.handle,
+        ))
+    }
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.on_app_quit(|view, _| {
+            if let Some(close) = view.close() {
+                let _ = view.runtime.handle.block_on(close);
+            }
+            async {}
+        })
+        .detach();
         let (updates, incoming) = async_channel::unbounded();
         cx.spawn_in(window, async move |view, cx| {
             while let Ok(update) = incoming.recv().await {
@@ -108,8 +117,9 @@ impl Hosts {
             );
         }
         let updates = self.updates.clone();
+        let connections = self.runtime.connections.clone();
         self.runtime.handle.spawn(async move {
-            match platform::connect(None, Snapshot::default()).await {
+            match connections.connect(None, Snapshot::default()).await {
                 Ok(store) => {
                     let mut snapshots = store.subscribe();
                     if updates

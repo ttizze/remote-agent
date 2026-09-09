@@ -4,10 +4,20 @@
 
 - Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
 
+- Kill the entire quality process group or Windows job on timeout before removing its checkout. Derive the Windows CI Rust version from the pinned Nix shell and cache native Cargo dependencies and build artifacts.
+
 - Replace Rust Xcode/build wrappers with `just` recipes and scripts. Preserve certificate signing, bundle rollback, isolated Simulator/Host cleanup and exact zero-skip test counts. Keep the Rust fixture servers and quality queue/status; use standard file locks and process-wrap for managed quality subprocesses. Add native Linux/Windows CI and a Nix native development shell.
+
+- Close native snapshot waits on Store shutdown, replace stale foreground transports, and recover interrupted pending sends into drafts. Keep session requests and activity out of restored connection state. Serialize and write iOS snapshots off MainActor, await ordered background writes, and cover native Android FFI shutdown and per-Host persistence.
+
+- Use SwiftUI scroll positioning for iPhone conversations instead of mutating UIKit offsets. Restore image history after reopening, scroll long histories to the latest message after layout, and preserve the reading position when live updates arrive after a small drag toward older content.
+
+- Preserve mobile title expansion in ten-entry increments and wait for an existing iPhone conversation to load before navigating. Render changing activity groups in a lazy scroll stack so completing a live turn cannot invalidate native List indices; retain independent expansion and history paging. Reset isolated fixture controls between UI tests and treat HTTP control failures as failures.
 
 - Move SwiftUI and Android Compose onto generated UniFFI bindings for the common Rust Store. Remove Kotlin common state and handwritten FFI; retain native identity storage, media, QR and lifecycle adapters. Cache immutable conversation projections, expose each activity as a lazy native row, and persist per-Host snapshots. Commit iOS native text before accepting a send and flush submissions and media changes atomically before reporting completion.
 - Publish Store notifications after releasing the state lock so a synchronous native observer can read its snapshot without deadlocking. Add a reentrant-observer regression test and preserve synchronous draft updates and ordered effects.
+
+- Reset session-only approval/watch/activity state and pending submissions when connecting or disconnecting; recover unsent dictation from saved snapshots. Let Store shutdown close snapshot subscriptions, retain enqueued drafts, and release only its own transport session. Share one Desktop endpoint, serialize local daemon startup, and wait for draft persistence and PTY termination in GPUI quit callbacks.
 
 - Move GPUI Desktop, Side Chat, Host management and terminal interactions onto the common Store and immutable snapshots. Preserve native conversation rendering, approvals, image attachments, history paging, revision-aware file editing, worktree settings and PTY lifecycle. Persist per-Host snapshots and flush Japanese drafts on shutdown; remove the obsolete Desktop RPC/conversation implementations and macOS file-picker helper. Verify macOS production startup through the actual daemon, sending and conversation/draft restoration against isolated fixtures.
 

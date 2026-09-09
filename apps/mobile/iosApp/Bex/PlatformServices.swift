@@ -17,13 +17,17 @@ enum SnapshotFiles {
         return directory.appendingPathComponent(name).appendingPathExtension("json")
     }
 
-    static func load(_ host: String) throws -> Data {
-        let url = try location(host)
-        return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
+    static func load(_ host: String) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            let url = try location(host)
+            return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
+        }.value
     }
 
-    static func save(_ host: String, bytes: Data) throws {
-        try bytes.write(to: location(host), options: .atomic)
+    static func save(_ host: String, snapshot: AgentCore.Snapshot) async throws {
+        try await Task.detached(priority: .utility) {
+            try snapshot.serialize().write(to: location(host), options: .atomic)
+        }.value
     }
 }
 

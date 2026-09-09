@@ -23,6 +23,7 @@ pub enum Outcome {
 }
 enum Command {
     Dispatch(Dispatch),
+    Disconnect(oneshot::Sender<Result<(), PeerError>>),
     Attach {
         connection: Connection,
         complete: oneshot::Sender<Result<(), PeerError>>,
@@ -31,16 +32,12 @@ enum Command {
 struct Connection {
     peer: RpcPeer,
     session: Option<crate::transport::Session>,
-    endpoint: Option<crate::transport::Endpoint>,
 }
 impl Connection {
     async fn close(self) {
         let _ = self.peer.close().await;
         if let Some(session) = self.session {
             session.close();
-        }
-        if let Some(endpoint) = self.endpoint {
-            endpoint.close().await;
         }
     }
 }
@@ -67,7 +64,8 @@ struct Scheduled {
     complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
 }
 pub struct Store {
-    updates: watch::Sender<Arc<Snapshot>>,
+    updates: watch::Receiver<Arc<Snapshot>>,
+    publications: Mutex<Option<watch::Sender<Arc<Snapshot>>>>,
     commands: mpsc::UnboundedSender<Command>,
     stop: CancellationToken,
     _close_on_drop: DropGuard,
@@ -75,45 +73,39 @@ pub struct Store {
 }
 impl Store {
     pub fn new(peer: RpcPeer, snapshot: Snapshot) -> Self {
-        Self::start(Some(peer), snapshot, None, None)
+        Self::start(Some(peer), snapshot, None)
     }
     pub fn offline(snapshot: Snapshot) -> Self {
         let (snapshot, _) = reduce(&snapshot, Event::Disconnected("Host not connected".into()));
-        Self::start(None, snapshot, None, None)
+        Self::start(None, snapshot, None)
     }
     fn start(
         peer: Option<RpcPeer>,
         snapshot: Snapshot,
         session: Option<crate::transport::Session>,
-        endpoint: Option<crate::transport::Endpoint>,
     ) -> Self {
-        let (updates, _) = watch::channel(Arc::new(snapshot));
+        let snapshot = if peer.is_some() {
+            reduce(&snapshot, Event::Connected).0
+        } else {
+            snapshot
+        };
+        let (writer, updates) = watch::channel(Arc::new(snapshot));
         let (commands, mut incoming) = mpsc::unbounded_channel();
         let stop = CancellationToken::new();
         let (finished_tx, finished) = watch::channel(None);
-        let publications = updates.clone();
+        let publications = writer.clone();
         let shutdown = stop.clone();
         tokio::spawn(async move {
-            let mut connection = peer.map(|peer| Connection {
-                peer,
-                session,
-                endpoint,
-            });
+            let mut connection = peer.map(|peer| Connection { peer, session });
             let mut result = Ok(());
             loop {
-                if let Some(Connection {
-                    peer,
-                    session,
-                    endpoint,
-                }) = connection.take()
-                {
+                if let Some(Connection { peer, session }) = connection.take() {
                     result = run(
                         peer,
                         publications.clone(),
                         &mut incoming,
                         shutdown.clone(),
                         session,
-                        endpoint,
                     )
                     .await;
                 }
@@ -123,10 +115,12 @@ impl Store {
                     break;
                 }
             }
+            apply(&publications, Event::Disconnected("store closed".into()));
             finished_tx.send_replace(Some(result.map_err(|error| error.to_string())));
         });
         Self {
             updates,
+            publications: Mutex::new(Some(writer)),
             commands,
             _close_on_drop: stop.clone().drop_guard(),
             stop,
@@ -134,7 +128,7 @@ impl Store {
         }
     }
     pub async fn connect(
-        endpoint: crate::transport::Endpoint,
+        endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
         snapshot: Snapshot,
         invitation: Option<uuid::Uuid>,
@@ -146,17 +140,11 @@ impl Store {
     /// Prepare transport while the actor continues to accept local edits.
     pub async fn reconnect(
         &self,
-        endpoint: crate::transport::Endpoint,
+        endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
         invitation: Option<uuid::Uuid>,
     ) -> Result<(), crate::transport::TransportError> {
-        let session = match endpoint.connect(ticket).await {
-            Ok(session) => session,
-            Err(error) => {
-                endpoint.close().await;
-                return Err(error);
-            }
-        };
+        let session = endpoint.connect(ticket).await?;
         let setup = async {
             let peer = session
                 .open_peer(std::time::Duration::from_secs(30), 64)
@@ -175,7 +163,6 @@ impl Store {
                     connection: Connection {
                         peer,
                         session: Some(session),
-                        endpoint: Some(endpoint),
                     },
                     complete,
                 };
@@ -192,16 +179,25 @@ impl Store {
             }
             Err(error) => {
                 session.close();
-                endpoint.close().await;
                 Err(error)
             }
         }
+    }
+    /// Release the current transport while retaining offline editing and observers.
+    pub async fn disconnect(&self) -> Result<(), PeerError> {
+        let (complete, result) = oneshot::channel();
+        self.commands
+            .send(Command::Disconnect(complete))
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+        result
+            .await
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.updates.borrow().clone()
     }
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
-        self.updates.subscribe()
+        self.updates.clone()
     }
     /// Publish the pure transition before returning to a native input control.
     /// The watch lock orders publication and effect enqueueing across callers.
@@ -211,27 +207,31 @@ impl Store {
         &self,
         intent: Intent,
     ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
-        let mut receipt = Ok(None);
-        self.updates.send_if_modified(|current| {
-            if self.stop.is_cancelled() || self.commands.is_closed() {
-                receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
-                return false;
-            }
-            let (effects, changed) = apply_locked(current, Event::Intent(intent));
-            if !effects.is_empty() {
-                let (complete, result) = oneshot::channel();
-                receipt = self
-                    .commands
-                    .send(Command::Dispatch(Dispatch {
-                        effects,
-                        snapshot: current.clone(),
-                        complete,
-                    }))
-                    .map(|()| Some(result))
-                    .map_err(|_| PeerError::ConnectionClosed("store is closed".into()));
-            }
-            changed
-        });
+        let mut receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
+        let publications = self.publications.lock().unwrap().clone();
+        if let Some(publications) = publications {
+            receipt = Ok(None);
+            publications.send_if_modified(|current| {
+                if self.stop.is_cancelled() || self.commands.is_closed() {
+                    receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
+                    return false;
+                }
+                let (effects, changed) = apply_locked(current, Event::Intent(intent));
+                if !effects.is_empty() {
+                    let (complete, result) = oneshot::channel();
+                    receipt = self
+                        .commands
+                        .send(Command::Dispatch(Dispatch {
+                            effects,
+                            snapshot: current.clone(),
+                            complete,
+                        }))
+                        .map(|()| Some(result))
+                        .map_err(|_| PeerError::ConnectionClosed("store is closed".into()));
+                }
+                changed
+            });
+        }
         async move {
             match receipt? {
                 None => Ok(Outcome::Applied),
@@ -243,6 +243,7 @@ impl Store {
     }
     pub async fn close(&self) -> Result<(), PeerError> {
         self.stop.cancel();
+        self.publications.lock().unwrap().take();
         let mut finished = self.finished.clone();
         loop {
             if let Some(result) = finished.borrow_and_update().clone() {
@@ -391,7 +392,6 @@ async fn run(
     commands: &mut mpsc::UnboundedReceiver<Command>,
     stop: CancellationToken,
     session: Option<crate::transport::Session>,
-    endpoint: Option<crate::transport::Endpoint>,
 ) -> Result<(), PeerError> {
     let mut events = peer.subscribe();
     let peer = Arc::new(peer);
@@ -404,14 +404,8 @@ async fn run(
     let mut terminal_reason = None;
     let mut terminal_commands = VecDeque::new();
     let mut terminal_running = false;
-    let mut effects: Vec<Scheduled> = apply(&updates, Event::Connected)
-        .into_iter()
-        .map(|effect| Scheduled {
-            effect,
-            snapshot: None,
-            complete: None,
-        })
-        .collect();
+    let mut disconnected = None;
+    let mut effects: Vec<Scheduled> = Vec::new();
     let reason = loop {
         for Scheduled {
             effect,
@@ -464,6 +458,10 @@ async fn run(
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
                     Command::Dispatch(command) => command,
+                    Command::Disconnect(complete) => {
+                        disconnected = Some(complete);
+                        break "Host disconnected".into();
+                    }
                     Command::Attach { connection, complete } => {
                         connection.close().await;
                         let _ = complete.send(Err(PeerError::ConnectionClosed("store is already connected".into())));
@@ -552,10 +550,10 @@ async fn run(
     if let Some(session) = session {
         session.close();
     }
-    if let Some(endpoint) = endpoint {
-        endpoint.close().await;
-    }
     apply(&updates, Event::Disconnected(reason));
+    if let Some(complete) = disconnected {
+        let _ = complete.send(Ok(()));
+    }
     result
 }
 
@@ -573,10 +571,15 @@ async fn run_offline(
         };
         let command = match command {
             Command::Dispatch(command) => command,
+            Command::Disconnect(complete) => {
+                let _ = complete.send(Ok(()));
+                continue;
+            }
             Command::Attach {
                 connection,
                 complete,
             } => {
+                apply(updates, Event::Connected);
                 let _ = complete.send(Ok(()));
                 return Some(connection);
             }

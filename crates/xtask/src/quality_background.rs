@@ -164,7 +164,7 @@ async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
     if !added.success() {
         return Err(format!("quality checkout failed: {added}").into());
     }
-    let result = tokio::time::timeout(Duration::from_secs(3600), async {
+    let result: Result<_> = async {
         let mut command = CommandWrap::with_new("nix", |command| {
             command
                 .arg("develop")
@@ -185,8 +185,9 @@ async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
         command.wrap(process_wrap::tokio::ProcessGroup::leader());
         #[cfg(windows)]
         command.wrap(process_wrap::tokio::JobObject);
-        command.wrap(KillOnDrop).spawn()?.wait().await
-    })
+        let mut child = command.wrap(KillOnDrop).spawn()?;
+        wait_for_quality(child.as_mut(), Duration::from_secs(3600)).await
+    }
     .await;
     let cleanup = Command::new("git")
         .args(["worktree", "remove", "--force", checkout_str])
@@ -195,7 +196,7 @@ async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
         .kill_on_drop(true)
         .status()
         .await?;
-    let status = result??;
+    let status = result?;
     if !status.success() {
         return Err(format!("quality checks failed: {status}").into());
     }
@@ -203,6 +204,63 @@ async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
         return Err(format!("quality checkout cleanup failed: {cleanup}").into());
     }
     Ok(())
+}
+
+async fn wait_for_quality(
+    child: &mut dyn process_wrap::tokio::ChildWrapper,
+    duration: Duration,
+) -> Result<std::process::ExitStatus> {
+    match tokio::time::timeout(duration, child.wait()).await {
+        Ok(status) => Ok(status?),
+        Err(timeout) => {
+            // KillOnDrop only kills the direct child on Unix. Explicitly kill
+            // the group/job and reap it before removing its working directory.
+            child.start_kill()?;
+            child.wait().await?;
+            Err(timeout.into())
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    #[tokio::test]
+    async fn timeout_terminates_descendants_before_checkout_cleanup() {
+        let mut command = CommandWrap::with_new("sh", |command| {
+            command
+                .args(["-c", "sleep 30 & echo ready; wait"])
+                .stdout(std::process::Stdio::piped());
+        });
+        command
+            .wrap(process_wrap::tokio::ProcessGroup::leader())
+            .wrap(KillOnDrop);
+        let mut child = command.spawn().unwrap();
+        let mut output = BufReader::new(child.stdout().take().unwrap());
+        let mut ready = String::new();
+        tokio::time::timeout(Duration::from_secs(5), output.read_line(&mut ready))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let result = wait_for_quality(child.as_mut(), Duration::from_millis(20)).await;
+        assert!(result.is_err());
+        let mut remainder = Vec::new();
+        let closed = tokio::time::timeout(
+            Duration::from_millis(300),
+            output.read_to_end(&mut remainder),
+        )
+        .await;
+        // Always remove our process group, including on the regression's red run.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        assert!(
+            closed.is_ok(),
+            "a descendant retained the output pipe after timeout"
+        );
+    }
 }
 
 pub async fn status(wait: bool) -> Result<()> {
