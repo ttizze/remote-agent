@@ -293,6 +293,90 @@ async fn invalid_typed_reply_does_not_block_later_wire_events() {
     assert_eq!(loaded_text(&store.snapshot()), Some("recovered"));
 }
 #[tokio::test]
+async fn snapshot_notification_can_reenter_store_synchronously() {
+    use std::{
+        future::Future,
+        task::{Context, Wake, Waker},
+    };
+    struct ReadOnWake {
+        store: Arc<Store>,
+        observed: std::sync::mpsc::Sender<String>,
+    }
+    impl Wake for ReadOnWake {
+        fn wake(self: Arc<Self>) {
+            self.observed
+                .send(self.store.snapshot().navigation.cwd.clone())
+                .unwrap();
+        }
+    }
+    let store = Arc::new(Store::offline(Snapshot::default()));
+    let mut updates = store.subscribe();
+    let mut changed = Box::pin(updates.changed());
+    let (observed, received) = std::sync::mpsc::channel();
+    let waker = Waker::from(Arc::new(ReadOnWake {
+        store: store.clone(),
+        observed,
+    }));
+    assert!(
+        changed
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    let publishing = std::thread::spawn({
+        let store = store.clone();
+        move || drop(store.dispatch(Intent::NewChat("/fixture".into())))
+    });
+    assert_eq!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("notification held Store's snapshot lock"),
+        "/fixture"
+    );
+    publishing.join().unwrap();
+    drop(changed);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn new_conversation_clears_sent_draft_after_native_echo() {
+    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    store
+        .dispatch(Intent::NewChat("/fixture".into()))
+        .await
+        .unwrap();
+    let key = store.snapshot().navigation.draft_key.clone();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: key.clone(),
+            text: "first message".into(),
+        })
+        .await
+        .unwrap();
+    let sending = store.dispatch(Intent::Submit {
+        thread_id: None,
+        client_user_message_id: "client".into(),
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/thread/start");
+    writer.write_line(&json!({"id": request["id"], "result": {"thread": {"id":"created", "cwd":"/fixture", "status":{"type":"idle"}, "turns":[]}}}).to_string()).await.unwrap();
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "turn/start");
+    assert_eq!(request["params"]["input"][0]["text"], "first message");
+    writer.write_line(&json!({"method":"item/completed", "params":{"threadId":"created", "turnId":"turn", "item":{"id":"native", "type":"userMessage", "clientId":"client", "content":[{"type":"text", "text":"first message"}]}}}).to_string()).await.unwrap();
+    writer
+        .write_line(&json!({"id":request["id"], "result":{"turn":{"id":"turn"}}}).to_string())
+        .await
+        .unwrap();
+    sending.await.unwrap();
+    let current = store.snapshot();
+    assert_eq!(current.navigation.draft_key, "created");
+    assert!(current.drafts["created"].text.is_empty());
+    assert!(!current.drafts.contains_key(&key));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn successful_submission_does_not_erase_a_newer_draft() {
     let mut initial = snapshot();
     Arc::make_mut(&mut initial.conversations).insert(
@@ -1239,5 +1323,225 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
     assert_eq!(turns[0].items_has_more, Some(false));
     assert_eq!(thread.history_cursor, Some(None));
     let _writer = server.await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
+    let (store, mut reader, mut writer) = setup(snapshot());
+    let fork = store.dispatch(Intent::ForkThread {
+        thread_id: "thread".into(),
+        last_turn_id: "turn".into(),
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "thread/fork");
+    assert_eq!(request["params"]["lastTurnId"], "turn");
+    writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"forked","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","type":"agentMessage","text":"copied"}]}]}}}).to_string()).await.unwrap();
+    writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}}).to_string()).await.unwrap();
+    assert_eq!(fork.await.unwrap(), Outcome::StartedThread("forked".into()));
+    wait_for(&store, |s| {
+        s.conversations
+            .get("forked")
+            .and_then(|t| t.turns.as_ref())
+            .is_some_and(|turns| {
+                turns[0].items.as_ref().unwrap()[0].text.as_deref() == Some("copied later")
+            })
+    })
+    .await;
+    assert_eq!(
+        store.snapshot().navigation.thread_id.as_deref(),
+        Some("forked")
+    );
+    assert_eq!(loaded_text(&store.snapshot()), Some("old"));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn account_selection_publishes_the_selected_account_and_persistence_warning() {
+    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let listing = store.dispatch(Intent::ListAccounts);
+    let request = read(&mut reader).await;
+    writer.write_line(&json!({"id":request["id"],"result":{"accounts":[{"id":"a"},{"id":"b"}],"selectedId":"a","error":null}}).to_string()).await.unwrap();
+    listing.await.unwrap();
+    assert_eq!(
+        store
+            .snapshot()
+            .account
+            .accounts
+            .as_ref()
+            .unwrap()
+            .selected_id
+            .as_deref(),
+        Some("a")
+    );
+    let selecting = store.dispatch(Intent::SelectAccount("b".into()));
+    let request = read(&mut reader).await;
+    assert_eq!(request["params"]["accountId"], "b");
+    writer.write_line(&json!({"id":request["id"],"result":{"selectedId":"b","persistenceError":"store unavailable"}}).to_string()).await.unwrap();
+    selecting.await.unwrap();
+    assert_eq!(
+        store
+            .snapshot()
+            .account
+            .accounts
+            .as_ref()
+            .unwrap()
+            .selected_id
+            .as_deref(),
+        Some("b")
+    );
+    assert_eq!(store.snapshot().error.as_deref(), Some("store unavailable"));
+    let models = read(&mut reader).await;
+    assert_eq!(models["method"], "model/list");
+    writer
+        .write_line(&json!({"id":models["id"],"result":{"data":[]}}).to_string())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_account_login_ignores_an_older_status_reply() {
+    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let starting = store.dispatch(Intent::StartAccountLogin);
+    let request = read(&mut reader).await;
+    writer.write_line(&json!({"id":request["id"],"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}}).to_string()).await.unwrap();
+    starting.await.unwrap();
+    let polling = store.dispatch(Intent::ReadAccountLogin("login".into()));
+    let poll = read(&mut reader).await;
+    let cancelling = store.dispatch(Intent::CancelAccountLogin("login".into()));
+    let cancel = read(&mut reader).await;
+    writer
+        .write_line(&json!({"id":cancel["id"],"result":{}}).to_string())
+        .await
+        .unwrap();
+    cancelling.await.unwrap();
+    writer
+        .write_line(
+            &json!({"id":poll["id"],"result":{"completed":true,"accountId":"obsolete"}})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    polling.await.unwrap();
+    let state = store.snapshot();
+    assert!(state.account.login.is_none());
+    assert!(state.account.login_status.is_none());
+    assert!(state.account.accounts.is_none());
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn disconnected_store_keeps_editing_and_persisting_drafts() {
+    let (store, reader, writer) = setup(Snapshot::default());
+    wait_for(&store, |s| s.connected).await;
+    drop((reader, writer));
+    wait_for(&store, |s| !s.connected).await;
+    store
+        .dispatch(Intent::NewChat("/offline".into()))
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: "new:/offline".into(),
+            text: "切断中の下書き".into(),
+        })
+        .await
+        .unwrap();
+    let serialized = serde_json::to_vec(&store.snapshot()).unwrap();
+    let restored: Snapshot = serde_json::from_slice(&serialized).unwrap();
+    assert_eq!(restored.drafts["new:/offline"].text, "切断中の下書き");
+    assert!(
+        store
+            .dispatch(Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "offline".into()
+            })
+            .await
+            .is_err()
+    );
+    assert!(store.snapshot().pending_submissions.is_empty());
+    assert_eq!(
+        store.snapshot().drafts["new:/offline"].text,
+        "切断中の下書き"
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_preserves_edits_made_during_pairing() {
+    use agent_core::transport::{Endpoint, Identity, Relays, Trust};
+    use std::collections::BTreeSet;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let trust = Trust {
+            allowed: BTreeSet::from([client.node_id()]),
+            ..Default::default()
+        };
+        let store = Arc::new(Store::offline(Snapshot::default()));
+        let connecting = {
+            let store = store.clone();
+            let ticket = host.ticket();
+            tokio::spawn(async move {
+                store
+                    .reconnect(client, &ticket, Some(uuid::Uuid::new_v4()))
+                    .await
+            })
+        };
+        let pairing = host
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .pairing()
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::NewChat("/pairing".into()))
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: "new:/pairing".into(),
+                text: "接続待ち中の編集".into(),
+            })
+            .await
+            .unwrap();
+        let drafts = store.snapshot().drafts.clone();
+        let (session, peer, _events) = pairing.authorize(&trust).await.unwrap();
+        connecting.await.unwrap().unwrap();
+        wait_for(&store, |state| state.connected).await;
+        assert!(Arc::ptr_eq(&drafts, &store.snapshot().drafts));
+        assert_eq!(
+            store.snapshot().drafts["new:/pairing"].text,
+            "接続待ち中の編集"
+        );
+        assert_eq!(store.snapshot().navigation.cwd, "/pairing");
+        store.close().await.unwrap();
+        let _ = peer.close().await;
+        session.close();
+        host.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn dispatch_publishes_edits_before_returning_to_the_native_input_control() {
+    let store = Store::offline(Snapshot::default());
+    let navigation = store.dispatch(Intent::NewChat("/input".into()));
+    assert_eq!(store.snapshot().navigation.draft_key, "new:/input");
+    let edit = store.dispatch(Intent::SetDraftText {
+        thread_id: "new:/input".into(),
+        text: "入力を戻さない".into(),
+    });
+    assert_eq!(store.snapshot().drafts["new:/input"].text, "入力を戻さない");
+    navigation.await.unwrap();
+    edit.await.unwrap();
     store.close().await.unwrap();
 }

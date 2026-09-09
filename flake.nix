@@ -38,8 +38,22 @@
             includeEmulator = false;
             includeSystemImages = false;
           }).androidsdk;
+          androidTestSdk = (pkgs.androidenv.composeAndroidPackages {
+            platformVersions = [ "36" ];
+            buildToolsVersions = [ "36.0.0" ];
+            includeEmulator = true;
+            includeSystemImages = true;
+            systemImageTypes = [ "google_apis" ];
+            abiVersions = [ (if pkgs.stdenv.hostPlatform.isAarch64 then "arm64-v8a" else "x86_64") ];
+          }).androidsdk;
         in
         {
+          android-test = pkgs.mkShell {
+            packages = [ androidTestSdk pkgs.jdk21 ];
+            JAVA_HOME = pkgs.jdk21.home;
+            ANDROID_HOME = "${androidTestSdk}/libexec/android-sdk";
+            ANDROID_SDK_ROOT = "${androidTestSdk}/libexec/android-sdk";
+          };
           default = pkgs.mkShell {
             packages = with pkgs; [
               gradle

@@ -1,343 +1,266 @@
+import AgentCore
 import Combine
 import Foundation
-import RemoteAgentMobile
-import UniformTypeIdentifiers
 
-/// Native presentation only: state transitions, cache reconciliation, and RPC
-/// orchestration remain inside IosAppController.
 @MainActor
 final class BexAppViewModel: ObservableObject {
-    @Published private(set) var state: IosAppViewState
-    let conversation: BexConversationModel
+    @Published private(set) var snapshot = AgentCore.Snapshot.empty()
+    @Published var screen: AppScreen = .profiles
     @Published var isScanning = false
     @Published var transferError: String?
     @Published var transferring = false
     @Published var sending = false
-    @Published private(set) var transcribing = false
-    let modelSettings: CodexModelSettings
-
-    @Published private var drafts = UserDefaults.standard
-        .dictionary(forKey: "bex.drafts.v4") as? [String: String] ?? [:]
-    @Published private var staged: [String: [StagedAttachment]] = {
-        guard let data = UserDefaults.standard.data(forKey: "bex.attachments.v4") else { return [:] }
-        return (try? JSONDecoder().decode([String: [StagedAttachment]].self, from: data)) ?? [:]
-    }() {
-        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(staged), forKey: "bex.attachments.v4") }
-    }
-
-    var draftKey: String {
-        (state.selectedProfileId ?? "") + ":" + (state.selectedThreadId ?? "new:\(state.workingDirectory)")
-    }
-
-    var draft: String {
-        get { drafts[draftKey] ?? "" }
-        set { drafts[draftKey] = newValue; UserDefaults.standard.set(drafts, forKey: "bex.drafts.v4") }
-    }
-
-    var attachments: [StagedAttachment] {
-        staged[draftKey] ?? []
-    }
-
-    var cwd: String {
-        state.workingDirectory
-    }
-
-    var workspace: IosWorkspaceActions {
-        controller.workspace
-    }
-
-    private let controller = IosAppController()
+    @Published var transcribing = false
+    @Published var isConnecting = false
+    @Published var pairingError: String?
+    @Published var connectionError: String?
+    @Published var notice: String?
+    @Published var loadingThreads = false
+    @Published var loadingHistory = false
+    @Published var interruptingTurnId: String?
+    @Published var profiles: [HostProfile] = []
+    @Published private(set) var selectedProfileId: String?
+    private(set) var conversation: ConversationPresentation?
+    private(set) var list: ThreadList?
+    private(set) var models: [Model] = []
+    private var requests: [Request] = []
+    private let presentation = ConversationPresentationCache()
+    private var store: AgentStore?
+    private var initialization: Task<Void, Never>?
+    private var observation: Task<Void, Never>?
+    private var persistence: Task<Void, Never>?
+    private var connection: Task<Void, Never>?
+    private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
+    private var operations: [UUID: Task<Void, Never>] = [:]
 
     init() {
-        modelSettings = CodexModelSettings(actions: controller.conversation)
-        state = controller.currentState()
-        conversation = BexConversationModel(thread: controller.currentThread())
-        modelSettings.update(host: state.selectedProfileId, connected: state.isConnected)
-        controller.observe { [weak self] state, thread in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if self.state !== state {
-                    self.state = state
-                }
-                if self.conversation.thread !== thread {
-                    self.conversation.thread = thread
-                }
-                self.modelSettings.update(host: state.selectedProfileId, connected: state.isConnected)
-            }
+        if let data = UserDefaults.standard.data(forKey: "bex.hosts.iroh") {
+            do {
+                profiles = try JSONDecoder().decode([HostProfile].self, from: data)
+            } catch { notice = error.localizedDescription }
         }
-    }
-
-    deinit {
-        controller.close()
-    }
-
-    func openPairing() {
-        controller.hosts.openPairing()
-    }
-
-    func dismissPairing() {
-        controller.hosts.dismissPairing()
-    }
-
-    func showProfiles() {
-        controller.hosts.showProfiles()
+        if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
+           profiles.contains(where: { $0.id == id }) {
+            selectProfile(id)
+        }
     }
 
     func selectProfile(_ id: String) {
-        controller.hosts.selectProfile(hostIdentity: id)
+        guard profiles.contains(where: { $0.id == id }) else { return }
+        screen = .threads
+        if selectedProfileId == id, store != nil {
+            connect(); return
+        }
+        persist()
+        connection?.cancel()
+        observation?.cancel()
+        initialization?.cancel()
+        let old = store
+        store = nil
+        let cancelled = pending
+        pending.removeAll()
+        for (_, complete) in cancelled {
+            complete(.failure(CancellationError()))
+        }
+        isConnecting = false
+        selectedProfileId = id
+        UserDefaults.standard.set(id, forKey: "bex.selected-host")
+        let bytes: Data
+        do {
+            bytes = try SnapshotFiles.load(id)
+            try publish(AgentCore.Snapshot.restore(bytes: bytes))
+        } catch { notice = error.localizedDescription; return }
+        initialization = Task { [weak self] in
+            await self?.initialize(id, bytes: bytes, previous: old)
+        }
+    }
+
+    private func initialize(_ id: String, bytes: Data, previous old: AgentStore?) async {
+        if let old {
+            try? await old.shutdown()
+        }
+        do {
+            let owner = try await AgentStore.offline(persisted: bytes)
+            guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
+            store = owner
+            initialization = nil
+            publish(owner.snapshot())
+            perform(.showThreadList)
+            let queued = pending
+            pending.removeAll()
+            for (intent, complete) in queued {
+                perform(intent, completion: complete)
+            }
+            observe(owner, host: id)
+            connect()
+        } catch {
+            guard selectedProfileId == id else { return }
+            connectionError = error.localizedDescription
+            initialization = nil
+            let queued = pending
+            pending.removeAll()
+            for (_, complete) in queued {
+                complete(.failure(error))
+            }
+        }
     }
 
     func pair(_ contents: String) {
-        controller.hosts.pair(
-            contents: contents,
-            nowMs: Int64(Date().timeIntervalSince1970 * 1000)
-        )
+        do {
+            let invitation = try parseInvitation(contents: contents, now: UInt64(Date().timeIntervalSince1970))
+            let id = try ticketIdentity(ticket: invitation.ticket)
+            pairingError = nil
+            isConnecting = true
+            connection?.cancel()
+            connection = Task { [weak self] in
+                do {
+                    let identity = try DeviceIdentity.loadOrGenerate(id)
+                    let owner = try await AgentStore.connect(connection: Connection(
+                        ticket: invitation.ticket,
+                        identity: identity,
+                        invitation: invitation.token,
+                        useRelays: true
+                    ), persisted: Data())
+                    guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
+                    persist()
+                    observation?.cancel()
+                    initialization?.cancel()
+                    if let old = store {
+                        try? await old.shutdown()
+                    }
+                    profiles.removeAll { $0.id == id }
+                    profiles.append(HostProfile(id: id, name: "PC Host", ticket: invitation.ticket))
+                    try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
+                    UserDefaults.standard.set(id, forKey: "bex.selected-host")
+                    selectedProfileId = id
+                    store = owner
+                    publish(owner.snapshot())
+                    screen = .threads
+                    isConnecting = false
+                    observe(owner, host: id)
+                    refreshTaskList()
+                    loadModels()
+                } catch { self?.isConnecting = false; self?.pairingError = error.localizedDescription }
+            }
+        } catch { pairingError = error.localizedDescription }
     }
 
     func connect() {
-        controller.hosts.connect()
-    }
-
-    func refreshTaskList() {
-        controller.navigation.refreshTaskList()
-    }
-
-    func expandTaskList(projects: Bool = false, projectId: String? = nil) {
-        controller.navigation.expandTaskList(
-            projects: projects,
-            projectId: projectId
-        )
-    }
-
-    func searchTaskList(_ term: String) {
-        controller.navigation.searchTaskList(term: term)
-    }
-
-    func openNewThread(cwd: String) {
-        controller.navigation.openNewThread(cwd: cwd)
-    }
-
-    func openNewThread(on profileId: String) {
-        guard profileId != state.selectedProfileId else { return }
-        controller.hosts.selectProfile(hostIdentity: profileId)
-        controller.navigation.openNewThread(cwd: "")
-    }
-
-    func openThread(_ id: String) {
-        controller.navigation.openThread(threadId: id)
-    }
-
-    func loadOlderHistory(_ turnId: String?) {
-        controller.navigation.loadOlderHistory(turnId: turnId)
-    }
-
-    func showThreadList() {
-        controller.navigation.showThreadList()
-    }
-}
-
-/// Draft submission and dictation
-extension BexAppViewModel {
-    func send() {
-        let submission = captureDraft()
-        send(submission.text, from: submission)
-    }
-
-    private func captureDraft() -> DraftSubmission {
-        DraftSubmission(text: draft, files: attachments, key: draftKey, host: state.selectedProfileId ?? "")
-    }
-
-    private func send(_ text: String, from submission: DraftSubmission, dictatedText: String? = nil) {
-        modelSettings.applyTurnOptions()
-        sending = true
-        controller.conversation.sendTurn(
-            text: text,
-            attachments: submission.files.map { CodexAttachment(path: $0.path, name: $0.name, isImage: $0.isImage) }
-        ) { [weak self] accepted, threadId in
-            guard let self else { return }
-            sending = false
-            let destination = threadId.map { submission.host + ":" + $0 } ?? submission.key
-            if accepted.boolValue {
-                for draftKey in Set([submission.key, destination]) {
-                    if drafts[draftKey] == submission.text {
-                        drafts[draftKey] = ""
-                    }
-                    staged[draftKey]?.removeAll { attachment in submission.files.contains { $0.id == attachment.id } }
+        guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
+              !isConnecting else { return }
+        if snapshot.connected() {
+            refreshTaskList()
+            if let id = snapshot.navigation().threadId {
+                perform(.readThread(id: id))
+            }
+            return
+        }
+        isConnecting = true
+        connectionError = nil
+        connection = Task { [weak self] in
+            do {
+                try await owner.reconnect(connection: Connection(ticket: profile.ticket,
+                                                                 identity: DeviceIdentity.loadOrGenerate(profile.id),
+                                                                 invitation: nil, useRelays: true))
+                guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
+                publish(owner.snapshot())
+                isConnecting = false
+                refreshTaskList()
+                loadModels()
+                if let id = snapshot.navigation().threadId {
+                    perform(.openThread(id: id))
                 }
+            } catch {
+                guard self?.selectedProfileId == profile.id else { return }
+                self?.isConnecting = false
+                self?.connectionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func observe(_ owner: AgentStore, host: String) {
+        observation = Task { [weak self] in
+            var previous = owner.snapshot()
+            while !Task.isCancelled {
+                do {
+                    _ = try await owner.nextSnapshot(previous: previous)
+                    guard let self, selectedProfileId == host, !Task.isCancelled else { return }
+                    let latest = owner.snapshot()
+                    publish(latest)
+                    previous = latest
+                } catch { return }
+            }
+        }
+    }
+
+    private func publish(_ next: AgentCore.Snapshot) {
+        if !next.listUnchanged(other: snapshot) {
+            list = next.threadList()
+        }
+        if !next.modelsUnchanged(other: snapshot) {
+            models = next.models()
+        }
+        if !next.requestsUnchanged(other: snapshot) {
+            requests = next.requests()
+        }
+        conversation = presentation.project(
+            next.navigation().threadId.flatMap { next.conversation(id: $0) },
+            requests: requests
+        )
+        snapshot = next
+        persistence?.cancel()
+        persistence = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
+            self?.persist()
+        }
+    }
+
+    func persist() {
+        guard let id = selectedProfileId else { return }
+        do {
+            try SnapshotFiles.save(id, bytes: (store?.snapshot() ?? snapshot).serialize())
+        } catch { notice = error.localizedDescription }
+    }
+
+    func persistBeforeBackground() async {
+        let active = Array(operations.values)
+        for operation in active {
+            await operation.value
+        }
+        persist()
+    }
+
+    func restoreAfterForeground() {
+        connect()
+    }
+
+    func perform(_ intent: Intent, completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
+        guard let owner = store else {
+            if initialization != nil {
+                pending.append((intent, completion))
             } else {
-                if destination != submission.key {
-                    if drafts[destination, default: ""].isEmpty {
-                        drafts[destination] = submission.text
-                    }
-                    if staged[destination, default: []].isEmpty {
-                        staged[destination] = submission.files
-                    }
-                }
-                if let dictatedText {
-                    for draftKey in Set([submission.key, destination]) {
-                        drafts[draftKey] = Self.appendingDictation(
-                            dictatedText,
-                            to: drafts[draftKey, default: ""]
-                        )
-                    }
-                }
+                completion(.failure(CocoaError(.fileReadUnknown)))
             }
-            UserDefaults.standard.set(drafts, forKey: "bex.drafts.v4")
-        }
-    }
-
-    func removeAttachment(_ id: UUID) {
-        staged[draftKey]?.removeAll { $0.id == id }
-    }
-
-    func transcribe(_ audio: Data, draftKey key: String, sendImmediately: Bool) {
-        guard !transcribing, key == draftKey else { return }
-        let submission = captureDraft()
-        transcribing = true
-        transferError = nil
-        controller.conversation.transcribeAudio(audio: audio.base64EncodedString()) { [weak self] text, error in
-            guard let self else { return }
-            transcribing = false
-            if let text {
-                if sendImmediately, draftKey == key {
-                    send(Self.appendingDictation(text, to: submission.text), from: submission, dictatedText: text)
-                } else {
-                    drafts[key] = Self.appendingDictation(text, to: drafts[key, default: ""])
-                    UserDefaults.standard.set(drafts, forKey: "bex.drafts.v4")
-                    if sendImmediately {
-                        transferError = "会話が切り替わったため送信せず、元の会話の下書きに文字起こしを保存しました。"
-                    }
-                }
-            } else if draftKey == key {
-                transferError = error ?? "文字起こしできませんでした。"
-            }
-        }
-    }
-
-    private static func appendingDictation(_ text: String, to draft: String) -> String {
-        draft + (draft.isEmpty || draft.last?.isWhitespace == true ? "" : "\n") + text
-    }
-}
-
-/// Attachments and host requests
-extension BexAppViewModel {
-    func attach(_ url: URL, temporaryDirectory: URL? = nil, completion: @escaping () -> Void = {}) {
-        let key = draftKey
-        let directory = cwd
-        let params: String
-        do {
-            params = try jsonString([
-                "direction": "upload",
-                "source": url.path,
-                "directory": directory,
-                "fileName": url.lastPathComponent
-            ])
-        } catch {
-            transferError = error.localizedDescription
-            if let temporaryDirectory {
-                try? FileManager.default.removeItem(at: temporaryDirectory)
-            }
-            completion()
             return
         }
-        let access = url.startAccessingSecurityScopedResource()
-        transferring = true
-        transferError = nil
-        controller.workspace.transfer(paramsJson: params) { [weak self] result, error in
-            if access {
-                url.stopAccessingSecurityScopedResource()
-            }
-            if let temporaryDirectory {
-                try? FileManager.default.removeItem(at: temporaryDirectory)
-            }
-            defer { completion() }
-            guard let self else { return }
-            transferring = false
-            transferError = error
-            if let result, let path = jsonObject(result)["path"] as? String {
-                let type = UTType(filenameExtension: url.pathExtension)
-                staged[key, default: []].append(StagedAttachment(
-                    name: url.lastPathComponent,
-                    path: path,
-                    isImage: type?.conforms(to: .image) == true
-                ))
-            }
-        }
-    }
-
-    func respond(_ request: IosTurnRequestView, result: [String: Any], completion: @escaping (String?) -> Void) {
         do {
-            try controller.conversation.respond(
-                requestIdJson: request.requestIdJson,
-                responseJson: jsonString(result),
-                completion: completion
-            )
-        } catch { completion(error.localizedDescription) }
-    }
-
-    func workspace(_ method: String, _ params: [String: Any], completion: @escaping ([String: Any]?, String?) -> Void) {
-        do {
-            try controller.workspace.request(method: method, paramsJson: jsonString(params)) { result, error in
-                completion(result.map(jsonObject), error)
+            let receipt = try owner.dispatch(intent: intent)
+            publish(owner.snapshot())
+            let id = UUID()
+            let host = selectedProfileId
+            operations[id] = Task { [weak self] in
+                let result: Result<Outcome, Error>
+                do { result = try await .success(receipt.wait()) } catch { result = .failure(error) }
+                guard let self else { return }
+                operations[id] = nil
+                if selectedProfileId == host {
+                    publish(owner.snapshot())
+                    if case let .failure(error) = result {
+                        notice = error.localizedDescription
+                    }
+                }
+                completion(result)
             }
-        } catch { completion(nil, error.localizedDescription) }
-    }
-
-    func forkThread(
-        _ threadId: String,
-        through turnId: String,
-        completion: @escaping ([String: Any]?, String?) -> Void
-    ) {
-        controller.conversation.forkThread(threadId: threadId, lastTurnId: turnId) { result, error in
-            completion(result.map(jsonObject), error)
-        }
-    }
-
-    func readItemDetails(threadId: String, turnId: String, itemId: String) async -> (String?, String?) {
-        await withCheckedContinuation { continuation in
-            controller.conversation.readItemDetails(threadId: threadId, turnId: turnId, itemId: itemId) { body, error in
-                continuation.resume(returning: (body, error))
-            }
-        }
-    }
-
-    func readSessionImages(_ threadId: String, completion: @escaping ([String]?, String?) -> Void) {
-        controller.conversation.readSessionImages(threadId: threadId, completion: completion)
-    }
-
-    func download(_ path: String, completion: @escaping (URL?, String?) -> Void) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString,
-            isDirectory: true
-        )
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        } catch {
-            completion(nil, error.localizedDescription)
-            return
-        }
-        let target = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
-        do {
-            try controller.workspace.transfer(paramsJson: jsonString([
-                "direction": "download",
-                "source": path,
-                "destination": target.path
-            ])) { result, error in
-                completion(result == nil ? nil : target, error)
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            completion(nil, error.localizedDescription)
-        }
-    }
-
-    func interrupt(_ turnId: String) {
-        controller.conversation.interrupt(turnId: turnId)
-    }
-
-    func scanned(_ contents: String?) {
-        isScanning = false
-        guard let contents, !contents.isEmpty else { return }
-        pair(contents)
+        } catch { completion(.failure(error)) }
     }
 }

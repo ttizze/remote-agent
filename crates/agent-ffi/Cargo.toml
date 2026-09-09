@@ -1,0 +1,31 @@
+[package]
+name = "agent-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "agent-bindgen"
+path = "src/bin/bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+conversation-presentation = { path = "../conversation-presentation" }
+uniffi = { version = "=0.32.0", features = ["tokio"] }
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+uuid = { version = "1", features = ["v4"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+host-protocol = { path = "../host-protocol" }
+

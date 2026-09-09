@@ -1,9 +1,9 @@
-import RemoteAgentMobile
+import AgentCore
 import SwiftUI
 import UIKit
 
 struct BexSwiftUIRoot: View {
-    @StateObject private var model = BexAppViewModel()
+    @ObservedObject var model: BexAppViewModel
 
     var body: some View {
         BexScreen(state: model.state, model: model)
@@ -15,7 +15,7 @@ struct BexSwiftUIRoot: View {
 }
 
 private struct BexScreen: View {
-    let state: IosAppViewState
+    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {
@@ -89,7 +89,7 @@ private struct BexScreen: View {
 }
 
 private struct PairingScreen: View {
-    let state: IosAppViewState
+    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
     @State private var contents = ""
     @State private var showsManualPairing = false
@@ -165,7 +165,7 @@ private struct PairingScreen: View {
 }
 
 private struct ProfilesScreen: View {
-    let state: IosAppViewState
+    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {

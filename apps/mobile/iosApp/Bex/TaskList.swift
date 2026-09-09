@@ -1,8 +1,8 @@
-import RemoteAgentMobile
+import AgentCore
 import SwiftUI
 
 struct ThreadsScreen: View {
-    let state: IosAppViewState
+    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
     @State private var expandedProjectIds = Set<String>()
@@ -223,7 +223,7 @@ struct ThreadsScreen: View {
         .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(model: model, host: host) }
     }
 
-    private var visibleThreads: [IosThreadSummaryView] {
+    private var visibleThreads: [ThreadSummary] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return state.threads }
         return state.threads.filter {
@@ -242,7 +242,7 @@ extension View {
 }
 
 private struct ThreadListRow: View {
-    let thread: IosThreadSummaryView
+    let thread: ThreadSummary
     var indented = false
     let open: () -> Void
 

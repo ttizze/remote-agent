@@ -494,3 +494,84 @@ fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
         );
     }
 }
+
+#[test]
+fn late_fork_preserves_new_navigation_and_stores_the_fork() {
+    use agent_core::state::Intent;
+    let (forking, _) = reduce(
+        &Snapshot::default(),
+        Event::Intent(Intent::ForkThread {
+            thread_id: "old".into(),
+            last_turn_id: "turn".into(),
+        }),
+    );
+    let generation = forking.navigation.generation;
+    let (navigated, _) = reduce(&forking, Event::Intent(Intent::NewChat("/new".into())));
+    let (finished, _) = reduce(
+        &navigated,
+        Event::ThreadForked {
+            generation,
+            thread: serde_json::from_value(json!({"id":"forked","cwd":"/old"})).unwrap(),
+            model: None,
+        },
+    );
+    assert!(finished.navigation.thread_id.is_none());
+    assert_eq!(finished.navigation.cwd, "/new");
+    assert!(finished.conversations.contains_key("forked"));
+}
+
+#[test]
+fn account_listing_does_not_invalidate_a_concurrent_login() {
+    use agent_core::state::Intent;
+    let (starting, _) = reduce(
+        &Snapshot::default(),
+        Event::Intent(Intent::StartAccountLogin),
+    );
+    let generation = starting.account.login_generation;
+    let (listing, _) = reduce(&starting, Event::Intent(Intent::ListAccounts));
+    let (finished, _)=reduce(&listing,Event::AccountLoginStarted { generation,login:serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap() });
+    assert_eq!(
+        finished.account.login.as_ref().map(|l| l.login_id.as_str()),
+        Some("login")
+    );
+}
+
+#[test]
+fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
+    use agent_core::state::{Draft, Effect, Intent, Navigation};
+    let previous = Snapshot {
+        drafts: Arc::new(BTreeMap::from([(
+            "thread".into(),
+            Arc::new(Draft {
+                text: "下書き".into(),
+                ..Default::default()
+            }),
+        )])),
+        navigation: Arc::new(Navigation {
+            thread_id: Some("thread".into()),
+            draft_key: "thread".into(),
+            generation: 8,
+            watch_id: Some(7),
+            watch_thread_id: Some("thread".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (listed, effects) = reduce(&previous, Event::Intent(Intent::ShowThreadList));
+    assert!(listed.navigation.thread_id.is_none());
+    assert_eq!(listed.navigation.generation, 9);
+    assert!(Arc::ptr_eq(&listed.drafts, &previous.drafts));
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Execute(Intent::Unwatch { watch_id: 7, .. })]
+    ));
+    let (completed, _) = reduce(
+        &listed,
+        Event::Notification {
+            method: "turn/completed".into(),
+            params: json!({"threadId":"thread","turn":{"id":"turn","status":"completed","items":[]}}),
+        },
+    );
+    assert!(completed.activity.unread.contains("thread"));
+    assert_eq!(completed.drafts["thread"].text, "下書き");
+}

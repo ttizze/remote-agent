@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Move SwiftUI and Android Compose onto generated UniFFI bindings for the common Rust Store. Remove Kotlin common state and handwritten FFI; retain native identity storage, media, QR and lifecycle adapters. Cache immutable conversation projections, expose each activity as a lazy native row, and persist per-Host snapshots. Commit iOS native text before accepting a send and flush submissions and media changes atomically before reporting completion.
+- Publish Store notifications after releasing the state lock so a synchronous native observer can read its snapshot without deadlocking. Add a reentrant-observer regression test and preserve synchronous draft updates and ordered effects.
+
 - Move GPUI Desktop, Side Chat, Host management and terminal interactions onto the common Store and immutable snapshots. Preserve native conversation rendering, approvals, image attachments, history paging, revision-aware file editing, worktree settings and PTY lifecycle. Persist per-Host snapshots and flush Japanese drafts on shutdown; remove the obsolete Desktop RPC/conversation implementations and macOS file-picker helper. Verify macOS production startup through the actual daemon, sending and conversation/draft restoration against isolated fixtures.
 
 - Extend the common Store with draft-safe submission and transcription, task activity, model selection, workspace operations, and terminal state. Enqueue intents synchronously, preserve interleaved attachment/settings changes during text editing, initialize new-chat model defaults regardless of catalog load order, and refresh a loaded thread list after creating a chat. Preserve binary review counts. Retain terminal output until acknowledged, serialize shell input/resize/close, select the shell on the Host, and terminate live PTYs when their Store closes.

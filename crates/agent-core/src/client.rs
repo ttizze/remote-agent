@@ -445,7 +445,7 @@ impl Operation for ForkThread<'_> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
@@ -456,7 +456,7 @@ pub struct Account {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Accounts {
     pub accounts: Vec<Account>,
@@ -488,7 +488,7 @@ pub struct AccountSelection {
 operation!(SelectAccount, AccountSelection, "host/account/select");
 #[derive(Debug, Serialize)]
 pub struct StartAccountLogin {}
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountLogin {
     pub login_id: String,
@@ -506,7 +506,7 @@ impl Operation for StartAccountLogin {
 pub struct ReadAccountLogin<'a> {
     pub login_id: &'a str,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountLoginStatus {
     pub completed: bool,
@@ -701,23 +701,24 @@ pub enum Answer {
     Questions(std::collections::BTreeMap<String, String>),
     Raw(Box<serde_json::value::RawValue>),
 }
+/// The UI and response validator use the same ordered choices.
+pub fn approval_decisions(request: &ServerRequest) -> &[Value] {
+    static DEFAULTS: std::sync::LazyLock<[Value; 4]> = std::sync::LazyLock::new(|| {
+        ["accept", "acceptForSession", "decline", "cancel"].map(|value| Value::String(value.into()))
+    });
+    request
+        .params
+        .get("availableDecisions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(DEFAULTS.as_slice())
+}
 /// Validates a response before any bytes are queued. Unknown payloads remain intact.
 pub fn answer_result(request: &ServerRequest, answer: &Answer) -> Result<Value, PeerError> {
     use serde_json::json;
     match answer {
         Answer::Decision(index) => {
-            let defaults = [
-                json!("accept"),
-                json!("acceptForSession"),
-                json!("decline"),
-                json!("cancel"),
-            ];
-            let choices = request
-                .params
-                .get("availableDecisions")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&defaults);
+            let choices = approval_decisions(request);
             let decision = choices
                 .get(*index)
                 .ok_or_else(|| PeerError::InvalidMessage("invalid approval choice".into()))?;

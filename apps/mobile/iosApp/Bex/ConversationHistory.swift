@@ -1,5 +1,5 @@
+import AgentCore
 import AVFoundation
-import RemoteAgentMobile
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -7,14 +7,14 @@ import UniformTypeIdentifiers
 extension ThreadScreen {
     /// Give native list virtualization one stable identity per conversation row.
     /// Whole-turn containers and size-change anchoring loop on large histories.
-    func activityIsExpanded(_ turn: IosTurnView) -> Bool {
+    func activityIsExpanded(_ turn: TurnPresentation) -> Bool {
         guard let override = activityExpansionOverrides[turn.id], override.status == turn.status else {
             return turn.activityInitiallyExpanded
         }
         return override.expanded
     }
 
-    func conversationRows(_ thread: IosThreadView) -> [ThreadConversationRow] {
+    func conversationRows(_ thread: ConversationPresentation) -> [ThreadConversationRow] {
         var rows = [ThreadConversationRow]()
         rows
             .reserveCapacity(thread.turns
@@ -32,7 +32,7 @@ extension ThreadScreen {
         return rows
     }
 
-    func appendRows(for turn: IosTurnView, endsNativeTurn: Bool, to rows: inout [ThreadConversationRow]) {
+    func appendRows(for turn: TurnPresentation, endsNativeTurn: Bool, to rows: inout [ThreadConversationRow]) {
         if let opening = turn.openingUserMessage {
             rows.append(.init(
                 id: "opening:" + turn.id,
@@ -92,7 +92,7 @@ extension ThreadScreen {
                               }
                           },
                           loadDetails: { await model.readItemDetails(
-                              threadId: conversation.thread?.id ?? "",
+                              threadId: conversation?.id ?? "",
                               turnId: turnId,
                               itemId: item.id
                           ) })
@@ -107,7 +107,7 @@ extension ThreadScreen {
     }
 
     @ViewBuilder
-    func activityHeader(_ turn: IosTurnView) -> some View {
+    func activityHeader(_ turn: TurnPresentation) -> some View {
         let expanded = activityIsExpanded(turn)
         if turn.activityCanCollapse {
             Button {
@@ -157,7 +157,7 @@ extension ThreadScreen {
         })
     }
 
-    func threadAccessibilityValue(_ thread: IosThreadView) -> String {
+    func threadAccessibilityValue(_ thread: ConversationPresentation) -> String {
         let itemCount = thread.turns.reduce(0) { total, turn in
             total + turn.userMessages.count + turn.activityItems.count + turn.responses.count
                 + turn.pendingRequests.count + (turn.error == nil ? 0 : 1)

@@ -1,12 +1,12 @@
+import AgentCore
 import AVFoundation
-import RemoteAgentMobile
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ThreadScreen: View {
-    let state: IosAppViewState
+    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
-    @ObservedObject var conversation: BexConversationModel
+    let conversation: ConversationPresentation?
     @StateObject var dictation = DictationRecorder()
     @State var sendRecordedText = false
     @State var importing = false
@@ -29,8 +29,8 @@ struct ThreadScreen: View {
 
     private var reviewVersion: String {
         var version = "\(state.selectedProfileId ?? ""):\(state.isConnected):\(model.cwd)"
-        version += ":\(conversation.thread?.id ?? "")"
-        for turn in conversation.thread?.turns ?? [] {
+        version += ":\(conversation?.id ?? "")"
+        for turn in conversation?.turns ?? [] {
             version += ":\(turn.id):\(turn.status)"
             if turn.isInProgress {
                 // Commands and tools can edit files before the native turn finishes.
@@ -42,7 +42,7 @@ struct ThreadScreen: View {
         return version
     }
 
-    private var project: IosProjectView? {
+    private var project: Project? {
         state.projects.first { $0.roots.contains(model.cwd) }
     }
 
@@ -51,7 +51,7 @@ struct ThreadScreen: View {
             if let notice = state.notice {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
-            if let thread = conversation.thread {
+            if let thread = conversation {
                 List {
                     ForEach(conversationRows(thread)) { row in
                         conversationRow(row)
@@ -150,7 +150,7 @@ struct ThreadScreen: View {
         .sheet(isPresented: $showingFiles, onDismiss: { Task { await refreshReview() } }, content: {
             WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
         })
-        .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model.modelSettings) }
+        .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
         .onAppear {
             if state.isNewThread {
                 composerFocused = true
@@ -186,7 +186,7 @@ extension ThreadScreen {
     var conversationTitle: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text(conversation.thread?.title ?? (state.isNewThread ? "チャット" : "タスク"))
+                Text(conversation?.title ?? (state.isNewThread ? "チャット" : "タスク"))
                     .font(.headline).lineLimit(1)
                 if state.isConnecting {
                     ProgressView().controlSize(.small)
@@ -216,7 +216,7 @@ extension ThreadScreen {
                     Label("変更を表示", systemImage: "plus.forwardslash.minus")
                 }
                 Button {
-                    if let id = conversation.thread?.id {
+                    if let id = conversation?.id {
                         model.openThread(id)
                     }
                     Task { await refreshReview() }

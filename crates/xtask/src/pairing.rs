@@ -125,6 +125,12 @@ fn route(
     }
     let root = state.parent().ok_or("fixture state has no parent")?;
     match path {
+        "/auth-token/unavailable" => fs::write(root.join("auth-token-unavailable"), [])?,
+        "/auth-token/reset" => {
+            if root.join("auth-token-unavailable").exists() {
+                fs::remove_file(root.join("auth-token-unavailable"))?;
+            }
+        }
         "/worktree-conversation" => worktree_conversation(root)?,
         "/long-conversation" => write_json(
             root.join("list-fixture.json"),

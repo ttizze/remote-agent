@@ -109,12 +109,7 @@ pub async fn run(arguments: &[String]) -> Result<()> {
     let fixture = tempfile::Builder::new()
         .prefix("bex-ios.")
         .tempdir_in("/tmp")?;
-    command::run(Command::new("./gradlew").args([
-        ":apps:mobile:iosSimulatorArm64Test",
-        ":apps:mobile:linkDebugFrameworkIosSimulatorArm64",
-        "--console=plain",
-    ]))
-    .await?;
+    command::run(Command::new("scripts/build-agent-ios.sh").arg("simulator")).await?;
     command::run(command::cargo().args([
         "build",
         "--locked",

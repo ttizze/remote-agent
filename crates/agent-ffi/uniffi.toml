@@ -1,0 +1,9 @@
+[bindings.swift]
+module_name = "AgentCore"
+ffi_module_name = "AgentCoreFFI"
+generate_module_map = true
+
+[bindings.kotlin]
+package_name = "dev.remoteagent.core"
+cdylib_name = "agent_ffi"
+android = true

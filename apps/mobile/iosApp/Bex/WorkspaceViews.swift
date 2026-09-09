@@ -1,3 +1,4 @@
+import AgentCore
 import SwiftUI
 import UIKit
 
@@ -155,25 +156,28 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func loadDiff() {
         busy = true; error = nil
-        model.workspace("host/workspace/review", ["cwd": root]) { result, message in
-            busy = false; error = message
-            if let value = result?["diff"] as? String {
-                diff = value.components(separatedBy: "\n"); showingDiff = true
+        model.perform(.reviewWorkspace(cwd: root)) { result in
+            busy = false
+            if case let .failure(failure) = result {
+                error = failure.localizedDescription; return
+            }
+            if let value = model.snapshot.review() {
+                diff = value.diff.components(separatedBy: "\n"); showingDiff = true
             }
         }
     }
 
     private func load(_ directory: String) {
         busy = true; error = nil
-        model.workspace("host/file/list", ["path": directory]) { result, message in
-            busy = false; error = message
-            guard let result else { return }
-            path = result["path"] as? String ?? directory
-            entries = (result["entries"] as? [[String: Any]] ?? []).compactMap {
-                guard let name = $0["name"] as? String, let path = $0["path"] as? String else { return nil }
-                return WorkspaceEntry(name: name, path: path, directory: $0["directory"] as? Bool ?? false)
+        model.perform(.listFiles(path: directory)) { result in
+            busy = false
+            if case let .failure(failure) = result {
+                error = failure.localizedDescription; return
             }
-            if result["truncated"] as? Bool == true {
+            guard let result = model.snapshot.directory(), result.path == directory else { return }
+            path = result.path
+            entries = result.entries.map { WorkspaceEntry(name: $0.name, path: $0.path, directory: $0.directory) }
+            if result.truncated {
                 error = "先頭 2,000 件を表示しています。パスを指定して開けます。"
             }
         }
@@ -204,16 +208,24 @@ private struct FileEditorSheet: View {
     let download: (String) -> Void
     let aiEdit: (String) -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var text = ""
-    @State private var revision = ""
-    @State private var savedText = ""
     @State private var error: String?
     @State private var busy = false
     @State private var initialized = false
     @State private var confirmReload = false
+    private var file: FileContent? {
+        model.snapshot.file().flatMap { $0.path == entry.path ? $0 : nil }
+    }
 
-    private var draftKey: String {
-        "bex.editor.v4:\(model.state.selectedProfileId ?? ""):\(entry.path)"
+    private var text: String {
+        model.snapshot.fileDraft(path: entry.path)?.text ?? file?.text ?? ""
+    }
+
+    private var revision: String {
+        model.snapshot.fileDraft(path: entry.path)?.revision ?? file?.revision ?? ""
+    }
+
+    private var savedText: String {
+        file?.text ?? ""
     }
 
     var body: some View {
@@ -226,18 +238,13 @@ private struct FileEditorSheet: View {
                 if busy {
                     ProgressView().padding()
                 }
-                TextEditor(text: $text).font(.body.monospaced())
+                TextEditor(text: Binding(
+                    get: { text },
+                    set: { model.perform(.setFileDraft(path: entry.path, text: $0)) }
+                )).font(.body.monospaced())
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
                     .accessibilityIdentifier("file.editor")
                     .disabled(revision.isEmpty)
-                    .onChange(of: text) { value in
-                        guard initialized else { return }
-                        if value == savedText {
-                            UserDefaults.standard.removeObject(forKey: draftKey)
-                        } else {
-                            UserDefaults.standard.set(["text": value, "revision": revision], forKey: draftKey)
-                        }
-                    }
                 HStack {
                     Button("再読込") {
                         if text != savedText {
@@ -258,20 +265,10 @@ private struct FileEditorSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
                         busy = true; error = nil
-                        let submitted = text
-                        model.workspace(
-                            "host/file/write",
-                            ["path": entry.path, "revision": revision, "text": submitted]
-                        ) { result, message in
-                            busy = false; error = message
-                            if let result, let nextRevision = result["revision"] as? String {
-                                revision = nextRevision; savedText = result["text"] as? String ?? submitted
-                                if text ==
-                                    submitted {
-                                    text = savedText; UserDefaults.standard.removeObject(forKey: draftKey)
-                                } else {
-                                    UserDefaults.standard.set(["text": text, "revision": revision], forKey: draftKey)
-                                }
+                        model.perform(.saveFile(path: entry.path)) { result in
+                            busy = false
+                            if case let .failure(failure) = result {
+                                error = failure.localizedDescription
                             }
                         }
                     }.disabled(busy || revision.isEmpty || text == savedText).accessibilityIdentifier("file.save")
@@ -284,7 +281,7 @@ private struct FileEditorSheet: View {
             }
             .confirmationDialog("保存していない編集を破棄して再読込しますか？", isPresented: $confirmReload, titleVisibility: .visible) {
                 Button("編集を破棄して再読込", role: .destructive) {
-                    UserDefaults.standard.removeObject(forKey: draftKey); load(restoreDraft: false)
+                    load(restoreDraft: false)
                 }
             }
         }
@@ -292,23 +289,15 @@ private struct FileEditorSheet: View {
 
     private func load(restoreDraft: Bool) {
         busy = true; error = nil
-        model.workspace("host/file/read", ["path": entry.path]) { result, message in
-            busy = false; error = message
-            guard let result, let value = result["text"] as? String,
-                  let version = result["revision"] as? String else { return }
-            initialized = false
-            text = value; savedText = value; revision = version
-            if restoreDraft, let draft = UserDefaults.standard.dictionary(forKey: draftKey) as? [String: String],
-               let cached = draft["text"] {
-                text = cached
-                if let original = draft["revision"] {
-                    revision = original
-                }
-                if revision != version {
-                    error = "ホストのファイルが変更されています。下書きは保持しました。再読込すると下書きを破棄します。"
-                }
+        model.perform(.readFile(path: entry.path, discardDraft: !restoreDraft)) { result in
+            busy = false
+            if case let .failure(failure) = result {
+                error = failure.localizedDescription; return
             }
             initialized = true
+            if let file, revision != file.revision {
+                error = "ホストのファイルが変更されています。下書きは保持しました。再読込すると下書きを破棄します。"
+            }
         }
     }
 }

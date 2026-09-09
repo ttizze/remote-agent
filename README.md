@@ -141,24 +141,24 @@ The iPhone conversation uses a dark native layout with expandable work rows, Mar
 
 New iPhone chats place the environment and folder menus directly above the composer. Choose a paired Host and one of its project folders, or **チャット** for an unassigned conversation. The folder menu can load more projects. Open conversations retain their own upload directory even when a refreshed recent-task list no longer includes their title, so subsequent attachments continue to use that conversation's workspace.
 
-The iPhone app is SwiftUI over shared Kotlin state and Rust transport. Build its Simulator framework, then open the Xcode project:
+The iPhone app is SwiftUI over the Rust Store through generated UniFFI bindings. Build the Simulator libraries, then open the Xcode project:
 
 ```sh
-nix develop . --command ./gradlew :apps:mobile:linkDebugFrameworkIosSimulatorArm64
+nix develop . --command scripts/build-agent-ios.sh simulator
 open apps/mobile/iosApp/Bex.xcodeproj
 ```
 
-Select the Bex scheme and an iPhone Simulator. Physical-device signing and installation are separate from this Simulator workflow. Before a physical-device Release archive, rebuild the device framework from the same checkout with `nix develop . --command ./gradlew :apps:mobile:linkReleaseFrameworkIosArm64`. Xcode links this prebuilt framework; building the Simulator framework or archiving Swift alone does not update the device's shared Kotlin code.
+Select the Bex scheme and an iPhone Simulator. Xcode also runs the library build for the selected SDK. `scripts/build-agent-ios.sh device` builds device libraries without installing or signing an app. Physical-device signing and installation are separate. Rust tools come from Nix; Apple SDK compilation and linking use Xcode clang and Swift as a platform exception. Generated Swift/Kotlin sources and libraries stay under `target/` and are never committed.
 
-The fixture runner now starts an isolated iroh Host with a deterministic Codex process. The existing Simulator tests require the mobile UI cutover before they can use that Host; their runner still rejects failures and skipped tests:
+The fixture runner starts an isolated iroh Host with a deterministic Codex process and exercises the native SwiftUI app. It rejects failures and skipped tests:
 
 ```sh
 nix develop . --command cargo xtask ios-e2e
 ```
 
-Development commands, the Codex subprocess fixture, and the pairing HTTP fixture live in the Rust `crates/xtask` package. Run `cargo xtask --help` inside the Nix shell for available commands. Project-owned build and test tooling requires no Python or Shell scripts; the upstream Gradle wrapper remains the entry point for Kotlin builds.
+The Codex subprocess and pairing HTTP fixtures live in `crates/xtask`. Run `cargo xtask --help` inside the Nix shell for fixture and quality commands. Scripts build the generated mobile bindings and Apple libraries; Gradle builds the Android app.
 
-`ios-e2e` runs the existing 36-test selection by default. Append Simulator test method names to run a specific selection. Each run builds the app once and owns one fresh Host, loopback pairing server, and Simulator shared by the selected tests, matching the former shell runner. The runner removes these fixtures and its Xcode build products on completion or interruption. Results and their JSON summaries remain under `target/qa`; `BEX_RELAY_RESULT_BUNDLE` selects an explicit result bundle path. A nonzero Xcode exit, failed or skipped test, or unexpected pass count fails the command.
+`ios-e2e` runs the 40-test selection by default. Append Simulator test method names to run a specific selection. Each run builds the app once and owns one fresh Host, loopback pairing server, and Simulator shared by the selected tests, matching the former shell runner. The runner removes these fixtures and its Xcode build products on completion or interruption. Results and their JSON summaries remain under `target/qa`; `BEX_RELAY_RESULT_BUNDLE` selects an explicit result bundle path. A nonzero Xcode exit, failed or skipped test, or unexpected pass count fails the command.
 
 The headless command runs the real daemon over isolated iroh sessions:
 
@@ -192,7 +192,7 @@ The command checks every selected language and returns a failure if any check fa
 | Language | Configuration and policy |
 | --- | --- |
 | Rust | `cargo fmt --all --check` and Clippy over all workspace targets, with warnings denied. Keep Clippy's default lint groups; do not enable `restriction` or `pedantic` wholesale. The toolchain is pinned by `flake.lock`. |
-| Kotlin | ktfmt Gradle plugin 0.26.0 with Kotlin style and 120-column wrapping, plus detekt 1.23.8 with `buildUponDefaultConfig`, validated `detekt.yml`, and all `src` source sets, including tests and Native. Apply the official Compose naming/default-parameter adjustments. This stable release runs source analysis; its Kotlin 2.0 compiler does not establish Kotlin 2.3 type-resolution coverage. Kotlin compilation and tests remain separate checks. |
+| Kotlin | ktfmt Gradle plugin 0.26.0 with Kotlin style and 120-column wrapping, plus detekt 1.23.8 with `buildUponDefaultConfig`, validated `detekt.yml`, and handwritten Android `src/main/kotlin` sources. Apply the official Compose naming/default-parameter adjustments. This stable release runs source analysis; its Kotlin 2.0 compiler does not establish Kotlin 2.3 type-resolution coverage. Kotlin compilation and tests remain separate checks. |
 | Swift | Nix-pinned SwiftLint and SwiftFormat, `.swiftlint.yml` and `.swiftformat`, Swift 6.3 formatting syntax with Swift 5 language mode matching Xcode, four-space indentation, LF, 120-column wrapping, and inline commas. Lint handwritten iOS/macOS sources and UI fixtures; build products and dependencies are outside the included roots. |
 
 Default thresholds remain enabled. There are no baselines or blanket failure suppression. New tool versions and individual rule exceptions require review. Formatting can be applied with `cargo fmt --all`, `./gradlew :apps:mobile:ktfmtFormat`, and `swiftformat apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/desktop/macos` in the Nix shell.
@@ -202,7 +202,10 @@ Configuration references: [Clippy lint groups](https://doc.rust-lang.org/stable/
 ```sh
 nix develop . --command cargo test --workspace
 nix develop . --command cargo test --package bex-desktop
-nix develop . --command ./gradlew :apps:mobile:iosSimulatorArm64Test
+nix develop . --command cargo test --package agent-core --package agent-ffi
+nix develop . --command ./gradlew :apps:mobile:assembleDebug
 ```
+
+Android uses native Compose over the same generated UniFFI Store API. `assembleDebug` builds both arm64 and x86_64 Rust libraries. The `android-test` Nix shell provides an API 36 emulator and system image; use an isolated AVD and pairing fixture. Android Keystore seals device identity, while iOS uses Keychain. Both native owners persist opaque per-Host snapshots and keep platform media, QR, and lifecycle handling outside Core. Kotlin common source sets and handwritten FFI have been removed.
 
 Simulator evidence does not verify physical camera, physical-device networking or distribution. See [implementation evidence](docs/IMPLEMENTATION_PLAN.md).

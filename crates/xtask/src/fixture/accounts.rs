@@ -35,7 +35,9 @@ impl Accounts {
                 &json!({"account":self.current,"requiresOpenaiAuth":true}),
             ),
             "getAuthStatus" => {
-                let token = if self.current.is_null() {
+                let token = if self.current.is_null()
+                    || context.home.join("auth-token-unavailable").exists()
+                {
                     None
                 } else {
                     let claims = json!({"https://api.openai.com/auth":{"chatgpt_account_id":self.current["accountId"],"chatgpt_plan_type":self.current["planType"]}});

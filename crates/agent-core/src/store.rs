@@ -8,7 +8,7 @@ use futures_util::{StreamExt, stream::FuturesUnordered};
 use host_protocol::{RpcMessageKind, classify_message};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex},
 };
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -21,8 +21,32 @@ pub enum Outcome {
     RemoteHostPaired(String),
     SessionImages(Vec<SessionImage>),
 }
+enum Command {
+    Dispatch(Dispatch),
+    Attach {
+        connection: Connection,
+        complete: oneshot::Sender<Result<(), PeerError>>,
+    },
+}
+struct Connection {
+    peer: RpcPeer,
+    session: Option<crate::transport::Session>,
+    endpoint: Option<crate::transport::Endpoint>,
+}
+impl Connection {
+    async fn close(self) {
+        let _ = self.peer.close().await;
+        if let Some(session) = self.session {
+            session.close();
+        }
+        if let Some(endpoint) = self.endpoint {
+            endpoint.close().await;
+        }
+    }
+}
 struct Dispatch {
-    intent: Intent,
+    effects: Vec<Effect>,
+    snapshot: Arc<Snapshot>,
     complete: oneshot::Sender<Result<Outcome, PeerError>>,
 }
 struct Applied {
@@ -39,45 +63,69 @@ struct Completed {
 }
 struct Scheduled {
     effect: Effect,
+    snapshot: Option<Arc<Snapshot>>,
     complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
 }
 pub struct Store {
-    snapshot: Arc<RwLock<Arc<Snapshot>>>,
     updates: watch::Sender<Arc<Snapshot>>,
-    commands: mpsc::UnboundedSender<Dispatch>,
+    commands: mpsc::UnboundedSender<Command>,
     stop: CancellationToken,
     _close_on_drop: DropGuard,
     finished: watch::Receiver<Option<Result<(), String>>>,
 }
 impl Store {
     pub fn new(peer: RpcPeer, snapshot: Snapshot) -> Self {
-        Self::start(peer, snapshot, None, None)
+        Self::start(Some(peer), snapshot, None, None)
+    }
+    pub fn offline(snapshot: Snapshot) -> Self {
+        let (snapshot, _) = reduce(&snapshot, Event::Disconnected("Host not connected".into()));
+        Self::start(None, snapshot, None, None)
     }
     fn start(
-        peer: RpcPeer,
+        peer: Option<RpcPeer>,
         snapshot: Snapshot,
         session: Option<crate::transport::Session>,
         endpoint: Option<crate::transport::Endpoint>,
     ) -> Self {
-        let snapshot = Arc::new(RwLock::new(Arc::new(snapshot)));
-        let (updates, _) = watch::channel(snapshot.read().unwrap().clone());
-        let (commands, incoming) = mpsc::unbounded_channel();
+        let (updates, _) = watch::channel(Arc::new(snapshot));
+        let (commands, mut incoming) = mpsc::unbounded_channel();
         let stop = CancellationToken::new();
         let (finished_tx, finished) = watch::channel(None);
-        let run = run(
-            peer,
-            snapshot.clone(),
-            updates.clone(),
-            incoming,
-            stop.clone(),
-            session,
-            endpoint,
-        );
+        let publications = updates.clone();
+        let shutdown = stop.clone();
         tokio::spawn(async move {
-            finished_tx.send_replace(Some(run.await.map_err(|error| error.to_string())));
+            let mut connection = peer.map(|peer| Connection {
+                peer,
+                session,
+                endpoint,
+            });
+            let mut result = Ok(());
+            loop {
+                if let Some(Connection {
+                    peer,
+                    session,
+                    endpoint,
+                }) = connection.take()
+                {
+                    result = run(
+                        peer,
+                        publications.clone(),
+                        &mut incoming,
+                        shutdown.clone(),
+                        session,
+                        endpoint,
+                    )
+                    .await;
+                }
+                // Local intents and reconnects share one state owner.
+                connection = run_offline(&publications, &mut incoming, &shutdown).await;
+                if connection.is_none() {
+                    break;
+                }
+            }
+            finished_tx.send_replace(Some(result.map_err(|error| error.to_string())));
         });
         Self {
-            snapshot,
             updates,
             commands,
             _close_on_drop: stop.clone().drop_guard(),
@@ -91,6 +139,17 @@ impl Store {
         snapshot: Snapshot,
         invitation: Option<uuid::Uuid>,
     ) -> Result<Self, crate::transport::TransportError> {
+        let store = Self::offline(snapshot);
+        store.reconnect(endpoint, ticket, invitation).await?;
+        Ok(store)
+    }
+    /// Prepare transport while the actor continues to accept local edits.
+    pub async fn reconnect(
+        &self,
+        endpoint: crate::transport::Endpoint,
+        ticket: &crate::transport::Ticket,
+        invitation: Option<uuid::Uuid>,
+    ) -> Result<(), crate::transport::TransportError> {
         let session = match endpoint.connect(ticket).await {
             Ok(session) => session,
             Err(error) => {
@@ -110,7 +169,27 @@ impl Store {
         }
         .await;
         match setup {
-            Ok(peer) => Ok(Self::start(peer, snapshot, Some(session), Some(endpoint))),
+            Ok(peer) => {
+                let (complete, result) = oneshot::channel();
+                let command = Command::Attach {
+                    connection: Connection {
+                        peer,
+                        session: Some(session),
+                        endpoint: Some(endpoint),
+                    },
+                    complete,
+                };
+                if let Err(failed) = self.commands.send(command) {
+                    if let Command::Attach { connection, .. } = failed.0 {
+                        connection.close().await;
+                    }
+                    return Err(PeerError::ConnectionClosed("store is closed".into()).into());
+                }
+                result
+                    .await
+                    .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
+                Ok(())
+            }
             Err(error) => {
                 session.close();
                 endpoint.close().await;
@@ -119,24 +198,47 @@ impl Store {
         }
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
-        self.snapshot.read().unwrap().clone()
+        self.updates.borrow().clone()
     }
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
         self.updates.subscribe()
     }
-    /// Enqueue at the call site so UI intent order does not depend on executor
-    /// polling order. Dropping the returned receipt does not cancel the intent.
+    /// Publish the pure transition before returning to a native input control.
+    /// The watch lock orders publication and effect enqueueing across callers.
+    /// Watch releases that lock before waking potentially reentrant FFI consumers.
+    /// Only effects wait for the executor; dropping a receipt does not cancel them.
     pub fn dispatch(
         &self,
         intent: Intent,
     ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
-        let (complete, result) = oneshot::channel();
-        let queued = self.commands.send(Dispatch { intent, complete });
+        let mut receipt = Ok(None);
+        self.updates.send_if_modified(|current| {
+            if self.stop.is_cancelled() || self.commands.is_closed() {
+                receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
+                return false;
+            }
+            let (effects, changed) = apply_locked(current, Event::Intent(intent));
+            if !effects.is_empty() {
+                let (complete, result) = oneshot::channel();
+                receipt = self
+                    .commands
+                    .send(Command::Dispatch(Dispatch {
+                        effects,
+                        snapshot: current.clone(),
+                        complete,
+                    }))
+                    .map(|()| Some(result))
+                    .map_err(|_| PeerError::ConnectionClosed("store is closed".into()));
+            }
+            changed
+        });
         async move {
-            queued.map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
-            result
-                .await
-                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?
+            match receipt? {
+                None => Ok(Outcome::Applied),
+                Some(result) => result
+                    .await
+                    .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?,
+            }
         }
     }
     pub async fn close(&self) -> Result<(), PeerError> {
@@ -154,19 +256,24 @@ impl Store {
     }
 }
 
-fn apply(
-    snapshot: &RwLock<Arc<Snapshot>>,
-    updates: &watch::Sender<Arc<Snapshot>>,
-    event: Event,
-) -> Vec<Effect> {
-    let mut current = snapshot.write().unwrap();
-    let (next, effects) = reduce(&current, event);
+fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Effect> {
+    let mut effects = Vec::new();
+    updates.send_if_modified(|current| {
+        let (produced, changed) = apply_locked(current, event);
+        effects = produced;
+        changed
+    });
+    effects
+}
+fn apply_locked(current: &mut Arc<Snapshot>, event: Event) -> (Vec<Effect>, bool) {
+    let (next, effects) = reduce(current, event);
     let same_threads = match (&current.threads, &next.threads) {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
         (None, None) => true,
         _ => false,
     };
     if Arc::ptr_eq(&current.terminals, &next.terminals)
+        && Arc::ptr_eq(&current.account, &next.account)
         && Arc::ptr_eq(&current.conversations, &next.conversations)
         && same_threads
         && Arc::ptr_eq(&current.models, &next.models)
@@ -183,11 +290,10 @@ fn apply(
         && current.connected == next.connected
         && current.error == next.error
     {
-        return effects;
+        return (effects, false);
     }
     *current = Arc::new(next);
-    updates.send_replace(current.clone());
-    effects
+    (effects, true)
 }
 fn completion_sequence(completed: &Completed) -> Option<u64> {
     completed.request_id?;
@@ -201,7 +307,6 @@ fn completion_sequence(completed: &Completed) -> Option<u64> {
 }
 fn finish(
     ordered: &Mutex<BTreeSet<u64>>,
-    snapshot: &RwLock<Arc<Snapshot>>,
     updates: &watch::Sender<Arc<Snapshot>>,
     completed: Completed,
 ) -> Vec<Scheduled> {
@@ -212,14 +317,13 @@ fn finish(
     let result = match completed.result {
         Ok(applied) => {
             if let Some(event) = applied.event {
-                effects = apply(snapshot, updates, event);
+                effects = apply(updates, event);
             }
             Ok(applied.outcome)
         }
         Err(error) => {
             if let Some(handle) = completed.terminal {
                 apply(
-                    snapshot,
                     updates,
                     Event::TerminalFailed {
                         handle,
@@ -228,9 +332,9 @@ fn finish(
                 );
             }
             if let Some(id) = completed.failed_submission {
-                apply(snapshot, updates, Event::SubmissionFailed(id));
+                apply(updates, Event::SubmissionFailed(id));
             }
-            effects = apply(snapshot, updates, Event::Failed(error.to_string()));
+            effects = apply(updates, Event::Failed(error.to_string()));
             Err(error)
         }
     };
@@ -251,6 +355,7 @@ fn finish(
         .enumerate()
         .map(|(index, effect)| Scheduled {
             effect,
+            snapshot: None,
             complete: if Some(index) == continuation {
                 complete.take()
             } else {
@@ -282,9 +387,8 @@ fn decode_message(line: &str) -> Result<Event, PeerError> {
 }
 async fn run(
     peer: RpcPeer,
-    snapshot: Arc<RwLock<Arc<Snapshot>>>,
     updates: watch::Sender<Arc<Snapshot>>,
-    mut commands: mpsc::UnboundedReceiver<Dispatch>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
     stop: CancellationToken,
     session: Option<crate::transport::Session>,
     endpoint: Option<crate::transport::Endpoint>,
@@ -300,39 +404,53 @@ async fn run(
     let mut terminal_reason = None;
     let mut terminal_commands = VecDeque::new();
     let mut terminal_running = false;
-    let mut effects: Vec<Scheduled> = apply(&snapshot, &updates, Event::Connected)
+    let mut effects: Vec<Scheduled> = apply(&updates, Event::Connected)
         .into_iter()
         .map(|effect| Scheduled {
             effect,
+            snapshot: None,
             complete: None,
         })
         .collect();
     let reason = loop {
-        for Scheduled { effect, complete } in effects.drain(..) {
+        for Scheduled {
+            effect,
+            snapshot: captured,
+            complete,
+        } in effects.drain(..)
+        {
             if terminal_handle(&effect).is_some() {
-                terminal_commands.push_back(Scheduled { effect, complete });
+                terminal_commands.push_back(Scheduled {
+                    effect,
+                    snapshot: captured,
+                    complete,
+                });
                 continue;
             }
             jobs.push(perform(
-                &client,
-                &peer,
+                Some(&client),
+                Some(&peer),
                 &ordered,
                 session.as_ref(),
-                snapshot.read().unwrap().clone(),
+                captured.unwrap_or_else(|| updates.borrow().clone()),
                 effect,
                 complete,
             ));
         }
         if !terminal_running
-            && let Some(Scheduled { effect, complete }) = terminal_commands.pop_front()
+            && let Some(Scheduled {
+                effect,
+                snapshot: captured,
+                complete,
+            }) = terminal_commands.pop_front()
         {
             terminal_running = true;
             jobs.push(perform(
-                &client,
-                &peer,
+                Some(&client),
+                Some(&peer),
                 &ordered,
                 session.as_ref(),
-                snapshot.read().unwrap().clone(),
+                captured.unwrap_or_else(|| updates.borrow().clone()),
                 effect,
                 complete,
             ));
@@ -344,18 +462,24 @@ async fn run(
             _ = stop.cancelled() => break "store closed".into(),
             command = commands.recv() => {
                 let Some(command) = command else { break "store closed".into() };
-                let pending = apply(&snapshot,&updates,Event::Intent(command.intent));
+                let command = match command {
+                    Command::Dispatch(command) => command,
+                    Command::Attach { connection, complete } => {
+                        connection.close().await;
+                        let _ = complete.send(Err(PeerError::ConnectionClosed("store is already connected".into())));
+                        continue;
+                    }
+                };
                 let mut complete = Some(command.complete);
-                if pending.is_empty() { let _ = complete.take().unwrap().send(Ok(Outcome::Applied)); }
-                for effect in pending {
-                    effects.push(Scheduled { effect, complete: complete.take() });
+                for effect in command.effects {
+                    effects.push(Scheduled { effect, snapshot: Some(command.snapshot.clone()), complete: complete.take() });
                 }
             }
             result = jobs.next(), if !jobs.is_empty() => {
                 let result = result.unwrap();
                 if result.terminal.is_some() { terminal_running = false; }
                 if let Some(sequence) = completion_sequence(&result) { completed.insert(sequence,result); }
-                else { effects.extend(finish(&ordered,&snapshot,&updates,result)); }
+                else { effects.extend(finish(&ordered,&updates,result)); }
             }
             event = events.recv(), if stream_open => match event {
                 Ok(event) => received.push_back(event),
@@ -376,17 +500,16 @@ async fn run(
                 let Some(result) = completed.remove(&sequence) else {
                     break;
                 };
-                effects.extend(finish(&ordered, &snapshot, &updates, result));
+                effects.extend(finish(&ordered, &updates, result));
             }
             match received.pop_front().unwrap() {
                 PeerEvent::Message(frame) => {
                     let event = decode_message(&frame.value)
                         .unwrap_or_else(|error| Event::Failed(error.to_string()));
-                    effects.extend(apply(&snapshot, &updates, event).into_iter().map(|effect| {
-                        Scheduled {
-                            effect,
-                            complete: None,
-                        }
+                    effects.extend(apply(&updates, event).into_iter().map(|effect| Scheduled {
+                        effect,
+                        snapshot: None,
+                        complete: None,
                     }));
                 }
                 PeerEvent::Closed(reason) => {
@@ -410,7 +533,7 @@ async fn run(
     drop(jobs);
     // PTYs live in the daemon's upstream connection, so closing this view's
     // connection alone does not terminate them.
-    let terminals = snapshot.read().unwrap().terminals.clone();
+    let terminals = updates.borrow().terminals.clone();
     for (handle, terminal) in terminals.iter() {
         if !matches!(
             terminal.phase,
@@ -432,8 +555,55 @@ async fn run(
     if let Some(endpoint) = endpoint {
         endpoint.close().await;
     }
-    apply(&snapshot, &updates, Event::Disconnected(reason));
+    apply(&updates, Event::Disconnected(reason));
     result
+}
+
+async fn run_offline(
+    updates: &watch::Sender<Arc<Snapshot>>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    stop: &CancellationToken,
+) -> Option<Connection> {
+    let ordered = Mutex::new(BTreeSet::new());
+    while !stop.is_cancelled() {
+        let command = tokio::select! {
+            biased;
+            _ = stop.cancelled() => break,
+            command = commands.recv() => match command { Some(command) => command, None => break },
+        };
+        let command = match command {
+            Command::Dispatch(command) => command,
+            Command::Attach {
+                connection,
+                complete,
+            } => {
+                let _ = complete.send(Ok(()));
+                return Some(connection);
+            }
+        };
+        let mut complete = Some(command.complete);
+        for effect in command.effects {
+            // Disconnect already removed the subscription on the Host.
+            if matches!(effect, Effect::Execute(Intent::Unwatch { .. })) {
+                continue;
+            }
+            let result = perform(
+                None,
+                None,
+                &ordered,
+                None,
+                command.snapshot.clone(),
+                effect,
+                complete.take(),
+            )
+            .await;
+            drop(finish(&ordered, updates, result));
+        }
+        if let Some(complete) = complete {
+            let _ = complete.send(Ok(Outcome::Applied));
+        }
+    }
+    None
 }
 
 fn terminal_handle(effect: &Effect) -> Option<&str> {
@@ -449,8 +619,8 @@ fn terminal_handle(effect: &Effect) -> Option<&str> {
 }
 
 async fn perform(
-    client: &Client,
-    peer: &RpcPeer,
+    client: Option<&Client>,
+    peer: Option<&RpcPeer>,
     ordered: &Mutex<BTreeSet<u64>>,
     session: Option<&crate::transport::Session>,
     snapshot: Arc<Snapshot>,
@@ -471,6 +641,9 @@ async fn perform(
     };
     let mut request_id = None;
     let result = async {
+        let client =
+            client.ok_or_else(|| PeerError::ConnectionClosed("Host not connected".into()))?;
+        let peer = peer.ok_or_else(|| PeerError::ConnectionClosed("Host not connected".into()))?;
         let applied = match effect {
             Effect::StartSubmission {
                 draft_key,
@@ -562,6 +735,92 @@ async fn perform(
                 }
             }
             Effect::Execute(intent) => match intent {
+                Intent::ListAccounts => {
+                    let reply = client.call(&ListAccounts {}).await?;
+                    Applied {
+                        sequence: None,
+                        event: Some(Event::AccountsLoaded {
+                            generation: snapshot.account.accounts_generation,
+                            accounts: reply.value,
+                        }),
+                        outcome: Outcome::Applied,
+                    }
+                }
+                Intent::SelectAccount(id) => {
+                    let reply = client.call(&SelectAccount { account_id: &id }).await?;
+                    Applied {
+                        sequence: None,
+                        event: Some(Event::AccountSelected {
+                            generation: snapshot.account.accounts_generation,
+                            selected_id: reply.value.selected_id,
+                            persistence_error: reply.value.persistence_error,
+                        }),
+                        outcome: Outcome::Applied,
+                    }
+                }
+                Intent::StartAccountLogin => {
+                    let reply = client.call(&StartAccountLogin {}).await?;
+                    Applied {
+                        sequence: None,
+                        event: Some(Event::AccountLoginStarted {
+                            generation: snapshot.account.login_generation,
+                            login: reply.value,
+                        }),
+                        outcome: Outcome::Applied,
+                    }
+                }
+                Intent::ReadAccountLogin(id) => {
+                    let reply = client.call(&ReadAccountLogin { login_id: &id }).await?;
+                    Applied {
+                        sequence: None,
+                        event: Some(Event::AccountLoginUpdated {
+                            generation: snapshot.account.login_generation,
+                            status: reply.value,
+                        }),
+                        outcome: Outcome::Applied,
+                    }
+                }
+                Intent::CancelAccountLogin(id) => {
+                    client.call(&CancelAccountLogin { login_id: &id }).await?;
+                    Applied {
+                        sequence: None,
+                        event: Some(Event::AccountLoginCancelled {
+                            generation: snapshot.account.login_generation,
+                        }),
+                        outcome: Outcome::Applied,
+                    }
+                }
+                Intent::ForkThread {
+                    thread_id,
+                    last_turn_id,
+                } => {
+                    let reply = call_ordered(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        &ForkThread {
+                            thread_id: &thread_id,
+                            last_turn_id: &last_turn_id,
+                            exclude_turns: false,
+                        },
+                    )
+                    .await?;
+                    let id = reply
+                        .value
+                        .thread
+                        .id
+                        .clone()
+                        .expect("validated fork thread ID");
+                    Applied {
+                        sequence: Some(reply.sequence),
+                        event: Some(Event::ThreadForked {
+                            generation: snapshot.navigation.generation,
+                            thread: reply.value.thread,
+                            model: reply.value.model,
+                        }),
+                        outcome: Outcome::StartedThread(id),
+                    }
+                }
                 Intent::StartTerminal { handle, cwd, size } => {
                     let reply = call_ordered(
                         client,
@@ -1098,6 +1357,7 @@ async fn perform(
                 | Intent::AddAttachment { .. }
                 | Intent::RemoveAttachment { .. }
                 | Intent::NewChat(_)
+                | Intent::ShowThreadList
                 | Intent::SetDraft { .. }
                 | Intent::SetDraftText { .. }
                 | Intent::SelectModel { .. }

@@ -68,6 +68,16 @@ pub struct HostManagement {
     #[serde(skip)]
     pub invitation: Option<Arc<Invitation>>,
 }
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AccountState {
+    pub accounts_generation: u64,
+    pub login_generation: u64,
+    pub accounts: Option<Arc<crate::client::Accounts>>,
+    #[serde(skip)]
+    pub login: Option<Arc<crate::client::AccountLogin>>,
+    #[serde(skip)]
+    pub login_status: Option<Arc<crate::client::AccountLoginStatus>>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
     pub draft_key: String,
@@ -103,6 +113,8 @@ pub struct Terminal {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub account: Arc<AccountState>,
     #[serde(skip)]
     pub terminals: Arc<BTreeMap<String, Arc<Terminal>>>,
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
@@ -131,6 +143,16 @@ pub struct Snapshot {
 }
 #[derive(Debug)]
 pub enum Intent {
+    ShowThreadList,
+    ListAccounts,
+    SelectAccount(String),
+    StartAccountLogin,
+    ReadAccountLogin(String),
+    CancelAccountLogin(String),
+    ForkThread {
+        thread_id: String,
+        last_turn_id: String,
+    },
     StartTerminal {
         handle: String,
         cwd: String,
@@ -259,6 +281,31 @@ pub enum Intent {
 }
 #[derive(Debug)]
 pub enum Event {
+    AccountsLoaded {
+        generation: u64,
+        accounts: crate::client::Accounts,
+    },
+    AccountSelected {
+        generation: u64,
+        selected_id: String,
+        persistence_error: Option<String>,
+    },
+    AccountLoginStarted {
+        generation: u64,
+        login: crate::client::AccountLogin,
+    },
+    AccountLoginUpdated {
+        generation: u64,
+        status: crate::client::AccountLoginStatus,
+    },
+    AccountLoginCancelled {
+        generation: u64,
+    },
+    ThreadForked {
+        generation: u64,
+        thread: Thread,
+        model: Option<String>,
+    },
     TerminalStarted(String),
     TerminalClosed(String),
     TerminalFailed {
@@ -644,6 +691,26 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.list_request += 1;
             return (next, vec![Effect::Execute(Intent::ListThreads(query))]);
         }
+        Event::Intent(Intent::ShowThreadList) => {
+            let watch = previous.navigation.watch_id;
+            next.navigation = Arc::new(Navigation {
+                generation: previous.navigation.generation + 1,
+                ..Default::default()
+            });
+            clear_workspace_location(Arc::make_mut(&mut next.workspace));
+            return (
+                next,
+                watch
+                    .into_iter()
+                    .map(|watch_id| {
+                        Effect::Execute(Intent::Unwatch {
+                            watch_key: 1,
+                            watch_id,
+                        })
+                    })
+                    .collect(),
+            );
+        }
         Event::Intent(Intent::NewChat(cwd)) => {
             let key = format!("new:{cwd}");
             if !previous.drafts.contains_key(&key) {
@@ -680,10 +747,94 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     .collect(),
             );
         }
-        Event::Intent(intent @ Intent::OpenThread(_)) => {
+        Event::Intent(intent @ (Intent::OpenThread(_) | Intent::ForkThread { .. })) => {
             Arc::make_mut(&mut next.navigation).generation += 1;
             return (next, vec![Effect::Execute(intent)]);
         }
+        Event::ThreadForked {
+            generation,
+            thread,
+            model,
+        } => {
+            let (mut next, mut effects) = reduce(
+                previous,
+                Event::ThreadOpened {
+                    generation,
+                    thread,
+                    model,
+                },
+            );
+            if previous.threads.is_some() {
+                let (updated, refresh) = reduce(
+                    &next,
+                    Event::Intent(Intent::ListThreads((*previous.list_query).clone())),
+                );
+                next = updated;
+                effects.extend(refresh);
+            }
+            return (next, effects);
+        }
+        Event::Intent(intent @ (Intent::ListAccounts | Intent::SelectAccount(_))) => {
+            Arc::make_mut(&mut next.account).accounts_generation += 1;
+            return (next, vec![Effect::Execute(intent)]);
+        }
+        Event::Intent(
+            intent @ (Intent::StartAccountLogin
+            | Intent::ReadAccountLogin(_)
+            | Intent::CancelAccountLogin(_)),
+        ) => {
+            Arc::make_mut(&mut next.account).login_generation += 1;
+            return (next, vec![Effect::Execute(intent)]);
+        }
+        Event::AccountsLoaded {
+            generation,
+            accounts,
+        } if generation == previous.account.accounts_generation => {
+            Arc::make_mut(&mut next.account).accounts = Some(Arc::new(accounts));
+        }
+        Event::AccountSelected {
+            generation,
+            selected_id,
+            persistence_error,
+        } if generation == previous.account.accounts_generation => {
+            if let Some(accounts) = &mut Arc::make_mut(&mut next.account).accounts {
+                Arc::make_mut(accounts).selected_id = Some(selected_id);
+            }
+            next.error = persistence_error;
+            return (next, vec![Effect::Execute(Intent::LoadModels)]);
+        }
+        Event::AccountLoginStarted { generation, login }
+            if generation == previous.account.login_generation =>
+        {
+            let account = Arc::make_mut(&mut next.account);
+            account.login = Some(Arc::new(login));
+            account.login_status = None;
+        }
+        Event::AccountLoginUpdated { generation, status }
+            if generation == previous.account.login_generation =>
+        {
+            let completed = status.completed;
+            let account = Arc::make_mut(&mut next.account);
+            account.login_status = Some(Arc::new(status));
+            if completed {
+                account.login = None;
+                let (next, mut effects) = reduce(&next, Event::Intent(Intent::ListAccounts));
+                effects.push(Effect::Execute(Intent::LoadModels));
+                return (next, effects);
+            }
+        }
+        Event::AccountLoginCancelled { generation }
+            if generation == previous.account.login_generation =>
+        {
+            let account = Arc::make_mut(&mut next.account);
+            account.login = None;
+            account.login_status = None;
+        }
+        Event::AccountsLoaded { .. }
+        | Event::AccountSelected { .. }
+        | Event::AccountLoginStarted { .. }
+        | Event::AccountLoginUpdated { .. }
+        | Event::AccountLoginCancelled { .. } => {}
         Event::ThreadOpened {
             generation,
             thread,
@@ -1054,6 +1205,10 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         }
         Event::Disconnected(reason) => {
             next.connected = false;
+            next.requests = Arc::default();
+            let navigation = Arc::make_mut(&mut next.navigation);
+            navigation.watch_id = None;
+            navigation.watch_thread_id = None;
             for terminal in Arc::make_mut(&mut next.terminals).values_mut() {
                 if matches!(
                     terminal.phase,

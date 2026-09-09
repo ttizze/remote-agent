@@ -1,10 +1,16 @@
+import AgentCore
 import SwiftUI
 
 struct ModelSettingsSheet: View {
-    @ObservedObject var model: CodexModelSettings
+    @ObservedObject var model: BexAppViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
-    @State private var login: [String: Any]?
+    private var login: AccountLogin? {
+        model.snapshot.accountLogin()
+    }
+
+    @State private var changingAccount = false
+    @State private var loadingModels = false
     @State private var loginError: String?
     @State private var startingLogin = false
     @State private var pollingLogin: Task<Void, Never>?
@@ -12,14 +18,15 @@ struct ModelSettingsSheet: View {
     var body: some View {
         NavigationView {
             List {
-                ForEach(model.accounts) { account in
+                ForEach(model.accounts, id: \.id) { account in
                     Section {
-                        Button { model.chooseAccount(account.id) } label: {
+                        Button { chooseAccount(account.id) } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "person.crop.circle").font(.title2)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(account.email).foregroundColor(.primary)
-                                    Text(account.plan.uppercased()).font(.caption).foregroundColor(.secondary)
+                                    Text(account.email ?? account.id).foregroundColor(.primary)
+                                    Text((account.planType ?? "").uppercased()).font(.caption)
+                                        .foregroundColor(.secondary)
                                 }
                                 Spacer()
                                 if account.id == model.selectedAccountId {
@@ -29,7 +36,7 @@ struct ModelSettingsSheet: View {
                         }
                         .accessibilityIdentifier("model.account." + account.id)
                         .accessibilityValue(account.id == model.selectedAccountId ? "選択中" : "")
-                        .disabled(model.changingAccount)
+                        .disabled(changingAccount)
                         if account.id == model.selectedAccountId {
                             Button { model.chooseModel("") } label: {
                                 HStack {
@@ -57,28 +64,39 @@ struct ModelSettingsSheet: View {
                         }
                     }
                 }
-                if model.loadingModels || model.changingAccount {
+                if loadingModels || changingAccount {
                     ProgressView()
                 }
-                if let current = model.currentModel, !current.reasoningEfforts.isEmpty {
+                if let current = model.currentModel, !current.efforts.isEmpty {
                     Section("推論の強度") {
                         Picker("推論の強度", selection: Binding(
                             get: { model.selectedEffort.isEmpty ? current.defaultReasoningEffort : model.selectedEffort
                             },
                             set: model.chooseEffort
                         )) {
-                            ForEach(current.reasoningEfforts, id: \.self) { Text($0).tag($0) }
+                            ForEach(current.efforts, id: \.self) { Text($0).tag($0) }
                         }
                         .pickerStyle(.segmented)
                         .accessibilityIdentifier("model.quick.effort")
                     }
                 }
+                if let current = model.currentModel, !current.serviceTiers.isEmpty {
+                    Section("サービス階層") {
+                        Picker(
+                            "サービス階層",
+                            selection: Binding(get: { model.selectedServiceTier }, set: model.chooseServiceTier)
+                        ) {
+                            Text("既定").tag("")
+                            ForEach(current.serviceTiers, id: \.self) { Text($0).tag($0) }
+                        }.accessibilityIdentifier("model.service-tier")
+                    }
+                }
                 Section {
                     if let login {
                         Text("ブラウザでログインし、次のコードを入力してください。")
-                        Text(login["userCode"] as? String ?? "").font(.title2.monospaced()).textSelection(.enabled)
+                        Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
                             .accessibilityIdentifier("model.login.code")
-                        if let value = login["verificationUrl"] as? String, let url = URL(string: value),
+                        if let url = URL(string: login.verificationUrl),
                            url.scheme == "https" {
                             Link("ログインページを開く", destination: url)
                         }
@@ -105,7 +123,7 @@ struct ModelSettingsSheet: View {
         .interactiveDismissDisabled(login != nil || startingLogin)
         .onAppear { refresh() }
         .onChange(of: scenePhase) { phase in
-            if phase == .active, let id = login?["loginId"] as? String {
+            if phase == .active, let id = login?.loginId {
                 pollLogin(id)
             }
         }
@@ -115,20 +133,29 @@ struct ModelSettingsSheet: View {
     private func startLogin() {
         startingLogin = true
         loginError = nil
-        model.account("host/account/login/start", [:]) { result, error in
+        model.perform(.startAccountLogin) { result in
             startingLogin = false
-            loginError = error
-            guard let result, let id = result["loginId"] as? String else { return }
-            login = result
-            pollLogin(id)
+            if case let .failure(error) = result {
+                loginError = error.localizedDescription; return
+            }
+            if let id = login?.loginId {
+                pollLogin(id)
+            }
         }
     }
 
+    private func chooseAccount(_ id: String) {
+        changingAccount = true
+        model.perform(.selectAccount(id: id)) { _ in changingAccount = false }
+    }
+
     private func refresh() {
-        if let id = login?["loginId"] as? String {
+        if let id = login?.loginId {
             pollLogin(id)
         } else {
-            model.loadAccounts(); model.loadModels()
+            model.loadAccounts()
+            loadingModels = true
+            model.perform(.loadModels) { _ in loadingModels = false }
         }
     }
 
@@ -136,24 +163,20 @@ struct ModelSettingsSheet: View {
         guard pollingLogin == nil else { return }
         loginError = nil
         pollingLogin = Task { @MainActor in
-            while !Task.isCancelled {
+            defer { pollingLogin = nil }
+            while !Task.isCancelled, login?.loginId == id {
                 do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
-                let (status, error): ([String: Any]?, String?) = await withCheckedContinuation { continuation in
-                    model.account("host/account/login/status", ["loginId": id]) { continuation.resume(returning: (
-                        $0,
-                        $1
-                    )) }
+                let result: Result<Outcome, Error> = await withCheckedContinuation { continuation in
+                    model.perform(.readAccountLogin(id: id)) { continuation.resume(returning: $0) }
                 }
                 guard !Task.isCancelled else { return }
-                if let error {
-                    loginError = error
-                    pollingLogin = nil
-                    return
+                if case let .failure(error) = result {
+                    loginError = error.localizedDescription; return
                 }
-                if status?["completed"] as? Bool == true {
-                    login = nil
-                    pollingLogin = nil
-                    model.loadAccounts(selecting: status?["accountId"] as? String)
+                if let status = model.snapshot.accountLoginStatus(), status.completed {
+                    if let id = status.accountId {
+                        model.chooseAccount(id)
+                    }
                     return
                 }
             }
@@ -161,12 +184,12 @@ struct ModelSettingsSheet: View {
     }
 
     private func cancelLogin() {
-        guard let id = login?["loginId"] as? String else { return }
+        guard let id = login?.loginId else { return }
         pollingLogin?.cancel()
-        pollingLogin = nil
-        login = nil
-        model.account("host/account/login/cancel", ["loginId": id]) { _, error in
-            loginError = error
+        model.perform(.cancelAccountLogin(id: id)) { result in
+            if case let .failure(error) = result {
+                loginError = error.localizedDescription
+            }
             model.loadAccounts()
         }
     }

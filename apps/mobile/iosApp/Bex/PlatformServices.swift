@@ -1,26 +1,54 @@
+import AgentCore
 import AVFoundation
 import Combine
-import RemoteAgentMobile
+import Security
 import UIKit
 
-@MainActor
-final class BexPlatformBridge {
-    func didEnterBackground() {
-        let application = UIApplication.shared
-        var task: UIBackgroundTaskIdentifier = .invalid
-        let finish: @MainActor @Sendable () -> Void = {
-            guard task != .invalid else { return }
-            application.endBackgroundTask(task)
-            task = .invalid
-        }
-        task = application.beginBackgroundTask(withName: "Save conversation state", expirationHandler: finish)
-        IosLifecycleBridge.shared.didEnterBackground { Task { @MainActor in finish() } }
+/// Atomic per-Host persistence for lifecycle flushes and completed submissions/media edits.
+enum SnapshotFiles {
+    private static func location(_ host: String) throws -> URL {
+        let directory = try FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true
+        ).appendingPathComponent("snapshots", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let name = Data(host.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+        return directory.appendingPathComponent(name).appendingPathExtension("json")
     }
 
-    /// iOS may stop the process while backgrounded. Recovery always obtains a
-    /// fresh Host snapshot rather than trusting the on-device cache.
-    func restoreAfterForeground() {
-        IosLifecycleBridge.shared.restoreAfterForeground()
+    static func load(_ host: String) throws -> Data {
+        let url = try location(host)
+        return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
+    }
+
+    static func save(_ host: String, bytes: Data) throws {
+        try bytes.write(to: location(host), options: .atomic)
+    }
+}
+
+enum DeviceIdentity {
+    static func loadOrGenerate(_ reference: String) throws -> Data {
+        let query: [String: CFTypeRef] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.bex.iroh.identity" as CFString,
+            kSecAttrAccount as String: reference as CFString,
+            kSecReturnData as String: kCFBooleanTrue!
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecSuccess, let data = result as? Data {
+            return data
+        }
+        guard status == errSecItemNotFound else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+        let data = generateIdentity()
+        var record = query
+        record.removeValue(forKey: kSecReturnData as String)
+        record[kSecValueData as String] = data as CFData
+        record[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let saved = SecItemAdd(record as CFDictionary, nil)
+        guard saved == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(saved)) }
+        return data
     }
 }
 

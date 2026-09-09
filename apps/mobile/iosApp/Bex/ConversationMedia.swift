@@ -274,7 +274,7 @@ struct ConversationPreview: View {
         }
         .interactiveDismissDisabled(saving)
         .task {
-            guard isImage, let model, let thread = model.conversation.thread else { return }
+            guard isImage, let model, let thread = model.conversation else { return }
             let (images, error) = await withCheckedContinuation { continuation in
                 model.readSessionImages(thread.id) { images, error in
                     continuation.resume(returning: (images, error))

@@ -1,6 +1,7 @@
+import AgentCore
 import AVFoundation
-import RemoteAgentMobile
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// Composer and dictation
@@ -95,12 +96,12 @@ extension ThreadScreen {
                                 .frame(width: 40, height: 40)
                         }
                     }
-                    .disabled(!state.isConnected || (!state.isNewThread && conversation.thread == nil) || model
+                    .disabled(!state.isConnected || (!state.isNewThread && conversation == nil) || model
                         .transcribing || dictation.requestingPermission || model.sending || model
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if let running = conversation.thread?.turns.last(where: { $0.isInProgress }),
+                    if let running = conversation?.turns.last(where: { $0.isInProgress }),
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, model.attachments
                        .isEmpty {
@@ -115,13 +116,20 @@ extension ThreadScreen {
                         .accessibilityIdentifier("turn.interrupt.\(running.id)")
                     } else {
                         Button {
+                            // Commit native text before Store can clear the accepted draft.
+                            UIApplication.shared.sendAction(
+                                #selector(UIResponder.resignFirstResponder),
+                                to: nil,
+                                from: nil,
+                                for: nil
+                            )
+                            composerFocused = false
                             if dictation.isRecording {
                                 sendRecordedText = true
                                 dictation.finish()
                             } else {
                                 model.send()
                             }
-                            composerFocused = false
                         } label: {
                             Image(systemName: "arrow.up").font(.title2.weight(.semibold))
                         }
@@ -129,7 +137,7 @@ extension ThreadScreen {
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
                         .accessibilityLabel(dictation.isRecording ? "文字起こしして送信" : "送信")
-                        .disabled(!state.isConnected || (!state.isNewThread && conversation.thread == nil) || model
+                        .disabled(!state.isConnected || (!state.isNewThread && conversation == nil) || model
                             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
                             .transcribing ||
                             (!dictation.isRecording && model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -179,17 +187,18 @@ extension ThreadScreen {
         let directory = model.cwd
         let host = model.state.selectedProfileId
         guard model.state.isConnected, !directory.isEmpty,
-              let threadId = conversation.thread?.id else { review = nil; return }
-        let result: [String: Any]? = await withCheckedContinuation { continuation in
-            model.workspace("host/workspace/review", ["cwd": directory]) { result, _ in
-                continuation.resume(returning: result)
-            }
+              let threadId = conversation?.id else { review = nil; return }
+        let result: Result<Outcome, Error> = await withCheckedContinuation { continuation in
+            model.perform(.reviewWorkspace(cwd: directory)) { continuation.resume(returning: $0) }
         }
         guard !Task.isCancelled, model.cwd == directory, model.state.selectedThreadId == threadId,
               model.state.selectedProfileId == host else { return }
-        if let result, let files = result["files"] as? [[String: Any]],
-           let additions = result["additions"] as? Int, let deletions = result["deletions"] as? Int {
-            review = WorkspaceReviewSummary(files: files.count, additions: additions, deletions: deletions)
+        if case .success = result, let value = model.snapshot.review() {
+            review = WorkspaceReviewSummary(
+                files: value.files.count,
+                additions: Int(value.additions),
+                deletions: Int(value.deletions)
+            )
         } else {
             review = nil
         }
@@ -208,8 +217,8 @@ struct ThreadConversationRow: Identifiable {
     let content: Content
     enum Content {
         case olderTurns, olderItems(String)
-        case user(IosItemView), response(IosItemView, String?), queued(IosItemView)
-        case activityHeader(IosTurnView), activity(IosItemView, String)
-        case request(IosTurnRequestView), error(IosTurnErrorView)
+        case user(ConversationItem), response(ConversationItem, String?), queued(ConversationItem)
+        case activityHeader(TurnPresentation), activity(ConversationItem, String)
+        case request(RequestPresentation), error(TurnErrorPresentation)
     }
 }

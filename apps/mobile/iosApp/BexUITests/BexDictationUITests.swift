@@ -23,6 +23,8 @@ extension BexLaunchUITests {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This test uses the isolated Simulator fixture")
         #endif
+        try simulatorFixture("auth-token/unavailable")
+        addTeardownBlock { _ = try self.simulatorFixture("auth-token/reset") }
         XCUIApplication().resetAuthorizationStatus(for: .microphone)
         let app = try connectedSimulatorApp()
         let compose = app.buttons["tasks.new.project.simulator-project"]
@@ -52,8 +54,8 @@ extension BexLaunchUITests {
         app.buttons["task.send"].tap()
         let notice = app.staticTexts["notice"]
         XCTAssertTrue(notice.waitForExistence(timeout: 30))
-        // The isolated Codex fixture has no account. Reaching this error proves
-        // recorded PCM crossed the real mobile bridge, SSH relay and Host route.
+        // The isolated provider has no bearer token for this test. Reaching this
+        // error proves recorded PCM crossed UniFFI, iroh and the Host route.
         XCTAssertTrue(notice.label.contains("ChatGPT"), notice.label)
         XCTAssertFalse(notice.label.contains("unknown variant"))
         XCTAssertFalse(recording.exists)

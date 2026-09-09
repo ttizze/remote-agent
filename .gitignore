@@ -1,9 +1,9 @@
 /target/
 /apps/desktop/web/node_modules/
 /.gradle/
+/.kotlin/
 /.idea/
 **/build/
-apps/mobile/src/androidMain/jniLibs/
 *.xcuserstate
 xcuserdata/
 .DS_Store

@@ -10,7 +10,6 @@
 		A10000000000000000000001 /* BexIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* BexIOSApp.swift */; };
 		A10000000000000000000002 /* PlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* PlatformServices.swift */; };
 		A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* QRCodeCaptureViewController.swift */; };
-		A10000000000000000000005 /* RemoteAgentMobile.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* RemoteAgentMobile.framework */; };
 		A10000000000000000000006 /* SwiftUIRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* SwiftUIRoot.swift */; };
 		B20000000000000000000001 /* BexLaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* BexLaunchUITests.swift */; };
 		FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DBDDA3779489C57B929936E /* AppViewModel.swift */; };
@@ -40,6 +39,8 @@
 		316AE30ED1CAB6B32EF98FFE /* BexWorktreeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */; };
 		C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* CodexModelSettings.swift */; };
 		C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000002 /* ModelSettingsSheet.swift */; };
+		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
+		C0DE00000000000000000104 /* ConversationPresentationCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000004 /* ConversationPresentationCache.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,7 +49,6 @@
 		A10000000000000000000011 /* BexIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexIOSApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000012 /* PlatformServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformServices.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* QRCodeCaptureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeCaptureViewController.swift; sourceTree = "<group>"; };
-		A10000000000000000000015 /* RemoteAgentMobile.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = RemoteAgentMobile.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000017 /* SwiftUIRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIRoot.swift; sourceTree = "<group>"; };
 		B20000000000000000000010 /* BexUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BexUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -80,13 +80,15 @@
 		04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexWorktreeUITests.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000001 /* CodexModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelSettings.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000002 /* ModelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsSheet.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000004 /* ConversationPresentationCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentationCache.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000021 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
-			files = (A10000000000000000000005 /* RemoteAgentMobile.framework in Frameworks */,);
+			files = ();
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		B20000000000000000000021 /* Frameworks */ = {
@@ -137,6 +139,8 @@
 				109E523F621AEB123226918A /* ConversationHistory.swift */,
 				2036041A039EEBAA78D55844 /* AppPresentationData.swift */,
 				1DBDDA3779489C57B929936E /* AppViewModel.swift */,
+				C0DE00000000000000000004 /* ConversationPresentationCache.swift */,
+				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
 				04926FF582DA33DFFF64E6C5 /* TaskList.swift */,
@@ -156,7 +160,7 @@
 		};
 		A10000000000000000000032 /* Frameworks */ = {
 			isa = PBXGroup;
-			children = (A10000000000000000000015 /* RemoteAgentMobile.framework */,);
+			children = ();
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
@@ -267,6 +271,8 @@
 				556D7396D1777928A463D2DF /* ConversationHistory.swift in Sources */,
 				B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */,
 				FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */,
+				C0DE00000000000000000104 /* ConversationPresentationCache.swift in Sources */,
+				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
 				D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */,
@@ -330,8 +336,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 42;
 				DEVELOPMENT_TEAM = K65K9J8686;
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/debugFramework";
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/debugFramework";
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -339,11 +345,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libmobile_client.a";
-				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libmobile_client.a";
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../../../target/agent-bindings/AgentCoreFFI.modulemap";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -356,8 +363,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 42;
 				DEVELOPMENT_TEAM = K65K9J8686;
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../build/bin/iosArm64/releaseFramework";
-				"FRAMEWORK_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../build/bin/iosSimulatorArm64/releaseFramework";
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release";
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release";
 				GENERATE_INFOPLIST_FILE = NO;
@@ -365,11 +372,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libmobile_client.a";
-				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libmobile_client.a";
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../../../target/agent-bindings/AgentCoreFFI.modulemap";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
