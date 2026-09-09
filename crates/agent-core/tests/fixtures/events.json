@@ -1,0 +1,451 @@
+[
+  {
+    "name": "summary retains live items and unknown metadata",
+    "previous": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "inProgress",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ],
+          "future": "old"
+        }
+      ]
+    },
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thread",
+          "turn": {
+            "id": "t",
+            "status": "completed",
+            "itemsView": "summary",
+            "items": [
+              {
+                "id": "b",
+                "type": "futureTool",
+                "opaque": {
+                  "retained": true
+                }
+              }
+            ],
+            "future": "new"
+          }
+        }
+      }
+    ],
+    "expected": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            },
+            {
+              "id": "b",
+              "type": "futureTool",
+              "opaque": {
+                "retained": true
+              }
+            }
+          ],
+          "itemsView": "summary",
+          "future": "new"
+        }
+      ]
+    }
+  },
+  {
+    "name": "full lifecycle replaces item occurrences",
+    "previous": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "inProgress",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ]
+        }
+      ]
+    },
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thread",
+          "turn": {
+            "id": "t",
+            "status": "completed",
+            "items": [
+              {
+                "id": "b",
+                "type": "futureTool",
+                "opaque": {
+                  "retained": true
+                }
+              },
+              {
+                "id": "b",
+                "type": "futureTool",
+                "opaque": {
+                  "retained": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "expected": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "b",
+              "type": "futureTool",
+              "opaque": {
+                "retained": true
+              }
+            },
+            {
+              "id": "b",
+              "type": "futureTool",
+              "opaque": {
+                "retained": true
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "late start preserves completed timing",
+    "previous": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ],
+          "startedAt": 1,
+          "completedAt": 6,
+          "durationMs": 5000
+        }
+      ]
+    },
+    "events": [
+      {
+        "method": "turn/started",
+        "params": {
+          "threadId": "thread",
+          "turn": {
+            "id": "t",
+            "status": "inProgress",
+            "items": [],
+            "startedAt": null,
+            "completedAt": null,
+            "durationMs": null
+          }
+        }
+      }
+    ],
+    "expected": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ],
+          "startedAt": 1,
+          "completedAt": 6,
+          "durationMs": 5000
+        }
+      ]
+    }
+  },
+  {
+    "name": "completion clears retrying error",
+    "previous": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "inProgress",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ],
+          "error": {
+            "message": "retry",
+            "willRetry": true
+          }
+        }
+      ]
+    },
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thread",
+          "turn": {
+            "id": "t",
+            "status": "completed",
+            "items": []
+          }
+        }
+      }
+    ],
+    "expected": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "summary resolves deferred identities",
+    "previous": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "inProgress",
+          "items": [
+            {
+              "id": "b",
+              "type": "futureTool",
+              "opaque": {
+                "retained": true
+              }
+            }
+          ],
+          "deferredItemIds": [
+            "b",
+            "other"
+          ]
+        }
+      ]
+    },
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thread",
+          "turn": {
+            "id": "t",
+            "status": "completed",
+            "itemsView": "summary",
+            "items": [
+              {
+                "id": "b",
+                "type": "futureTool",
+                "opaque": {
+                  "retained": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "expected": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "b",
+              "type": "futureTool",
+              "opaque": {
+                "retained": true
+              }
+            }
+          ],
+          "deferredItemIds": [
+            "other"
+          ],
+          "itemsView": "summary"
+        }
+      ]
+    }
+  },
+  {
+    "name": "delta after completion applies to loaded item",
+    "previous": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "inProgress",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ]
+        }
+      ]
+    },
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thread",
+          "turn": {
+            "id": "t",
+            "status": "completed",
+            "items": []
+          }
+        }
+      },
+      {
+        "method": "item/agentMessage/delta",
+        "params": {
+          "threadId": "thread",
+          "turnId": "t",
+          "itemId": "a",
+          "delta": " tail"
+        }
+      }
+    ],
+    "expected": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live tail"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "repeated turn identity selects final occurrence",
+    "previous": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "b",
+              "type": "futureTool",
+              "opaque": {
+                "retained": true
+              }
+            }
+          ]
+        },
+        {
+          "id": "t",
+          "status": "inProgress",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ]
+        }
+      ]
+    },
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "thread",
+          "turn": {
+            "id": "t",
+            "status": "completed",
+            "items": []
+          }
+        }
+      }
+    ],
+    "expected": {
+      "id": "thread",
+      "turns": [
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "b",
+              "type": "futureTool",
+              "opaque": {
+                "retained": true
+              }
+            }
+          ]
+        },
+        {
+          "id": "t",
+          "status": "completed",
+          "items": [
+            {
+              "id": "a",
+              "type": "agentMessage",
+              "text": "live"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

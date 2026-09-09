@@ -2,6 +2,7 @@
 members = [
     "apps/desktop",
     "crates/agent-core",
+    "crates/agent-cli",
     "crates/codex-app-server",
     "crates/conversation-presentation",
     "crates/host-daemon",
