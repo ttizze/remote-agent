@@ -10,6 +10,19 @@ concurrency:
   group: native-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  toolchain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      rust-version: ${{ steps.rust.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - id: rust
+        name: Read the pinned flake toolchain
+        run: echo "version=$(nix eval --raw .#devShells.x86_64-linux.native.RUST_TOOLCHAIN_VERSION)" >> "$GITHUB_OUTPUT"
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -18,21 +31,27 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cmd-format: nix develop .#native --command {0}
+          key: ${{ hashFiles('flake.lock') }}
       - name: Build desktop, Host and CLI
         run: nix develop .#native --command cargo build --locked -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
         run: nix develop .#native --command cargo test --locked -p agent-core -p agent-cli -p host-daemon -p xtask
   windows:
+    needs: toolchain
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      # Native Windows has no Nix shell. Keep the Rust version aligned with flake.lock.
+      # Native Windows consumes the version evaluated from the pinned flake.
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
-          toolchain: 1.98.0
+          toolchain: ${{ needs.toolchain.outputs.rust-version }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Build desktop, Host and CLI
         run: cargo build --locked -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
