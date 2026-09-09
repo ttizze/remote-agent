@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
+- Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Remove the obsolete iOS 15 single-line message-field fallback. Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
 
 - Kill the entire quality process group or Windows job on timeout before removing its checkout. Derive the Windows CI Rust version from the pinned Nix shell, declare one inherited Rust 1.98 minimum for every workspace crate, and cache native Cargo dependencies and build artifacts.
 

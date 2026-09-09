@@ -223,19 +223,14 @@ private struct ConversationMessageField: View {
             text = $0
             draft = $0
         })
-        Group {
-            if #available(iOS 16.0, *) {
-                TextField(placeholder, text: input, axis: .vertical).lineLimit(1 ... 6)
-            } else {
-                TextField(placeholder, text: input)
+        TextField(placeholder, text: input, axis: .vertical)
+            .lineLimit(1 ... 6)
+            .onChange(of: draft) { _ in
+                // Read the latest Store value, including send clears and transcription.
+                if text != draft {
+                    text = draft
+                }
             }
-        }
-        .onChange(of: draft) { _ in
-            // Read the latest Store value, including send clears and transcription.
-            if text != draft {
-                text = draft
-            }
-        }
     }
 }
 
