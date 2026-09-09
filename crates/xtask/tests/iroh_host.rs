@@ -363,7 +363,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         )
         .await
         .unwrap();
-        let store = Store::connect(endpoint, &fixture.ticket, Default::default(), None)
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
             .await
             .unwrap();
         store
@@ -436,18 +436,18 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
             Endpoint::bind(second.credentials.local_identity().await, Relays::Disabled)
                 .await
                 .unwrap();
-        let manager_a = agent_core::store::Store::connect(
-            endpoint_a.clone(),
-            &first.ticket,
+        let manager_a =
+            agent_core::store::Store::connect(&endpoint_a, &first.ticket, Default::default(), None)
+                .await
+                .unwrap();
+        let manager_b = agent_core::store::Store::connect(
+            &endpoint_b,
+            &second.ticket,
             Default::default(),
             None,
         )
         .await
         .unwrap();
-        let manager_b =
-            agent_core::store::Store::connect(endpoint_b, &second.ticket, Default::default(), None)
-                .await
-                .unwrap();
         use agent_core::{state::Intent, store::Outcome};
         manager_b.dispatch(Intent::CreateInvitation).await.unwrap();
         let invitation = manager_b

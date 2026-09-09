@@ -29,6 +29,7 @@ final class BexAppViewModel: ObservableObject {
     private var initialization: Task<Void, Never>?
     private var observation: Task<Void, Never>?
     private var persistence: Task<Void, Never>?
+    private var persistenceWrite: Task<Void, Never>?
     private var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
@@ -65,21 +66,20 @@ final class BexAppViewModel: ObservableObject {
         isConnecting = false
         selectedProfileId = id
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
-        let bytes: Data
-        do {
-            bytes = try SnapshotFiles.load(id)
-            try publish(AgentCore.Snapshot.restore(bytes: bytes))
-        } catch { notice = error.localizedDescription; return }
+        publish(AgentCore.Snapshot.empty())
+        let writing = persistenceWrite
         initialization = Task { [weak self] in
-            await self?.initialize(id, bytes: bytes, previous: old)
+            await writing?.value
+            await self?.initialize(id, previous: old)
         }
     }
 
-    private func initialize(_ id: String, bytes: Data, previous old: AgentStore?) async {
+    private func initialize(_ id: String, previous old: AgentStore?) async {
         if let old {
             try? await old.shutdown()
         }
         do {
+            let bytes = try await SnapshotFiles.load(id)
             let owner = try await AgentStore.offline(persisted: bytes)
             guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
             store = owner
@@ -145,10 +145,10 @@ final class BexAppViewModel: ObservableObject {
         } catch { pairingError = error.localizedDescription }
     }
 
-    func connect() {
+    func connect(force: Bool = false) {
         guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
               !isConnecting else { return }
-        if snapshot.connected() {
+        if !force, snapshot.connected() {
             refreshTaskList()
             if let id = snapshot.navigation().threadId {
                 perform(.readThread(id: id))
@@ -178,6 +178,39 @@ final class BexAppViewModel: ObservableObject {
         }
     }
 
+    func perform(_ intent: Intent, completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
+        guard let owner = store else {
+            if initialization != nil {
+                pending.append((intent, completion))
+            } else {
+                completion(.failure(CocoaError(.fileReadUnknown)))
+            }
+            return
+        }
+        do {
+            let receipt = try owner.dispatch(intent: intent)
+            publish(owner.snapshot())
+            let id = UUID()
+            let host = selectedProfileId
+            operations[id] = Task { [weak self] in
+                let result: Result<Outcome, Error>
+                do { result = try await .success(receipt.wait()) } catch { result = .failure(error) }
+                guard let self else { return }
+                operations[id] = nil
+                if selectedProfileId == host {
+                    publish(owner.snapshot())
+                    if case let .failure(error) = result {
+                        notice = error.localizedDescription
+                    }
+                }
+                completion(result)
+            }
+        } catch { completion(.failure(error)) }
+    }
+}
+
+/// Snapshot observation, persistence and foreground recovery.
+extension BexAppViewModel {
     private func observe(_ owner: AgentStore, host: String) {
         observation = Task { [weak self] in
             var previous = owner.snapshot()
@@ -216,10 +249,16 @@ final class BexAppViewModel: ObservableObject {
     }
 
     func persist() {
-        guard let id = selectedProfileId else { return }
-        do {
-            try SnapshotFiles.save(id, bytes: (store?.snapshot() ?? snapshot).serialize())
-        } catch { notice = error.localizedDescription }
+        guard let id = selectedProfileId, let owner = store else { return }
+        let current = owner.snapshot()
+        let previous = persistenceWrite
+        // Serialize immutable snapshots off MainActor and commit writes in order.
+        persistenceWrite = Task { [weak self] in
+            await previous?.value
+            do {
+                try await SnapshotFiles.save(id, snapshot: current)
+            } catch { self?.notice = error.localizedDescription }
+        }
     }
 
     func persistBeforeBackground() async {
@@ -228,39 +267,10 @@ final class BexAppViewModel: ObservableObject {
             await operation.value
         }
         persist()
+        await persistenceWrite?.value
     }
 
     func restoreAfterForeground() {
-        connect()
-    }
-
-    func perform(_ intent: Intent, completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
-        guard let owner = store else {
-            if initialization != nil {
-                pending.append((intent, completion))
-            } else {
-                completion(.failure(CocoaError(.fileReadUnknown)))
-            }
-            return
-        }
-        do {
-            let receipt = try owner.dispatch(intent: intent)
-            publish(owner.snapshot())
-            let id = UUID()
-            let host = selectedProfileId
-            operations[id] = Task { [weak self] in
-                let result: Result<Outcome, Error>
-                do { result = try await .success(receipt.wait()) } catch { result = .failure(error) }
-                guard let self else { return }
-                operations[id] = nil
-                if selectedProfileId == host {
-                    publish(owner.snapshot())
-                    if case let .failure(error) = result {
-                        notice = error.localizedDescription
-                    }
-                }
-                completion(result)
-            }
-        } catch { completion(.failure(error)) }
+        connect(force: true)
     }
 }

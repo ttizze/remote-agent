@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
         let ticket: Ticket = args.ticket.expect("connection required").parse()?;
-        Store::connect(endpoint, &ticket, Snapshot::default(), args.invitation).await?
+        Store::connect(&endpoint, &ticket, Snapshot::default(), args.invitation).await?
     };
     match args.command {
         Command::List {

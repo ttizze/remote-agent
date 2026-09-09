@@ -101,6 +101,7 @@ impl AgentStore {
     }
 
     pub async fn reconnect(&self, connection: Connection) -> Result<(), AgentError> {
+        self.store.disconnect().await.map_err(error)?;
         let secret = Zeroizing::new(connection.identity);
         let bytes = Zeroizing::new(
             <[u8; 32]>::try_from(secret.as_slice())
@@ -124,7 +125,7 @@ impl AgentStore {
         .await
         .map_err(error)?;
         self.store
-            .reconnect(endpoint, &ticket, invitation)
+            .reconnect(&endpoint, &ticket, invitation)
             .await
             .map_err(error)
     }
@@ -180,5 +181,80 @@ impl Receipt {
             .take()
             .ok_or_else(|| error("receipt was already awaited"))?;
         result.await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn shutdown_releases_a_native_snapshot_waiter() {
+        let store = AgentStore::offline(Vec::new()).await.unwrap();
+        let previous = store.snapshot();
+        let weak = Arc::downgrade(&store);
+        let waiting = store.clone();
+        let task = tokio::spawn(async move {
+            let mut snapshot = previous;
+            while let Ok(next) = waiting.next_snapshot(snapshot).await {
+                snapshot = next;
+            }
+        });
+        store.shutdown().await.unwrap();
+        drop(store);
+        tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("shutdown must release a native waiter without task cancellation")
+            .unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+    #[tokio::test]
+    async fn reconnect_replaces_a_transport_still_marked_connected() {
+        use agent_core::transport::Trust;
+        use host_protocol::{JsonlReader, JsonlWriter};
+        use serde_json::{Value, json};
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let identity = Identity::generate();
+            let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let connection = || Connection {
+                ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(),
+                invitation: None, use_relays: false,
+            };
+            let store = AgentStore::offline(Vec::new()).await.unwrap();
+            let (connected, incoming) = tokio::join!(store.reconnect(connection()), host.accept());
+            connected.unwrap();
+            let first = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+            let stream = first.accept_stream().await.unwrap();
+            let (read, _write) = tokio::io::split(stream);
+            let mut old = JsonlReader::new(read);
+            assert_eq!(old.read_line().await.unwrap().as_deref(), Some(""));
+            assert!(store.snapshot().connected());
+            store.dispatch(Intent::SetDraftText { key: "thread".into(), text: "preserved".into() })
+                .unwrap().wait().await.unwrap();
+            let server = async {
+                assert!(!matches!(old.read_line().await, Ok(Some(_))));
+                let next = host.accept().await.unwrap().unwrap().authorize(&trust).unwrap();
+                let (read, write) = tokio::io::split(next.accept_stream().await.unwrap());
+                let mut reader = JsonlReader::new(read);
+                let mut writer = JsonlWriter::new(write);
+                assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+                let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["method"], "host/thread/read");
+                writer.write_line(&json!({"id":request["id"], "result":{"thread":{"id":"thread","turns":[]}}}).to_string()).await.unwrap();
+                assert!(!matches!(reader.read_line().await, Ok(Some(_))));
+                next.close();
+            };
+            let client = async {
+                store.reconnect(connection()).await.unwrap();
+                store.dispatch(Intent::ReadThread { id: "thread".into() }).unwrap().wait().await.unwrap();
+                assert!(store.snapshot().conversation("thread".into()).is_some());
+                assert_eq!(store.store.snapshot().drafts["thread"].text, "preserved");
+                store.shutdown().await.unwrap();
+            };
+            tokio::join!(server, client);
+            first.close(); host.close().await;
+        }).await.unwrap();
     }
 }
