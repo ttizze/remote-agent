@@ -178,7 +178,7 @@ struct ThreadMessageRow: View {
                     if isUser {
                         Text(item.collapsedBody).font(.system(size: 18)).textSelection(.enabled)
                     } else {
-                        ConversationMarkdown(text: item.collapsedBody, model: model)
+                        ConversationMarkdown(blocks: item.markdown, model: model)
                     }
                 }
             }
@@ -293,7 +293,7 @@ struct ThreadItemRow: View {
                         .accessibilityIdentifier("item.\(item.id)")
                 }
             } else {
-                ConversationMarkdown(text: item.collapsedBody, model: model)
+                ConversationMarkdown(blocks: item.markdown, model: model)
                     .foregroundColor(item.kind == "agent" || item.kind == "user" ? .primary : .secondary)
                     .accessibilityIdentifier("item.\(item.id)")
             }
