@@ -3,7 +3,6 @@ use host_daemon::{
     CodexRpcService, CredentialStore, DesktopProjectStore, HostCredentials, HostRuntime,
 };
 use std::{
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -27,7 +26,11 @@ async fn main() {
             .expect("isolated directory required"),
     );
     std::fs::create_dir_all(&directory).unwrap();
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let directory = directory.canonicalize().unwrap();
     let workspace = directory.join("project");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -64,11 +67,15 @@ async fn main() {
         credentials.local_identity().await.to_bytes(),
     )
     .unwrap();
-    std::fs::set_permissions(
-        state.join("local.key"),
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            state.join("local.key"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let fixture = PathBuf::from(
         std::env::args_os()
             .nth(2)

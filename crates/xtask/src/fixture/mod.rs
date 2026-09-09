@@ -35,7 +35,7 @@ impl Config {
     pub fn install(&self, executable: &Path, directory: &Path) -> Result<PathBuf> {
         fs::create_dir_all(directory)?;
         let directory = directory.canonicalize()?;
-        let program = directory.join("bex-codex-fixture");
+        let program = directory.join(format!("bex-codex-fixture{}", std::env::consts::EXE_SUFFIX));
         // A symlink would be canonicalized by the real Codex launcher and lose
         // this directory. A hard link keeps isolation without copying a binary.
         match fs::hard_link(executable, &program) {

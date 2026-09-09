@@ -282,7 +282,17 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[cfg(windows)]
+    fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> std::io::Result<()> {
+        if original.as_ref().is_dir() {
+            std::os::windows::fs::symlink_dir(original, link)
+        } else {
+            std::os::windows::fs::symlink_file(original, link)
+        }
+    }
 
     fn repository() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
@@ -321,6 +331,7 @@ mod tests {
         fs::write(root.join("tracked.txt"), "uncommitted\n").unwrap();
         fs::write(root.join("config.txt"), "local config\n").unwrap();
         fs::write(root.join(".env"), "FIXTURE_TOKEN=isolated\n").unwrap();
+        #[cfg(unix)]
         fs::set_permissions(root.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir(root.join("local")).unwrap();
         fs::write(root.join("local/value"), "local data").unwrap();
@@ -342,6 +353,7 @@ mod tests {
             fs::read(first.join(".env")).unwrap(),
             fs::read(root.join(".env")).unwrap()
         );
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(first.join(".env"))
                 .unwrap()
@@ -360,6 +372,7 @@ mod tests {
                 .unwrap()
                 .starts_with("bex/session-")
         );
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&first).unwrap().permissions().mode() & 0o777,
             0o700
@@ -482,6 +495,7 @@ mod tests {
             fs::read(first.join(".env")).unwrap(),
             fs::read(root.join(".env")).unwrap()
         );
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&first).unwrap().permissions().mode() & 0o777,
             0o700

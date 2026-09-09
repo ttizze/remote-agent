@@ -90,12 +90,12 @@ All clients connect directly through iroh. Management RPCs (`host/status`, `host
 
 Public iroh relays are the default. `--relay-url` supplies a custom list; `--no-relay` restricts isolated fixtures to direct local addresses. SSH, the custom Phoenix relay, and their repository deployment scripts are removed. This source change does not decommission previously deployed Fly infrastructure.
 
-## Existing Mac setup (pending UI cutover)
+## Mac setup
 
 Build and open the Mac app from the repository root:
 
 ```sh
-nix develop . --command cargo xtask build-desktop-macos
+nix develop . --command just build-desktop-macos
 open target/Bex.app
 ```
 
@@ -103,7 +103,7 @@ Mac builds require a stable signing certificate. Both build commands use the sam
 
 When switching an existing installation from ad-hoc signing, choose **Always Allow / 常に許可** for the Host's existing Keychain entries once. Later builds signed with the same certificate identity and `app.bex.host` identifier retain that authorization. This does not grant other applications access or bypass a locked Keychain. Changing the signing identity or resetting permissions requires authorization again. See [Apple's designated-requirement explanation](https://developer.apple.com/library/archive/technotes/tn2206/_index.html).
 
-The old UI's relay settings and invitation screen are not compatible with this daemon. The next migration replaces them with Store and iroh connections.
+The native app uses the common Store and iroh Host connection. It loads the local Host identity from its private state directory and opens a separate session for each view.
 
 ## Working with Codex
 
@@ -127,7 +127,7 @@ The iPhone microphone button starts voice input and records until Stop or Send i
 
 Voice input requires the updated iPhone app and Host, with Codex signed in to ChatGPT on the Host. The Host's `host/dictation/transcribe` operation forwards PCM16 mono audio to the Codex desktop dictation service and returns text. As in the desktop, it first uses `/dictation/stream` and submits the original recording to `/transcribe` if streaming fails. Both transports send the `userAgent` returned by the running App Server's initialization; omitting it caused Cloudflare to reject native transcription requests. The recording upload wraps the phone's unchanged samples in a WAV file, sends it as multipart `file`, and uses the Codex bearer token and its account ID. Stream completion follows the service's `session.updated` closed event; nonfatal session errors do not discard a transcript. Account credentials stay on the Host; no separate API key or browser-cookie sharing is used. These internal endpoints can change independently of the public App Server API.
 
-An `unknown variant` error naming `host/dictation/transcribe` means the connected Host predates the dictation route and forwarded it to Codex. Rebuild the Host with `nix develop . --command cargo xtask build-host-macos`, replace the Host executable used by the Mac app, and restart that Host. Updating the iPhone alone or rebuilding a file while leaving the old Host process running does not activate the route. Restart only after accounting for active tasks.
+An `unknown variant` error naming `host/dictation/transcribe` means the connected Host predates the dictation route and forwarded it to Codex. Rebuild the Host with `nix develop . --command just build-host-macos`, replace the Host executable used by the Mac app, and restart that Host. Updating the iPhone alone or rebuilding a file while leaving the old Host process running does not activate the route. Restart only after accounting for active tasks.
 
 The iPhone composer's **＋** menu offers **写真・動画**, **カメラ**, and **ファイル**. Select multiple photos and videos together, or capture a photo/video with the camera. Library selections upload in selection order; sending stays disabled until the batch finishes. If an export or upload fails, already attached files remain and the remaining selection stops with an error. Photos use image inputs, while videos use uploaded file references. Camera capture requires camera permission; recording sound requires microphone permission. The existing upload limit is 512 MiB per file. Media exports stay in temporary storage until upload completes, then the local copies are removed.
 
@@ -153,20 +153,20 @@ Select the Bex scheme and an iPhone Simulator. Xcode also runs the library build
 The fixture runner starts an isolated iroh Host with a deterministic Codex process and exercises the native SwiftUI app. It rejects failures and skipped tests:
 
 ```sh
-nix develop . --command cargo xtask ios-e2e
+nix develop . --command just ios-e2e
 ```
 
-The Codex subprocess and pairing HTTP fixtures live in `crates/xtask`. Run `cargo xtask --help` inside the Nix shell for fixture and quality commands. Scripts build the generated mobile bindings and Apple libraries; Gradle builds the Android app.
+The Codex subprocess and pairing HTTP fixtures live in `crates/xtask`. Run `just --list` inside the Nix shell for build, integration and quality commands; `cargo xtask --help` lists the quality queue commands. Scripts build the generated mobile bindings and Apple libraries; Gradle builds the Android app.
 
 `ios-e2e` runs the 40-test selection by default. Append Simulator test method names to run a specific selection. Each run builds the app once and owns one fresh Host, loopback pairing server, and Simulator shared by the selected tests, matching the former shell runner. The runner removes these fixtures and its Xcode build products on completion or interruption. Results and their JSON summaries remain under `target/qa`; `BEX_RELAY_RESULT_BUNDLE` selects an explicit result bundle path. A nonzero Xcode exit, failed or skipped test, or unexpected pass count fails the command.
 
 The headless command runs the real daemon over isolated iroh sessions:
 
 ```sh
-nix develop . --command cargo xtask iroh-e2e
+nix develop . --command just iroh-e2e
 ```
 
-Other verification commands:
+Native Linux development uses the smaller `nix develop .#native` shell, which includes the Rust toolchain, GTK/WebKit, audio, font and display libraries. Run `cargo build --locked -p bex-desktop -p host-daemon -p agent-cli` there. Native Windows CI is the Nix exception: `.github/workflows/native.yml` installs the Rust version resolved by the pinned Rust overlay and uses the runner's Windows SDK. A successful build does not verify GUI interaction or production keyring access.
 
 Code quality runs locally on macOS with Xcode installed. Install the Nix-pinned Lefthook once per clone to run checks asynchronously after each commit:
 
@@ -176,15 +176,15 @@ lefthook install
 nix-store --realise "$(dirname "$(dirname "$(command -v lefthook)")")" --add-root "$(git rev-parse --path-format=absolute --git-common-dir)/bex-lefthook"
 ```
 
-The GC root keeps the installed hook executable available outside the development shell. Commit and push do not wait for checks. One worker checks immutable commits in temporary worktrees; consecutive queued commits from the same source worktree are replaced by its newest request. Results and logs remain under the shared Git directory in `bex-quality/`; no desktop notification is sent. GitHub Actions is no longer configured.
+The GC root keeps the installed hook executable available outside the development shell. Commit and push do not wait for checks. One worker checks immutable commits in temporary worktrees; consecutive queued commits from the same source worktree are replaced by its newest request. Results and logs remain under the shared Git directory in `bex-quality/`; no desktop notification is sent. GitHub Actions builds the native desktop, Host and CLI on Linux and Windows and runs core and isolated Host contracts. These checks are independent of local post-commit quality.
 
 Agents and humans can inspect the current commit with `nix develop . --command cargo xtask quality-status --wait` (omit `--wait` for an immediate result). JSON includes the commit, status, log paths, and `workingTreeDirty`. Exit status is successful only for a passed commit and clean worktree. Waiting is bounded to one hour; missing, queued, failed, interrupted, and superseded results are not passes. An idle queue can be drained with `cargo xtask quality-worker`. A worker crash may leave its temporary checkout under `bex-quality/worktrees/`; logs are retained for diagnosis.
 
 Manual checks remain available:
 
 ```sh
-nix develop . --command cargo xtask quality
-nix develop . --command cargo xtask quality rust # or kotlin, swift
+nix develop . --command just quality
+nix develop . --command just quality rust # or kotlin, swift
 ```
 
 The command checks every selected language and returns a failure if any check fails. It does not rewrite files. The background worker reuses Cargo caches and checks the committed worktree. Each check has a one-hour timeout.

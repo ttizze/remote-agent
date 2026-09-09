@@ -48,6 +48,16 @@
           }).androidsdk;
         in
         {
+          native = pkgs.mkShell {
+            packages = with pkgs; [ rustToolchain just jq python3 git pkg-config cmake clang ]
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
+                libxcb libX11 libXcursor libXi libXrandr
+                openssl gtk3 webkitgtk_4_1
+              ];
+            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
+              (pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libGL pkgs.libxkbcommon pkgs.wayland ]);
+          };
           android-test = pkgs.mkShell {
             packages = [ androidTestSdk pkgs.jdk21 ];
             JAVA_HOME = pkgs.jdk21.home;
@@ -56,6 +66,10 @@
           };
           default = pkgs.mkShell {
             packages = with pkgs; [
+              just
+              jq
+              python3
+              shellcheck
               gradle
               jdk21
               rustToolchain

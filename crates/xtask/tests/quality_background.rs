@@ -1,3 +1,6 @@
+// The Nix worker runs on Unix; Windows CI runs native Rust commands directly.
+#![cfg(unix)]
+
 use serde_json::Value;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
@@ -22,8 +25,6 @@ fn checks_committed_snapshot_and_exposes_failures_without_touching_source() {
     git(root, &["init", "-q"]);
     git(root, &["config", "user.name", "Quality test"]);
     git(root, &["config", "user.email", "quality@example.invalid"]);
-    fs::create_dir_all(root.join("apps/server")).unwrap();
-    fs::write(root.join("apps/server/.keep"), "").unwrap();
     fs::write(root.join("subject"), "committed").unwrap();
     git(root, &["add", "."]);
     git(
@@ -106,8 +107,6 @@ fn coalesces_only_queued_commits_from_the_same_worktree() {
     git(root, &["init", "-q"]);
     git(root, &["config", "user.name", "Quality test"]);
     git(root, &["config", "user.email", "quality@example.invalid"]);
-    fs::create_dir_all(root.join("apps/server")).unwrap();
-    fs::write(root.join("apps/server/.keep"), "").unwrap();
     let state = root.join(".git/bex-quality");
     fs::create_dir_all(state.join("queue")).unwrap();
     let bin = root.join(".git/bin");

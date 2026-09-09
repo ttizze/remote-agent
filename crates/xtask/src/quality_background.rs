@@ -1,10 +1,8 @@
-use crate::command;
+use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
-    os::fd::AsRawFd,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -12,11 +10,15 @@ use tokio::process::Command;
 use xtask::Result;
 
 async fn git(arguments: &[&str]) -> Result<String> {
-    Ok(
-        String::from_utf8(command::output(Command::new("git").args(arguments)).await?)?
-            .trim_end()
-            .to_owned(),
-    )
+    let output = Command::new("git")
+        .args(arguments)
+        .kill_on_drop(true)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(format!("git exited with {}", output.status).into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim_end().to_owned())
 }
 
 async fn state_directory() -> Result<PathBuf> {
@@ -32,19 +34,11 @@ fn lock(state: &Path) -> Result<Option<File>> {
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
         .open(state.join("worker.lock"))?;
-    // File ownership keeps the advisory lock alive; process exit releases it.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        Ok(Some(file))
-    } else {
-        let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::WouldBlock {
-            Ok(None)
-        } else {
-            Err(error.into())
-        }
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
@@ -158,46 +152,57 @@ async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
     let directory = tempfile::tempdir_in(state.join("worktrees"))?;
     let checkout = directory.path().join("checkout");
     let checkout_str = checkout.to_str().ok_or("non-UTF-8 checkout path")?;
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(log)?;
-    command::run(
-        Command::new("git")
-            .args(["worktree", "add", "--detach", checkout_str, commit])
-            .stdout(file.try_clone()?)
-            .stderr(file.try_clone()?),
-    )
-    .await?;
+    // NamedTempFile supplies private creation permissions on Unix and Windows.
+    let file = tempfile::NamedTempFile::new_in(state.join("logs"))?.persist(log)?;
+    let added = Command::new("git")
+        .args(["worktree", "add", "--detach", checkout_str, commit])
+        .stdout(file.try_clone()?)
+        .stderr(file.try_clone()?)
+        .kill_on_drop(true)
+        .status()
+        .await?;
+    if !added.success() {
+        return Err(format!("quality checkout failed: {added}").into());
+    }
     let result = tokio::time::timeout(Duration::from_secs(3600), async {
-        command::run(
-            Command::new("nix")
+        let mut command = CommandWrap::with_new("nix", |command| {
+            command
                 .arg("develop")
                 .arg(&checkout)
-                .args(["--command", "cargo", "xtask", "quality"])
+                .args(["--command", "just", "quality"])
                 .current_dir(&checkout)
                 .env_remove("CARGO")
                 .env_remove("RUSTC")
                 .env_remove("RUSTDOC")
                 .env("CARGO_TARGET_DIR", state.join("cargo-target"))
-                .stdin(std::process::Stdio::null())
-                .stdout(file.try_clone()?)
-                .stderr(file.try_clone()?),
-        )
-        .await
+                .stdin(std::process::Stdio::null());
+        });
+        command
+            .command_mut()
+            .stdout(file.try_clone()?)
+            .stderr(file.try_clone()?);
+        #[cfg(unix)]
+        command.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(process_wrap::tokio::JobObject);
+        command.wrap(KillOnDrop).spawn()?.wait().await
     })
     .await;
-    let cleanup = command::run(
-        Command::new("git")
-            .args(["worktree", "remove", "--force", checkout_str])
-            .stdout(file.try_clone()?)
-            .stderr(file),
-    )
-    .await;
-    result??;
-    cleanup
+    let cleanup = Command::new("git")
+        .args(["worktree", "remove", "--force", checkout_str])
+        .stdout(file.try_clone()?)
+        .stderr(file)
+        .kill_on_drop(true)
+        .status()
+        .await?;
+    let status = result??;
+    if !status.success() {
+        return Err(format!("quality checks failed: {status}").into());
+    }
+    if !cleanup.success() {
+        return Err(format!("quality checkout cleanup failed: {cleanup}").into());
+    }
+    Ok(())
 }
 
 pub async fn status(wait: bool) -> Result<()> {

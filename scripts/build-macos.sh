@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Xcode signing and Swift compilation use the installed Apple toolchain.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+[[ $(uname -s) == Darwin ]] || { echo 'Mac builds require macOS' >&2; exit 2; }
+case "${1:-desktop}" in
+    host|desktop) product=${1:-desktop} ;;
+    *) echo "usage: $0 [host|desktop]" >&2; exit 2 ;;
+esac
+identity=${BEX_CODE_SIGN_IDENTITY:-}
+if [[ -z $identity ]]; then
+    identities=$(/usr/bin/security find-identity -v -p codesigning | awk '/"Apple Development:|"Developer ID Application:/ {print $2}')
+    [[ -n $identities && $identities != *$'\n'* ]] || {
+        echo 'Set BEX_CODE_SIGN_IDENTITY to one Apple Development or Developer ID Application certificate.' >&2
+        exit 1
+    }
+    identity=$identities
+fi
+[[ $identity != - ]] || { echo 'Certificate signing is required to retain Keychain authorization.' >&2; exit 1; }
+target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
+sign() { /usr/bin/codesign --force --sign "$identity" --timestamp=none "$@"; }
+verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
+if [[ $product == host ]]; then
+    cargo build --locked --package host-daemon --release
+    sign --identifier app.bex.host "$target/release/host-daemon"
+    verify "$target/release/host-daemon"
+    echo "$target/release/host-daemon"
+    exit
+fi
+[[ $(uname -m) == arm64 ]] || { echo 'The GPUI Mac bundle requires Apple Silicon.' >&2; exit 2; }
+npm --prefix apps/desktop/web ci --ignore-scripts --no-audit --no-fund
+cargo build --locked --package host-daemon --package bex-desktop --release
+staging=$(mktemp -d "$target/.Bex-build.XXXXXX")
+destination="$target/Bex.app"
+cleanup() {
+    result=$?
+    if [[ -d $staging/previous.app && ! -e $destination ]]; then
+        if ! mv "$staging/previous.app" "$destination"; then
+            echo "Previous bundle retained in $staging/previous.app" >&2
+            exit 1
+        fi
+    fi
+    rm -rf "$staging"
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+bundle="$staging/Bex.app"
+executables="$bundle/Contents/MacOS"
+resources="$bundle/Contents/Resources"
+mkdir -p "$executables" "$resources/terminal"
+cp apps/desktop/assets/icon.icns "$resources/Bex.icns"
+cp "$target/release/bex-desktop" "$executables/Bex"
+cp "$target/release/host-daemon" "$executables/host-daemon"
+modules=apps/desktop/web/node_modules/@xterm
+cp "$modules/xterm/lib/xterm.js" "$modules/xterm/css/xterm.css" "$modules/addon-fit/lib/addon-fit.js" "$resources/terminal/"
+cp "$modules/xterm/LICENSE" "$resources/terminal/LICENSE-xterm"
+cp "$modules/addon-fit/LICENSE" "$resources/terminal/LICENSE-addon-fit"
+dictation="$resources/Bex Dictation.app"
+mkdir -p "$dictation/Contents/MacOS"
+xcrun swiftc -O apps/desktop/macos/Dictation.swift -o "$dictation/Contents/MacOS/Dictation"
+cp apps/desktop/macos/Dictation-Info.plist "$dictation/Contents/Info.plist"
+cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
+sign "$dictation"
+sign "$executables/Bex"
+sign --identifier app.bex.host "$executables/host-daemon"
+sign "$bundle"
+verify "$bundle"
+if [[ -e $destination ]]; then mv "$destination" "$staging/previous.app"; fi
+mv "$bundle" "$destination"
+echo "$destination"

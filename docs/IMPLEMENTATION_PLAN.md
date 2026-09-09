@@ -415,7 +415,7 @@ Physical verification caught an intermediate archive linked against an old devic
   Remote Host runs on the same Mac.
 - Final release executable: reopen the same remote history and restore Japanese
   composer text plus uploaded attachments, then send them and observe live work and final completion.
-- `cargo xtask build-desktop-macos` is the current entry point for the native `target/Bex.app`; the
+- `just build-desktop-macos` is the current entry point for the native `target/Bex.app`; the
   build verifies the complete bundle with strict code-signature verification.
   The Host keeps its existing certificate identity.
 - No physical second Mac or mobile surface was exercised for this migration.
@@ -483,3 +483,8 @@ Project folders now start collapsed and retain manual expansion during refresh a
 ### Preserve mobile navigation and task-list expansion
 
 Returning from a conversation retains project, chat and per-project title limits and the current search. iOS and Android foreground callbacks restore the connection and visible data without opening another screen; fresh app initialization still opens the task list with its initial limits. The regression assertion failed before the fix: expected limits 15/15/{project:15} with search `retained`, received 5/5/{} with an empty search. After the fix, all 156 Kotlin Simulator tests passed with zero failures/errors/skips. The real encrypted-Relay title-list test passed (1 passed, 0 failed/ignored), and Android Debug Kotlin compilation succeeded. `target/qa/Bex-20260908-115918.xcresult` passed four UI tests with zero failures/skips: all 18 expanded project titles survive a detail round trip; foreground return retains the open conversation and unsent draft while fetching an external reply; a visible list fetches external tasks on foreground; a terminated/relaunched app starts on the list while a backgrounded/reactivated app keeps its conversation and selected model. Exported screenshots of retained expanded titles and the foreground conversation/draft were visually inspected. The isolated runner cleaned up its temporary pairing fixture and Simulator. Physical devices, Android UI behavior and the full iOS UI suite were not exercised.
+
+
+### Native tooling cutover
+
+Build/sign/iOS orchestration now lives in `justfile` and `scripts/`, while the Codex and pairing fixture servers remain in `crates/xtask`. The asynchronous post-commit queue retains its commit-specific JSON status and runs `just quality` in an isolated checkout. Linux uses the pinned Nix native shell; Windows uses the matching Rust version and the hosted Windows SDK because Nix does not provide a native Windows shell. CI compiles desktop/Host/CLI and runs core and isolated Host contracts. OS deployment minimums and AGP/Gradle changes remain in a separate PR.

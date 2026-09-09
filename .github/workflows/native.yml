@@ -1,0 +1,39 @@
+name: Native clients
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - name: Build desktop, Host and CLI
+        run: nix develop .#native --command cargo build --locked -p bex-desktop -p host-daemon -p agent-cli
+      - name: Core contracts and isolated iroh Host
+        run: nix develop .#native --command cargo test --locked -p agent-core -p agent-cli -p host-daemon -p xtask
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # Native Windows has no Nix shell. Keep the Rust version aligned with flake.lock.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.0
+      - name: Build desktop, Host and CLI
+        run: cargo build --locked -p bex-desktop -p host-daemon -p agent-cli
+      - name: Core contracts and isolated iroh Host
+        run: cargo test --locked -p agent-core -p agent-cli -p host-daemon -p xtask
