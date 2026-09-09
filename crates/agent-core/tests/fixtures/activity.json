@@ -1,0 +1,138 @@
+[
+  {
+    "name": "unseen completion marks unread and idle",
+    "visible": null,
+    "events": [
+      {
+        "method": "turn/started",
+        "params": {
+          "threadId": "a",
+          "turn": {
+            "id": "turn",
+            "status": "inProgress"
+          }
+        }
+      },
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "a",
+          "turn": {
+            "id": "turn",
+            "status": "completed"
+          }
+        }
+      }
+    ],
+    "active": false,
+    "unread": true
+  },
+  {
+    "name": "visible completion stays read",
+    "visible": "a",
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "a",
+          "turn": {
+            "id": "turn",
+            "status": "completed"
+          }
+        }
+      }
+    ],
+    "active": false,
+    "unread": false
+  },
+  {
+    "name": "failed completion stays read",
+    "visible": null,
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "a",
+          "turn": {
+            "id": "turn",
+            "status": "failed"
+          }
+        }
+      }
+    ],
+    "active": false,
+    "unread": false
+  },
+  {
+    "name": "interrupted completion stays read",
+    "visible": null,
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "a",
+          "turn": {
+            "id": "turn",
+            "status": "interrupted"
+          }
+        }
+      }
+    ],
+    "active": false,
+    "unread": false
+  },
+  {
+    "name": "new activity clears unread",
+    "visible": null,
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "a",
+          "turn": {
+            "id": "turn",
+            "status": "completed"
+          }
+        }
+      },
+      {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "a",
+          "status": {
+            "type": "active"
+          }
+        }
+      }
+    ],
+    "active": true,
+    "unread": false
+  },
+  {
+    "name": "idle status keeps unread",
+    "visible": null,
+    "events": [
+      {
+        "method": "turn/completed",
+        "params": {
+          "threadId": "a",
+          "turn": {
+            "id": "turn",
+            "status": "completed"
+          }
+        }
+      },
+      {
+        "method": "thread/status/changed",
+        "params": {
+          "threadId": "a",
+          "status": {
+            "type": "idle"
+          }
+        }
+      }
+    ],
+    "active": false,
+    "unread": true
+  }
+]

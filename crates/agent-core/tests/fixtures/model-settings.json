@@ -1,0 +1,288 @@
+[
+  {
+    "name": "catalog refresh keeps supported manual choices",
+    "draft": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "max",
+      "service_tier": "default"
+    },
+    "models": [
+      {
+        "id": "model-a",
+        "model": "model-a",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "medium",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "max"
+          }
+        ],
+        "serviceTiers": [
+          {
+            "id": "priority"
+          }
+        ]
+      }
+    ],
+    "expected": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "max",
+      "service_tier": "default"
+    }
+  },
+  {
+    "name": "reordered efforts keep the selected value",
+    "draft": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "max",
+      "service_tier": "priority"
+    },
+    "models": [
+      {
+        "id": "model-a",
+        "model": "model-a",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "medium",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "max"
+          },
+          {
+            "reasoningEffort": "medium"
+          }
+        ],
+        "serviceTiers": [
+          {
+            "id": "priority"
+          }
+        ]
+      }
+    ],
+    "expected": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "max",
+      "service_tier": "priority"
+    }
+  },
+  {
+    "name": "removed options fall back to supported defaults",
+    "draft": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "max",
+      "service_tier": "priority"
+    },
+    "models": [
+      {
+        "id": "model-a",
+        "model": "model-a",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "medium",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          }
+        ],
+        "serviceTiers": []
+      }
+    ],
+    "expected": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "medium",
+      "service_tier": "default"
+    }
+  },
+  {
+    "name": "unsupported default effort uses first supported effort",
+    "draft": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": null,
+      "service_tier": null
+    },
+    "models": [
+      {
+        "id": "model-a",
+        "model": "model-a",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "unknown",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "max"
+          }
+        ],
+        "serviceTiers": [
+          {
+            "id": "priority"
+          }
+        ]
+      }
+    ],
+    "expected": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "medium",
+      "service_tier": "priority"
+    }
+  },
+  {
+    "name": "empty catalog clears all settings",
+    "draft": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "max",
+      "service_tier": "priority"
+    },
+    "models": [],
+    "expected": {
+      "text": "keep text",
+      "attachments": [],
+      "model": null,
+      "effort": null
+    }
+  },
+  {
+    "name": "changing model resets manual choices",
+    "draft": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-a",
+      "effort": "max",
+      "service_tier": "default"
+    },
+    "models": [
+      {
+        "id": "model-a",
+        "model": "model-a",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "medium",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "max"
+          }
+        ],
+        "serviceTiers": [
+          {
+            "id": "priority"
+          }
+        ]
+      },
+      {
+        "id": "model-b",
+        "model": "model-b",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "medium",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "max"
+          }
+        ],
+        "serviceTiers": [
+          {
+            "id": "priority"
+          }
+        ]
+      }
+    ],
+    "expected": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-b",
+      "effort": "medium",
+      "service_tier": "priority"
+    },
+    "select": "model-b"
+  },
+  {
+    "name": "removed model selects catalog default",
+    "draft": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "removed",
+      "effort": "max",
+      "service_tier": "default"
+    },
+    "models": [
+      {
+        "id": "model-a",
+        "model": "model-a",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "medium",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "max"
+          }
+        ],
+        "serviceTiers": [
+          {
+            "id": "priority"
+          }
+        ]
+      },
+      {
+        "id": "model-b",
+        "model": "model-b",
+        "displayName": "Model A",
+        "defaultReasoningEffort": "medium",
+        "defaultServiceTier": "priority",
+        "supportedReasoningEfforts": [
+          {
+            "reasoningEffort": "medium"
+          },
+          {
+            "reasoningEffort": "max"
+          }
+        ],
+        "serviceTiers": [
+          {
+            "id": "priority"
+          }
+        ],
+        "isDefault": true
+      }
+    ],
+    "expected": {
+      "text": "keep text",
+      "attachments": [],
+      "model": "model-b",
+      "effort": "medium",
+      "service_tier": "priority"
+    }
+  }
+]

@@ -1,33 +1,67 @@
-use crate::rpc::{self, Rpc};
-use crate::{conversation::text, platform};
-use base64::Engine;
+use crate::{Runtime, platform};
+use agent_core::{
+    client::TerminalSize,
+    state::{Intent, Snapshot, TerminalPhase},
+    store::Store,
+};
 use gpui_kit::{
     component::{h_flex, v_flex},
     *,
 };
 use gpui_wry::WebView;
-use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use serde::Deserialize;
+use serde_json::json;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum Frontend {
+    Ready { cols: u16, rows: u16 },
+    Resize { cols: u16, rows: u16 },
+    Input { data: String },
+    Copy { data: String },
+    Paste,
+    Acknowledge { sequence: u64 },
+}
 enum Event {
-    Frontend(Value),
-    Rpc(rpc::Event),
-    Reply(Result<Value, String>),
+    Frontend(Frontend),
+    Connected(Result<Arc<Store>, String>),
+    Snapshot(Arc<Snapshot>),
+    Error(String),
 }
 
-/// One PTY on the selected Host. Panel visibility does not restart the shell.
+/// A terminal view owns one Store and one iroh session. Output remains in the
+/// immutable snapshot until xterm confirms it has consumed the corresponding bytes.
 pub(crate) struct Terminal {
-    requests: std::sync::mpsc::Sender<(&'static str, Value)>,
+    store: Option<Arc<Store>>,
+    snapshot: Arc<Snapshot>,
+    events: async_channel::Sender<Event>,
+    runtime: Runtime,
     webview: Entity<WebView>,
     handle: String,
     cwd: String,
-    online: bool,
     ready: bool,
-    started: bool,
-    exited: bool,
-    cols: u16,
-    rows: u16,
-    status: String,
+    start_requested: bool,
+    sent_sequence: u64,
+    size: TerminalSize,
+    sent_size: Option<TerminalSize>,
+    error: Option<String>,
+    noticed: Option<String>,
+}
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        if let Some(store) = self.store.take() {
+            self.runtime.closing.spawn_on(
+                async move {
+                    let _ = store.close().await;
+                },
+                &self.runtime.handle,
+            );
+        }
+    }
 }
 impl Terminal {
     pub(crate) fn new(
@@ -37,8 +71,8 @@ impl Terminal {
         cx: &mut App,
     ) -> Result<Entity<Self>, String> {
         let html = terminal_html()?;
-        let (tx, rx) = async_channel::unbounded();
-        let frontend = tx.clone();
+        let (events, incoming) = async_channel::unbounded();
+        let frontend = events.clone();
         let raw = wry::WebViewBuilder::new()
             .with_html(html)
             .with_background_color((24, 24, 24, 255))
@@ -47,63 +81,69 @@ impl Terminal {
             .with_navigation_handler(|url| url == "about:blank")
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_ipc_handler(move |request| {
-                if let Ok(value) = serde_json::from_str::<Value>(request.body()) {
+                if let Ok(value) = serde_json::from_str(request.body()) {
                     let _ = frontend.try_send(Event::Frontend(value));
                 }
             })
             .build_as_child(window)
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| error.to_string())?;
         let webview = cx.new(|cx| WebView::new(raw, window, cx));
-        let events = tx.clone();
-        let target = if remote.is_empty() {
-            json!({"target":"local"})
-        } else {
-            json!({"target":"remote","profileId":remote})
-        };
-        let rpc = Rpc::connect(
-            platform::state_dir().join("host.sock"),
-            target,
-            move |event| {
-                let _ = events.send_blocking(Event::Rpc(event));
-            },
-        );
-        let handle = format!("bex-terminal-{}", uuid::Uuid::new_v4());
-        let process_handle = handle.clone();
-        let (requests, commands) = std::sync::mpsc::channel::<(&'static str, Value)>();
-        // Serialize input and resize requests so scheduler order cannot reorder shell bytes.
-        std::thread::spawn(move || {
-            let mut started = false;
-            for (method, params) in commands {
-                started |= method == "process/spawn";
-                let result = rpc.request(method, params);
-                let _ = tx.send_blocking(Event::Reply(result));
+        let runtime = cx.global::<Runtime>().clone();
+        let remote = (!remote.is_empty()).then(|| remote.to_owned());
+        let updates = events.clone();
+        runtime.handle.spawn(async move {
+            match platform::connect(remote.as_deref(), Snapshot::default()).await {
+                Ok(store) => {
+                    let mut snapshots = store.subscribe();
+                    if updates
+                        .send(Event::Connected(Ok(Arc::new(store))))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    loop {
+                        let snapshot = snapshots.borrow_and_update().clone();
+                        if updates.send(Event::Snapshot(snapshot)).await.is_err() {
+                            break;
+                        }
+                        if snapshots.changed().await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = updates.send(Event::Connected(Err(error))).await;
+                }
             }
-            if started {
-                let _ = rpc.request("process/kill", json!({"processHandle":process_handle}));
-            }
-            rpc.close();
         });
         Ok(cx.new(|cx: &mut Context<Self>| {
             cx.spawn_in(window, async move |view, cx| {
-                while let Ok(event) = rx.recv().await {
-                    if view.update_in(cx, |s, _, cx| s.event(event, cx)).is_err() {
+                while let Ok(event) = incoming.recv().await {
+                    if view
+                        .update_in(cx, |view, _, cx| view.event(event, cx))
+                        .is_err()
+                    {
                         break;
                     }
                 }
             })
             .detach();
             Self {
-                requests,
+                store: None,
+                snapshot: Arc::default(),
+                events,
+                runtime,
                 webview,
-                handle,
+                handle: format!("bex-terminal-{}", uuid::Uuid::new_v4()),
                 cwd,
-                online: false,
                 ready: false,
-                started: false,
-                exited: false,
-                cols: 80,
-                rows: 24,
-                status: "接続中…".into(),
+                start_requested: false,
+                sent_sequence: 0,
+                size: TerminalSize { cols: 80, rows: 24 },
+                sent_size: None,
+                error: None,
+                noticed: None,
             }
         }))
     }
@@ -118,112 +158,152 @@ impl Terminal {
             }
         });
     }
-    fn request(&self, method: &'static str, params: Value) {
-        let _ = self.requests.send((method, params));
+    fn dispatch(&self, intent: Intent) {
+        if let Some(store) = &self.store {
+            let receipt = store.dispatch(intent);
+            let events = self.events.clone();
+            self.runtime.handle.spawn(async move {
+                if let Err(error) = receipt.await {
+                    let _ = events.send(Event::Error(error.to_string())).await;
+                }
+            });
+        }
     }
-
     fn script(&self, script: String, cx: &App) {
         let _ = self.webview.read(cx).raw().evaluate_script(&script);
     }
-    fn notice(&self, message: &str, cx: &App) {
-        self.script(format!("window.bexTerminal.status({})", json!(message)), cx);
-    }
     fn event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Frontend(value) => match text(&value, "type") {
-                "ready" => {
-                    self.ready = true;
-                    self.resize(&value);
-                }
-                "resize" => {
-                    self.resize(&value);
-                    if self.started && self.online && !self.exited {
-                        self.request("process/resizePty", json!({"processHandle":self.handle,"size":{"cols":self.cols,"rows":self.rows}}));
-                    }
-                }
-                "input" if self.started && self.online && !self.exited => {
-                    if let Some(data) = value["data"].as_str() {
-                        for chunk in data.as_bytes().chunks(16 * 1024) {
-                            self.request("process/writeStdin", json!({"processHandle":self.handle,"deltaBase64":base64::engine::general_purpose::STANDARD.encode(chunk)}));
-                        }
-                    }
-                }
-                "paste" => {
-                    if let Some(data) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.script(format!("window.bexTerminal.paste({})", json!(data)), cx);
-                    }
-                }
-                "copy" => {
-                    if let Some(data) = value["data"].as_str() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(data.to_owned()));
-                    }
-                }
-                _ => {}
-            },
-            Event::Rpc(rpc::Event::Connected(online, reason)) => {
-                self.online = online;
-                if !online {
-                    self.status = reason;
-                    if self.started {
-                        // A reconnect cannot recover missed screen bytes. Require an explicit new shell.
-                        self.exited = true;
-                        if self.ready {
-                            self.notice("接続が切れました。新しいターミナルを開いてください。", cx);
-                        }
-                    }
+            Event::Connected(Ok(store)) => {
+                self.snapshot = store.snapshot();
+                self.store = Some(store);
+            }
+            Event::Connected(Err(error)) | Event::Error(error) => self.error = Some(error),
+            Event::Snapshot(snapshot) => self.snapshot = snapshot,
+            Event::Frontend(Frontend::Ready { cols, rows }) => {
+                self.ready = true;
+                self.size = TerminalSize {
+                    cols: cols.clamp(2, 500),
+                    rows: rows.clamp(1, 250),
+                };
+            }
+            Event::Frontend(Frontend::Resize { cols, rows }) => {
+                self.size = TerminalSize {
+                    cols: cols.clamp(2, 500),
+                    rows: rows.clamp(1, 250),
+                };
+            }
+            Event::Frontend(Frontend::Input { data }) => {
+                if self
+                    .snapshot
+                    .terminals
+                    .get(&self.handle)
+                    .is_some_and(|terminal| terminal.phase == TerminalPhase::Running)
+                {
+                    self.dispatch(Intent::WriteTerminal {
+                        handle: self.handle.clone(),
+                        data: data.into_bytes(),
+                    });
                 }
             }
-            Event::Rpc(rpc::Event::Message(value)) => {
-                let params = &value["params"];
-                if params["processHandle"] != self.handle {
-                    return;
-                }
-                match text(&value, "method") {
-                    "process/outputDelta" => {
-                        self.status = "実行中".into();
-                        if let Some(delta) = params["deltaBase64"].as_str() {
-                            self.script(format!("window.bexTerminal.write({})", json!(delta)), cx);
-                        }
-                        if params["capReached"] == true {
-                            self.notice("出力が Host の上限に達しました。", cx);
-                        }
-                    }
-                    "process/exited" => {
-                        self.exited = true;
-                        self.status = format!("終了 · {}", params["exitCode"]);
-                        self.notice(&self.status, cx);
-                    }
-                    _ => {}
+            Event::Frontend(Frontend::Acknowledge { sequence }) => {
+                self.dispatch(Intent::AcknowledgeTerminal {
+                    handle: self.handle.clone(),
+                    sequence,
+                })
+            }
+            Event::Frontend(Frontend::Paste) => {
+                if let Some(data) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.script(format!("window.bexTerminal.paste({})", json!(data)), cx);
                 }
             }
-            Event::Reply(Err(error)) => {
-                self.status = error;
-                if self.ready {
-                    self.notice(&self.status, cx);
-                }
+            Event::Frontend(Frontend::Copy { data }) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(data))
             }
-            Event::Reply(Ok(_)) => {}
         }
-        if self.online && self.ready && !self.started {
-            self.started = true;
-            self.status = "接続中".into();
-            self.request("process/spawn", json!({
-                "processHandle":self.handle,"cwd":self.cwd,
-                "command":["/bin/sh","-c","exec \"${SHELL:-/bin/sh}\" -l"],
-                "env":{"TERM":"xterm-256color","COLORTERM":"truecolor"},
-                "tty":true,"streamStdin":true,"streamStdoutStderr":true,
-                "timeoutMs":null,"outputBytesCap":null,"size":{"cols":self.cols,"rows":self.rows}
-            }));
+        if self.ready && self.snapshot.connected && !self.start_requested {
+            // The handle is dispatched once at readiness; the next UI event may
+            // precede the asynchronous Store publication.
+            self.start_requested = true;
+            self.sent_size = Some(self.size);
+            self.dispatch(Intent::StartTerminal {
+                handle: self.handle.clone(),
+                cwd: self.cwd.clone(),
+                size: self.size,
+            });
+        }
+        if self.sent_size != Some(self.size)
+            && self
+                .snapshot
+                .terminals
+                .get(&self.handle)
+                .is_some_and(|terminal| terminal.phase == TerminalPhase::Running)
+        {
+            self.sent_size = Some(self.size);
+            self.dispatch(Intent::ResizeTerminal {
+                handle: self.handle.clone(),
+                size: self.size,
+            });
+        }
+        if self.ready {
+            if let Some(terminal) = self.snapshot.terminals.get(&self.handle) {
+                for chunk in &terminal.output {
+                    if chunk.sequence > self.sent_sequence {
+                        self.script(
+                            format!(
+                                "window.bexTerminal.write({}, {})",
+                                json!(chunk.data),
+                                chunk.sequence
+                            ),
+                            cx,
+                        );
+                        if chunk.cap_reached {
+                            self.script(
+                                format!(
+                                    "window.bexTerminal.status({})",
+                                    json!("出力が Host の上限に達しました。")
+                                ),
+                                cx,
+                            );
+                        }
+                        self.sent_sequence = chunk.sequence;
+                    }
+                }
+            }
+            let notice = self.error.clone().or_else(|| {
+                self.snapshot
+                    .terminals
+                    .get(&self.handle)
+                    .and_then(|terminal| match &terminal.phase {
+                        TerminalPhase::Exited(code) => Some(format!("終了 · {code}")),
+                        TerminalPhase::Failed(error) => Some(error.clone()),
+                        _ => None,
+                    })
+            });
+            if notice != self.noticed {
+                if let Some(notice) = &notice {
+                    self.script(format!("window.bexTerminal.status({})", json!(notice)), cx);
+                }
+                self.noticed = notice;
+            }
         }
         cx.notify();
-    }
-    fn resize(&mut self, value: &Value) {
-        self.cols = value["cols"].as_u64().unwrap_or(80).clamp(2, 500) as u16;
-        self.rows = value["rows"].as_u64().unwrap_or(24).clamp(1, 250) as u16;
     }
 }
 impl Render for Terminal {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let status = self.error.clone().unwrap_or_else(|| {
+            self.snapshot
+                .terminals
+                .get(&self.handle)
+                .map_or("接続中…".into(), |terminal| match &terminal.phase {
+                    TerminalPhase::Starting => "起動中…".into(),
+                    TerminalPhase::Running => "実行中".into(),
+                    TerminalPhase::Exited(code) => format!("終了 · {code}"),
+                    TerminalPhase::Failed(error) => error.clone(),
+                    TerminalPhase::Closed => "終了".into(),
+                })
+        });
         v_flex()
             .size_full()
             .min_h_0()
@@ -241,7 +321,7 @@ impl Render for Terminal {
                             .text_ellipsis()
                             .child(self.cwd.clone()),
                     )
-                    .child(self.status.clone()),
+                    .child(status),
             )
             .child(div().flex_1().min_h_0().pl_1().child(self.webview.clone()))
     }

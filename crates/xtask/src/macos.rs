@@ -126,21 +126,6 @@ pub async fn build_desktop() -> Result<()> {
     ] {
         fs::copy(modules.join(source), terminal.join(name))?;
     }
-    let picker = resources.join("Bex File Picker.app");
-    fs::create_dir_all(picker.join("Contents/MacOS"))?;
-    command::run(
-        Command::new("xcrun")
-            .args(["swiftc", "-O", "apps/desktop/macos/FilePicker.swift", "-o"])
-            .arg(picker.join("Contents/MacOS/FilePicker")),
-    )
-    .await?;
-    plist::Value::from(dictionary(&[
-        ("CFBundleIdentifier", "app.bex.filepicker"),
-        ("CFBundleName", "Bex File Picker"),
-        ("CFBundleExecutable", "FilePicker"),
-        ("CFBundlePackageType", "APPL"),
-    ]))
-    .to_file_xml(picker.join("Contents/Info.plist"))?;
     let dictation = resources.join("Bex Dictation.app");
     fs::create_dir_all(dictation.join("Contents/MacOS"))?;
     command::run(
@@ -189,7 +174,6 @@ pub async fn build_desktop() -> Result<()> {
         .collect::<plist::Dictionary>(),
     )
     .to_file_xml(bundle.join("Contents/Info.plist"))?;
-    sign(&picker, &identity, None).await?;
     sign(&dictation, &identity, None).await?;
     sign(&executables.join("Bex"), &identity, None).await?;
     sign(

@@ -224,6 +224,37 @@ impl CodexRpcService {
                 self.host_thread_request(&line, "thread/start", false)
                     .await?
             }
+            "host/terminal/start" => {
+                let raw = parse_params(&line)?;
+                let result: Result<agent_core::client::StartTerminal<'_>, _> =
+                    serde::Deserialize::deserialize(&raw);
+                match result {
+                    Ok(params) => {
+                        let upstream_params = json!({
+                            "processHandle": params.process_handle,
+                            "cwd": params.cwd,
+                            "size": params.size,
+                            "command": crate::platform::terminal_command(),
+                            "env": {"TERM":"xterm-256color", "COLORTERM":"truecolor"},
+                            "tty": true, "streamStdin": true, "streamStdoutStderr": true,
+                            "timeoutMs": null, "outputBytesCap": null,
+                        });
+                        let mut request = raw_object(&line)
+                            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
+                        request.insert("method".into(), raw_value("process/spawn")?);
+                        request.insert("params".into(), raw_value(upstream_params)?);
+                        let upstream = serde_json::to_string(&request)
+                            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
+                        match self.inner.app_server.request_raw(&upstream).await {
+                            Ok(response) => response,
+                            Err(error) => {
+                                response_with_error(&line, "terminal_start_failed", &error)?
+                            }
+                        }
+                    }
+                    Err(error) => response_with_error(&line, "invalid_terminal_params", &error)?,
+                }
+            }
             "host/dictation/transcribe" => {
                 match crate::dictation::transcribe(&self.inner.app_server, &parse_params(&line)?)
                     .await

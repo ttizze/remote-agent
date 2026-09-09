@@ -59,6 +59,7 @@ pub enum PeerEvent {
     /// A response marker lets Store order a typed completion with surrounding events.
     Response {
         sequence: u64,
+        request_id: Option<u64>,
         method: Option<Arc<str>>,
     },
     Closed(String),
@@ -73,9 +74,9 @@ pin_project_lite::pin_project! {
     /// A raw request's assigned wire ID is available before its first poll.
     /// Routers use it for notifications that refer to an outstanding request.
     pub struct Request<F> {
-        wire_id: Option<u64>,
+        pub(crate) wire_id: Option<u64>,
         #[pin]
-        response: F,
+        pub(crate) response: F,
     }
 }
 impl<F> Request<F> {
@@ -294,33 +295,39 @@ impl RpcPeer {
             }
         }
     }
-    pub async fn request<P: Serialize, T: DeserializeOwned>(
-        &self,
-        method: &str,
+    pub fn request<'a, P: Serialize, T: DeserializeOwned>(
+        &'a self,
+        method: &'a str,
         params: &P,
-    ) -> Result<Reply<T>, PeerError> {
-        let reply = self.request_raw(&request_line(method, params)?).await?;
-        let object = raw_object(&reply.value).map_err(invalid)?;
-        if let Some(error) = object.get("error") {
-            return Err(PeerError::Remote {
-                error: error.get().into(),
-                sequence: Some(reply.sequence),
-            });
-        }
-        let result = object
-            .get("result")
-            .ok_or_else(|| invalid("response has no result or error"))?;
-        Ok(Reply {
-            sequence: reply.sequence,
-            value: serde_json::from_str(result.get()).map_err(|error| {
-                PeerError::InvalidResponse {
-                    method: method.into(),
-                    reason: error.to_string(),
-                    raw: result.get().into(),
-                    sequence: Some(reply.sequence),
+    ) -> Request<impl Future<Output = Result<Reply<T>, PeerError>> + Send + use<'a, P, T>> {
+        let prepared = request_line(method, params).and_then(|line| self.prepare(&line));
+        Request {
+            wire_id: prepared.as_ref().ok().map(|request| request.id),
+            response: async move {
+                let reply = self.exchange(prepared?).await?;
+                let object = raw_object(&reply.value).map_err(invalid)?;
+                if let Some(error) = object.get("error") {
+                    return Err(PeerError::Remote {
+                        error: error.get().into(),
+                        sequence: Some(reply.sequence),
+                    });
                 }
-            })?,
-        })
+                let result = object
+                    .get("result")
+                    .ok_or_else(|| invalid("response has no result or error"))?;
+                Ok(Reply {
+                    sequence: reply.sequence,
+                    value: serde_json::from_str(result.get()).map_err(|error| {
+                        PeerError::InvalidResponse {
+                            method: method.into(),
+                            reason: error.to_string(),
+                            raw: result.get().into(),
+                            sequence: Some(reply.sequence),
+                        }
+                    })?,
+                })
+            },
+        }
     }
     pub async fn send_raw(&self, line: impl Into<String>) -> Result<(), PeerError> {
         let line = line.into();
@@ -438,6 +445,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 if let Some(events) = &state.events {
                     let _ = events.send(PeerEvent::Response {
                         sequence,
+                        request_id: id,
                         method: pending.as_ref().map(|pending| pending.method.clone()),
                     });
                 }
@@ -655,7 +663,7 @@ mod tests {
         let (reply, _writer) = tokio::join!(peer.request::<_, Value>("read", &params), server);
         let reply = reply.unwrap();
         assert_eq!(reply.value["text"], "base");
-        let PeerEvent::Response { sequence, method } = events.recv().await.unwrap() else {
+        let PeerEvent::Response { sequence, method, .. } = events.recv().await.unwrap() else {
             panic!("expected response")
         };
         let PeerEvent::Message(delta) = events.recv().await.unwrap() else {

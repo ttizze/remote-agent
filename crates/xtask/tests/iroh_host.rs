@@ -1,6 +1,7 @@
 use agent_core::{
+    models::Invitation,
     peer::{PeerEvent, RpcPeer},
-    transport::{Endpoint, Identity, PairingTicket, Relays, Session, Ticket},
+    transport::{Endpoint, Identity, Relays, Session, Ticket},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
@@ -179,10 +180,11 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
             rpc(&local.peer, "thread/list", json!({})).await["data"],
             json!([])
         );
-        let invitation: PairingTicket =
+        let invitation: Invitation =
             serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
         let key = Identity::generate().to_bytes();
         fixture.memory.fail.store(true, Ordering::SeqCst);
+        assert_eq!(host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap().node_id(), local.endpoint.node_id());
         let failed = fixture.connect(Identity::from_bytes(key)).await;
         assert!(
             failed
@@ -278,7 +280,7 @@ async fn concurrent_consumers_cannot_both_use_one_invitation() {
         let directory = tempfile::tempdir().unwrap();
         let fixture = Fixture::start(directory.path()).await;
         let local = fixture.local().await;
-        let invitation: PairingTicket =
+        let invitation: Invitation =
             serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
         let first = fixture.connect(Identity::generate()).await;
         let second = fixture.connect(Identity::generate()).await;
@@ -347,21 +349,15 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         let content: Vec<u8> = (0..65537).map(|n| (n % 251) as u8).collect();
         let source = directory.path().join("source.bin");
         std::fs::write(&source, &content).unwrap();
-        let uploaded = agent_core::transfers::upload_file(
-            &client.peer,
-            || async {
-                client
-                    .session
-                    .open_stream()
-                    .await
-                    .map_err(std::io::Error::other)
-            },
-            &source,
-            directory.path(),
-            "upload.bin",
-        )
-        .await
-        .unwrap();
+        use agent_core::{state::{Attachment, Intent}, store::Store};
+        let endpoint = Endpoint::bind(host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(), Relays::Disabled).await.unwrap();
+        let store = Store::connect(endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+        store.dispatch(Intent::UploadAttachment {
+            draft_key: "transfer-draft".into(),
+            attachment: Attachment { path: source.to_str().unwrap().into(), name: "upload.bin".into(), is_image: false },
+            directory: directory.path().to_str().unwrap().into(),
+        }).await.unwrap();
+        let uploaded = PathBuf::from(&store.snapshot().drafts["transfer-draft"].attachments[0].path);
         let other = fixture.local().await;
         rpc(&other.peer, "thread/list", json!({})).await;
         let denied = directory.path().join("denied.bin");
@@ -387,21 +383,10 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         );
         other.close().await;
         let destination = directory.path().join("download.bin");
-        agent_core::transfers::download_file(
-            &client.peer,
-            || async {
-                client
-                    .session
-                    .open_stream()
-                    .await
-                    .map_err(std::io::Error::other)
-            },
-            Path::new(uploaded["path"].as_str().unwrap()),
-            &destination,
-        )
-        .await
-        .unwrap();
+        store.dispatch(Intent::DownloadFile { source: uploaded, destination: destination.clone() }).await.unwrap();
         assert_eq!(std::fs::read(destination).unwrap(), content);
+        store.close().await.unwrap();
+        assert!(!store.snapshot().connected);
         client.close().await;
         fixture.close().await;
     })
@@ -416,16 +401,17 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         let b = tempfile::tempdir().unwrap();
         let first = Fixture::start(a.path()).await;
         let second = Fixture::start(b.path()).await;
-        let local_a = first.local().await;
-        let local_b = second.local().await;
-        let invitation = rpc(&local_b.peer, "host/invite", json!({})).await;
-        let profile = rpc(
-            &local_a.peer,
-            "host/pairRemote",
-            json!({"invitation":invitation,"name":"remote fixture"}),
-        )
-        .await;
-        assert_eq!(profile["id"], json!(second.ticket.node_id()));
+        let Connection { endpoint: endpoint_a, session: session_a, peer: peer_a } = first.local().await;
+        let Connection { endpoint: endpoint_b, session: session_b, peer: peer_b } = second.local().await;
+        let manager_a = agent_core::store::Store::new(peer_a, Default::default());
+        let manager_b = agent_core::store::Store::new(peer_b, Default::default());
+        use agent_core::{state::Intent, store::Outcome};
+        manager_b.dispatch(Intent::CreateInvitation).await.unwrap();
+        let invitation = manager_b.snapshot().management.invitation.as_ref().unwrap().as_ref().clone();
+        let serialized = serde_json::to_string(&manager_b.snapshot()).unwrap();
+        assert!(!serialized.contains(&invitation.invitation.to_string()));
+        let id = second.ticket.node_id().to_string();
+        assert_eq!(manager_a.dispatch(Intent::PairRemoteHost { invitation, name: "remote fixture".into() }).await.unwrap(), Outcome::RemoteHostPaired(id.clone()));
         let direct = second
             .connect(first.credentials.local_identity().await)
             .await;
@@ -433,30 +419,23 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
             rpc(&direct.peer, "thread/list", json!({})).await["data"],
             json!([])
         );
-        assert!(
-            direct
-                .peer
-                .request::<_, Value>("host/invite", &json!({}))
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            rpc(&local_a.peer, "host/listRemotes", json!({})).await,
-            json!([profile])
-        );
-        rpc(
-            &local_a.peer,
-            "host/removeRemote",
-            json!({"id":second.ticket.node_id()}),
-        )
-        .await;
-        assert_eq!(
-            rpc(&local_a.peer, "host/listRemotes", json!({})).await,
-            json!([])
-        );
+        assert!(direct.peer.request::<_, Value>("host/invite", &json!({})).await.is_err());
+        manager_a.dispatch(Intent::LoadHostManagement).await.unwrap();
+        let snapshot = manager_a.snapshot();
+        assert_eq!(snapshot.management.remotes.len(), 1);
+        assert_eq!(snapshot.management.remotes[0].id, id);
+        assert_eq!(snapshot.management.remotes[0].ticket.parse::<Ticket>().unwrap().node_id(), second.ticket.node_id());
+        manager_a.dispatch(Intent::RemoveRemoteHost(id)).await.unwrap();
+        assert!(manager_a.snapshot().management.remotes.is_empty());
+        manager_a.dispatch(Intent::LoadHostManagement).await.unwrap();
+        assert!(manager_a.snapshot().management.remotes.is_empty());
         direct.close().await;
-        local_a.close().await;
-        local_b.close().await;
+        manager_a.close().await.unwrap();
+        manager_b.close().await.unwrap();
+        session_a.close();
+        session_b.close();
+        endpoint_a.close().await;
+        endpoint_b.close().await;
         first.close().await;
         second.close().await;
     })

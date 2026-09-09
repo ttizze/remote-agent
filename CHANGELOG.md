@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extend the common Store with draft-safe submission and transcription, task activity, model selection, workspace operations, and terminal state. Enqueue intents synchronously, preserve interleaved attachment/settings changes during text editing, initialize new-chat model defaults regardless of catalog load order, and refresh a loaded thread list after creating a chat. Preserve binary review counts. Retain terminal output until acknowledged, serialize shell input/resize/close, select the shell on the Host, and terminate live PTYs when their Store closes.
+
 - Move the daemon and fixture servers to authenticated iroh sessions and the common peer. Persist Host/local identities, single-use invitations and NodeId authorization atomically through keyring; restrict management to the local identity and disconnect revoked clients. Use typed core models for project lists and history, preserve per-client approval IDs, and transfer blobs on session-bound streams. Remove the SSH/Phoenix server and mobile transport crates. Add `cargo xtask iroh-e2e`; preserve worktrees, files, accounts, dictation and installed-Codex schema adaptation.
 
 - Add a fresh typed `agent-core` client, immutable Snapshot/reducer/Store, and headless `agent-cli` against the expanded 87-case corpus. Replace peer delivery modes and request variants with one ordered event stream and typed/raw requests. Add iroh endpoints, native tickets, expiring one-use authorization data and acknowledged stream shutdown. Verify the actual CLI over isolated iroh sessions for listing, sending and numeric/string approvals. Native UI callers are intentionally replaced in subsequent migration stages.

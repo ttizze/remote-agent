@@ -83,7 +83,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     }
                 });
             }
-            let target = submission_target(snapshot.as_ref(), listed.as_ref())?;
+            let target = submission_target(snapshot.as_ref(), listed.as_ref(), None)?;
             let reply = client
                 .submit(
                     &Submission {
@@ -92,6 +92,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                         input: &items,
                         model: optional(command, "model"),
                         effort: optional(command, "effort"),
+                        service_tier: optional(command, "serviceTierForTurn"),
                     },
                     target,
                 )
@@ -301,7 +302,7 @@ fn submission_corpus() {
     for case in cases {
         let snapshot: Option<Thread> = serde_json::from_value(case["snapshot"].clone()).unwrap();
         let listed: Option<Thread> = serde_json::from_value(case["listed"].clone()).unwrap();
-        let result = submission_target(snapshot.as_ref(), listed.as_ref());
+        let result = submission_target(snapshot.as_ref(), listed.as_ref(), None);
         let expected = &case["expected"];
         if expected["action"] == "reject" {
             assert!(result.is_err());

@@ -3,6 +3,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Invitation {
+    pub endpoint: String,
+    pub invitation: uuid::Uuid,
+    pub expires_at: u64,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+impl std::fmt::Debug for Invitation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invitation")
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteHost {
+    pub id: String,
+    pub name: String,
+    pub ticket: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostStatus {
+    pub node_id: String,
+    pub name: String,
+    pub devices: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
@@ -149,6 +183,18 @@ pub struct Model {
     pub display_name: String,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tiers: Option<Vec<ServiceTier>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_default: Option<bool>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServiceTier {
+    pub id: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -221,8 +267,8 @@ pub struct WorkspaceReview {
 pub struct ChangedFile {
     pub path: String,
     pub status: String,
-    pub additions: u64,
-    pub deletions: u64,
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

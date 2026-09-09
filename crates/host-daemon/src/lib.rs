@@ -6,16 +6,14 @@ mod host_identity;
 mod host_runtime;
 mod jsonl_session;
 pub mod platform;
-mod remote_hosts;
 mod workspace_files;
 mod workspace_review;
 mod worktrees;
-pub use remote_hosts::RemoteHostProfile;
 pub use workspace_review::{WorkspaceReview, inspect_workspace};
 
 pub use host_runtime::HostRuntime;
 
-pub use host_identity::{CredentialStore, HostCredentials, KeyringStore};
+pub use host_identity::{CredentialStore, HostCredentials, KeyringStore, load_local_identity};
 
 pub use codex_rpc::{CodexRpcService, CodexSession, DispatchError, ResponseDisposition, SessionId};
 pub use desktop_projects::{

@@ -90,23 +90,6 @@ impl FromStr for Ticket {
             .map_err(|error: iroh_tickets::ParseError| TransportError::Ticket(error.to_string()))
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingTicket {
-    pub endpoint: Ticket,
-    pub invitation: Uuid,
-    /// Absolute Unix time in seconds.
-    pub expires_at: u64,
-}
-impl PairingTicket {
-    pub fn new(endpoint: Ticket, expires_at: u64) -> Self {
-        Self {
-            endpoint,
-            invitation: Uuid::new_v4(),
-            expires_at,
-        }
-    }
-}
 /// Pure authorization data. The daemon commits updates under its state owner's lock.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trust {

@@ -1,7 +1,8 @@
-use crate::{CodexRpcService, HostCredentials, RemoteHostProfile, SessionId};
+use crate::{CodexRpcService, HostCredentials, SessionId};
 use agent_core::{
+    models::{HostStatus, Invitation, RemoteHost},
     peer::{PeerEvent, RpcPeer},
-    transport::{Endpoint, NodeId, PairingTicket, Relays, Session, Ticket, authorize},
+    transport::{Endpoint, NodeId, Relays, Session, Ticket, authorize},
 };
 use host_protocol::{RpcMessageKind, classify_message};
 use serde::Deserialize;
@@ -251,12 +252,26 @@ impl HostRuntime {
         match method {
             "host/status" => {
                 let record = self.credentials.record.lock().await;
-                Ok(
-                    json!({"nodeId":self.endpoint.node_id(), "name":self.name, "devices":record.trust.allowed}),
-                )
+                serde_json::to_value(HostStatus {
+                    node_id: self.endpoint.node_id().to_string(),
+                    name: self.name.clone(),
+                    devices: record
+                        .trust
+                        .allowed
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    extra: Default::default(),
+                })
+                .map_err(|error| error.to_string())
             }
             "host/invite" => {
-                let ticket = PairingTicket::new(self.endpoint.ticket(), now() + 300);
+                let ticket = Invitation {
+                    endpoint: self.endpoint.ticket().to_string(),
+                    invitation: uuid::Uuid::new_v4(),
+                    expires_at: now() + 300,
+                    extra: Default::default(),
+                };
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
                 next.trust.invitations.retain(|_, expiry| now() < *expiry);
@@ -303,7 +318,7 @@ impl HostRuntime {
             "host/pairRemote" => {
                 #[derive(Deserialize)]
                 struct Pair {
-                    invitation: PairingTicket,
+                    invitation: Invitation,
                     name: String,
                 }
                 let params: Pair =
@@ -311,15 +326,16 @@ impl HostRuntime {
                 if now() >= params.invitation.expires_at {
                     return Err("invitation expired".into());
                 }
+                let ticket: Ticket =
+                    params.invitation.endpoint.parse().map_err(
+                        |error: agent_core::transport::TransportError| error.to_string(),
+                    )?;
                 // Pair the desktop's durable identity, which will connect directly.
                 let endpoint =
                     Endpoint::bind(self.credentials.local_identity().await, self.relays.clone())
                         .await
                         .map_err(|e| e.to_string())?;
-                let connection = endpoint
-                    .connect(&params.invitation.endpoint)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let connection = endpoint.connect(&ticket).await.map_err(|e| e.to_string())?;
                 let peer = connection
                     .open_peer(Duration::from_secs(20), 8)
                     .await
@@ -335,14 +351,16 @@ impl HostRuntime {
                 endpoint.close().await;
                 result.map_err(|e| e.to_string())?;
                 closed.map_err(|e| e.to_string())?;
-                let profile = RemoteHostProfile {
-                    id: params.invitation.endpoint.node_id(),
+                let node_id = ticket.node_id();
+                let profile = RemoteHost {
+                    id: node_id.to_string(),
                     name: params.name,
                     ticket: params.invitation.endpoint,
+                    extra: Default::default(),
                 };
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
-                next.remotes.insert(profile.id, profile.clone());
+                next.remotes.insert(node_id, profile.clone());
                 self.credentials.persist(&next)?;
                 *record = next;
                 serde_json::to_value(profile).map_err(|e| e.to_string())

@@ -1,17 +1,44 @@
 //! Conversation display policy shared by native desktop and mobile clients.
-//! Inputs may be native Codex values or metadata-only values. Message bodies
+//! Projections borrow typed turns and item metadata. Message bodies
 //! are never read; projections identify source items by index, including when
 //! native IDs repeat. Rendering and local expansion state belong to each UI.
 
+use agent_core::models::{Item, Turn};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 pub mod state;
 
-fn text<'a>(value: &'a Value, key: &str) -> &'a str {
-    value[key].as_str().unwrap_or("")
+fn field<'a>(item: &'a Item, key: &str) -> &'a str {
+    item.extra
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
 }
-fn array(value: &Value) -> &[Value] {
-    value.as_array().map(Vec::as_slice).unwrap_or_default()
+
+/// Borrow only the fields used for grouping; pending input can supply metadata
+/// without allocating a native item or copying its message and attachments.
+#[derive(Clone, Copy, Default)]
+pub struct ItemMetadata<'a> {
+    pub id: &'a str,
+    pub client_id: Option<&'a str>,
+    pub kind: &'a str,
+    pub phase: Option<&'a str>,
+    pub file_count: usize,
+}
+impl<'a> From<&'a Item> for ItemMetadata<'a> {
+    fn from(item: &'a Item) -> Self {
+        Self {
+            id: &item.id,
+            client_id: item.client_id.as_deref(),
+            kind: item.kind.as_deref().unwrap_or_default(),
+            phase: item.extra.get("phase").and_then(Value::as_str),
+            file_count: item
+                .extra
+                .get("changes")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -36,8 +63,8 @@ pub struct Segment {
     pub label: Option<String>,
 }
 impl Segment {
-    pub fn role(&self, index: usize, item: &Value) -> Role {
-        match text(item, "type") {
+    pub fn role(&self, index: usize, item: ItemMetadata<'_>) -> Role {
+        match item.kind {
             "sleep" | "enteredReviewMode" | "exitedReviewMode" => Role::Hidden,
             "userMessage" => Role::User,
             "imageGeneration" => Role::Response,
@@ -47,19 +74,19 @@ impl Segment {
     }
 }
 
-pub fn project(turn: &Value) -> impl Iterator<Item = Segment> {
-    let items = array(&turn["items"]);
-    project_items(turn, items.len(), move |index| &items[index])
+pub fn project(turn: &Turn) -> impl Iterator<Item = Segment> {
+    let items = turn.items.as_deref().unwrap_or_default();
+    project_items(turn, items.len(), move |index| items[index].as_ref().into())
 }
 
 /// The accessor lets clients project interleaved pending input without cloning
 /// native item bodies. It must return the same item for an index throughout a call.
 pub fn project_items<'a>(
-    turn: &'a Value,
+    turn: &'a Turn,
     count: usize,
-    item: impl Fn(usize) -> &'a Value + 'a,
+    item: impl Fn(usize) -> ItemMetadata<'a> + 'a,
 ) -> impl Iterator<Item = Segment> + 'a {
-    let completed = turn["status"] == "completed";
+    let completed = turn.status.as_deref() == Some("completed");
     let mut start = 0;
     let mut first = true;
     let mut exchange_end = 0;
@@ -71,12 +98,12 @@ pub fn project_items<'a>(
         first = false;
         if start == exchange_end {
             exchange_end = (start + 1..count)
-                .find(|&index| item(index)["type"] == "userMessage")
+                .find(|&index| item(index).kind == "userMessage")
                 .unwrap_or(count);
             exchange_has_answer = completed
                 && (start..exchange_end).any(|index| {
                     let value = item(index);
-                    value["type"] == "agentMessage" && value["phase"] != "commentary"
+                    value.kind == "agentMessage" && value.phase != Some("commentary")
                 });
         }
         let mut end = exchange_end;
@@ -84,38 +111,32 @@ pub fn project_items<'a>(
             let mut follows_response = false;
             for index in start..exchange_end {
                 let value = item(index);
-                if follows_response && value["type"] != "agentMessage" && visible(value) {
+                if follows_response && value.kind != "agentMessage" && visible(value) {
                     end = index;
                     break;
                 }
-                follows_response |= value["type"] == "agentMessage";
+                follows_response |= value.kind == "agentMessage";
             }
         }
         let answer = if completed {
             (start..end)
                 .rev()
                 .find(|&index| {
-                    item(index)["type"] == "agentMessage" && item(index)["phase"] == "final_answer"
+                    item(index).kind == "agentMessage" && item(index).phase == Some("final_answer")
                 })
                 .or_else(|| {
                     (start..end).rev().find(|&index| {
-                        item(index)["type"] == "agentMessage" && item(index)["phase"].is_null()
+                        item(index).kind == "agentMessage" && item(index).phase.is_none()
                     })
                 })
         } else {
             None
         };
         let id = if start == 0 {
-            text(turn, "id").to_owned()
+            turn.id.clone()
         } else {
             let first = item(start);
-            format!(
-                "{}:{}",
-                text(turn, "id"),
-                first["clientId"]
-                    .as_str()
-                    .unwrap_or_else(|| text(first, "id"))
-            )
+            format!("{}:{}", turn.id, first.client_id.unwrap_or(first.id))
         };
         let mut segment = Segment {
             id,
@@ -142,7 +163,12 @@ pub fn project_items<'a>(
                         .filter(|&index| segment.role(index, item(index)) == Role::Activity)
                         .map(&item),
                 );
-                if segment.last && matches!(text(turn, "status"), "failed" | "interrupted") {
+                if segment.last
+                    && matches!(
+                        turn.status.as_deref().unwrap_or_default(),
+                        "failed" | "interrupted"
+                    )
+                {
                     format!("{}・{summary}", work_summary(turn))
                 } else {
                     summary
@@ -157,18 +183,18 @@ pub fn project_items<'a>(
         Some(segment)
     })
 }
-fn visible(item: &Value) -> bool {
+fn visible(item: ItemMetadata<'_>) -> bool {
     !matches!(
-        text(item, "type"),
+        item.kind,
         "sleep" | "enteredReviewMode" | "exitedReviewMode"
     )
 }
-fn activity_summary<'a>(items: impl Iterator<Item = &'a Value>) -> String {
+fn activity_summary<'a>(items: impl Iterator<Item = ItemMetadata<'a>>) -> String {
     let (mut commands, mut files, mut tools, mut reasoning) = (0, 0, 0, false);
     for item in items {
-        match text(item, "type") {
+        match item.kind {
             "commandExecution" => commands += 1,
-            "fileChange" => files += file_count(item),
+            "fileChange" => files += item.file_count,
             "reasoning" => reasoning = true,
             _ => tools += 1,
         }
@@ -199,20 +225,15 @@ fn activity_summary<'a>(items: impl Iterator<Item = &'a Value>) -> String {
     }
     summary
 }
-fn file_count(item: &Value) -> usize {
-    item["fileCount"]
-        .as_u64()
-        .and_then(|n| usize::try_from(n).ok())
-        .unwrap_or_else(|| array(&item["changes"]).len())
-}
-fn work_summary(turn: &Value) -> String {
-    if turn["status"] == "inProgress" {
+fn work_summary(turn: &Turn) -> String {
+    if turn.status.as_deref() == Some("inProgress") {
         return "作業中…".into();
     }
-    let duration = turn["durationMs"].as_u64().or_else(|| {
-        turn["completedAtMs"]
+    let duration = turn.duration_ms.flatten().or_else(|| {
+        turn.extra
+            .get("completedAtMs")?
             .as_u64()?
-            .checked_sub(turn["startedAtMs"].as_u64()?)
+            .checked_sub(turn.extra.get("startedAtMs")?.as_u64()?)
     });
     let mut summary = String::new();
     if let Some(ms) = duration {
@@ -239,7 +260,7 @@ fn work_summary(turn: &Value) -> String {
     } else {
         summary.push_str("作業");
     }
-    summary.push_str(match text(turn, "status") {
+    summary.push_str(match turn.status.as_deref().unwrap_or_default() {
         "interrupted" => {
             if duration.is_some() {
                 "した後に中断しました"
@@ -329,11 +350,11 @@ pub struct ItemPresentation {
     pub collapsible: bool,
     pub visible: bool,
 }
-pub fn item_presentation(item: &Value) -> ItemPresentation {
-    let (kind, title, collapsible) = match text(item, "type") {
+pub fn item_presentation(item: &Item) -> ItemPresentation {
+    let (kind, title, collapsible) = match item.kind.as_deref().unwrap_or_default() {
         "userMessage" => ("user", "You".into(), false),
         "agentMessage" => (
-            if item["phase"] == "commentary" {
+            if field(item, "phase") == "commentary" {
                 "commentary"
             } else {
                 "agent"
@@ -343,10 +364,14 @@ pub fn item_presentation(item: &Value) -> ItemPresentation {
         ),
         "reasoning" => ("reasoning", "思考".into(), true),
         "imageGeneration" => ("imageGeneration", tool_title(item), false),
-        "commandExecution" => ("command", compact_title(text(item, "command")), true),
+        "commandExecution" => (
+            "command",
+            compact_title(item.command.as_deref().unwrap_or_default()),
+            true,
+        ),
         "fileChange" => (
             "fileChange",
-            format!("{}件のファイル変更", file_count(item)),
+            format!("{}件のファイル変更", ItemMetadata::from(item).file_count),
             true,
         ),
         _ => ("unknown", tool_title(item), true),
@@ -355,15 +380,15 @@ pub fn item_presentation(item: &Value) -> ItemPresentation {
         kind,
         title,
         collapsible,
-        visible: visible(item),
+        visible: visible(item.into()),
     }
 }
-fn tool_title(item: &Value) -> String {
-    let tool = text(item, "tool");
-    match text(item, "type") {
+fn tool_title(item: &Item) -> String {
+    let tool = field(item, "tool");
+    match item.kind.as_deref().unwrap_or_default() {
         "hookPrompt" => "追加指示".into(),
         "plan" => "計画を更新しました".into(),
-        "mcpToolCall" => match (text(item, "server"), tool) {
+        "mcpToolCall" => match (field(item, "server"), tool) {
             ("", "") => "MCPツールを実行しました".into(),
             (server, "") => compact_title(server),
             ("", tool) => compact_title(tool),
@@ -384,22 +409,28 @@ fn tool_title(item: &Value) -> String {
             }
         }
         "subAgentActivity" => "サブエージェントが作業しました".into(),
-        "webSearch" => match text(item, "query") {
+        "webSearch" => match field(item, "query") {
             "" => "Webを検索しました".into(),
             query => format!("Webを検索: {}", compact_title(query)),
         },
-        "imageView" => match text(item, "path") {
+        "imageView" => match field(item, "path") {
             "" => "画像を確認しました".into(),
             path => format!("画像を確認: {}", compact_title(path)),
         },
-        "imageGeneration" => match text(item, "status") {
+        "imageGeneration" => match item.status.as_deref().unwrap_or_default() {
             "inProgress" => "画像を生成中…",
             "failed" => "画像を生成できませんでした",
             _ => "生成画像",
         }
         .into(),
         "contextCompaction" => "コンテキストを圧縮しました".into(),
-        "automaticApprovalReview" => match text(&item["review"], "status") {
+        "automaticApprovalReview" => match item
+            .extra
+            .get("review")
+            .and_then(|review| review.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
             "inProgress" => "承認を自動確認中",
             "denied" => "自動確認で拒否されました",
             "timedOut" => "自動確認がタイムアウトしました",
@@ -414,130 +445,72 @@ fn tool_title(item: &Value) -> String {
     }
 }
 
-/// Metadata-only bridge used by C/JNI clients. Output contains source indices,
-/// display policy and labels, never source message bodies or tool output.
-pub fn present_json(request: &str) -> Result<String, String> {
-    let request: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
-    let result = match text(&request, "operation") {
-        "eventKind" => serde_json::to_value(state::classify_event(
-            text(&request, "method"),
-            request["isRequest"] == true,
-        ))
-        .map_err(|e| e.to_string())?,
-        "transition" => {
-            let event: state::EventMetadata<'_> =
-                serde::Deserialize::deserialize(&request["event"]).map_err(|e| e.to_string())?;
-            let current: state::CurrentMetadata<'_> =
-                serde::Deserialize::deserialize(&request["current"]).map_err(|e| e.to_string())?;
-            serde_json::to_value(state::transition(&event, &current)).map_err(|e| e.to_string())?
-        }
-        "turn" => {
-            let turn = &request["turn"];
-            let items = turn["items"]
-                .as_array()
-                .ok_or("turn.items must be an array")?;
-            let pending = array(&request["pending"]);
-            let anchors: Vec<_> = pending
-                .iter()
-                .map(|value| value["afterItemId"].as_str())
-                .collect();
-            let order = source_order(items.len(), |index| text(&items[index], "id"), &anchors);
-            let item = |index: usize| {
-                let source = order[index];
-                if source < items.len() {
-                    &items[source]
-                } else {
-                    &pending[source - items.len()]["item"]
-                }
-            };
-            let segments: Vec<_> = project_items(turn, order.len(), item).map(|segment| {
-                let rows: Vec<_> = (segment.start..segment.end).map(|index| json!({"source":order[index],"role":segment.role(index, item(index))})).collect();
-                json!({"id":segment.id,"last":segment.last,"collapsible":segment.collapsible,"initiallyExpanded":segment.initially_expanded,"label":segment.label,"rows":rows})
-            }).collect();
-            json!(segments)
-        }
-        "item" => {
-            serde_json::to_value(item_presentation(&request["item"])).map_err(|e| e.to_string())?
-        }
-        "reconcile" => {
-            let ids = |key: &str| -> Result<Vec<&str>, String> {
-                request[key]
-                    .as_array()
-                    .ok_or_else(|| format!("{key} must be an array"))?
-                    .iter()
-                    .map(|id| {
-                        id.as_str()
-                            .ok_or_else(|| format!("{key} must contain strings"))
-                    })
-                    .collect()
-            };
-            json!(remaining_submissions(&ids("pending")?, ids("echoed")?))
-        }
-        _ => return Err("unknown conversation presentation operation".into()),
-    };
-    serde_json::to_string(&result).map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod presentation_tests {
     use super::*;
+    use serde_json::json;
+    macro_rules! turn {
+        ($($value:tt)*) => { serde_json::from_value::<Turn>(json!($($value)*)).unwrap() };
+    }
 
     #[test]
     fn generated_images_remain_visible_outside_completed_work() {
         for status in ["inProgress", "completed", "failed"] {
-            let turn = json!({"id":"turn","status":"completed","items":[
+            let turn = turn!({"id":"turn","status":"completed","items":[
                 {"id":"work","type":"reasoning"},
                 {"id":"image","type":"imageGeneration","status":status},
                 {"id":"answer","type":"agentMessage","phase":"final_answer","text":"Here is the image"}
             ]});
             let segment = project(&turn).next().unwrap();
-            assert_eq!(segment.role(1, &turn["items"][1]), Role::Response);
-            assert!(!item_presentation(&turn["items"][1]).collapsible);
+            assert_eq!(
+                segment.role(1, turn.items.as_ref().unwrap()[1].as_ref().into()),
+                Role::Response
+            );
+            assert!(!item_presentation(turn.items.as_ref().unwrap()[1].as_ref()).collapsible);
         }
     }
 
-    fn rows<'a>(part: &'a Segment, turn: &'a Value, role: Role) -> impl Iterator<Item = &'a Value> {
+    fn rows<'a>(part: &'a Segment, turn: &'a Turn, role: Role) -> impl Iterator<Item = &'a Item> {
         (part.start..part.end)
-            .filter(move |&index| part.role(index, &turn["items"][index]) == role)
-            .map(move |index| &turn["items"][index])
+            .filter(move |&index| {
+                part.role(index, turn.items.as_ref().unwrap()[index].as_ref().into()) == role
+            })
+            .map(move |index| turn.items.as_ref().unwrap()[index].as_ref())
     }
     #[test]
     fn completed_turn_projects_user_work_and_final() {
-        let turn = json!({"id":"turn","status":"completed","durationMs":40000,"items":[{"id":"u","type":"userMessage"},{"id":"r","type":"reasoning"},{"id":"c","type":"commandExecution"},{"id":"a","type":"agentMessage","phase":"commentary"},{"id":"f","type":"agentMessage","phase":"final_answer"}]});
+        let turn = turn!({"id":"turn","status":"completed","durationMs":40000,"items":[{"id":"u","type":"userMessage"},{"id":"r","type":"reasoning"},{"id":"c","type":"commandExecution"},{"id":"a","type":"agentMessage","phase":"commentary"},{"id":"f","type":"agentMessage","phase":"final_answer"}]});
         let p = project(&turn).next().unwrap();
         assert_eq!(rows(&p, &turn, Role::User).count(), 1);
         assert_eq!(
             rows(&p, &turn, Role::Activity)
-                .map(|i| text(i, "id"))
+                .map(|i| i.id.as_str())
                 .collect::<Vec<_>>(),
             ["r", "c", "a"]
         );
-        assert_eq!(
-            text(rows(&p, &turn, Role::Response).next().unwrap(), "id"),
-            "f"
-        );
+        assert_eq!(rows(&p, &turn, Role::Response).next().unwrap().id, "f");
         assert!(p.collapsible);
         assert_eq!(p.label.as_deref(), Some("40秒 作業しました"));
     }
     #[test]
     fn completed_empty_turn_does_not_restore_thinking() {
-        let turn = json!({"id":"turn","status":"completed","items":[{"id":"u","type":"userMessage","text":"追加メッセージ"}]});
+        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"u","type":"userMessage","text":"追加メッセージ"}]});
         assert!(project(&turn).next().unwrap().label.is_none());
     }
-    fn order(turn: &Value) -> Vec<String> {
+    fn order(turn: &Turn) -> Vec<String> {
         project(turn)
             .flat_map(|part| {
                 rows(&part, turn, Role::User)
                     .chain(rows(&part, turn, Role::Activity))
                     .chain(rows(&part, turn, Role::Response))
-                    .map(|item| text(item, "id").to_owned())
+                    .map(|item| item.id.clone())
                     .collect::<Vec<_>>()
             })
             .collect()
     }
     #[test]
     fn live_commentary_separates_activity_groups_without_reordering() {
-        let turn = json!({"id":"turn","status":"inProgress","items":[
+        let turn = turn!({"id":"turn","status":"inProgress","items":[
             {"id":"u","type":"userMessage"},
             {"id":"intro","type":"agentMessage","phase":"commentary"},
             {"id":"c1","type":"commandExecution"},
@@ -562,7 +535,7 @@ mod presentation_tests {
     #[test]
     fn completed_exchanges_keep_each_answer_beside_its_question() {
         for phase in [Value::Null, json!("final_answer")] {
-            let turn = json!({"id":"turn","status":"completed","durationMs":1459000,"items":[
+            let turn = turn!({"id":"turn","status":"completed","durationMs":1459000,"items":[
                 {"id":"u1","type":"userMessage"},
                 {"id":"progress","type":"agentMessage","phase":"commentary"},
                 {"id":"f1","type":"agentMessage","phase":phase},
@@ -574,11 +547,11 @@ mod presentation_tests {
             let parts: Vec<_> = project(&turn).collect();
             assert_eq!(parts.len(), 2);
             assert_eq!(
-                rows(&parts[0], &turn, Role::Response).next().unwrap()["id"],
+                rows(&parts[0], &turn, Role::Response).next().unwrap().id,
                 "f1"
             );
             assert_eq!(
-                rows(&parts[1], &turn, Role::Response).next().unwrap()["id"],
+                rows(&parts[1], &turn, Role::Response).next().unwrap().id,
                 "f2"
             );
             assert_eq!(parts[0].label.as_deref(), Some("作業内容"));
@@ -587,7 +560,7 @@ mod presentation_tests {
     }
     #[test]
     fn later_answer_does_not_hide_earlier_unanswered_commentary() {
-        let turn = json!({"id":"turn","status":"completed","items":[
+        let turn = turn!({"id":"turn","status":"completed","items":[
             {"id":"u1","type":"userMessage"},
             {"id":"a1","type":"agentMessage","phase":"commentary"},
             {"id":"c","type":"commandExecution"},
@@ -599,7 +572,7 @@ mod presentation_tests {
         let responses: Vec<_> = project(&turn)
             .flat_map(|part| {
                 rows(&part, &turn, Role::Response)
-                    .map(|item| text(item, "id").to_owned())
+                    .map(|item| item.id.clone())
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -611,7 +584,7 @@ mod presentation_tests {
             ("failed", "12秒 作業した後に失敗しました・思考"),
             ("interrupted", "12秒 作業した後に中断しました・思考"),
         ] {
-            let turn = json!({"id":"turn","status":status,"durationMs":12000,"items":[
+            let turn = turn!({"id":"turn","status":status,"durationMs":12000,"items":[
                 {"id":"a","type":"agentMessage","phase":"commentary"},
                 {"id":"r","type":"reasoning"}
             ]});
@@ -623,7 +596,7 @@ mod presentation_tests {
     }
     #[test]
     fn hidden_lifecycle_items_do_not_split_visible_responses() {
-        let turn = json!({"id":"turn","status":"inProgress","items":[
+        let turn = turn!({"id":"turn","status":"inProgress","items":[
             {"id":"a","type":"agentMessage","phase":"commentary"},
             {"id":"sleep","type":"sleep"},
             {"id":"review","type":"exitedReviewMode"},
@@ -635,8 +608,12 @@ mod presentation_tests {
 }
 
 #[cfg(test)]
-mod bridge_tests {
+mod projection_tests {
     use super::*;
+    use serde_json::json;
+    macro_rules! turn {
+        ($($value:tt)*) => { serde_json::from_value::<Turn>(json!($($value)*)).unwrap() };
+    }
     #[test]
     fn pending_echoes_deduplicate_by_identity_and_anchor_after_latest_occurrence() {
         assert_eq!(remaining_submissions(&["a", "b", "a", "c"], ["b"]), [0, 3]);
@@ -652,39 +629,65 @@ mod bridge_tests {
     }
     #[test]
     fn duplicate_native_ids_keep_distinct_response_and_activity_indices() {
-        let turn = json!({"id":"turn","status":"completed","items":[
+        let turn = turn!({"id":"turn","status":"completed","items":[
             {"id":"same","type":"agentMessage","text":"old"},
             {"id":"same","type":"agentMessage","phase":"final_answer","text":"new"}
         ]});
         let segment = project(&turn).next().unwrap();
-        assert_eq!(segment.role(0, &turn["items"][0]), Role::Activity);
-        assert_eq!(segment.role(1, &turn["items"][1]), Role::Response);
+        assert_eq!(
+            segment.role(0, turn.items.as_ref().unwrap()[0].as_ref().into()),
+            Role::Activity
+        );
+        assert_eq!(
+            segment.role(1, turn.items.as_ref().unwrap()[1].as_ref().into()),
+            Role::Response
+        );
         assert!(!segment.initially_expanded);
     }
     #[test]
-    fn bridge_preserves_source_positions_without_returning_bodies() {
-        let request = json!({"operation":"turn","turn":{"id":"t","status":"inProgress","items":[
+    fn pending_metadata_preserves_source_positions_without_copying_bodies() {
+        let turn = turn!({"id":"t","status":"inProgress","items":[
             {"id":"a","type":"agentMessage","phase":"commentary","text":"private body"},
             {"id":"b","type":"commandExecution","aggregatedOutput":"private output"}
-        ]},"pending":[{"afterItemId":"a","item":{"id":"p","type":"userMessage","clientId":"p","text":"private input"}}]});
-        let output = present_json(&request.to_string()).unwrap();
-        assert!(!output.contains("private"));
-        let segments: Value = serde_json::from_str(&output).unwrap();
+        ]});
+        let items = turn.items.as_ref().unwrap();
+        let order = source_order(items.len(), |i| &items[i].id, &[Some("a")]);
+        let item = |index: usize| {
+            let source = order[index];
+            if source < items.len() {
+                items[source].as_ref().into()
+            } else {
+                ItemMetadata {
+                    id: "p",
+                    client_id: Some("p"),
+                    kind: "userMessage",
+                    ..Default::default()
+                }
+            }
+        };
+        let segments: Vec<_> = project_items(&turn, order.len(), item).collect();
+        assert!(
+            !serde_json::to_string(&segments)
+                .unwrap()
+                .contains("private")
+        );
         let rows: Vec<_> = segments
-            .as_array()
-            .unwrap()
             .iter()
-            .flat_map(|s| s["rows"].as_array().unwrap())
-            .map(|r| (r["source"].as_u64().unwrap(), r["role"].as_str().unwrap()))
+            .flat_map(|s| (s.start..s.end).map(|index| (order[index], s.role(index, item(index)))))
             .collect();
-        assert_eq!(rows, [(0, "response"), (2, "user"), (1, "activity")]);
+        assert_eq!(
+            rows,
+            [(0, Role::Response), (2, Role::User), (1, Role::Activity)]
+        );
     }
     #[test]
     fn titles_keep_one_bounded_unicode_line() {
-        let command =
-            json!({"type":"commandExecution","command":"  cargo test\nsecret second line"});
+        let command: Item = serde_json::from_value(json!({"id":"command","type":"commandExecution","command":"  cargo test\nsecret second line"})).unwrap();
         assert_eq!(item_presentation(&command).title, "cargo test");
-        let command = json!({"type":"commandExecution","command":"日".repeat(121)});
+        let command: Item = serde_json::from_value(
+            json!({"id":"command","type":"commandExecution","command":"日".repeat(121)}),
+        )
+        .unwrap();
         let title = item_presentation(&command).title;
         assert_eq!(title.chars().count(), 121);
         assert!(title.ends_with('…'));

@@ -40,3 +40,16 @@ pub(crate) fn private_file_options() -> fs::OpenOptions {
     }
     options
 }
+
+/// Resolve the interactive shell on the Host, which may run a different OS
+/// from the client opening the terminal.
+pub(crate) fn terminal_command() -> &'static [&'static str] {
+    #[cfg(windows)]
+    {
+        &["cmd.exe"]
+    }
+    #[cfg(not(windows))]
+    {
+        &["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" -l"]
+    }
+}

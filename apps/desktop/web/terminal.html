@@ -23,7 +23,7 @@ terminal.attachCustomKeyEventHandler(event => {
   return true;
 });
 window.bexTerminal = {
-  write(base64) {terminal.write(Uint8Array.from(atob(base64), c => c.charCodeAt(0)));},
+  write(base64, sequence) {terminal.write(Uint8Array.from(atob(base64), c => c.charCodeAt(0)), () => post({type:'acknowledge',sequence}));},
   status(message) {terminal.writeln('\r\n\x1b[90m'+message+'\x1b[0m');},
   paste(text) {terminal.paste(text);},
   focus() {terminal.focus();}

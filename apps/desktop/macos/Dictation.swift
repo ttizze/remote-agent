@@ -1,7 +1,7 @@
 import AppKit
 import AVFoundation
 
-/// Like FilePicker, this helper owns its AppKit loop independently of GPUI.
+/// This helper owns its AppKit loop independently of GPUI.
 /// stdin EOF cancels recording even if the parent exits unexpectedly. Audio stays
 /// in the parent's private temporary directory; stdout contains only status.
 final class Dictation: NSObject, AVAudioRecorderDelegate {

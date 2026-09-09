@@ -6,10 +6,13 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
-host-protocol = { path = "../../crates/host-protocol" }
 tokio = { workspace = true, features = ["net"] }
-tokio-util.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 agent-core = { path = "../../crates/agent-core" }
+host-daemon = { path = "../../crates/host-daemon" }
+directories = "6"
+atomicwrites = "0.4.4"
+rfd = "0.17.2"
 conversation-presentation = { path = "../../crates/conversation-presentation" }
 gpui-kit = { version = "=0.6.0", features = ["tree-sitter-languages"] }
 gpui-http = { package = "gpui-pre-reqwest-client", version = "0.3.4" }
@@ -26,6 +29,10 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 pulldown-cmark = "0.13"
 async-channel = "2"
 similar = { version = "2", features = ["inline"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+cpal = "0.18.2"
+rubato = { version = "5", default-features = false }
 
 [dev-dependencies]
 gpui-kit = { version = "=0.6.0", features = ["test-support"] }

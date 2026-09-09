@@ -1,0 +1,112 @@
+[
+  {
+    "name": "ack clears sent text but keeps model changes and new attachments",
+    "sent": {
+      "text": "sent",
+      "attachments": [
+        {
+          "path": "/a",
+          "name": "a",
+          "isImage": false
+        }
+      ],
+      "model": null,
+      "effort": null
+    },
+    "current": {
+      "text": "sent",
+      "attachments": [
+        {
+          "path": "/a",
+          "name": "a",
+          "isImage": false
+        },
+        {
+          "path": "/b",
+          "name": "b",
+          "isImage": false
+        }
+      ],
+      "model": "new-model",
+      "effort": null
+    },
+    "expected": {
+      "text": "",
+      "attachments": [
+        {
+          "path": "/b",
+          "name": "b",
+          "isImage": false
+        }
+      ],
+      "model": "new-model",
+      "effort": null
+    }
+  },
+  {
+    "name": "ack keeps text edited during submission",
+    "sent": {
+      "text": "sent",
+      "attachments": [
+        {
+          "path": "/a",
+          "name": "a",
+          "isImage": false
+        }
+      ],
+      "model": null,
+      "effort": null
+    },
+    "current": {
+      "text": "newer",
+      "attachments": [
+        {
+          "path": "/a",
+          "name": "a",
+          "isImage": false
+        }
+      ],
+      "model": null,
+      "effort": null
+    },
+    "expected": {
+      "text": "newer",
+      "attachments": [],
+      "model": null,
+      "effort": null
+    }
+  },
+  {
+    "name": "ack clears unchanged input",
+    "sent": {
+      "text": "sent",
+      "attachments": [
+        {
+          "path": "/a",
+          "name": "a",
+          "isImage": false
+        }
+      ],
+      "model": null,
+      "effort": null
+    },
+    "current": {
+      "text": "sent",
+      "attachments": [
+        {
+          "path": "/a",
+          "name": "a",
+          "isImage": false
+        }
+      ],
+      "model": null,
+      "effort": null
+    },
+    "expected": {
+      "text": "",
+      "attachments": [],
+      "model": null,
+      "effort": null
+    }
+  }
+]

@@ -6,22 +6,38 @@ use gpui_kit::component::{
 };
 use std::path::PathBuf;
 
+fn text<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+fn array(value: &Value) -> &[Value] {
+    value.as_array().map(Vec::as_slice).unwrap_or_default()
+}
+fn extra<'a>(item: &'a Item, key: &str) -> &'a Value {
+    item.extra.get(key).unwrap_or(&Value::Null)
+}
+fn field<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> &'a Value {
+    map.get(key).unwrap_or(&Value::Null)
+}
+fn file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_owned()
+}
+
 const CHAT_WIDTH: f32 = 780.;
 
-fn review_counts(change: &Value) -> AnyElement {
+fn review_counts(additions: Option<u64>, deletions: Option<u64>) -> AnyElement {
     let counts = h_flex().gap_1().text_xs();
-    match (change["additions"].as_u64(), change["deletions"].as_u64()) {
+    match (additions, deletions) {
         (Some(added), Some(deleted)) => counts
             .child(div().text_color(rgb(0x37cf77)).child(format!("+{added}")))
             .child(div().text_color(rgb(0xff6259)).child(format!("−{deleted}")))
             .into_any_element(),
         _ => counts
             .text_color(rgb(0x999999))
-            .child(if change.get("additions").is_some() {
-                "バイナリ"
-            } else {
-                "—"
-            })
+            .child("バイナリ")
             .into_any_element(),
     }
 }
@@ -194,60 +210,6 @@ mod link_tests {
     }
 }
 
-// Reuse the conversation paging contract, retaining only image items while
-// traversing older turns and within-turn gaps. Never return just the loaded page.
-fn session_image_sources(rpc: &Rpc, thread_id: &str) -> Result<Value, String> {
-    fn retain_images(thread: &mut Value) {
-        if let Some(turns) = thread["turns"].as_array_mut() {
-            for turn in turns {
-                if let Some(items) = turn["items"].as_array_mut() {
-                    items.retain(|item| item["type"] == "imageGeneration");
-                    for item in items {
-                        if !text(item, "savedPath").is_empty() {
-                            item.as_object_mut().unwrap().remove("result");
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let mut result = rpc.request("host/thread/read", json!({"threadId":thread_id,"includeTurns":true,"paginateHistory":true,"deferItemDetails":true}))?;
-    let mut history = Conversation {
-        thread: result["thread"].take(),
-        ..Default::default()
-    };
-    retain_images(&mut history.thread);
-    let mut cursors = HashSet::new();
-    while let Some(page) = history.older_page() {
-        if !cursors.insert((page.turn.clone(), page.cursor.to_string())) {
-            return Err("履歴カーソルが進みませんでした".into());
-        }
-        let method = if page.turn.is_some() {
-            "host/thread/items/list"
-        } else {
-            "host/thread/turns/list"
-        };
-        let mut result = rpc.request(method, json!({"threadId":thread_id,"turnId":page.turn,"cursor":page.cursor,"deferItemDetails":true}))?;
-        retain_images(&mut result["thread"]);
-        history.merge_older(result, &page)?;
-    }
-    let mut images = Vec::new();
-    if let Value::Array(turns) = history.thread["turns"].take() {
-        for mut turn in turns {
-            if let Value::Array(items) = turn["items"].take() {
-                for mut item in items {
-                    let encoded = text(&item, "savedPath").is_empty();
-                    let source = item[if encoded { "result" } else { "savedPath" }].take();
-                    if source.as_str().is_some_and(|source| !source.is_empty()) {
-                        images.push(json!({"source":source,"encoded":encoded}));
-                    }
-                }
-            }
-        }
-    }
-    Ok(Value::Array(images))
-}
-
 impl Desktop {
     fn button(
         &self,
@@ -294,9 +256,14 @@ impl Desktop {
         clickable: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
+        let key = format!(
+            "{}:{}:{encoded}:{}",
+            self.remote_key(),
+            self.snapshot.navigation.cwd,
+            source
+        );
         if !self.images.contains_key(&key) {
-            let source = std::sync::Arc::new(source.to_owned());
+            let source = Arc::new(source.to_owned());
             self.images.insert(
                 key.clone(),
                 ImageState {
@@ -305,24 +272,68 @@ impl Desktop {
                     error: None,
                 },
             );
-            let cwd = self.cwd.clone();
-            let remote = self.remote.clone();
-            let manager = self.manager.clone();
+            let cwd = self.snapshot.navigation.cwd.clone();
+            let remote = self.remote.is_some();
+            let store = self.store.clone();
             let destination = self
                 .image_dir
                 .path()
                 .join(format!("image-{}", self.images.len()));
             let returned = key.clone();
-            self.work(false,move||{
-                let result=(||->Result<String,String>{
-                    if encoded { let bytes=base64::engine::general_purpose::STANDARD.decode(source.as_bytes()).map_err(|e|e.to_string())?; std::fs::write(&destination,bytes).map_err(|e|e.to_string())?;return Ok(destination.to_string_lossy().into_owned()); }
-                    if source.starts_with("https://")||source.starts_with("http://"){return Ok(source.as_ref().clone());}
-                    if source.starts_with("data:image/"){let (header,data)=source.split_once(',').ok_or("画像データが不正です")?;if !header.ends_with(";base64"){return Err("未対応の画像データです".into());}let bytes=base64::engine::general_purpose::STANDARD.decode(data).map_err(|e|e.to_string())?;std::fs::write(&destination,bytes).map_err(|e|e.to_string())?;return Ok(destination.to_string_lossy().into_owned());}
-                    let path=conversation_file_path(&source,&cwd)?;
-                    if remote.is_empty(){return Ok(path.to_string_lossy().into_owned());}
-                    manager.request("host/transfer",json!({"profileId":remote,"direction":"download","source":path,"destination":destination}))?;Ok(destination.to_string_lossy().into_owned())
-                })();Ok(match result{Ok(path)=>json!({"path":path}),Err(error)=>json!({"error":error})})
-            },move|s,v,_,_|{if let Some(image)=s.images.get_mut(&returned){image.path=v["path"].as_str().map(|s|if s.starts_with("/"){std::path::PathBuf::from(s).into()}else{ImageSource::from(s.to_owned())});image.error=v["error"].as_str().map(str::to_owned);}s.list.remeasure();});
+            self.effect(
+                async move {
+                    if encoded || source.starts_with("data:image/") {
+                        let data = if encoded {
+                            source.as_str()
+                        } else {
+                            let (header, data) =
+                                source.split_once(',').ok_or("画像データが不正です")?;
+                            if !header.ends_with(";base64") {
+                                return Err("未対応の画像データです".into());
+                            }
+                            data
+                        };
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .map_err(|error| error.to_string())?;
+                        tokio::fs::write(&destination, bytes)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        return Ok(destination.to_string_lossy().into_owned());
+                    }
+                    if source.starts_with("https://") || source.starts_with("http://") {
+                        return Ok(source.as_ref().clone());
+                    }
+                    let path = conversation_file_path(&source, &cwd)?;
+                    if !remote {
+                        return Ok(path.to_string_lossy().into_owned());
+                    }
+                    store
+                        .ok_or("Host に接続していません")?
+                        .dispatch(Intent::DownloadFile {
+                            source: path,
+                            destination: destination.clone(),
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok(destination.to_string_lossy().into_owned())
+                },
+                move |view, result, _, _| {
+                    if let Some(image) = view.images.get_mut(&returned) {
+                        match result {
+                            Ok(path) => {
+                                image.path = Some(if Path::new(&path).is_absolute() {
+                                    PathBuf::from(path).into()
+                                } else {
+                                    ImageSource::from(path)
+                                })
+                            }
+                            Err(error) => image.error = Some(error),
+                        }
+                    }
+                    view.list.remeasure();
+                },
+            );
         }
         let state = &self.images[&key];
         if let Some(path) = &state.path {
@@ -343,8 +354,8 @@ impl Desktop {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |s, _, _, cx| {
-                        s.open_image_gallery(source.clone(), encoded, cx)
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.open_image_gallery(source.clone(), encoded, cx)
                     }))
                     .child(image)
                     .into_any_element()
@@ -364,6 +375,7 @@ impl Desktop {
                 .into_any_element()
         }
     }
+
     fn markdown(&mut self, id: String, source: &str, cx: &mut Context<Self>) -> AnyElement {
         if self
             .markdown_cache
@@ -432,7 +444,7 @@ impl Desktop {
             cx.open_url(source);
             return;
         }
-        let path = match conversation_file_path(source, &self.cwd) {
+        let path = match conversation_file_path(source, &self.snapshot.navigation.cwd) {
             Ok(path) => path,
             Err(error) => {
                 self.error = error;
@@ -446,36 +458,47 @@ impl Desktop {
             .and_then(image::ImageFormat::from_extension)
             .is_some()
         {
-            self.open_image_gallery(
-                std::sync::Arc::new(path.to_string_lossy().into_owned()),
-                false,
-                cx,
-            );
+            self.open_image_gallery(Arc::new(path.to_string_lossy().into_owned()), false, cx);
             return;
         }
-        let remote = self.remote.clone();
-        let manager = self.manager.clone();
+        let store = self.store.clone();
+        let remote = self.remote.is_some();
         let directory = self.image_dir.path().to_owned();
-        self.work(false, move || {
-            let path = if remote.is_empty() {
-                path
-            } else {
-                let download = tempfile::Builder::new().prefix("link-").tempdir_in(directory).map_err(|e| e.to_string())?.keep();
-                let destination = download.join(path.file_name().ok_or("ファイル名がありません")?);
-                manager.request("host/transfer", json!({"profileId":remote,"direction":"download","source":path,"destination":destination}))?;
-                destination
-            };
-            let path = path.canonicalize().map_err(|e| e.to_string())?;
-            let url = url::Url::from_file_path(path).map_err(|_| "ファイルパスが不正です")?;
-            Ok(json!({"url":url.as_str()}))
-        }, |_, result, _, cx| cx.open_url(text(&result, "url")));
+        self.effect(
+            async move {
+                let path = if remote {
+                    let download = tempfile::Builder::new()
+                        .prefix("link-")
+                        .tempdir_in(directory)
+                        .map_err(|error| error.to_string())?
+                        .keep();
+                    let destination =
+                        download.join(path.file_name().ok_or("ファイル名がありません")?);
+                    store
+                        .ok_or("Host に接続していません")?
+                        .dispatch(Intent::DownloadFile {
+                            source: path,
+                            destination: destination.clone(),
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    destination
+                } else {
+                    path
+                };
+                let path = tokio::fs::canonicalize(path)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                url::Url::from_file_path(path).map_err(|_| "ファイルパスが不正です".into())
+            },
+            |view, result, _, cx| match result {
+                Ok(url) => cx.open_url(url.as_str()),
+                Err(error) => view.error = error,
+            },
+        );
     }
-    fn open_image_gallery(
-        &mut self,
-        source: std::sync::Arc<String>,
-        encoded: bool,
-        cx: &mut Context<Self>,
-    ) {
+
+    fn open_image_gallery(&mut self, source: Arc<String>, encoded: bool, cx: &mut Context<Self>) {
         let id = uuid::Uuid::new_v4();
         self.image_gallery = Some(ImageGallery {
             id,
@@ -488,47 +511,39 @@ impl Desktop {
             saved: false,
             error: String::new(),
         });
-        let rpc = self.rpc.clone();
-        let thread = self.selected.clone();
-        self.work(
-            false,
-            move || {
-                Ok(match session_image_sources(&rpc, &thread) {
-                    Ok(images) => json!({"images":images}),
-                    Err(error) => json!({"error":error}),
-                })
-            },
-            move |s, mut result, _, _| {
-                let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| gallery.id == id)
+        self.perform(
+            Intent::LoadSessionImages(self.selected().into()),
+            move |view, result, _, _| {
+                let Some(gallery) = view
+                    .image_gallery
+                    .as_mut()
+                    .filter(|gallery| gallery.id == id)
                 else {
                     return;
                 };
                 gallery.loading = false;
-                if let Some(error) = result["error"].as_str() {
-                    gallery.error = error.into();
-                    return;
-                }
-                let initial = gallery.current_image().clone();
-                let mut entries = Vec::new();
-                let mut seen = HashSet::new();
-                if let Value::Array(images) = result["images"].take() {
-                    for mut image in images {
-                        if let Value::String(source) = image["source"].take() {
-                            let source = std::sync::Arc::new(source);
-                            let encoded = image["encoded"] == true;
-                            if seen.insert((source.clone(), encoded)) {
-                                entries.push((source, encoded));
-                            }
+                match result {
+                    Ok(Outcome::SessionImages(images)) => {
+                        let initial = gallery.current_image().clone();
+                        let mut seen = HashSet::new();
+                        let entries: Vec<_> = images
+                            .into_iter()
+                            .filter_map(|image| {
+                                let entry = (Arc::new(image.source), image.encoded);
+                                seen.insert(entry.clone()).then_some(entry)
+                            })
+                            .collect();
+                        gallery.selected = entries.iter().position(|entry| entry == &initial);
+                        gallery
+                            .list
+                            .splice(0..gallery.list.item_count(), entries.len());
+                        gallery.entries = entries;
+                        if let Some(index) = gallery.selected {
+                            gallery.list.scroll_to_reveal_item(index);
                         }
                     }
-                }
-                gallery.selected = entries.iter().position(|entry| entry == &initial);
-                gallery
-                    .list
-                    .splice(0..gallery.list.item_count(), entries.len());
-                gallery.entries = entries;
-                if let Some(selected) = gallery.selected {
-                    gallery.list.scroll_to_reveal_item(selected);
+                    Err(error) => gallery.error = error,
+                    _ => unreachable!("session image outcome"),
                 }
             },
         );
@@ -582,7 +597,12 @@ impl Desktop {
             false,
             cx,
         );
-        let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
+        let key = format!(
+            "{}:{}:{encoded}:{}",
+            self.remote_key(),
+            self.snapshot.navigation.cwd,
+            source
+        );
         let ready = self
             .images
             .get(&key)
@@ -652,7 +672,14 @@ impl Desktop {
             return;
         };
         let (source, encoded) = gallery.current_image();
-        let key = format!("{}:{}:{encoded}:{}", self.remote, self.cwd, source);
+        let key = format!(
+            "{}:{}:{encoded}:{}",
+            self.remote
+                .as_ref()
+                .map_or("local", |remote| remote.id.as_str()),
+            self.snapshot.navigation.cwd,
+            source
+        );
         let Some(ImageSource::Resource(resource)) =
             self.images.get(&key).and_then(|image| image.path.clone())
         else {
@@ -705,8 +732,8 @@ impl Desktop {
                                 image::guess_format(bytes).map_err(|error| error.to_string())?
                             }
                         };
-                        let mode = format!("download:image.{}", format.extensions_str()[0]);
-                        let Some(destination) = platform::choose(&mode)? else {
+                        let mode = format!("image.{}", format.extensions_str()[0]);
+                        let Some(destination) = platform::choose_destination(&mode) else {
                             return Ok(false);
                         };
                         match original {
@@ -767,15 +794,18 @@ impl Desktop {
             .scrollable(true)
             .h(px(lines as f32 * 22. + 32.))
     }
-    fn item(&mut self, item: &Value, turn: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let id = text(item, "id").to_owned();
-        let kind = text(item, "type");
+    fn item(&mut self, item: &Item, turn: Option<&Turn>, cx: &mut Context<Self>) -> AnyElement {
+        let id = item.id.clone();
+        let kind = item.kind.as_deref().unwrap_or_default();
         let expanded = self.expanded_items.contains(&id);
-        let deferred = array(&turn["deferredItemIds"])
-            .iter()
-            .any(|value| value == &id);
+        let deferred = turn
+            .and_then(|turn| turn.deferred_item_ids.as_ref())
+            .is_some_and(|ids| ids.contains(&id));
         if expanded && deferred {
-            let key = (text(turn, "id").to_owned(), id.clone());
+            let key = (
+                turn.map(|turn| turn.id.clone()).unwrap_or_default(),
+                id.clone(),
+            );
             let label = match self
                 .item_details
                 .get(&key)
@@ -800,18 +830,22 @@ impl Desktop {
                 ))
                 .child(
                     self.button(format!("detail-{id}"), label, cx, move |s, _, _| {
-                        s.load_detail(key.0.clone(), key.1.clone());
+                        s.detail(key.0.clone(), key.1.clone());
                         s.remeasure_item(&key.0);
                     }),
                 )
                 .into_any_element();
         }
-        let turn_id = text(turn, "id").to_owned();
+        let turn_id = turn.map(|turn| turn.id.clone()).unwrap_or_default();
         match kind {
-            "agentMessage" => self.markdown(id, text(item, "text"), cx),
+            "agentMessage" => self.markdown(id, item.text.as_deref().unwrap_or_default(), cx),
             "imageGeneration" => {
-                let path = text(item, "savedPath");
-                let result = text(item, "result");
+                let path = item.saved_path.as_deref().unwrap_or_default();
+                let result = item
+                    .result
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 let title = conversation_presentation::item_presentation(item).title;
                 let mut body = v_flex()
                     .gap_2()
@@ -830,7 +864,7 @@ impl Desktop {
                     ));
                 } else if !result.is_empty() {
                     body = body.child(self.image(result, true, 320., true, cx));
-                } else if text(item, "status") == "inProgress" {
+                } else if item.status.as_deref().unwrap_or_default() == "inProgress" {
                     body = body.child(spinner::Spinner::new().small());
                 }
                 body.into_any_element()
@@ -842,8 +876,8 @@ impl Desktop {
                     .p_4()
                     .rounded(px(18.))
                     .bg(rgb(0x303030));
-                if item["content"].is_array() {
-                    for (i, part) in array(&item["content"]).iter().enumerate() {
+                if extra(item, "content").is_array() {
+                    for (i, part) in array(extra(item, "content")).iter().enumerate() {
                         body = body.child(match text(part, "type") {
                             "text" => TextView::markdown(
                                 SharedString::from(format!("{id}-{i}")),
@@ -860,7 +894,7 @@ impl Desktop {
                                     if path.is_empty() {
                                         part.to_string()
                                     } else {
-                                        basename(&path)
+                                        file_name(&path)
                                     },
                                     cx,
                                     move |s, _, _| {
@@ -877,7 +911,7 @@ impl Desktop {
                     body = body.child(
                         TextView::markdown(
                             SharedString::from(id.clone()),
-                            literal(text(item, "text")),
+                            literal(item.text.as_deref().unwrap_or_default()),
                         )
                         .selectable(true),
                     );
@@ -899,7 +933,7 @@ impl Desktop {
                     move |s, _, _| {
                         toggle_set(&mut s.expanded_items, &toggle);
                         if s.expanded_items.contains(&toggle) {
-                            s.load_detail(turn_id.clone(), toggle.clone());
+                            s.detail(turn_id.clone(), toggle.clone());
                         }
                         s.pause_tail();
                         s.remeasure_item(&toggle);
@@ -907,32 +941,32 @@ impl Desktop {
                 ));
                 if expanded {
                     let content = if kind == "reasoning" {
-                        if item["summary"].is_array() {
-                            array(&item["summary"])
+                        if extra(item, "summary").is_array() {
+                            array(extra(item, "summary"))
                                 .iter()
                                 .filter_map(Value::as_str)
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         } else {
-                            item["summary"]
+                            extra(item, "summary")
                                 .as_str()
-                                .or(item["text"].as_str())
+                                .or(item.text.as_deref())
                                 .unwrap_or("")
                                 .to_owned()
                         }
                     } else {
                         format!(
                             "$ {}\n\n{}",
-                            text(item, "command"),
-                            text(item, "aggregatedOutput")
+                            item.command.as_deref().unwrap_or_default(),
+                            item.aggregated_output.as_deref().unwrap_or_default()
                         )
                     };
                     body = body
                         .child(Self::activity_text(format!("output-{id}"), &content, ""))
                         .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
                                 "{} {}",
-                                text(item, "status"),
-                                item.get("exitCode")
+                                item.status.as_deref().unwrap_or_default(),
+                                item.extra.get("exitCode")
                                     .map(|v| format!("exit {v}"))
                                     .unwrap_or_default()
                             )));
@@ -941,7 +975,7 @@ impl Desktop {
             }
             "fileChange" => {
                 let mut body = v_flex().gap_3();
-                for (i, change) in array(&item["changes"]).iter().enumerate() {
+                for (i, change) in array(extra(item, "changes")).iter().enumerate() {
                     let path = text(change, "path").to_owned();
                     let toggle = id.clone();
                     let turn_id = turn_id.clone();
@@ -949,12 +983,12 @@ impl Desktop {
                         .gap_2()
                         .child(self.button(
                             format!("change-{id}-{i}"),
-                            format!("{} {}", if expanded { "⌄" } else { "›" }, basename(&path)),
+                            format!("{} {}", if expanded { "⌄" } else { "›" }, file_name(&path)),
                             cx,
                             move |s, _, _| {
                                 toggle_set(&mut s.expanded_items, &toggle);
                                 if s.expanded_items.contains(&toggle) {
-                                    s.load_detail(turn_id.clone(), toggle.clone());
+                                    s.detail(turn_id.clone(), toggle.clone());
                                 }
                                 s.pause_tail();
                                 s.remeasure_item(&toggle);
@@ -993,7 +1027,7 @@ impl Desktop {
                         move |s, _, _| {
                             toggle_set(&mut s.expanded_items, &toggle);
                             if s.expanded_items.contains(&toggle) {
-                                s.load_detail(turn_id.clone(), toggle.clone());
+                                s.detail(turn_id.clone(), toggle.clone());
                             }
                             s.pause_tail();
                             s.remeasure_item(&toggle);
@@ -1010,56 +1044,43 @@ impl Desktop {
             }
         }
     }
-    fn turn(&mut self, index: usize, turn: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let projected = self.project_turn(index, turn);
-        let outgoing = std::mem::take(&mut self.outgoing);
-        let items = array(&turn["items"]);
-        let item_at = |index: usize| {
-            let source = projected
-                .sources
-                .as_ref()
-                .map_or(index, |sources| sources[index]);
-            if source < items.len() {
-                &items[source]
-            } else {
-                &outgoing[source - items.len()].item
-            }
-        };
+    fn turn(&mut self, turn: &Arc<Turn>, cx: &mut Context<Self>) -> AnyElement {
+        let projected = self.project_turn(turn);
+        let items = turn.items.as_deref().unwrap_or_default();
         let mut body = v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4();
-        let opening = &turn["openingUserMessage"];
-        if opening.is_object() && !items.iter().any(|item| item["id"] == opening["id"]) {
-            body = body.child(self.item(opening, turn, cx));
+        if let Some(opening) = &turn.opening_user_message
+            && !items.iter().any(|item| item.id == opening.id)
+        {
+            body = body.child(self.item(opening, Some(turn), cx));
         }
         for projection in &projected.segments {
             let id = &projection.id;
-            let status = text(turn, "status");
+            let status = turn.status.as_deref().unwrap_or_default();
             let expanded = self
                 .expanded_work
                 .get(id)
                 .filter(|(previous, _)| previous == status)
                 .map_or(projection.initially_expanded, |(_, expanded)| *expanded);
-            for item in (projection.start..projection.end)
-                .filter(|&index| {
-                    projection.role(index, item_at(index)) == conversation_presentation::Role::User
-                })
-                .map(&item_at)
-            {
-                body = body.child(self.item(item, turn, cx));
+            for index in (projection.start..projection.end).filter(|&index| {
+                projection.role(index, projected.metadata(index))
+                    == conversation_presentation::Role::User
+            }) {
+                body = body.child(self.projected_item(&projected, index, cx));
             }
             if let Some(label) = &projection.label {
                 let header = if projection.collapsible {
                     let toggle = id.clone();
                     let status = status.to_owned();
-                    let turn_id = text(turn, "id").to_owned();
+                    let turn_id = turn.id.clone();
                     self.button(
                         format!("work-{id}"),
                         format!("{label} {}", if expanded { "⌄" } else { "›" }),
                         cx,
-                        move |s, _, _| {
-                            s.expanded_work
+                        move |view, _, _| {
+                            view.expanded_work
                                 .insert(toggle.clone(), (status.clone(), !expanded));
-                            s.pause_tail();
-                            s.remeasure_item(&turn_id);
+                            view.pause_tail();
+                            view.remeasure_item(&turn_id);
                         },
                     )
                     .text_color(rgb(0xa0a0a0))
@@ -1080,66 +1101,54 @@ impl Desktop {
                 );
             }
             if expanded {
-                for item in (projection.start..projection.end)
-                    .filter(|&index| {
-                        projection.role(index, item_at(index))
-                            == conversation_presentation::Role::Activity
-                    })
-                    .map(&item_at)
-                {
-                    body = body.child(self.item(item, turn, cx));
+                for index in (projection.start..projection.end).filter(|&index| {
+                    projection.role(index, projected.metadata(index))
+                        == conversation_presentation::Role::Activity
+                }) {
+                    body = body.child(self.projected_item(&projected, index, cx));
                 }
             }
-            if projection.last && !turn["error"].is_null() {
+            if projection.last
+                && let Some(error) = turn.error.as_ref().filter(|error| !error.is_null())
+            {
                 body = body.child(
                     div().text_color(rgb(0xff8e86)).child(
-                        turn["error"]["message"]
-                            .as_str()
+                        error
+                            .get("message")
+                            .and_then(Value::as_str)
                             .map(str::to_owned)
-                            .unwrap_or_else(|| turn["error"].to_string()),
+                            .unwrap_or_else(|| error.to_string()),
                     ),
                 );
             }
-            for item in (projection.start..projection.end)
-                .filter(|&index| {
-                    projection.role(index, item_at(index))
-                        == conversation_presentation::Role::Response
-                })
-                .map(&item_at)
-            {
-                body = body.child(self.item(item, turn, cx));
-                if item["type"] == "agentMessage" && item["phase"] != "commentary" {
-                    let turn_id = text(turn, "id").to_owned();
-                    let item_id = text(item, "id").to_owned();
+            for index in (projection.start..projection.end).filter(|&index| {
+                projection.role(index, projected.metadata(index))
+                    == conversation_presentation::Role::Response
+            }) {
+                body = body.child(self.projected_item(&projected, index, cx));
+                if let Some(item) = items.get(projected.sources[index])
+                    && item.kind.as_deref() == Some("agentMessage")
+                    && extra(item, "phase") != "commentary"
+                {
+                    let item = item.clone();
                     body = body.child(
                         h_flex().child(
-                            Button::new(SharedString::from(format!("copy-{}", text(item, "id"))))
+                            Button::new(format!("copy-{}", item.id))
                                 .icon(IconName::Copy)
                                 .small()
                                 .ghost()
                                 .tooltip("回答をコピー")
                                 .accessibility_label("回答をコピー")
-                                .on_click(cx.listener(move |s, _, _, cx| {
-                                    if let Some(item) = array(&s.conversation.thread["turns"])
-                                        .iter()
-                                        .find(|turn| turn["id"] == turn_id)
-                                        .and_then(|turn| {
-                                            array(&turn["items"])
-                                                .iter()
-                                                .find(|item| item["id"] == item_id)
-                                        })
-                                    {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            text(item, "text").to_owned(),
-                                        ));
-                                    }
-                                })),
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        item.text.clone().unwrap_or_default(),
+                                    ));
+                                }),
                         ),
                     );
                 }
             }
         }
-        self.outgoing = outgoing;
         h_flex()
             .justify_center()
             .w_full()
@@ -1148,10 +1157,66 @@ impl Desktop {
             .child(body)
             .into_any_element()
     }
-    fn request_card(&mut self, request: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let key = &request["id"];
-        let id = request["id"].clone();
-        let params = &request["params"];
+    fn projected_item(
+        &mut self,
+        projected: &ProjectedTurn,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let items = projected.turn.items.as_deref().unwrap_or_default();
+        let source = projected.sources[index];
+        if let Some(item) = items.get(source) {
+            self.item(item, Some(&projected.turn), cx)
+        } else {
+            let (id, pending) = &projected.pending[source - items.len()];
+            self.pending_item(id, &pending.draft, cx)
+        }
+    }
+    fn pending_item(&mut self, id: &str, draft: &Draft, cx: &mut Context<Self>) -> AnyElement {
+        let mut body = v_flex()
+            .gap_3()
+            .max_w(px(560.))
+            .p_4()
+            .rounded(px(18.))
+            .bg(rgb(0x303030));
+        if !draft.text.is_empty() {
+            body = body.child(
+                TextView::markdown(
+                    SharedString::from(format!("pending-{id}")),
+                    literal(&draft.text),
+                )
+                .selectable(true),
+            );
+        }
+        for (index, attachment) in draft.attachments.iter().enumerate() {
+            if attachment.is_image {
+                body = body.child(self.image(&attachment.path, false, 320., true, cx));
+            } else {
+                let path = attachment.path.clone();
+                body = body.child(self.button(
+                    format!("pending-{id}-file-{index}"),
+                    attachment.name.clone(),
+                    cx,
+                    move |view, _, _| view.download(path.clone()),
+                ));
+            }
+        }
+        h_flex()
+            .w_full()
+            .justify_end()
+            .my_4()
+            .child(body)
+            .into_any_element()
+    }
+
+    fn request_card(
+        &mut self,
+        key: &str,
+        request: &ServerRequest,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = &request.id;
+        let params = &request.params;
         let Some(inputs) = self.requests.get(key) else {
             return div().into_any_element();
         };
@@ -1177,89 +1242,92 @@ impl Desktop {
                 .into_any_element();
         }
         if !inputs.questions.is_empty() {
-            for q in &inputs.questions {
-                let input = q.input.clone();
-                body = body.child(q.prompt.clone());
-                for (i, option) in q.options.iter().enumerate() {
-                    let input = input.clone();
+            for question in &inputs.questions {
+                body = body.child(question.prompt.clone());
+                for (index, option) in question.options.iter().enumerate() {
+                    let input = question.input.clone();
                     let value = option.clone();
                     body = body.child(self.button(
-                        format!("answer-{key}-{}-{i}", q.id),
+                        format!("answer-{key}-{}-{index}", question.id),
                         option.clone(),
                         cx,
-                        move |_, w, cx| input.update(cx, |s, cx| s.set_value(value.clone(), w, cx)),
+                        move |_, window, cx| {
+                            input.update(cx, |input, cx| input.set_value(value.clone(), window, cx))
+                        },
                     ));
                 }
-                body = body.child(Input::new(&q.input));
+                body = body.child(Input::new(&question.input));
             }
+            let key = key.to_owned();
+            let id = id.clone();
             body = body.child(self.button(
                 format!("respond-{key}"),
                 "回答を送信",
                 cx,
-                move |s, _, cx| {
-                    let inputs = &s.requests[&id];
-                    let mut answers = serde_json::Map::new();
-                    for q in &inputs.questions {
-                        let value = q.input.read(cx).value();
-                        if value.trim().is_empty() {
-                            s.error = "すべての質問に回答してください".into();
-                            return;
-                        }
-                        answers.insert(q.id.clone(), json!({"answers":[value.as_ref()]}));
-                    }
-                    s.respond(id.clone(), json!({"answers":answers}));
+                move |view, _, cx| {
+                    let Some(inputs) = view.requests.get(&key) else {
+                        return;
+                    };
+                    let answers = inputs
+                        .questions
+                        .iter()
+                        .map(|question| {
+                            (
+                                question.id.clone(),
+                                question.input.read(cx).value().to_string(),
+                            )
+                        })
+                        .collect();
+                    view.respond(key.clone(), id.clone(), Answer::Questions(answers));
                 },
             ));
         } else if matches!(
-            text(request, "method"),
+            request.method.as_str(),
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
         ) {
-            let defaults = json!(["accept", "acceptForSession", "decline", "cancel"]);
-            let decisions = if params["availableDecisions"].is_array() {
-                &params["availableDecisions"]
-            } else {
-                &defaults
-            };
+            let defaults = ["accept", "acceptForSession", "decline", "cancel"];
+            let decisions = field(params, "availableDecisions").as_array();
             let mut row = h_flex().gap_2().flex_wrap();
-            for (i, decision) in array(decisions).iter().enumerate() {
-                let id = id.clone();
-                let decision = decision.clone();
-                let label = match decision.as_str() {
+            for index in 0..decisions.map_or(defaults.len(), Vec::len) {
+                let decision = decisions.and_then(|decisions| decisions.get(index));
+                let value = decision
+                    .and_then(Value::as_str)
+                    .or_else(|| decisions.is_none().then(|| defaults[index]));
+                let label = match value {
                     Some("accept") => "許可".into(),
                     Some("acceptForSession") => "このセッションで許可".into(),
                     Some("decline") => "拒否".into(),
                     Some("cancel") => "中止".into(),
-                    _ => decision.to_string(),
+                    _ => decision.map(Value::to_string).unwrap_or_default(),
                 };
+                let key = key.to_owned();
+                let id = id.clone();
                 row = row.child(self.button(
-                    format!("decision-{key}-{i}"),
+                    format!("decision-{key}-{index}"),
                     label,
                     cx,
-                    move |s, _, _| s.respond(id.clone(), json!({"decision":decision})),
+                    move |view, _, _| {
+                        view.respond(key.clone(), id.clone(), Answer::Decision(index))
+                    },
                 ));
             }
             body = body.child(row);
-        } else if request["method"] == "item/permissions/requestApproval" {
-            let denied = id.clone();
-            let permissions = params["permissions"].clone();
-            body = body
-                .child(self.button(
-                    format!("allow-{key}"),
-                    "今回の権限を許可",
+        } else if request.method == "item/permissions/requestApproval" {
+            for (allow, label) in [(true, "今回の権限を許可"), (false, "拒否")] {
+                let key = key.to_owned();
+                let id = id.clone();
+                body = body.child(self.button(
+                    format!("permissions-{key}-{allow}"),
+                    label,
                     cx,
-                    move |s, _, _| {
-                        s.respond(
-                            id.clone(),
-                            json!({"permissions":permissions,"scope":"turn"}),
-                        )
+                    move |view, _, _| {
+                        view.respond(key.clone(), id.clone(), Answer::Permissions(allow))
                     },
-                ))
-                .child(
-                    self.button(format!("deny-{key}"), "拒否", cx, move |s, _, _| {
-                        s.respond(denied.clone(), json!({"permissions":{},"scope":"turn"}))
-                    }),
-                );
+                ));
+            }
         } else {
+            let key = key.to_owned();
+            let id = id.clone();
             body = body
                 .child("要求の形式に合わせて回答JSONを入力")
                 .child(Textarea::new(&inputs.raw))
@@ -1267,11 +1335,16 @@ impl Desktop {
                     format!("raw-{key}"),
                     "回答を送信",
                     cx,
-                    move |s, _, cx| match serde_json::from_str(
-                        s.requests[&id].raw.read(cx).value().as_ref(),
-                    ) {
-                        Ok(value) => s.respond(id.clone(), value),
-                        Err(e) => s.error = e.to_string(),
+                    move |view, _, cx| {
+                        let Some(inputs) = view.requests.get(&key) else {
+                            return;
+                        };
+                        match serde_json::value::RawValue::from_string(
+                            inputs.raw.read(cx).value().to_string(),
+                        ) {
+                            Ok(value) => view.respond(key.clone(), id.clone(), Answer::Raw(value)),
+                            Err(error) => view.error = error.to_string(),
+                        }
                     },
                 ));
         }
@@ -1283,6 +1356,40 @@ impl Desktop {
             .child(body.max_w(px(CHAT_WIDTH)))
             .into_any_element()
     }
+    pub(super) fn sync_request_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.requests
+            .retain(|key, _| self.snapshot.requests.contains_key(key));
+        for (key, request) in self.snapshot.requests.iter() {
+            if self.requests.contains_key(key) {
+                continue;
+            }
+            let questions = array(field(&request.params, "questions"))
+                .iter()
+                .map(|question| Question {
+                    id: text(question, "id").into(),
+                    prompt: text(question, "question").into(),
+                    options: array(&question["options"])
+                        .iter()
+                        .map(|option| text(option, "label").into())
+                        .collect(),
+                    input: cx.new(|cx| InputState::new(window, cx).placeholder("回答を入力")),
+                })
+                .collect();
+            self.requests.insert(
+                key.clone(),
+                RequestInputs {
+                    questions,
+                    raw: cx.new(|cx| {
+                        TextareaState::new(window, cx)
+                            .default_value("{}")
+                            .auto_grow(3, 8)
+                    }),
+                    sent: false,
+                },
+            );
+        }
+    }
+
     fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         popover::Popover::new("model-controls")
@@ -1312,7 +1419,13 @@ impl Desktop {
     fn model_controls(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         let model = self.selected_model();
-        let effort_label = match self.effort.as_str() {
+        let effort = self
+            .draft()
+            .effort
+            .as_deref()
+            .or_else(|| model.map(|model| model.default_reasoning_effort.as_str()))
+            .unwrap_or_default();
+        let effort_label = match effort {
             "none" => "なし",
             "minimal" => "最小",
             "low" => "低",
@@ -1324,9 +1437,8 @@ impl Desktop {
             value => value,
         };
         let model_label = format!(
-            "{} {}",
-            model.map(|m| text(m, "displayName")).unwrap_or("モデル"),
-            effort_label
+            "{} {effort_label}",
+            model.map_or("モデル", |model| model.display_name.as_str())
         );
         let models = Button::new("model-choice")
             .label(model_label)
@@ -1335,16 +1447,22 @@ impl Desktop {
             .ghost()
             .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
                 if let Some(owner) = entity.upgrade() {
-                    let s = owner.read(cx);
-                    for model in &s.models {
-                        let value = text(model, "model").to_owned();
+                    let view = owner.read(cx);
+                    for model in view.snapshot.models.iter() {
+                        let value = model.model.clone();
                         let entity = entity.clone();
                         menu = menu.item(
-                            PopupMenuItem::new(text(model, "displayName").to_owned())
-                                .checked(value == s.model)
+                            PopupMenuItem::new(model.display_name.clone())
+                                .checked(
+                                    view.selected_model()
+                                        .is_some_and(|model| model.model == value),
+                                )
                                 .on_click(move |_, _, cx| {
-                                    let _ = entity.update(cx, |s, cx| {
-                                        s.select_model(&value, cx);
+                                    let _ = entity.update(cx, |view, cx| {
+                                        view.dispatch(Intent::SelectModel {
+                                            thread_id: view.draft_key().into(),
+                                            model: value.clone(),
+                                        });
                                         cx.notify();
                                     });
                                 }),
@@ -1354,13 +1472,21 @@ impl Desktop {
                 menu
             });
         let entity = cx.entity().downgrade();
+        let tier = self
+            .draft()
+            .service_tier
+            .as_deref()
+            .or_else(|| model.and_then(|model| model.default_service_tier.as_deref()))
+            .unwrap_or("default");
         let speed_label = model
-            .and_then(|m| {
-                array(&m["serviceTiers"])
-                    .iter()
-                    .find(|t| t["id"] == self.service_tier)
+            .and_then(|model| model.service_tiers.as_deref())
+            .and_then(|tiers| tiers.iter().find(|value| value.id == tier))
+            .map(|tier| {
+                tier.extra
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&tier.id)
             })
-            .map(|t| text(t, "name"))
             .unwrap_or("標準");
         let speed = Button::new("model-speed")
             .label(format!("⚡︎ {speed_label}"))
@@ -1370,31 +1496,52 @@ impl Desktop {
             .ghost()
             .dropdown_menu(move |mut menu, _, cx| {
                 if let Some(owner) = entity.upgrade() {
-                    let s = owner.read(cx);
+                    let view = owner.read(cx);
                     let standard = entity.clone();
                     menu = menu.item(
                         PopupMenuItem::new("標準")
-                            .checked(s.service_tier == "default")
+                            .checked(view.draft().service_tier.as_deref() == Some("default"))
                             .on_click(move |_, _, cx| {
-                                let _ = standard.update(cx, |s, cx| {
-                                    s.service_tier = "default".into();
+                                let _ = standard.update(cx, |view, cx| {
+                                    view.dispatch(Intent::SelectServiceTier {
+                                        thread_id: view.draft_key().into(),
+                                        service_tier: "default".into(),
+                                    });
                                     cx.notify();
                                 });
                             }),
                     );
-                    if let Some(model) = s.selected_model() {
-                        for tier in array(&model["serviceTiers"])
+                    if let Some(model) = view.selected_model() {
+                        for tier in model
+                            .service_tiers
+                            .as_deref()
+                            .unwrap_or_default()
                             .iter()
-                            .filter(|t| t["id"] != "default")
+                            .filter(|tier| tier.id != "default")
                         {
-                            let value = text(tier, "id").to_owned();
+                            let value = tier.id.clone();
                             let entity = entity.clone();
+                            let label = tier
+                                .extra
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&tier.id)
+                                .to_owned();
                             menu = menu.item(
-                                PopupMenuItem::new(text(tier, "name").to_owned())
-                                    .checked(value == s.service_tier)
+                                PopupMenuItem::new(label)
+                                    .checked(
+                                        view.draft()
+                                            .service_tier
+                                            .as_deref()
+                                            .or(model.default_service_tier.as_deref())
+                                            == Some(&value),
+                                    )
                                     .on_click(move |_, _, cx| {
-                                        let _ = entity.update(cx, |s, cx| {
-                                            s.service_tier = value.clone();
+                                        let _ = entity.update(cx, |view, cx| {
+                                            view.dispatch(Intent::SelectServiceTier {
+                                                thread_id: view.draft_key().into(),
+                                                service_tier: value.clone(),
+                                            });
                                             cx.notify();
                                         });
                                     }),
@@ -1404,68 +1551,52 @@ impl Desktop {
                 }
                 menu
             });
-        let efforts = model
-            .map(|m| array(&m["supportedReasoningEfforts"]))
-            .unwrap_or_default();
         v_flex()
             .w(px(280.))
             .gap_2()
             .child(h_flex().justify_between().child(speed).child(models))
-            .child(model_effort_slider(&self.effort_slider, efforts.len(), cx))
+            .child(model_effort_slider(
+                &self.effort_slider,
+                model.map_or(0, |model| model.supported_reasoning_efforts.len()),
+                cx,
+            ))
             .into_any_element()
     }
+
     fn host_menu(&self, id: &'static str, cx: &Context<Self>) -> AnyElement {
-        let mut hosts = vec![(String::new(), "この Mac".to_owned())];
-        hosts.extend(
-            self.hosts
-                .iter()
-                .map(|h| (text(h, "id").to_owned(), text(h, "hostName").to_owned())),
-        );
-        let current = self.remote.clone();
-        let entity = cx.entity().downgrade();
-        let label = hosts
-            .iter()
-            .find(|(id, _)| id == &current)
-            .map(|(_, name)| name.as_str())
-            .unwrap_or("Host")
-            .to_owned();
-        Button::new(id)
-            .label(label)
-            .dropdown_caret(true)
-            .small()
-            .ghost()
-            .disabled(self.busy > 0 || self.dictation.is_some())
-            .dropdown_menu(move |mut menu, _, _| {
-                for (id, name) in &hosts {
-                    let entity = entity.clone();
-                    let id = id.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(name.clone())
-                            .checked(id == current)
-                            .on_click(move |_, w, cx| {
-                                let _ = entity.update(cx, |s, cx| {
-                                    s.switch_host(id.clone(), w, cx);
-                                    cx.notify();
-                                });
-                            }),
-                    );
-                }
-                menu
-            })
+        if let Some(hosts) = &self.hosts {
+            Hosts::menu(
+                hosts,
+                id,
+                self.remote.as_ref().map(|remote| remote.id.as_str()),
+                self.busy > 0 || self.dictation.is_some(),
+                cx,
+            )
             .into_any_element()
+        } else {
+            div()
+                .child(
+                    self.remote
+                        .as_ref()
+                        .map_or("この端末", |remote| remote.name.as_str())
+                        .to_owned(),
+                )
+                .into_any_element()
+        }
     }
+
     fn composer_folder(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         Button::new("composer-folder")
-            .label(if self.cwd.is_empty() {
+            .label(if self.snapshot.navigation.cwd.is_empty() {
                 "チャット".into()
             } else {
-                basename(&self.cwd)
+                file_name(&self.snapshot.navigation.cwd)
             })
-            .accessibility_label(if self.cwd.is_empty() {
+            .accessibility_label(if self.snapshot.navigation.cwd.is_empty() {
                 "フォルダ: チャット".into()
             } else {
-                format!("フォルダ: {}", self.cwd)
+                format!("フォルダ: {}", self.snapshot.navigation.cwd)
             })
             .icon(IconName::Folder)
             .dropdown_caret(true)
@@ -1480,52 +1611,60 @@ impl Desktop {
                 let unassigned = entity.clone();
                 menu = menu.item(
                     PopupMenuItem::new("チャット")
-                        .checked(state.cwd.is_empty())
-                        .on_click(move |_, w, cx| {
+                        .checked(state.snapshot.navigation.cwd.is_empty())
+                        .on_click(move |_, _, cx| {
                             let _ = unassigned.update(cx, |s, cx| {
-                                s.new_thread(String::new(), w, cx);
+                                s.new_chat(String::new());
                                 cx.notify();
                             });
                         }),
                 );
-                for project in &state.projects {
-                    for root in array(&project["roots"]) {
-                        let Some(path) = root["path"].as_str() else {
-                            continue;
-                        };
-                        let path = path.to_owned();
-                        let label = if array(&project["roots"]).len() == 1 {
-                            text(project, "name").to_owned()
+                for project in state
+                    .snapshot
+                    .threads
+                    .as_ref()
+                    .map(|page| page.projects.as_slice())
+                    .unwrap_or_default()
+                {
+                    for root in &project.roots {
+                        let path = root.path.clone();
+                        let label = if project.roots.len() == 1 {
+                            project.name.clone()
                         } else {
                             path.clone()
                         };
                         let target = entity.clone();
                         menu = menu.item(
                             PopupMenuItem::new(label)
-                                .checked(path == state.cwd)
-                                .on_click(move |_, w, cx| {
+                                .checked(path == state.snapshot.navigation.cwd)
+                                .on_click(move |_, _, cx| {
                                     let _ = target.update(cx, |s, cx| {
-                                        s.new_thread(path.clone(), w, cx);
+                                        s.new_chat(path.clone());
                                         cx.notify();
                                     });
                                 }),
                         );
                     }
                 }
-                if state.more["hasMoreProjects"] == true {
+                if state
+                    .snapshot
+                    .threads
+                    .as_ref()
+                    .is_some_and(|page| page.has_more_projects)
+                {
                     let target = entity.clone();
                     menu = menu.item(PopupMenuItem::new("さらにプロジェクトを読み込む").on_click(
                         move |_, _, cx| {
                             let _ = target.update(cx, |s, cx| {
-                                s.query["projectLimit"] =
-                                    json!(s.query["projectLimit"].as_u64().unwrap_or(10) + 10);
-                                s.refresh_threads();
+                                let mut query = (*s.snapshot.list_query).clone();
+                                query.project_limit += 10;
+                                s.dispatch(Intent::ListThreads(query));
                                 cx.notify();
                             });
                         },
                     ));
                 }
-                if state.remote.is_empty() {
+                if state.remote.is_none() {
                     let target = entity.clone();
                     menu = menu.item(PopupMenuItem::new("別のフォルダを選択…").on_click(
                         move |_, _, cx| {
@@ -1541,23 +1680,33 @@ impl Desktop {
         let navigation = SidebarMenu::new().gap_1().child(
             SidebarMenuItem::new("新しいチャット")
                 .icon(IconName::Plus)
-                .disable(!self.connected)
-                .on_click(cx.listener(|s, _, w, cx| {
-                    s.new_thread(String::new(), w, cx);
+                .disable(!self.snapshot.connected)
+                .on_click(cx.listener(|s, _, _, cx| {
+                    s.new_chat(String::new());
                     cx.notify();
                 })),
         );
         let mut projects = SidebarMenu::new().gap_1();
-        for project in &self.projects {
-            let id = text(project, "id").to_owned();
-            let expanded =
-                self.expanded_projects.contains(&id) || !text(&self.query, "searchTerm").is_empty();
+        for project in self
+            .snapshot
+            .threads
+            .as_ref()
+            .map(|page| page.projects.as_slice())
+            .unwrap_or_default()
+        {
+            let id = project.id.clone();
+            let expanded = self.expanded_projects.contains(&id)
+                || !self.snapshot.list_query.search_term.is_empty();
             let toggle = id.clone();
-            let new_root = project_root(project);
+            let new_root = project
+                .roots
+                .first()
+                .map(|root| root.path.clone())
+                .unwrap_or_default();
             let entity = cx.entity().downgrade();
-            let connected = self.connected;
+            let connected = self.snapshot.connected;
             projects = projects.child(
-                SidebarMenuItem::new(text(project, "name").to_owned())
+                SidebarMenuItem::new(project.name.clone())
                     .icon(if expanded {
                         IconName::FolderOpen
                     } else {
@@ -1577,10 +1726,10 @@ impl Desktop {
                             .tooltip("このプロジェクトで新しいチャット")
                             .accessibility_label("このプロジェクトで新しいチャット")
                             .disabled(!connected)
-                            .on_click(move |_, w, cx| {
+                            .on_click(move |_, _, cx| {
                                 cx.stop_propagation();
                                 let _ = entity.update(cx, |s, cx| {
-                                    s.new_thread(path.clone(), w, cx);
+                                    s.new_chat(path.clone());
                                     cx.notify();
                                 });
                             })
@@ -1588,49 +1737,82 @@ impl Desktop {
             );
             if expanded {
                 for thread in self
+                    .snapshot
                     .threads
+                    .as_ref()
+                    .map(|page| page.data.as_slice())
+                    .unwrap_or_default()
                     .iter()
-                    .filter(|t| t["projectId"] == project["id"])
+                    .filter(|thread| {
+                        thread.project_id.as_ref().and_then(Option::as_deref) == Some(&project.id)
+                    })
                 {
                     projects =
                         projects.child(self.thread_button(thread, cx).icon(Icon::empty().size_4()));
                 }
-                if array(&self.more["moreProjectIds"])
-                    .iter()
-                    .any(|v| v == &project["id"])
+                if self
+                    .snapshot
+                    .threads
+                    .as_ref()
+                    .is_some_and(|page| page.more_project_ids.contains(&project.id))
                 {
                     projects = projects.child(
                         SidebarMenuItem::new("もっと表示する")
                             .icon(Icon::empty().size_4())
                             .on_click(cx.listener(move |s, _, _, cx| {
-                                let n = s.query["projectThreadLimits"][&id].as_u64().unwrap_or(5);
-                                s.query["projectThreadLimits"][&id] = json!(n + 10);
-                                s.refresh_threads();
+                                let mut query = (*s.snapshot.list_query).clone();
+                                *query.project_thread_limits.entry(id.clone()).or_insert(5) += 10;
+                                s.dispatch(Intent::ListThreads(query));
                                 cx.notify();
                             })),
                     );
                 }
             }
         }
-        if self.more["hasMoreProjects"] == true {
+        if self
+            .snapshot
+            .threads
+            .as_ref()
+            .is_some_and(|page| page.has_more_projects)
+        {
             projects = projects.child(SidebarMenuItem::new("もっとプロジェクトを表示").on_click(
                 cx.listener(|s, _, _, cx| {
-                    s.query["projectLimit"] =
-                        json!(s.query["projectLimit"].as_u64().unwrap_or(10) + 10);
-                    s.refresh_threads();
+                    let mut query = (*s.snapshot.list_query).clone();
+                    query.project_limit += 10;
+                    s.dispatch(Intent::ListThreads(query));
                     cx.notify();
                 }),
             ));
         }
         let mut chats = SidebarMenu::new().gap_1();
-        for thread in self.threads.iter().filter(|t| t["projectId"].is_null()) {
+        for thread in self
+            .snapshot
+            .threads
+            .as_ref()
+            .map(|page| page.data.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .filter(|thread| {
+                thread
+                    .project_id
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_none()
+            })
+        {
             chats = chats.child(self.thread_button(thread, cx));
         }
-        if self.more["hasMoreChats"] == true {
+        if self
+            .snapshot
+            .threads
+            .as_ref()
+            .is_some_and(|page| page.has_more_chats)
+        {
             chats = chats.child(SidebarMenuItem::new("もっと表示する").on_click(cx.listener(
                 |s, _, _, cx| {
-                    s.query["chatLimit"] = json!(s.query["chatLimit"].as_u64().unwrap_or(5) + 10);
-                    s.refresh_threads();
+                    let mut query = (*s.snapshot.list_query).clone();
+                    query.chat_limit += 10;
+                    s.dispatch(Intent::ListThreads(query));
                     cx.notify();
                 },
             )));
@@ -1670,7 +1852,7 @@ impl Desktop {
                                     cx,
                                     |s, _, _| s.pick_folder(),
                                 )
-                                .disabled(!self.remote.is_empty()),
+                                .disabled(!self.snapshot.connected || self.remote.is_some()),
                             ),
                     )
                     .child(navigation)
@@ -1691,30 +1873,28 @@ impl Desktop {
                     .border_t_1()
                     .border_color(rgb(0x383838))
                     .py_2()
-                    .child(div().size_2().rounded_full().bg(rgb(if self.connected {
-                        0x37cf77
-                    } else {
-                        0x999999
-                    })))
+                    .child(
+                        div()
+                            .size_2()
+                            .rounded_full()
+                            .bg(rgb(if self.snapshot.connected {
+                                0x37cf77
+                            } else {
+                                0x999999
+                            })),
+                    )
                     .child(
                         div().flex_1().min_w_0().child(
                             self.button(
                                 "sidebar-settings",
-                                if self.remote.is_empty() {
-                                    "この Mac".to_owned()
-                                } else {
-                                    self.hosts
-                                        .iter()
-                                        .find(|host| text(host, "id") == self.remote)
-                                        .map(|host| text(host, "hostName"))
-                                        .unwrap_or("Host")
-                                        .to_owned()
-                                },
+                                self.remote
+                                    .as_ref()
+                                    .map_or("この端末", |remote| remote.name.as_str())
+                                    .to_owned(),
                                 cx,
                                 |s, _, _| {
                                     s.tab = Tab::Settings;
-                                    s.refresh_manager();
-                                    s.refresh_worktree_settings();
+                                    s.dispatch(Intent::ReadWorktreeSettings);
                                 },
                             )
                             .accessibility_label("設定を開く")
@@ -1732,112 +1912,102 @@ impl Desktop {
             )
             .into_any_element()
     }
-    fn thread_button(&self, thread: &Value, cx: &Context<Self>) -> SidebarMenuItem {
-        let id = text(thread, "id").to_owned();
-        let active = self.task_indicators.is_active(thread);
+    fn thread_button(&self, thread: &Thread, cx: &Context<Self>) -> SidebarMenuItem {
+        let id = thread.id.clone().unwrap_or_default();
+        let active = self
+            .snapshot
+            .activity
+            .active
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| {
+                thread
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.kind == "active")
+            });
         SidebarMenuItem::new(
-            thread["name"]
-                .as_str()
-                .filter(|s| !s.is_empty())
+            thread
+                .name
+                .as_deref()
+                .filter(|name| !name.is_empty())
                 .unwrap_or("新しいチャット")
                 .to_owned(),
         )
-        .active(id == self.selected && self.tab != Tab::Settings)
+        .active(id == self.selected() && self.tab != Tab::Settings)
         .disable(self.busy > 0)
         .when(active, |item| {
             item.suffix(|_, _| spinner::Spinner::new().small())
         })
         .when(
-            !active && self.task_indicators.unread.contains(&id),
+            !active && self.snapshot.activity.unread.contains(&id),
             |item| item.suffix(|_, _| div().size(px(8.)).rounded_full().bg(rgb(0xffffff))),
         )
-        .on_click(cx.listener(move |s, _, w, cx| {
-            s.open_thread(id.clone(), w, cx);
+        .on_click(cx.listener(move |view, _, _, cx| {
+            view.open_chat(id.clone());
             cx.notify();
         }))
     }
+
     fn chat(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
-        let history = list(self.list.clone(), move |ix, _w, cx| {
+        let history = list(self.list.clone(), move |index, _, cx| {
             entity
-                .update(cx, |s, cx| {
-                    let ix = if !s.conversation.thread.is_null() {
-                        if ix == 0 {
-                            if s.conversation.older_page().is_none() {
-                                return div().into_any_element();
-                            }
-                            let label = if s.history_loading {
-                                "履歴を読み込み中…".to_owned()
-                            } else if !s.history_error.is_empty() {
-                                format!("{} · 再試行", s.history_error)
-                            } else {
-                                "以前の履歴を読み込む".to_owned()
-                            };
-                            return h_flex()
-                                .justify_center()
-                                .p_4()
-                                .child(s.button("older-history", label, cx, |s, w, cx| {
-                                    s.load_older(w, cx)
-                                }))
-                                .into_any_element();
+                .update(cx, |view, cx| match view.rows.get(index).cloned() {
+                    Some(ConversationRow::History) => {
+                        if view.older_page().is_none() {
+                            return div().into_any_element();
                         }
-                        ix - 1
-                    } else {
-                        ix
-                    };
-                    let turns = array(&s.conversation.thread["turns"]);
-                    if ix < turns.len() {
-                        let turn = s.conversation.thread["turns"][ix].take();
-                        let row = s.turn(ix, &turn, cx);
-                        s.conversation.thread["turns"][ix] = turn;
-                        row
-                    } else {
-                        let pending_index = ix - turns.len();
-                        let pending = s
-                            .visible_outgoing()
-                            .nth(pending_index)
-                            .map(|(index, message)| (index, message.accepted));
-                        if let Some((index, accepted)) = pending {
-                            let item = s.outgoing[index].item.take();
-                            let row = s.item(&item, &Value::Null, cx);
-                            s.outgoing[index].item = item;
-                            let label = if accepted {
-                                "送信済み"
-                            } else {
-                                "送信中…"
-                            };
-                            return h_flex()
-                                .justify_center()
-                                .w_full()
-                                .px_6()
-                                .pb_8()
-                                .child(
-                                    v_flex()
-                                        .w_full()
-                                        .max_w(px(CHAT_WIDTH))
-                                        .gap_4()
-                                        .child(row)
-                                        .child(
-                                            div().text_sm().text_color(rgb(0x999999)).child(label),
-                                        ),
-                                )
-                                .into_any_element();
-                        }
-                        let request = s
-                            .visible_requests()
-                            .nth(pending_index - s.visible_outgoing().count())
-                            .cloned();
-                        request
-                            .map(|r| s.request_card(&r, cx))
-                            .unwrap_or_else(|| div().into_any_element())
+                        let label = if view.history_loading {
+                            "履歴を読み込み中…".into()
+                        } else if !view.history_error.is_empty() {
+                            format!("{} · 再試行", view.history_error)
+                        } else {
+                            "以前の履歴を読み込む".into()
+                        };
+                        h_flex()
+                            .justify_center()
+                            .p_4()
+                            .child(view.button("older-history", label, cx, |view, window, cx| {
+                                view.older(window, cx)
+                            }))
+                            .into_any_element()
                     }
+                    Some(ConversationRow::Turn(turn)) => view.turn(&turn, cx),
+                    Some(ConversationRow::Pending(id, pending)) => {
+                        let row = view.pending_item(&id, &pending.draft, cx);
+                        h_flex()
+                            .justify_center()
+                            .w_full()
+                            .px_6()
+                            .pb_8()
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .max_w(px(CHAT_WIDTH))
+                                    .gap_4()
+                                    .child(row)
+                                    .child(div().text_sm().text_color(rgb(0x999999)).child(
+                                        if pending.accepted {
+                                            "送信済み"
+                                        } else {
+                                            "送信中…"
+                                        },
+                                    )),
+                            )
+                            .into_any_element()
+                    }
+                    Some(ConversationRow::Request(key, request)) => {
+                        view.request_card(&key, &request, cx)
+                    }
+                    None => div().into_any_element(),
                 })
                 .unwrap_or_else(|_| div().into_any_element())
         })
         .flex_1()
         .min_h_0();
         let mut body = v_flex().flex_1().min_w_0().h_full();
-        if self.conversation.thread.is_null() && self.visible_outgoing().next().is_none() {
+        if self.thread().is_none() && self.pending_rows().next().is_none() {
             body = body.child(
                 v_flex()
                     .flex_1()
@@ -1845,53 +2015,47 @@ impl Desktop {
                     .justify_center()
                     .gap_4()
                     .child(div().text_2xl().child("何から始めましょうか？"))
-                    .child(if self.cwd.is_empty() {
+                    .child(if self.snapshot.navigation.cwd.is_empty() {
                         "メッセージを入力して、作業を始めましょう。".into()
                     } else {
-                        basename(&self.cwd)
+                        file_name(&self.snapshot.navigation.cwd)
                     }),
             );
         } else {
             body = body.child(history);
         }
-        let key = self.draft_key();
-        let attachments = array(&self.cache["attachments"][&key]);
+        let key = self.draft_key().to_owned();
+        let attachments = &self.draft().attachments;
         let mut files = h_flex().gap_2().flex_wrap();
         for (i, file) in attachments.iter().enumerate() {
             let key = key.clone();
             files = files.child(self.button(
                 format!("attachment-{i}"),
-                format!("{} ×", text(file, "name")),
+                format!("{} ×", file.name),
                 cx,
                 move |s, _, _| {
-                    if let Some(files) = s.cache["attachments"][&key].as_array_mut()
-                        && i < files.len()
-                    {
-                        files.remove(i);
-                    }
-                    s.refresh_sources();
-                    s.persist();
+                    s.dispatch(Intent::RemoveAttachment {
+                        draft_key: key.clone(),
+                        index: i,
+                    });
                 },
             ));
         }
-        let running = self.conversation.active();
+        let running = self.active_turn();
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
         let phase = self.dictation.as_ref().map(|d| d.phase);
         let recording = phase == Some(Phase::Recording);
         let processing = matches!(phase, Some(Phase::Permission | Phase::Transcribing));
         let send = if let Some(turn) = running.filter(|_| empty && phase.is_none()) {
-            let id = turn["id"].clone();
+            let id = turn.id.clone();
             self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
-                s.request(
-                    false,
-                    "turn/interrupt",
-                    json!({"threadId":s.selected,"turnId":id}),
-                    true,
-                    |_, _, _, _| {},
-                )
+                s.dispatch(Intent::Interrupt {
+                    thread_id: s.selected().into(),
+                    turn_id: id.clone(),
+                });
             })
             .icon(Icon::default().path("bex/stop.svg"))
-            .disabled(!self.connected || self.busy > 0)
+            .disabled(!self.snapshot.connected || self.busy > 0)
         } else {
             self.icon_button(
                 "send",
@@ -1904,7 +2068,9 @@ impl Desktop {
                 cx,
                 |s, _, cx| s.send(cx),
             )
-            .disabled(!self.connected || self.busy > 0 || (empty && !recording) || processing)
+            .disabled(
+                !self.snapshot.connected || self.busy > 0 || (empty && !recording) || processing,
+            )
         };
         let microphone = Button::new("dictation-toggle")
             .icon(
@@ -1931,7 +2097,7 @@ impl Desktop {
                 "音声をCodexで文字起こし"
             })
             .when(recording, |button| button.text_color(rgb(0xff6666)))
-            .disabled(!self.connected || self.busy > 0 || processing)
+            .disabled(!self.snapshot.connected || self.busy > 0 || processing)
             .on_click(cx.listener(|s, _, _, cx| {
                 if s.dictation
                     .as_ref()
@@ -1961,7 +2127,8 @@ impl Desktop {
                         .appearance(false)
                         .bordered(false)
                         .text_size(px(18.))
-                        .aria_label("Codex に依頼する"),
+                        .aria_label("Codex に依頼する")
+                        .readonly(!self.snapshot.connected),
                 ),
             )
             .child(
@@ -1979,8 +2146,9 @@ impl Desktop {
                         .h(px(40.))
                         .large()
                         .disabled(
-                            !self.connected
-                                || (!self.remote.is_empty() && self.cwd.is_empty())
+                            !self.snapshot.connected
+                                || (!self.remote.is_none()
+                                    && self.snapshot.navigation.cwd.is_empty())
                                 || self.busy > 0
                                 || phase.is_some(),
                         ),
@@ -2000,7 +2168,7 @@ impl Desktop {
             .w_full()
             .max_w(px(CHAT_WIDTH))
             .gap_3()
-            .when(self.selected.is_empty(), |column| {
+            .when(self.selected().is_empty(), |column| {
                 column.child(
                     v_flex()
                         .items_start()
@@ -2010,7 +2178,13 @@ impl Desktop {
                 )
             })
             .when(
-                !self.selected.is_empty() && !array(&self.review["files"]).is_empty(),
+                !self.selected().is_empty()
+                    && self
+                        .snapshot
+                        .workspace
+                        .review
+                        .as_ref()
+                        .is_some_and(|review| !review.files.is_empty()),
                 |column| column.child(self.review_card(cx)),
             )
             .when(phase.is_some(), |column| {
@@ -2042,7 +2216,10 @@ impl Desktop {
         .into_any_element()
     }
     fn review_card(&self, cx: &Context<Self>) -> AnyElement {
-        let files = array(&self.review["files"]);
+        let review = self.snapshot.workspace.review.as_deref();
+        let files = review
+            .map(|review| review.files.as_slice())
+            .unwrap_or_default();
         let visible = if self.review_expanded {
             files.len()
         } else {
@@ -2079,7 +2256,10 @@ impl Desktop {
                                     .text_sm()
                                     .child(format!("{} 件のファイルを変更", files.len())),
                             )
-                            .child(review_counts(&self.review)),
+                            .child(review_counts(
+                                Some(review.map_or(0, |review| review.additions)),
+                                Some(review.map_or(0, |review| review.deletions)),
+                            )),
                     )
                     .child(
                         self.button("review-changes", "レビューする", cx, |s, _, _| {
@@ -2090,7 +2270,7 @@ impl Desktop {
                         })
                         .border_1()
                         .rounded(px(8.))
-                        .disabled(!self.connected),
+                        .disabled(!self.snapshot.connected),
                     ),
             )
             .child(
@@ -2111,9 +2291,9 @@ impl Desktop {
                                     .min_w_0()
                                     .text_sm()
                                     .text_ellipsis()
-                                    .child(text(file, "path").to_owned()),
+                                    .child(file.path.clone()),
                             )
-                            .child(review_counts(file))
+                            .child(review_counts(file.additions, file.deletions))
                     })),
             )
             .when(files.len() > 3, |card| {
@@ -2141,10 +2321,19 @@ impl Desktop {
     }
     fn files(&self, cx: &Context<Self>) -> AnyElement {
         let mut entries = v_flex().gap_1();
-        for (i, entry) in self.entries.iter().enumerate() {
-            let path = text(entry, "path").to_owned();
+        for (i, entry) in self
+            .snapshot
+            .workspace
+            .directory
+            .as_ref()
+            .map(|directory| directory.entries.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let path = entry.path.clone();
             let download = path.clone();
-            let directory = entry["directory"] == true;
+            let directory = entry.directory;
             entries = entries.child(
                 h_flex()
                     .w_full()
@@ -2152,7 +2341,7 @@ impl Desktop {
                     .child(
                         self.button(
                             format!("file-{i}"),
-                            text(entry, "name").to_owned(),
+                            entry.name.clone(),
                             cx,
                             move |s, _, _| {
                                 if directory {
@@ -2186,7 +2375,7 @@ impl Desktop {
             );
         }
         let mut editor = v_flex().flex_1().min_h_0().min_w_0().gap_2();
-        if !self.editor.is_null() {
+        if let Some(file) = &self.snapshot.workspace.file {
             editor = editor
                 .child(
                     h_flex().gap_2().child(IconName::FileText).child(
@@ -2195,7 +2384,7 @@ impl Desktop {
                             .min_w_0()
                             .text_sm()
                             .text_ellipsis()
-                            .child(text(&self.editor, "path").to_owned()),
+                            .child(file.path.clone()),
                     ),
                 )
                 .child(
@@ -2210,7 +2399,7 @@ impl Desktop {
                         .gap_2()
                         .flex_wrap()
                         .child(
-                            self.button("save-file", "保存", cx, |s, _, cx| s.save_file(cx))
+                            self.button("save-file", "保存", cx, |s, _, _| s.save_file())
                                 .primary()
                                 .disabled(self.busy > 0),
                         )
@@ -2219,17 +2408,23 @@ impl Desktop {
                             IconName::RotateCw,
                             "再読み込み・下書きを破棄",
                             cx,
-                            |s, _, _| s.edit(text(&s.editor, "path").into(), true),
+                            |s, _, _| {
+                                if let Some(file) = &s.snapshot.workspace.file {
+                                    s.edit(file.path.clone(), true);
+                                }
+                            },
                         ))
                         .child(
-                            self.button("ai-edit", "AI に編集を依頼", cx, |s, w, cx| {
-                                let key = s.draft_key();
-                                s.cache["messages"][key] = json!(format!(
-                                    "ファイル {} を編集してください。\n\n",
-                                    text(&s.editor, "path")
-                                ));
-                                s.persist();
-                                s.restore_draft(w, cx);
+                            self.button("ai-edit", "AI に編集を依頼", cx, |s, _, _| {
+                                if let Some(file) = &s.snapshot.workspace.file {
+                                    s.dispatch(Intent::SetDraftText {
+                                        thread_id: s.draft_key().into(),
+                                        text: format!(
+                                            "ファイル {} を編集してください。\n\n",
+                                            file.path
+                                        ),
+                                    });
+                                }
                                 s.tab = Tab::Chat;
                             })
                             .icon(IconName::Bot),
@@ -2306,30 +2501,30 @@ impl Desktop {
         body = body.child(
             v_flex().gap_3()
                 .child(div().text_xl().child("ワークツリー"))
-                .child("選択中の Host に保存し、Mac・iPhone からの新規セッションに適用します。")
+                .child("選択中の Host に保存し、すべての端末 からの新規セッションに適用します。")
                 .child(switch::Switch::new("worktree-create")
                     .label("新規セッションをワークツリーで開始")
-                    .checked(self.worktree_settings["createOnNewSession"] == true)
-                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0 || self.worktree_saving)
+                    .checked(self.snapshot.workspace.settings.as_ref().is_some_and(|settings| settings.create_on_new_session))
+                    .disabled(!self.snapshot.connected || self.snapshot.workspace.settings.is_none() || self.busy > 0 || self.worktree_saving)
                     .on_click(cx.listener(|s, checked, _, cx| {
-                        s.save_worktree_settings(Some(("createOnNewSession", *checked)), cx);
+                        s.save_worktree_settings(Some((true, *checked)), cx);
                         cx.notify();
                     })))
                 .child("ワークツリーの保存先")
                 .child(Input::new(&self.worktree_directory).aria_label("ワークツリーの保存先")
-                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0))
+                    .disabled(!self.snapshot.connected || self.snapshot.workspace.settings.is_none() || self.busy > 0))
                 .child("指定フォルダ内にセッションごとのフォルダを作ります。空欄ならリポジトリのGit管理領域に保存します。既存のワークツリーは移動しません。")
                 .child(switch::Switch::new("worktree-copy")
                     .label("ワークツリー作成時にファイルをコピー")
-                    .checked(self.worktree_settings["copyOnCreate"] == true)
-                    .disabled(!self.connected || self.worktree_settings.is_null() || self.busy > 0 || self.worktree_saving)
+                    .checked(self.snapshot.workspace.settings.as_ref().is_some_and(|settings| settings.copy_on_create))
+                    .disabled(!self.snapshot.connected || self.snapshot.workspace.settings.is_none() || self.busy > 0 || self.worktree_saving)
                     .on_click(cx.listener(|s, checked, _, cx| {
-                        s.save_worktree_settings(Some(("copyOnCreate", *checked)), cx);
+                        s.save_worktree_settings(Some((false, *checked)), cx);
                         cx.notify();
                     })))
                 .child("コピー対象（リポジトリからの相対パスを1行に1つ）")
                 .child(Textarea::new(&self.worktree_copy_paths).aria_label("コピー対象")
-                    .readonly(!self.connected || self.worktree_settings.is_null() || self.busy > 0))
+                    .readonly(!self.snapshot.connected || self.snapshot.workspace.settings.is_none() || self.busy > 0))
                 .child("例: .env、.env.local、config/local。存在しないパスはスキップします。指定したファイルはコピー元の内容で置き換えます。シンボリックリンクはコピーできません。")
                 .child("最初のメッセージ送信時に現在の HEAD から作成します。既存セッションを開き直しても作成・コピーしません。")
                 .child(div().text_sm().text_color(rgb(0x999999)).child(if self.worktree_saved {
@@ -2338,100 +2533,8 @@ impl Desktop {
                     "スイッチは切り替え時、入力欄は入力を終えると自動保存します。"
                 }))
         );
-        if !self.manager_connected {
-            body=body.child("この Mac の Host を起動").child(Input::new(&self.relay_url)).child(Input::new(&self.relay_token)).child(Input::new(&self.runner)).child(self.button("start-host","接続して起動",cx,|s,_,cx|{let endpoint=json!({"relayUrl":s.relay_url.read(cx).value().as_ref(),"relayToken":s.relay_token.read(cx).value().as_ref(),"runnerId":s.runner.read(cx).value().as_ref()});s.work(true,move||platform::start_host(Some(endpoint)).map(|_|Value::Null),|_,_,_,_|{});}));
-        } else {
-            body = body
-                .child(format!(
-                    "{} · relay {}",
-                    text(&self.status, "hostName"),
-                    if self.status["relayConnected"] == true {
-                        "接続中"
-                    } else {
-                        "再接続中"
-                    }
-                ))
-                .child(self.button("invite", "iPhone・Mac を招待", cx, |s, _, _| s.invite()));
-            if let Some(qr) = &self.invitation_qr {
-                body = body
-                    .child(img(qr.clone()).w(px(320.)).h(px(320.)))
-                    .child("1回限りの招待です。相手端末で読み取るか、招待を貼り付けてください。")
-                    .child(Textarea::new(&self.invitation_input).readonly(true))
-                    .child(self.button("copy-invite", "招待をコピー", cx, |s, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            s.invitation_input.read(cx).value().to_string(),
-                        ))
-                    }));
-            }
-            for (i, device) in array(&self.status["devices"]).iter().enumerate() {
-                let identity = device["identity"].clone();
-                body = body.child(
-                    h_flex()
-                        .gap_3()
-                        .child(text(device, "name").to_owned())
-                        .child(self.button(
-                            format!("revoke-{i}"),
-                            "接続を解除",
-                            cx,
-                            move |s, _, _| {
-                                s.request(
-                                    true,
-                                    "host/revoke",
-                                    json!({"identity":identity}),
-                                    true,
-                                    |s, _, _, _| s.refresh_manager(),
-                                )
-                            },
-                        )),
-                );
-            }
-            body = body
-                .child("別の Mac に接続")
-                .child(Textarea::new(&self.pairing).aria_label("ペアリング招待"))
-                .child(self.button("pair", "ペアリング", cx, |s, _, cx| {
-                    match serde_json::from_str::<Value>(s.pairing.read(cx).value().as_ref()) {
-                        Ok(invitation) => s.request(
-                            true,
-                            "host/pairRemote",
-                            json!({"invitation":invitation,"deviceName":"Mac"}),
-                            true,
-                            |s, v, w, cx| {
-                                s.pairing.update(cx, |i, cx| i.set_value("", w, cx));
-                                s.refresh_manager();
-                                s.switch_host(text(&v, "id").into(), w, cx);
-                            },
-                        ),
-                        Err(e) => s.error = e.to_string(),
-                    }
-                }));
-            for host in &self.hosts {
-                let id = text(host, "id").to_owned();
-                body = body.child(
-                    h_flex()
-                        .gap_3()
-                        .child(text(host, "hostName").to_owned())
-                        .child(self.button(
-                            format!("remove-{id}"),
-                            "保存した接続を削除",
-                            cx,
-                            move |s, _, _| {
-                                let id = id.clone();
-                                s.request(
-                                    true,
-                                    "host/removeRemote",
-                                    json!({"id":id}),
-                                    true,
-                                    move |s, _, w, cx| {
-                                        if s.remote == id {
-                                            s.switch_host(String::new(), w, cx);
-                                        }
-                                        s.refresh_manager();
-                                    },
-                                );
-                            },
-                        )),
-                );
-            }
+        if let Some(hosts) = &self.hosts {
+            body = body.child(hosts.clone());
         }
         div()
             .id("settings-scroll")
@@ -2442,14 +2545,14 @@ impl Desktop {
             .into_any_element()
     }
     fn workspace_card(&self, cx: &Context<Self>) -> AnyElement {
-        let enabled = self.connected && !self.cwd.is_empty();
+        let enabled = self.snapshot.connected && !self.snapshot.navigation.cwd.is_empty();
         let mut sources = v_flex().gap_1();
         for (i, path) in self.source_paths.iter().enumerate() {
             let path = path.clone();
             sources = sources.child(
                 self.button(
                     format!("source-{i}"),
-                    basename(&path),
+                    file_name(&path),
                     cx,
                     move |s, _, _| s.download(path.clone()),
                 )
@@ -2502,39 +2605,57 @@ impl Desktop {
                     .child(
                         self.button(
                             "context-files",
-                            if self.cwd.is_empty() {
+                            if self.snapshot.navigation.cwd.is_empty() {
                                 "フォルダを選択".into()
                             } else {
-                                basename(&self.cwd)
+                                file_name(&self.snapshot.navigation.cwd)
                             },
                             cx,
                             |s, _, _| {
-                                if s.cwd.is_empty() {
+                                if s.snapshot.navigation.cwd.is_empty() {
                                     s.pick_folder();
                                 } else {
-                                    s.browse(s.cwd.clone());
+                                    s.browse(s.snapshot.navigation.cwd.clone());
                                 }
                             },
                         )
                         .icon(IconName::FolderOpen)
                         .w_full(),
                     )
-                    .when(!text(&self.review, "branch").is_empty(), |body| {
-                        body.child(
-                            div()
-                                .pl_2()
-                                .text_sm()
-                                .text_color(rgb(0x999999))
-                                .child(text(&self.review, "branch").to_owned()),
-                        )
-                    })
+                    .when(
+                        self.snapshot
+                            .workspace
+                            .review
+                            .as_ref()
+                            .is_some_and(|review| !review.branch.is_empty()),
+                        |body| {
+                            body.child(
+                                div().pl_2().text_sm().text_color(rgb(0x999999)).child(
+                                    self.snapshot
+                                        .workspace
+                                        .review
+                                        .as_ref()
+                                        .map(|review| review.branch.clone())
+                                        .unwrap_or_default(),
+                                ),
+                            )
+                        },
+                    )
                     .child(
                         self.button(
                             "context-changes",
                             format!(
                                 "変更  +{}  −{}",
-                                self.review["additions"].as_u64().unwrap_or(0),
-                                self.review["deletions"].as_u64().unwrap_or(0)
+                                self.snapshot
+                                    .workspace
+                                    .review
+                                    .as_ref()
+                                    .map_or(0, |review| review.additions),
+                                self.snapshot
+                                    .workspace
+                                    .review
+                                    .as_ref()
+                                    .map_or(0, |review| review.deletions)
                             ),
                             cx,
                             |s, _, _| {
@@ -2572,21 +2693,13 @@ impl Desktop {
                     .child(sources)
                     .child(
                         self.button("all-files", "すべてのファイル", cx, |s, _, _| {
-                            s.browse(s.cwd.clone())
+                            s.browse(s.snapshot.navigation.cwd.clone())
                         })
                         .icon(IconName::Folder)
                         .w_full()
                         .disabled(!enabled),
                     ),
             )
-            .when(!self.review_error.is_empty(), |body| {
-                body.child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(0xff8e86))
-                        .child(self.review_error.clone()),
-                )
-            })
             .into_any_element()
     }
 }
@@ -2611,7 +2724,7 @@ impl Desktop {
             .on_click(cx.listener(|s, ix: &usize, w, cx| {
                 let panel = TOOLS[*ix].0;
                 if panel == Panel::Files {
-                    s.browse(s.cwd.clone());
+                    s.browse(s.snapshot.navigation.cwd.clone());
                 } else {
                     s.open_panel(panel, w, cx);
                 }
@@ -2649,9 +2762,9 @@ impl Desktop {
                     IconName::Plus,
                     "新しいサイドチャット",
                     cx,
-                    |s, w, cx| {
+                    |s, _, cx| {
                         if let Some(chat) = &s.side_chat {
-                            chat.update(cx, |chat, cx| chat.new_thread(String::new(), w, cx));
+                            chat.update(cx, |chat, _| chat.new_chat(String::new()));
                         }
                     },
                 ))
@@ -2671,7 +2784,7 @@ impl Desktop {
                     chooser = chooser.child(
                         self.button(format!("tool-{ix}"), *label, cx, move |s, w, cx| {
                             if panel == Panel::Files {
-                                s.browse(s.cwd.clone());
+                                s.browse(s.snapshot.navigation.cwd.clone());
                             } else {
                                 s.open_panel(panel, w, cx);
                             }
@@ -2681,7 +2794,9 @@ impl Desktop {
                         .h_10()
                         .bg(rgb(0x232323))
                         .disabled(
-                            panel != Panel::Browser && (!self.connected || self.cwd.is_empty()),
+                            panel != Panel::Browser
+                                && (!self.snapshot.connected
+                                    || self.snapshot.navigation.cwd.is_empty()),
                         ),
                     );
                 }
@@ -2701,11 +2816,21 @@ impl Desktop {
                 .gap_3()
                 .child(
                     h_flex()
-                        .child(div().flex_1().child(format!(
-                            "変更  +{} −{}",
-                            self.review["additions"].as_u64().unwrap_or(0),
-                            self.review["deletions"].as_u64().unwrap_or(0)
-                        )))
+                        .child(
+                            div().flex_1().child(format!(
+                                "変更  +{} −{}",
+                                self.snapshot
+                                    .workspace
+                                    .review
+                                    .as_ref()
+                                    .map_or(0, |review| review.additions),
+                                self.snapshot
+                                    .workspace
+                                    .review
+                                    .as_ref()
+                                    .map_or(0, |review| review.deletions)
+                            )),
+                        )
                         .child(self.icon_button(
                             "refresh-diff",
                             IconName::RotateCw,
@@ -2714,20 +2839,18 @@ impl Desktop {
                             |s, _, _| s.refresh_review(),
                         )),
                 )
-                .when(!self.review_error.is_empty(), |v| {
-                    v.child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xff8e86))
-                            .child(self.review_error.clone()),
-                    )
-                })
-                .child(div().flex_1().min_h_0().child(Self::diff(
-                    &mut self.diffs,
-                    "workspace-patch".into(),
-                    text(&self.review, "diff"),
-                    cx,
-                )))
+                .child(
+                    div().flex_1().min_h_0().child(Self::diff(
+                        &mut self.diffs,
+                        "workspace-patch".into(),
+                        self.snapshot
+                            .workspace
+                            .review
+                            .as_ref()
+                            .map_or("", |review| review.diff.as_str()),
+                        cx,
+                    )),
+                )
                 .into_any_element(),
             Panel::SideChat => self
                 .side_chat
@@ -2801,7 +2924,6 @@ impl Render for Desktop {
                 .size_full()
                 .bg(rgb(0x181818))
                 .text_color(rgb(0xececec))
-                .font_family("Hiragino Sans")
                 .text_size(px(14.))
                 .child(gallery);
         }
@@ -2809,13 +2931,18 @@ impl Render for Desktop {
         let title = if self.tab == Tab::Settings {
             "設定"
         } else {
-            self.conversation.thread["name"]
-                .as_str()
+            self.thread()
+                .and_then(|thread| thread.name.as_deref())
                 .or_else(|| {
-                    self.threads
-                        .iter()
-                        .find(|t| t["id"] == self.selected)
-                        .and_then(|t| t["name"].as_str())
+                    self.snapshot
+                        .threads
+                        .as_ref()
+                        .and_then(|page| {
+                            page.data
+                                .iter()
+                                .find(|thread| thread.id.as_deref() == Some(self.selected()))
+                        })
+                        .and_then(|thread| thread.name.as_deref())
                 })
                 .unwrap_or("新しいチャット")
         }
@@ -2941,7 +3068,6 @@ impl Render for Desktop {
             .bg(rgb(0x181818))
             .text_color(rgb(0xececec))
             .text_size(px(14.))
-            .font_family("Hiragino Sans")
             .font_weight(FontWeight::NORMAL)
             .when(self.sidebar && !self.side_chat_mode, |body| {
                 body.child(self.sidebar(window, cx))

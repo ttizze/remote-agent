@@ -56,3 +56,11 @@ fn operation_replies_preserve_opaque_thread_metadata() {
         }
     }
 }
+
+#[test]
+fn workspace_review_preserves_binary_file_counts() {
+    let source = serde_json::json!({"branch":"main","additions":0,"deletions":0,"diff":"Binary files differ","files":[{"path":"image.png","status":"modified","additions":null,"deletions":null}]});
+    let review: agent_core::models::WorkspaceReview =
+        serde_json::from_value(source.clone()).unwrap();
+    assert_eq!(serde_json::to_value(review).unwrap(), source);
+}

@@ -1,14 +1,18 @@
 mod app;
 mod browser;
-mod conversation;
 mod diff;
 mod platform;
-mod rpc;
 mod terminal;
 use gpui_kit::{
     component::{Root, Theme, ThemeMode},
     *,
 };
+#[derive(Clone)]
+pub(crate) struct Runtime {
+    pub(crate) handle: tokio::runtime::Handle,
+    pub(crate) closing: tokio_util::task::TaskTracker,
+}
+impl Global for Runtime {}
 struct DesktopAssets;
 impl AssetSource for DesktopAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
@@ -32,10 +36,18 @@ impl AssetSource for DesktopAssets {
     }
 }
 fn main() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("start async runtime");
+    let handle = runtime.handle().clone();
+    let closing = tokio_util::task::TaskTracker::new();
+    let shutdown = closing.clone();
     gpui_kit::application()
         .with_assets(DesktopAssets)
         .with_http_client(std::sync::Arc::new(gpui_http::ReqwestClient::new()))
-        .run(|cx| {
+        .run(move |cx| {
+            cx.set_global(Runtime { handle, closing });
             gpui_kit::init(cx);
             cx.bind_keys([KeyBinding::new(
                 "ctrl-v",
@@ -71,4 +83,6 @@ fn main() {
             .detach();
             cx.activate(true);
         });
+    shutdown.close();
+    runtime.block_on(shutdown.wait());
 }

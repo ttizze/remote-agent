@@ -1,4 +1,7 @@
-use agent_core::transport::{Identity, PairingTicket, Ticket, TransportError, Trust, authorize};
+use agent_core::{
+    models::Invitation,
+    transport::{Identity, Ticket, TransportError, Trust, authorize},
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
@@ -50,11 +53,19 @@ async fn endpoint_ticket_and_identity_round_trip_with_public_services_disabled()
     let ticket = endpoint.ticket();
     let parsed: Ticket = ticket.to_string().parse().unwrap();
     assert_eq!(parsed.node_id(), endpoint.node_id());
-    let pairing = PairingTicket::new(parsed, 100);
-    let restored: PairingTicket =
+    let pairing = Invitation {
+        endpoint: parsed.to_string(),
+        invitation: uuid::Uuid::new_v4(),
+        expires_at: 100,
+        extra: Default::default(),
+    };
+    let restored: Invitation =
         serde_json::from_slice(&serde_json::to_vec(&pairing).unwrap()).unwrap();
     assert_eq!(restored.invitation, pairing.invitation);
     assert_eq!(restored.expires_at, 100);
-    assert_eq!(restored.endpoint.node_id(), pairing.endpoint.node_id());
+    assert_eq!(
+        restored.endpoint.parse::<Ticket>().unwrap().node_id(),
+        endpoint.node_id()
+    );
     endpoint.close().await;
 }

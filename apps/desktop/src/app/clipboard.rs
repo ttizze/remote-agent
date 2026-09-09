@@ -1,10 +1,8 @@
 use gpui_kit::{Image, ImageFormat};
-use std::{io::Write, os::unix::fs::PermissionsExt, path::Path};
+use std::{io::Write, path::Path};
 
 pub(super) fn save_image(directory: &Path, image: Image) -> Result<String, String> {
-    std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
-    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| e.to_string())?;
+    host_daemon::platform::create_state_directory(directory).map_err(|e| e.to_string())?;
     let passthrough = matches!(
         image.format,
         ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::Webp
@@ -53,10 +51,6 @@ mod tests {
         .unwrap();
         assert_ne!(first, second);
         assert_eq!(std::fs::read(&first).unwrap(), bytes);
-        assert_eq!(
-            std::fs::metadata(first).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Typed RPC operations. This module has no transport or UI dependencies.
 use crate::{
     models::{ListQuery, ThreadList, ThreadResponse},
-    peer::{PeerError, Reply, RpcPeer},
+    peer::{PeerError, Reply, Request, RpcPeer},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -25,6 +25,51 @@ impl Operation for Pair {
     const METHOD: &'static str = "host/pair";
 }
 
+#[derive(Debug, Serialize)]
+pub struct ReadHostStatus {}
+impl Operation for ReadHostStatus {
+    type Output = crate::models::HostStatus;
+    const METHOD: &'static str = "host/status";
+}
+#[derive(Debug, Serialize)]
+pub struct CreateInvitation {}
+impl Operation for CreateInvitation {
+    type Output = crate::models::Invitation;
+    const METHOD: &'static str = "host/invite";
+}
+#[derive(Debug, Serialize)]
+pub struct ListRemoteHosts {}
+impl Operation for ListRemoteHosts {
+    type Output = Vec<crate::models::RemoteHost>;
+    const METHOD: &'static str = "host/listRemotes";
+}
+#[derive(Debug, Serialize)]
+pub struct PairRemoteHost<'a> {
+    pub invitation: &'a crate::models::Invitation,
+    pub name: &'a str,
+}
+impl Operation for PairRemoteHost<'_> {
+    type Output = crate::models::RemoteHost;
+    const METHOD: &'static str = "host/pairRemote";
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeDevice<'a> {
+    pub node_id: &'a str,
+}
+impl Operation for RevokeDevice<'_> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/revoke";
+}
+#[derive(Debug, Serialize)]
+pub struct RemoveRemoteHost<'a> {
+    pub id: &'a str,
+}
+impl Operation for RemoveRemoteHost<'_> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/removeRemote";
+}
+
 pub struct Client {
     peer: Arc<RpcPeer>,
 }
@@ -32,17 +77,27 @@ impl Client {
     pub fn new(peer: Arc<RpcPeer>) -> Self {
         Self { peer }
     }
-    pub async fn call<O: Operation>(&self, operation: &O) -> Result<Reply<O::Output>, PeerError> {
-        let reply = self.peer.request(O::METHOD, operation).await?;
-        operation
-            .validate(&reply.value)
-            .map_err(|reason| PeerError::InvalidResponse {
-                method: O::METHOD.into(),
-                reason: reason.into(),
-                sequence: Some(reply.sequence),
-                raw: serde_json::to_string(&reply.value).expect("wire output serializes"),
-            })?;
-        Ok(reply)
+    pub fn call<'a, O: Operation>(
+        &'a self,
+        operation: &'a O,
+    ) -> Request<impl std::future::Future<Output = Result<Reply<O::Output>, PeerError>> + use<'a, O>>
+    {
+        let request = self.peer.request(O::METHOD, operation);
+        Request {
+            wire_id: request.wire_id(),
+            response: async move {
+                let reply = request.await?;
+                operation
+                    .validate(&reply.value)
+                    .map_err(|reason| PeerError::InvalidResponse {
+                        method: O::METHOD.into(),
+                        reason: reason.into(),
+                        sequence: Some(reply.sequence),
+                        raw: serde_json::to_string(&reply.value).expect("wire output serializes"),
+                    })?;
+                Ok(reply)
+            },
+        }
     }
 }
 
@@ -115,6 +170,8 @@ pub struct StartTurn<'a> {
     pub model: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<&'a str>,
+    #[serde(rename = "serviceTierForTurn", skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<&'a str>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -479,6 +536,7 @@ pub enum SubmissionTarget<'a> {
 pub fn submission_target<'a>(
     snapshot: Option<&'a crate::models::Thread>,
     listed: Option<&'a crate::models::Thread>,
+    active: Option<bool>,
 ) -> Result<SubmissionTarget<'a>, PeerError> {
     if let Some(turn) = snapshot
         .and_then(|thread| thread.turns.as_ref())
@@ -490,11 +548,13 @@ pub fn submission_target<'a>(
     {
         return Ok(SubmissionTarget::Steer(&turn.id));
     }
-    if [snapshot, listed].into_iter().flatten().any(|thread| {
-        thread
-            .status
-            .as_ref()
-            .is_some_and(|status| status.kind == "active")
+    if active.unwrap_or_else(|| {
+        [snapshot, listed].into_iter().flatten().any(|thread| {
+            thread
+                .status
+                .as_ref()
+                .is_some_and(|status| status.kind == "active")
+        })
     }) {
         return Ok(SubmissionTarget::Queue);
     }
@@ -519,6 +579,7 @@ pub struct Submission<'a> {
     pub input: &'a [Input<'a>],
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub service_tier: Option<&'a str>,
 }
 impl Client {
     pub async fn submit(
@@ -532,6 +593,7 @@ impl Client {
             input,
             model,
             effort,
+            service_tier,
         } = *submission;
         match target {
             SubmissionTarget::Steer(turn_id) => {
@@ -576,6 +638,7 @@ impl Client {
                         input,
                         model,
                         effort,
+                        service_tier,
                     })
                     .await?;
                 let id = match reply.value {
@@ -820,3 +883,37 @@ impl Client {
         Ok(images)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTerminal<'a> {
+    pub process_handle: &'a str,
+    pub cwd: &'a str,
+    pub size: TerminalSize,
+}
+operation!(StartTerminal, Map<String, Value>, "host/terminal/start");
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteTerminal<'a> {
+    pub process_handle: &'a str,
+    pub delta_base64: &'a str,
+}
+operation!(WriteTerminal, Map<String, Value>, "process/writeStdin");
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeTerminal<'a> {
+    pub process_handle: &'a str,
+    pub size: TerminalSize,
+}
+operation!(ResizeTerminal, Map<String, Value>, "process/resizePty");
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KillTerminal<'a> {
+    pub process_handle: &'a str,
+}
+operation!(KillTerminal, Map<String, Value>, "process/kill");

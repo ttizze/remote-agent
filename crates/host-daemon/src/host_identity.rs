@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::remote_hosts::RemoteHostProfile;
+use agent_core::models::RemoteHost;
 
 /// One atomic secure record; fixtures inject isolated storage at this boundary.
 pub trait CredentialStore: Send + Sync {
@@ -32,12 +32,32 @@ impl CredentialStore for KeyringStore {
     }
 }
 
+/// Read the identity already provisioned by the local daemon. Clients never
+/// create or rewrite its secure record while connecting.
+pub fn load_local_identity(store: &dyn CredentialStore) -> Result<Identity, String> {
+    #[derive(Deserialize)]
+    struct LocalIdentity {
+        local_key: [u8; 32],
+    }
+    impl Drop for LocalIdentity {
+        fn drop(&mut self) {
+            self.local_key.zeroize();
+        }
+    }
+    let bytes = store
+        .load()?
+        .ok_or("local Host credentials are not provisioned")?;
+    let record: LocalIdentity =
+        serde_json::from_slice(&bytes).map_err(|_| "saved Host credentials are invalid")?;
+    Ok(Identity::from_bytes(record.local_key))
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Record {
     pub host_key: [u8; 32],
     pub local_key: [u8; 32],
     pub trust: Trust,
-    pub remotes: BTreeMap<NodeId, RemoteHostProfile>,
+    pub remotes: BTreeMap<NodeId, RemoteHost>,
 }
 impl Drop for Record {
     fn drop(&mut self) {

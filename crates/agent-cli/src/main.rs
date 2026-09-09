@@ -72,7 +72,6 @@ fn parse_json(value: &str) -> Result<Value, serde_json::Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut child = None;
-    let mut endpoint_to_close = None;
     let store = if let Some(program) = args.stdio {
         let mut process = tokio::process::Command::new(program)
             .args(args.stdio_arg)
@@ -105,9 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
         let ticket: Ticket = args.ticket.expect("connection required").parse()?;
-        let session = endpoint.connect(&ticket).await?;
-        endpoint_to_close = Some(endpoint);
-        Store::connect(session, Snapshot::default(), args.invitation).await?
+        Store::connect(endpoint, &ticket, Snapshot::default(), args.invitation).await?
     };
     match args.command {
         Command::List {
@@ -148,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             let Outcome::Submitted(id) = store
                 .dispatch(Intent::Submit {
-                    thread_id,
+                    thread_id: Some(thread_id),
                     client_user_message_id: client_message_id,
                 })
                 .await?
@@ -192,11 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("null");
         }
     }
-    let closed = store.close().await;
-    if let Some(endpoint) = endpoint_to_close {
-        endpoint.close().await;
-    }
-    closed?;
+    store.close().await?;
     if let Some(mut child) = child {
         child.kill().await?;
     }
