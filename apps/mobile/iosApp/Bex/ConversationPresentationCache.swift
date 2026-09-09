@@ -2,7 +2,7 @@ import AgentCore
 import Foundation
 
 /// Memoize rendered bodies by core identity. A delta rebuilds only its changed turn/items.
-final class ConversationPresentationCache {
+actor ConversationPresentationCache {
     private struct CachedTurn {
         let source: AgentCore.Turn
         let requests: [Request]
