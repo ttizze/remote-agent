@@ -316,10 +316,10 @@ class MobileStateCodecTest {
                         error = CodexTurnError("reconnecting", willRetry = true),
                         pendingRequests =
                             listOf(
-                                CodexServerRequest(
-                                    id = "request-1",
+                                codexMessage(
                                     method = "item/tool/requestUserInput",
                                     params = buildJsonObject { put("question", JsonPrimitive("Continue?")) },
+                                    id = kotlinx.serialization.json.JsonPrimitive("request-1"),
                                 )
                             ),
                     )

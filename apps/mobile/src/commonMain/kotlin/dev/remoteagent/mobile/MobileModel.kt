@@ -4,7 +4,6 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 
 /** UI projections of Codex data. Raw Codex values remain available on every projection. */
 @Serializable data class WorkingDirectory(val path: String)
@@ -102,8 +101,6 @@ data class ThreadSnapshot(
     val submittedMessages: List<SubmittedMessage> = emptyList(),
 )
 
-data class ThreadReadResult(val thread: ThreadSnapshot, val bufferedEvents: List<RawCodexMessage>)
-
 data class MessageSendResult(val accepted: Boolean, val threadId: String?)
 
 @Serializable
@@ -116,7 +113,7 @@ data class CodexTurn(
     val completedAtMs: Long? = null,
     val durationMs: Long? = null,
     val error: CodexTurnError? = null,
-    val pendingRequests: List<CodexServerRequest> = emptyList(),
+    val pendingRequests: List<RawCodexMessage> = emptyList(),
 )
 
 @Serializable
@@ -125,14 +122,6 @@ data class CodexTurnError(
     val additionalDetails: String? = null,
     val codexErrorInfo: JsonElement? = null,
     val willRetry: Boolean = false,
-)
-
-@Serializable
-data class CodexServerRequest(
-    val id: String,
-    val method: String,
-    val params: JsonObject,
-    val wireId: JsonElement = kotlinx.serialization.json.JsonPrimitive(id),
 )
 
 /** A typed, user-visible Codex item. */

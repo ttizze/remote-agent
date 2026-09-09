@@ -3,7 +3,7 @@ package dev.remoteagent.mobile
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-internal fun CodexServerRequest.toThreadRequestPresentation(): ThreadRequestPresentation {
+internal fun RawCodexMessage.toThreadRequestPresentation(): ThreadRequestPresentation {
     val input = buildJsonObject {
         put("operation", "request")
         put("method", method)

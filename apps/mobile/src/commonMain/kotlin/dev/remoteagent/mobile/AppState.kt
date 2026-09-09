@@ -141,8 +141,12 @@ sealed interface AppAction {
 
     data class ThreadReadLoading(val hostIdentity: String, val threadId: String) : History
 
-    data class SnapshotReceived(val hostIdentity: String, val result: ThreadReadResult, val select: Boolean = true) :
-        History
+    data class SnapshotReceived(
+        val hostIdentity: String,
+        val thread: ThreadSnapshot,
+        val select: Boolean = true,
+        val bufferedEvents: List<RawCodexMessage> = emptyList(),
+    ) : History
 
     data class HistoryLoading(val hostIdentity: String, val loading: Boolean, val error: String? = null) : History
 

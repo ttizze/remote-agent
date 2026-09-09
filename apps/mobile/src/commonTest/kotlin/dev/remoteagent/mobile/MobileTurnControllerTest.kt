@@ -64,7 +64,7 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
         val gateway =
             FakeHostGateway().apply {
                 startResult = GatewayResult.Success(started)
-                readResult = GatewayResult.Success(ThreadReadResult(started, emptyList()))
+                readResult = GatewayResult.Success(started)
             }
         val controller = controller(gateway)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
@@ -72,8 +72,8 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
         assertEquals(0, gateway.startCalls)
         runSuspend { assertEquals(MessageSendResult(true, "thread-new"), controller.sendMessage(profile, "Build it")) }
         assertEquals(listOf("/workspace"), gateway.startCwds)
-        assertEquals(listOf("Build it"), gateway.turnTexts)
-        assertEquals(listOf(false), gateway.turnResumes)
+        assertEquals(listOf("Build it"), gateway.sends.map { it.input.text })
+        assertEquals("thread-new", gateway.sends.single().threadId)
         assertEquals("thread-new", controller.state.selectedView.selectedThreadId)
         assertEquals(
             listOf("Build it"),
@@ -92,7 +92,7 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
         val gateway =
             FakeHostGateway().apply {
                 startResult = GatewayResult.Success(started)
-                turnResult = GatewayResult.Failure("Send failed")
+                sendResult = GatewayResult.Failure("Send failed")
             }
         val controller = controller(gateway)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
@@ -101,11 +101,11 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
             assertEquals(MessageSendResult(false, "thread-new"), controller.sendMessage(profile, "Keep this"))
         }
         assertEquals("thread-new", controller.state.selectedView.selectedThreadId)
-        gateway.turnResult = GatewayResult.Success("turn-new")
+        gateway.sendResult = GatewayResult.Success("turn-new")
         runSuspend { assertEquals(MessageSendResult(true, "thread-new"), controller.sendMessage(profile, "Keep this")) }
         assertEquals(1, gateway.startCalls)
-        assertEquals(listOf("Keep this", "Keep this"), gateway.turnTexts)
-        assertEquals(listOf(false, false), gateway.turnResumes)
+        assertEquals(listOf("Keep this", "Keep this"), gateway.sends.map { it.input.text })
+        assertEquals(listOf("thread-new", "thread-new"), gateway.sends.map { it.threadId })
     }
 
     @Test
@@ -131,8 +131,9 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
 
         runSuspend { controller.startTurn(profile, "thread-1", "hello") }
 
-        assertEquals(listOf("/workspace"), gateway.turnCwds)
-        assertEquals(listOf("hello"), gateway.turnTexts)
+        assertEquals("/workspace", gateway.sends.single().snapshot.asObjectOrNull()?.string("cwd"))
+        assertEquals("/cached/workspace", gateway.sends.single().listed.asObjectOrNull()?.string("cwd"))
+        assertEquals(listOf("hello"), gateway.sends.map { it.input.text })
     }
 
     @Test
@@ -141,7 +142,7 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
         val gateway =
             FakeHostGateway().apply {
                 startResult = GatewayResult.Success(started)
-                turnResult = GatewayResult.Success("turn-new")
+                sendResult = GatewayResult.Success("turn-new")
                 readResult = GatewayResult.Failure("rollout is empty")
             }
         val controller = controller(gateway)
@@ -185,14 +186,14 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
         val idleThread = thread.copy(turns = emptyList())
         val gateway =
             FakeHostGateway().apply {
-                turnResult = GatewayResult.Success("turn-2")
-                readResult = GatewayResult.Success(ThreadReadResult(idleThread, emptyList()))
+                sendResult = GatewayResult.Success("turn-2")
+                readResult = GatewayResult.Success(idleThread)
             }
         val controller = controller(gateway, selectedThreadId = "thread-1", cachedThread = idleThread)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
         runSuspend { controller.readThread(profile, "thread-1") }
         gateway.readIds.clear()
-        gateway.turnHook = { controller.dispatch(AppAction.ThreadListOpened(profile.id)) }
+        gateway.sendHook = { controller.dispatch(AppAction.ThreadListOpened(profile.id)) }
 
         runSuspend { controller.startTurn(profile, "thread-1", "hello") }
 
@@ -202,12 +203,11 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun accepted_steering_input_is_visible_across_reads_until_its_native_echo() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
         runSuspend { assertTrue(controller.startTurn(profile, "thread-1", "Change direction")) }
-        val clientId = gateway.submittedClientIds.single()
+        val clientId = gateway.sends.single().input.clientUserMessageId
         fun displayed() =
             controller.state.cache.snapshot(profile.id, "thread-1")!!.conversationSegments().flatMap { it.userMessages }
         assertEquals(listOf("Change direction"), displayed().map { it.text })
@@ -242,12 +242,11 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun identical_additional_inputs_have_distinct_ids_and_each_echo_replaces_only_its_submission() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
         repeat(2) { runSuspend { assertTrue(controller.startTurn(profile, "thread-1", "Again")) } }
-        val ids = gateway.submittedClientIds
+        val ids = gateway.sends.map { it.input.clientUserMessageId }
         assertEquals(2, ids.toSet().size)
         gateway.emit(
             notification(
@@ -264,16 +263,15 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun a_native_echo_before_the_acknowledgement_is_not_added_twice() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
-        gateway.steerHook = {
+        gateway.sendHook = {
             gateway.emit(
                 notification(
                     "item/started",
                     """
-                {"threadId":"thread-1","turnId":"turn-1","item":{"id":"native-first","clientId":"${gateway.submittedClientIds.last()}","type":"userMessage","content":[{"type":"text","text":"Quick echo"}]}}
+                {"threadId":"thread-1","turnId":"turn-1","item":{"id":"native-first","clientId":"${gateway.sends.last().input.clientUserMessageId}","type":"userMessage","content":[{"type":"text","text":"Quick echo"}]}}
             """,
                 )
             )
@@ -285,49 +283,37 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
     }
 
     @Test
-    fun active_turn_steers_existing_turn_without_replacing_its_live_snapshot() {
-        val gateway =
-            FakeHostGateway().apply {
-                readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
-                turnResult = GatewayResult.Failure("active turns must use steer")
-                steerResult = GatewayResult.Success(Unit)
-            }
+    fun accepted_input_retains_the_live_turn_without_rereading() {
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
         runSuspend { controller.readThread(profile, "thread-1") }
         gateway.readIds.clear()
+        val before = controller.state.cache.snapshot(profile.id, "thread-1")!!.turns
 
         runSuspend { controller.startTurn(profile, "thread-1", "keep going") }
 
-        assertEquals(listOf("turn-1"), gateway.steerTurnIds)
-        assertEquals(listOf("keep going"), gateway.steerTexts)
-        assertTrue(gateway.turnCwds.isEmpty())
+        assertEquals(before, controller.state.cache.snapshot(profile.id, "thread-1")!!.turns)
+        assertEquals("keep going", gateway.sends.single().input.text)
         assertTrue(gateway.readIds.isEmpty())
         assertNull(controller.state.selectedView.notice)
     }
 
     @Test
-    fun active_turn_steer_failure_surfaces_notice_without_falling_back_to_start() {
-        val gateway =
-            FakeHostGateway().apply {
-                readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
-                turnResult = GatewayResult.Failure("active turns must use steer")
-                steerResult = GatewayResult.Failure("steer failed")
-            }
-        val controller = controller(gateway, selectedThreadId = "thread-1")
-        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
-        runSuspend { controller.readThread(profile, "thread-1") }
-        gateway.readIds.clear()
-
-        runSuspend { assertEquals(false, controller.startTurn(profile, "thread-1", "keep going")) }
-
-        assertEquals("steer failed", controller.state.selectedView.notice)
-        assertTrue(controller.state.cache.snapshot(profile.id, "thread-1")!!.submittedMessages.isEmpty())
-        assertEquals(listOf("turn-1"), gateway.steerTurnIds)
-        assertEquals(listOf("keep going"), gateway.steerTexts)
-        assertTrue(gateway.turnCwds.isEmpty())
-        assertTrue(gateway.turnTexts.isEmpty())
-        assertTrue(gateway.readIds.isEmpty())
+    fun failed_send_keeps_the_snapshot_and_surfaces_the_error_without_accepting_input() {
+        val idle = thread.copy(turns = emptyList())
+        val queued = idle.copy(summary = idle.summary.copy(status = ThreadStatus.Active(emptyList())))
+        for (snapshot in listOf(idle, thread, queued)) {
+            val gateway = FakeHostGateway().apply { sendResult = GatewayResult.Failure("send failed") }
+            val controller = controller(gateway, selectedThreadId = "thread-1", cachedThread = snapshot)
+            runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+            gateway.readIds.clear()
+            runSuspend { assertEquals(false, controller.startTurn(profile, "thread-1", "keep going")) }
+            assertEquals("send failed", controller.state.selectedView.notice)
+            assertEquals(snapshot, controller.state.cache.snapshot(profile.id, "thread-1"))
+            assertEquals("keep going", gateway.sends.single().input.text)
+            assertTrue(gateway.readIds.isEmpty())
+        }
     }
 
     @Test
@@ -337,63 +323,40 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
         val gateway =
             FakeHostGateway().apply {
                 listResult = GatewayResult.Success(listOf(activeThread.summary))
-                queueResult = GatewayResult.Success("queued-1")
+                sendResult = GatewayResult.Success(null)
             }
         val controller = controller(gateway, cachedThread = activeThread)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
 
         runSuspend { assertEquals(true, controller.startTurn(profile, "thread-1", "queued hello")) }
 
-        assertEquals(listOf("thread-1"), gateway.queueThreadIds)
-        assertEquals(listOf("queued hello"), gateway.queueTexts)
+        assertEquals("thread-1", gateway.sends.single().threadId)
+        assertEquals("queued hello", gateway.sends.single().input.text)
         val queued = controller.state.cache.snapshot(profile.id, "thread-1")!!.submittedMessages.single()
         assertEquals("queued hello", queued.text)
         assertNull(queued.turnId)
-        assertEquals(gateway.submittedClientIds.single(), queued.clientId)
-        assertTrue(gateway.steerTurnIds.isEmpty())
-        assertTrue(gateway.turnTexts.isEmpty())
+        assertEquals(gateway.sends.single().input.clientUserMessageId, queued.clientId)
         assertEquals("現在の処理が完了した後にメッセージを送信します。", controller.state.selectedView.notice)
         assertTrue(controller.state.cache.snapshot(profile.id, "thread-1")?.turns.orEmpty().isEmpty())
     }
 
     @Test
-    fun active_thread_list_status_queues_even_when_cached_detail_status_is_stale() {
+    fun send_passes_the_new_list_status_and_cached_detail_to_the_shared_operation() {
         val idleThread = thread.copy(summary = thread.summary.copy(status = ThreadStatus.Idle), turns = emptyList())
         val activeSummary = idleThread.summary.copy(status = ThreadStatus.Active(emptyList()))
         val gateway =
             FakeHostGateway().apply {
                 listResult = GatewayResult.Success(listOf(activeSummary))
-                queueResult = GatewayResult.Success("queued-1")
+                sendResult = GatewayResult.Success(null)
             }
         val controller = controller(gateway, cachedThread = idleThread)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
 
         runSuspend { controller.startTurn(profile, "thread-1", "queued hello") }
 
-        assertEquals(listOf("thread-1"), gateway.queueThreadIds)
-        assertTrue(gateway.turnTexts.isEmpty())
-    }
-
-    @Test
-    fun active_thread_queue_failure_surfaces_notice_without_falling_back_to_start() {
-        val activeThread =
-            thread.copy(summary = thread.summary.copy(status = ThreadStatus.Active(emptyList())), turns = emptyList())
-        val gateway =
-            FakeHostGateway().apply {
-                listResult = GatewayResult.Success(listOf(activeThread.summary))
-                queueResult = GatewayResult.Failure("queue failed")
-                turnResult = GatewayResult.Success("must not start")
-            }
-        val controller = controller(gateway, cachedThread = activeThread)
-        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
-
-        runSuspend { controller.startTurn(profile, "thread-1", "queued hello") }
-
-        assertEquals("queue failed", controller.state.selectedView.notice)
-        assertEquals(listOf("thread-1"), gateway.queueThreadIds)
-        assertTrue(gateway.queueTexts.isNotEmpty())
-        assertTrue(gateway.steerTurnIds.isEmpty())
-        assertTrue(gateway.turnTexts.isEmpty())
+        val sent = gateway.sends.single()
+        assertEquals("idle", sent.snapshot.asObjectOrNull()?.childObject("status")?.string("type"))
+        assertEquals("active", sent.listed.asObjectOrNull()?.childObject("status")?.string("type"))
     }
 
     @Test
@@ -459,13 +422,14 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
             applyLiveEvent(
                 restored,
                 profile.id,
-                RawCodexMessage.Notification(
-                    "item/completed",
-                    buildJsonObject {
-                        put("threadId", JsonPrimitive("thread-1"))
-                        put("turnId", JsonPrimitive(snapshot.turns.single().id))
-                        put("item", (echoed).fixtureJson())
-                    },
+                codexMessage(
+                    method = "item/completed",
+                    params =
+                        buildJsonObject {
+                            put("threadId", JsonPrimitive("thread-1"))
+                            put("turnId", JsonPrimitive(snapshot.turns.single().id))
+                            put("item", (echoed).fixtureJson())
+                        },
                 ),
                 MobileCacheLimits(),
             )
@@ -495,14 +459,17 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
     }
 
     @Test
-    fun starting_turn_without_a_cached_working_directory_sends_no_request_and_asks_for_retry() {
-        val gateway = FakeHostGateway().apply { listResult = GatewayResult.Success(listOf(summary("thread-1", ""))) }
-        val controller = controller(gateway, selectedThreadId = null, cachedThread = null)
+    fun send_without_a_cached_snapshot_passes_the_listed_thread_to_the_shared_operation() {
+        val gateway =
+            FakeHostGateway().apply {
+                listResult = GatewayResult.Success(listOf(summary("thread-1", "")))
+                sendResult = GatewayResult.Failure("タスクの作業ディレクトリが不明です。タスク一覧を更新してください")
+            }
+        val controller = controller(gateway, cachedThread = null)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
-
-        runSuspend { controller.startTurn(profile, "thread-1", "hello") }
-
-        assertTrue(gateway.turnCwds.isEmpty())
+        runSuspend { assertEquals(false, controller.startTurn(profile, "thread-1", "hello")) }
+        assertEquals(kotlinx.serialization.json.JsonNull, gateway.sends.single().snapshot)
+        assertEquals("", gateway.sends.single().listed.asObjectOrNull()?.string("cwd"))
         assertEquals("タスクの作業ディレクトリが不明です。タスク一覧を更新してください", controller.state.selectedView.notice)
     }
 }

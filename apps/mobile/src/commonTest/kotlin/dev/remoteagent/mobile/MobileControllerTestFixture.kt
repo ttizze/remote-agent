@@ -94,7 +94,7 @@ internal abstract class MobileControllerTestFixture {
                             .copy(items = listOf(CodexItem.AgentMessage("item-1", "Persisted external answer")))
                     )
             )
-        gateway.readResult = GatewayResult.Success(ThreadReadResult(refreshed, emptyList()))
+        gateway.readResult = GatewayResult.Success(refreshed)
         repeat(3) {
             gateway.emit(
                 notification(
@@ -115,9 +115,7 @@ internal abstract class MobileControllerTestFixture {
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
     ): AtomicRef<MobileApp> {
         val initialCache =
-            cachedThread?.let {
-                reconcileThreadRead(MobileCache(), profile.id, ThreadReadResult(it, emptyList()), cacheLimits)
-            } ?: MobileCache()
+            cachedThread?.let { reconcileThreadRead(MobileCache(), profile.id, it, cacheLimits) } ?: MobileCache()
         return mobileApp(
             gateway = gateway,
             repository =
@@ -169,11 +167,11 @@ internal abstract class MobileControllerTestFixture {
         var connectBlock: (suspend () -> GatewayResult<Unit>)? = null
         var listResult: GatewayResult<List<ThreadSummary>> = GatewayResult.Success(emptyList())
         var projectResult: GatewayResult<List<CodexProject>> = GatewayResult.Success(emptyList())
-        var readResult: GatewayResult<ThreadReadResult> = GatewayResult.Failure("not configured")
+        var readResult: GatewayResult<ThreadSnapshot> = GatewayResult.Failure("not configured")
         var startResult: GatewayResult<ThreadSnapshot> = GatewayResult.Failure("not configured")
-        var turnResult: GatewayResult<String> = GatewayResult.Success("turn-1")
-        var steerResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
-        var queueResult: GatewayResult<String> = GatewayResult.Success("queue-1")
+        var sendResult: GatewayResult<String?> = GatewayResult.Success("turn-1")
+        val sends = mutableListOf<AgentCommand.SendTurn>()
+        var sendHook: (() -> Unit)? = null
         var interruptResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectBlock: (suspend () -> GatewayResult<Unit>)? = null
@@ -185,18 +183,8 @@ internal abstract class MobileControllerTestFixture {
         var readIds = mutableListOf<String>()
         var startCalls = 0
         var startCwds = mutableListOf<String>()
-        var turnResumes = mutableListOf<Boolean>()
-        var turnCwds = mutableListOf<String>()
-        var turnTexts = mutableListOf<String>()
-        val submittedClientIds = mutableListOf<String>()
-        var steerHook: (() -> Unit)? = null
-        var steerTurnIds = mutableListOf<String>()
-        var steerTexts = mutableListOf<String>()
-        var queueThreadIds = mutableListOf<String>()
-        var queueTexts = mutableListOf<String>()
         var connectHook: (() -> Unit)? = null
         var listHook: (() -> Unit)? = null
-        var turnHook: (() -> Unit)? = null
         var interruptHook: (() -> Unit)? = null
         var subscriptionCancelCount = 0
         var disconnectCalls = 0
@@ -254,14 +242,18 @@ internal abstract class MobileControllerTestFixture {
                     is AgentCommand.ReadThread -> {
                         readIds += command.threadId
                         readHook?.invoke()
-                        readResult.mapGateway { it.thread.fixtureResponse() }
+                        readResult.mapGateway { it.fixtureResponse() }
                     }
                     is AgentCommand.StartThread -> {
                         startCalls += 1
                         startCwds += command.cwd
                         startResult.mapGateway { it.fixtureResponse() }
                     }
-                    is AgentCommand.SendTurn -> send(command)
+                    is AgentCommand.SendTurn -> {
+                        sends += command
+                        sendHook?.invoke()
+                        sendResult.mapGateway(::JsonPrimitive)
+                    }
                     is AgentCommand.InterruptTurn -> {
                         interruptHook?.invoke()
                         interruptResult.mapGateway { JsonNull }
@@ -269,45 +261,6 @@ internal abstract class MobileControllerTestFixture {
                     else -> error("No response configured for native agent intent: $command")
                 }
             return result.mapGateway(JsonElement::toString)
-        }
-
-        private fun send(command: AgentCommand.SendTurn): GatewayResult<JsonElement> {
-            // Only transport effects are controlled here; use the real shared routing policy.
-            val plan =
-                Json.parseToJsonElement(
-                        nativeConversationPresentation(
-                            buildJsonObject {
-                                put("operation", "sendPlan")
-                                put("snapshot", command.snapshot)
-                                put("listed", command.listed)
-                            }
-                                .toString()
-                        )
-                    )
-                    .jsonObject
-            submittedClientIds += command.input.clientUserMessageId
-            return when (plan.string("action")) {
-                "steer" -> {
-                    val turnId = plan.string("turnId")!!
-                    steerHook?.invoke()
-                    steerTurnIds += turnId
-                    steerTexts += command.input.text
-                    steerResult.mapGateway { JsonPrimitive(turnId) }
-                }
-                "queue" -> {
-                    queueThreadIds += command.threadId
-                    queueTexts += command.input.text
-                    queueResult.mapGateway { JsonNull }
-                }
-                "start" -> {
-                    turnResumes += plan.boolean("resume")!!
-                    turnCwds += plan.string("cwd")!!
-                    turnTexts += command.input.text
-                    turnHook?.invoke()
-                    turnResult.mapGateway(::JsonPrimitive)
-                }
-                else -> GatewayResult.Failure(plan.string("message")!!)
-            }
         }
 
         override fun subscribeRaw(
@@ -382,8 +335,23 @@ internal abstract class MobileControllerTestFixture {
     }
 }
 
-internal fun notification(method: String, params: String): RawCodexMessage.Notification =
-    RawCodexMessage.Notification(method, Json.parseToJsonElement(params))
+internal fun codexMessage(
+    method: String,
+    params: JsonElement,
+    id: JsonElement? = null,
+    extensions: JsonObject = JsonObject(emptyMap()),
+): RawCodexMessage =
+    RawCodexMessage(
+        buildJsonObject {
+            extensions.forEach { (key, value) -> put(key, value) }
+            put("method", method)
+            put("params", params)
+            id?.let { put("id", it) }
+        }
+    )
+
+internal fun notification(method: String, params: String): RawCodexMessage =
+    codexMessage(method = method, params = Json.parseToJsonElement(params))
 
 internal class InMemoryMobileRepository(initial: AppState = AppState()) : MobileRepository {
     private var state = initial

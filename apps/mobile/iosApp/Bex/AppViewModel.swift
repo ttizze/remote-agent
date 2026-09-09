@@ -16,9 +16,6 @@ final class BexAppViewModel: ObservableObject {
     @Published private(set) var transcribing = false
     @Published private(set) var settings: AgentSettingsState
     private var settingsObservation: HostEventSubscription?
-    var settingsActions: IosSettingsActions {
-        controller.settings
-    }
 
     @Published private var drafts = UserDefaults.standard
         .dictionary(forKey: "bex.drafts.v4") as? [String: String] ?? [:]
@@ -30,7 +27,7 @@ final class BexAppViewModel: ObservableObject {
     }
 
     var draftKey: String {
-        (state.selectedProfileId ?? "") + ":" + (state.selectedThreadId ?? "new:\(state.workingDirectory)")
+        (state.selectedProfileId ?? "") + ":" + (state.view.selectedThreadId ?? "new:\(state.workingDirectory)")
     }
 
     var draft: String {
@@ -46,11 +43,7 @@ final class BexAppViewModel: ObservableObject {
         state.workingDirectory
     }
 
-    var workspace: IosWorkspaceActions {
-        controller.workspace
-    }
-
-    private let controller = IosAppController()
+    let controller = IosAppController()
 
     init() {
         settings = controller.settings.currentState()
@@ -77,22 +70,6 @@ final class BexAppViewModel: ObservableObject {
         controller.close()
     }
 
-    func openPairing() {
-        controller.hosts.openPairing()
-    }
-
-    func dismissPairing() {
-        controller.hosts.dismissPairing()
-    }
-
-    func showProfiles() {
-        controller.hosts.showProfiles()
-    }
-
-    func selectProfile(_ id: String) {
-        controller.hosts.selectProfile(hostIdentity: id)
-    }
-
     func pair(_ contents: String) {
         controller.hosts.pair(
             contents: contents,
@@ -100,45 +77,10 @@ final class BexAppViewModel: ObservableObject {
         )
     }
 
-    func connect() {
-        controller.hosts.connect()
-    }
-
-    func refreshTaskList() {
-        controller.navigation.refreshTaskList()
-    }
-
-    func expandTaskList(projects: Bool = false, projectId: String? = nil) {
-        controller.navigation.expandTaskList(
-            projects: projects,
-            projectId: projectId
-        )
-    }
-
-    func searchTaskList(_ term: String) {
-        controller.navigation.searchTaskList(term: term)
-    }
-
-    func openNewThread(cwd: String) {
-        controller.navigation.openNewThread(cwd: cwd)
-    }
-
     func openNewThread(on profileId: String) {
         guard profileId != state.selectedProfileId else { return }
         controller.hosts.selectProfile(hostIdentity: profileId)
         controller.navigation.openNewThread(cwd: "")
-    }
-
-    func openThread(_ id: String) {
-        controller.navigation.openThread(threadId: id)
-    }
-
-    func loadOlderHistory(_ turnId: String?) {
-        controller.navigation.loadOlderHistory(turnId: turnId)
-    }
-
-    func showThreadList() {
-        controller.navigation.showThreadList()
     }
 }
 
@@ -271,30 +213,12 @@ extension BexAppViewModel {
         }
     }
 
-    func respond(_ request: IosTurnRequestView, answer: RequestAnswer, completion: @escaping (String?) -> Void) {
-        controller.conversation.respond(requestJson: request.requestJson, answer: answer, completion: completion)
-    }
-
-    func forkThread(
-        _ threadId: String,
-        through turnId: String,
-        completion: @escaping ([String: Any]?, String?) -> Void
-    ) {
-        controller.conversation.forkThread(threadId: threadId, lastTurnId: turnId) { result, error in
-            completion(result.map(jsonObject), error)
-        }
-    }
-
     func readItemDetails(threadId: String, turnId: String, itemId: String) async -> (String?, String?) {
         await withCheckedContinuation { continuation in
             controller.conversation.readItemDetails(threadId: threadId, turnId: turnId, itemId: itemId) { body, error in
                 continuation.resume(returning: (body, error))
             }
         }
-    }
-
-    func readSessionImages(_ threadId: String, completion: @escaping ([String]?, String?) -> Void) {
-        controller.conversation.readSessionImages(threadId: threadId, completion: completion)
     }
 
     func download(_ path: String, completion: @escaping (URL?, String?) -> Void) {
@@ -321,10 +245,6 @@ extension BexAppViewModel {
             try? FileManager.default.removeItem(at: directory)
             completion(nil, error.localizedDescription)
         }
-    }
-
-    func interrupt(_ turnId: String) {
-        controller.conversation.interrupt(turnId: turnId)
     }
 
     func scanned(_ contents: String?) {

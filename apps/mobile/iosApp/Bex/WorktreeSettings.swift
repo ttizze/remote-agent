@@ -86,7 +86,7 @@ struct WorktreeSettingsSheet: View {
 
     private func requestSettings(update: HostWorktreeSettings? = nil) async -> (HostWorktreeSettings?, String?) {
         await withCheckedContinuation { continuation in
-            model.workspace.worktreeSettings(hostIdentity: host.id, update: update) { result, error in
+            model.controller.workspace.worktreeSettings(hostIdentity: host.id, update: update) { result, error in
                 continuation.resume(returning: (result, error))
             }
         }

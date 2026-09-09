@@ -124,7 +124,7 @@ extension ThreadScreen {
     }
 
     func loadVisibleHistory() {
-        guard scrollingToOlder, !historyRequestPending, !state.loadingHistory else { return }
+        guard scrollingToOlder, !historyRequestPending, !state.view.loadingHistory else { return }
         if let boundary = historyBoundaries.filter({ $0.value >= 0 && $0.value < scrollViewportHeight * 0.6 })
             .min(by: { $0.value < $1.value }) {
             let turnId = boundary.key == "older-turns" ? nil : boundary.key
@@ -133,23 +133,23 @@ extension ThreadScreen {
     }
 
     func requestHistory(_ turnId: String?) {
-        guard !state.loadingHistory else { return }
+        guard !state.view.loadingHistory else { return }
         scrollPosition.stopFollowingLatest()
         scrollingToOlder = false
         historyRequestPending = true
-        model.loadOlderHistory(turnId)
+        model.controller.navigation.loadOlderHistory(turnId: turnId)
     }
 
     func historyBoundary(_ turnId: String?) -> some View {
         Button { requestHistory(turnId) } label: {
             HStack {
-                if state.loadingHistory {
+                if state.view.loadingHistory {
                     ProgressView()
                 }
                 Text(turnId == nil ? "以前の会話を読み込む" : "途中の履歴を読み込む")
             }.frame(maxWidth: .infinity)
         }
-        .disabled(state.loadingHistory)
+        .disabled(state.view.loadingHistory)
         .accessibilityIdentifier("history.\(turnId ?? "older-turns")")
         .background(GeometryReader { geometry in
             Color.clear.preference(key: HistoryBoundaryPreferenceKey.self,

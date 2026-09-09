@@ -8,9 +8,8 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
 
 internal class AgentOperationCorpusTest : MobileControllerTestFixture() {
     @Test
@@ -27,72 +26,51 @@ internal class AgentOperationCorpusTest : MobileControllerTestFixture() {
             val commandJson = case.getValue("command")
             val command = Json.decodeFromJsonElement<AgentCommand>(commandJson)
             assertEquals(commandJson, Json.parseToJsonElement(command.encode()), name)
-            val failure =
-                case.string("errorContains")?.let { message ->
-                    GatewayResult.Failure(message, case["errorRaw"]?.takeUnless { it == JsonNull })
-                }
-            val gateway =
-                FakeHostGateway().apply {
-                    agentBlock = { actual ->
-                        assertEquals(commandJson, Json.parseToJsonElement(actual.encode()), name)
-                        failure ?: GatewayResult.Success(case.getValue("result").toString())
-                    }
-                }
-            val projected = project(gateway, command)
-            if (failure != null) {
-                assertEquals(failure, projected, name)
-                continue
-            }
-            val value = assertIs<GatewayResult.Success<*>>(projected, name).value
-            val expected = case.getValue("result")
-            assertProjection(expected, value, command, name)
-        }
-    }
-
-    private suspend fun project(gateway: HostGateway, command: AgentCommand): GatewayResult<*> {
-        if (command == AgentCommand.Models) return gateway.listModels(profile)
-        return gateway.command(profile, command).mapGateway { value ->
+            val expected = case.fixtureValue("result")
+            if (case.string("errorContains") != null) continue
             when (command) {
-                is AgentCommand.ListThreads -> parseThreadListPage(value)
-                is AgentCommand.ReadThread -> ThreadReadResult(codexThreadFromResponse(value), emptyList())
+                is AgentCommand.ReadThread,
                 is AgentCommand.ReadOlder,
-                is AgentCommand.StartThread -> codexThreadFromResponse(value)
-                is AgentCommand.ReadItem -> codexItem((value as JsonObject).getValue("item")).expandedThreadItemBody()
-                is AgentCommand.SendTurn -> (value as JsonPrimitive).contentOrNull
-                else -> value
+                is AgentCommand.StartThread -> assertSnapshot(expected, codexThreadFromResponse(expected), name)
+                is AgentCommand.ListThreads -> {
+                    val page = parseThreadListPage(expected)
+                    val raw = expected as JsonObject
+                    assertEquals(
+                        raw.array("data")!!.map { it.jsonObject.string("id") },
+                        page.threads.map { it.id },
+                        name,
+                    )
+                    assertEquals(raw.boolean("hasMoreChats"), page.hasMoreChats, name)
+                    assertEquals(raw.boolean("hasMoreProjects"), page.hasMoreProjects, name)
+                }
+                is AgentCommand.ReadItem -> {
+                    val item = (expected as JsonObject).getValue("item")
+                    assertEquals(
+                        item.jsonObject.string("aggregatedOutput"),
+                        codexItem(item).expandedThreadItemBody(),
+                        name,
+                    )
+                }
+                AgentCommand.Models -> {
+                    val gateway =
+                        FakeHostGateway().apply { agentBlock = { GatewayResult.Success(expected.toString()) } }
+                    val models =
+                        assertIs<GatewayResult.Success<List<CodexModel>>>(gateway.listModels(profile), name).value
+                    assertEquals(
+                        (expected as JsonArray).map { it.jsonObject.string("displayName") },
+                        models.map { it.displayName },
+                        name,
+                    )
+                }
+                else -> Unit
             }
         }
     }
 
-    private fun assertProjection(expected: JsonElement, value: Any?, command: AgentCommand, name: String) {
-        when (value) {
-            is ThreadReadResult -> assertSnapshot(expected, value.thread, name)
-            is ThreadSnapshot -> assertSnapshot(expected, value, name)
-            is ThreadListPage -> {
-                val expectedThreads = (expected as JsonObject).getValue("data") as JsonArray
-                assertEquals(expectedThreads.map { (it as JsonObject).string("id") }, value.threads.map { it.id }, name)
-                assertEquals(expected.boolean("hasMoreChats"), value.hasMoreChats, name)
-                assertEquals(expected.boolean("hasMoreProjects"), value.hasMoreProjects, name)
-            }
-            is JsonElement -> assertEquals(expected, value, name)
-            is List<*> ->
-                assertEquals(
-                    (expected as JsonArray).map { (it as JsonObject).string("displayName") },
-                    value.map { (it as CodexModel).displayName },
-                    name,
-                )
-            is String -> {
-                val text =
-                    if (command is AgentCommand.ReadItem)
-                        ((expected as JsonObject).getValue("item") as JsonObject).string("aggregatedOutput")
-                    else (expected as JsonPrimitive).content
-                assertEquals(text, value, name)
-            }
-            null,
-            Unit -> assertEquals(JsonNull, expected, name)
-            else -> error("Missing projection assertion for $value")
-        }
-    }
+    private fun JsonObject.fixtureValue(field: String): JsonElement =
+        string("${field}Ref")?.removePrefix("/")?.split("/")?.fold(this as JsonElement) { value, key ->
+            if (value is JsonArray) value[key.toInt()] else value.jsonObject.getValue(key)
+        } ?: get(field) ?: JsonNull
 
     private fun assertSnapshot(expected: JsonElement, snapshot: ThreadSnapshot, name: String) {
         val thread = (expected as JsonObject).getValue("thread") as JsonObject

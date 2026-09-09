@@ -23,7 +23,7 @@ internal data class ThreadTurnPresentation(
 )
 
 @Serializable
-internal data class ThreadErrorPresentation(
+data class ThreadErrorPresentation(
     val title: String,
     val message: String,
     val details: String?,
@@ -89,7 +89,7 @@ internal fun CodexTurn.toThreadTurnPresentations(
             segment.initiallyExpanded,
             segment.collapsible,
             if (segment.last) error?.toThreadErrorPresentation(status) else null,
-            if (segment.last) pendingRequests.map(CodexServerRequest::toThreadRequestPresentation) else emptyList(),
+            if (segment.last) pendingRequests.map(RawCodexMessage::toThreadRequestPresentation) else emptyList(),
         )
     }
 }

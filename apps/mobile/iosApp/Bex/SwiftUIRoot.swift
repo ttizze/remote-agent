@@ -30,7 +30,7 @@ private struct BexScreen: View {
                                 get: { state.screen == .threads || state.screen == .thread },
                                 set: {
                                     if !$0, model.state.selectedProfileId != nil {
-                                        model.showProfiles()
+                                        model.controller.hosts.showProfiles()
                                     }
                                 }
                             )) {
@@ -41,7 +41,7 @@ private struct BexScreen: View {
                             get: { state.screen == .pairing },
                             set: {
                                 if !$0, model.state.screen == .pairing {
-                                    model.dismissPairing()
+                                    model.controller.hosts.dismissPairing()
                                 }
                             }
                         )) {
@@ -63,7 +63,7 @@ private struct BexScreen: View {
                     get: { state.screen == .thread },
                     set: {
                         if !$0, model.state.screen == .thread {
-                            model.showThreadList()
+                            model.controller.navigation.showThreadList()
                         }
                     }
                 )) {
@@ -76,11 +76,11 @@ private struct BexScreen: View {
 
     @ViewBuilder private var connectionErrorBanner: some View {
         if state.selectedProfileId != nil, state.screen != .pairing,
-           let error = state.connectionError {
+           let error = (state.view.connection as? ConnectionPhaseFailed)?.message {
             HStack(spacing: 8) {
                 Text(error).font(.caption).lineLimit(2)
                 Spacer()
-                Button("再接続") { model.connect() }
+                Button("再接続") { model.controller.hosts.connect() }
             }
             .padding(10).background(.ultraThinMaterial)
             .accessibilityIdentifier("connection.error")
@@ -156,7 +156,7 @@ private struct PairingScreen: View {
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 if !state.profiles.isEmpty {
-                    Button("キャンセル") { model.dismissPairing() }
+                    Button("キャンセル") { model.controller.hosts.dismissPairing() }
                         .accessibilityIdentifier("pairing.cancel")
                 }
             }
@@ -171,7 +171,7 @@ private struct ProfilesScreen: View {
     var body: some View {
         List {
             ForEach(state.profiles, id: \.id) { profile in
-                Button { model.selectProfile(profile.id) } label: {
+                Button { model.controller.hosts.selectProfile(hostIdentity: profile.id) } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(profile.name).font(.headline)
                         Text(profile.hostIdentity).font(.caption).foregroundColor(.secondary)
@@ -180,7 +180,7 @@ private struct ProfilesScreen: View {
                 .accessibilityIdentifier("profiles.\(profile.id)")
             }
             Section {
-                Button("PCを追加") { model.openPairing() }
+                Button("PCを追加") { model.controller.hosts.openPairing() }
                     .accessibilityIdentifier("profiles.add")
             }
         }

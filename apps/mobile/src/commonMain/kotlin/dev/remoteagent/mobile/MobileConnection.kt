@@ -118,7 +118,7 @@ private fun AtomicRef<MobileApp>.receiveHostMessage(
     scope: CoroutineScope,
     message: RawCodexMessage,
 ) {
-    val notification = message as? RawCodexMessage.Notification
+    val notification = message.takeUnless { it.kind == ConversationEventKind.RequestStarted }
     val refreshProjects = notification?.method == "project/changed"
     val refreshThreads = notification?.method in THREAD_LIST_INVALIDATING_METHODS
     val threadWatchEvent = notification?.method in THREAD_WATCH_METHODS

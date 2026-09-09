@@ -57,14 +57,15 @@ class CodexProtocolTest {
     @Test
     fun unknown_notification_does_not_change_display_cache() {
         val event =
-            RawCodexMessage.Notification(
-                "item/futureThing",
-                json.parseToJsonElement(
-                    """
+            codexMessage(
+                method = "item/futureThing",
+                params =
+                    json.parseToJsonElement(
+                        """
                 {"threadId":"thread-1","turnId":"turn-1","extra":{"value":42}}
             """
-                ),
-                JsonObject(mapOf("vendor" to json.parseToJsonElement("true"))),
+                    ),
+                extensions = JsonObject(mapOf("vendor" to json.parseToJsonElement("true"))),
             )
         val unknown = assertEventKind(ConversationEventKind.Unknown, event)
         val cache = MobileCache()
@@ -72,14 +73,14 @@ class CodexProtocolTest {
 
         assertEquals("item/futureThing", unknown.method)
         assertEquals(42, unknown.paramsObject["extra"]?.jsonObject?.get("value")?.toString()?.toInt())
-        assertEquals("true", unknown.extensions["vendor"]?.toString())
+        assertEquals("true", unknown.raw["vendor"]?.toString())
         kotlin.test.assertSame(cache, updated)
     }
 
     @Test
     fun raw_parser_keeps_server_request_id_and_extensions() {
         val message =
-            assertIs<RawCodexMessage.ServerRequest>(
+            assertIs<RawCodexMessage>(
                 parseRawCodexMessage(
                     """
             {"id":"approval-1","method":"item/commandExecution/requestApproval","params":{"command":"ls"},"vendor":true}
@@ -87,9 +88,9 @@ class CodexProtocolTest {
                 )
             )
 
-        assertEquals("approval-1", message.id.toString().trim('"'))
+        assertEquals("approval-1", message.id)
         assertEquals("item/commandExecution/requestApproval", message.method)
-        assertEquals("true", message.extensions["vendor"]?.toString())
+        assertEquals("true", message.raw["vendor"]?.toString())
         assertTrue(message.params.toString().contains("ls"))
     }
 
@@ -107,13 +108,14 @@ class CodexProtocolTest {
         assertEquals("project-1", summary.projectId)
 
         val event =
-            RawCodexMessage.Notification(
-                "turn/completed",
-                json.parseToJsonElement(
-                    """
+            codexMessage(
+                method = "turn/completed",
+                params =
+                    json.parseToJsonElement(
+                        """
                 {"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted"}}
             """
-                ),
+                    ),
             )
         assertEquals(
             TurnStatus.Interrupted,
@@ -178,26 +180,28 @@ class CodexProtocolTest {
         val started =
             assertEventKind(
                 ConversationEventKind.TurnStarted,
-                RawCodexMessage.Notification(
-                    "turn/started",
-                    json.parseToJsonElement(
-                        """
+                codexMessage(
+                    method = "turn/started",
+                    params =
+                        json.parseToJsonElement(
+                            """
                 {"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress","startedAt":10}}
             """
-                    ),
+                        ),
                 ),
             )
         val completed =
             assertEventKind(
                 ConversationEventKind.TurnCompleted,
-                RawCodexMessage.Notification(
-                    "turn/completed",
-                    json.parseToJsonElement(
-                        """
+                codexMessage(
+                    method = "turn/completed",
+                    params =
+                        json.parseToJsonElement(
+                            """
                 {"threadId":"thread-1","turn":{"id":"turn-1","status":"completed",
                  "startedAt":10,"completedAt":12,"durationMs":2345}}
             """
-                    ),
+                        ),
                 ),
             )
 
@@ -228,13 +232,14 @@ class CodexProtocolTest {
     @Test
     fun reasoning_summary_text_delta_is_a_known_live_event() {
         val event =
-            RawCodexMessage.Notification(
-                "item/reasoning/summaryTextDelta",
-                json.parseToJsonElement(
-                    """
+            codexMessage(
+                method = "item/reasoning/summaryTextDelta",
+                params =
+                    json.parseToJsonElement(
+                        """
                 {"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"summary"}
             """
-                ),
+                    ),
             )
         val summary = assertEventKind(ConversationEventKind.ReasoningSummaryDelta, event)
         assertEquals("thread-1", summary.threadId)
@@ -248,28 +253,30 @@ class CodexProtocolTest {
         val retrying =
             assertEventKind(
                 ConversationEventKind.Error,
-                RawCodexMessage.Notification(
-                    "error",
-                    json.parseToJsonElement(
-                        """
+                codexMessage(
+                    method = "error",
+                    params =
+                        json.parseToJsonElement(
+                            """
                 {"threadId":"thread-1","turnId":"turn-1","willRetry":true,
                  "error":{"message":"stream disconnected","additionalDetails":"attempt 2 of 5",
                   "codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}
             """
-                    ),
+                        ),
                 ),
             )
         val terminal =
             assertEventKind(
                 ConversationEventKind.Error,
-                RawCodexMessage.Notification(
-                    "error",
-                    json.parseToJsonElement(
-                        """
+                codexMessage(
+                    method = "error",
+                    params =
+                        json.parseToJsonElement(
+                            """
                 {"threadId":"thread-1","turnId":"turn-1","willRetry":false,
                  "error":{"message":"context is full","codexErrorInfo":"contextWindowExceeded"}}
             """
-                    ),
+                        ),
                 ),
             )
 
@@ -307,15 +314,15 @@ class CodexProtocolTest {
 
         methods.forEachIndexed { index, method ->
             val message =
-                RawCodexMessage.ServerRequest(
-                    id = json.parseToJsonElement("\"request-$index\""),
+                codexMessage(
                     method = method,
                     params = json.parseToJsonElement("""{"threadId":"thread-1","turnId":"turn-1","reason":"needed"}"""),
+                    id = json.parseToJsonElement("\"request-$index\""),
                 )
             val event = assertEventKind(ConversationEventKind.RequestStarted, message)
-            assertEquals("request-$index", event.serverRequest().id)
-            assertEquals(method, event.serverRequest().method)
-            assertEquals("needed", event.serverRequest().params["reason"]?.toString()?.trim('"'))
+            assertEquals("request-$index", event.id)
+            assertEquals(method, event.method)
+            assertEquals("needed", event.paramsObject["reason"]?.toString()?.trim('"'))
         }
     }
 
@@ -324,12 +331,13 @@ class CodexProtocolTest {
         val event =
             assertEventKind(
                 ConversationEventKind.TurnCompleted,
-                RawCodexMessage.Notification(
-                    "turn/completed",
-                    json.parseToJsonElement(
-                        """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
+                codexMessage(
+                    method = "turn/completed",
+                    params =
+                        json.parseToJsonElement(
+                            """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
                     "error":{"message":"context full","codexErrorInfo":"contextWindowExceeded"}}}"""
-                    ),
+                        ),
                 ),
             )
 
@@ -346,11 +354,12 @@ class CodexProtocolTest {
         val status =
             assertEventKind(
                 ConversationEventKind.ThreadStatusChanged,
-                RawCodexMessage.Notification(
-                    "thread/status/changed",
-                    json.parseToJsonElement(
-                        """{"threadId":"thread-1","status":{"type":"active","activeFlags":["waitingOnApproval"]}}"""
-                    ),
+                codexMessage(
+                    method = "thread/status/changed",
+                    params =
+                        json.parseToJsonElement(
+                            """{"threadId":"thread-1","status":{"type":"active","activeFlags":["waitingOnApproval"]}}"""
+                        ),
                 ),
             )
         assertEquals(ThreadStatus.Active(listOf("waitingOnApproval")), codexThreadStatus(status.paramsObject["status"]))
@@ -365,13 +374,14 @@ class CodexProtocolTest {
             val review =
                 assertEventKind(
                     ConversationEventKind.GuardianReviewChanged,
-                    RawCodexMessage.Notification(
-                        method,
-                        json.parseToJsonElement(
-                            """{"threadId":"thread-1","turnId":"turn-1","reviewId":"review-1",
+                    codexMessage(
+                        method = method,
+                        params =
+                            json.parseToJsonElement(
+                                """{"threadId":"thread-1","turnId":"turn-1","reviewId":"review-1",
                         "review":{"status":"$reviewStatus","rationale":"checked"},
                         "action":{"type":"command","command":"git status"}}"""
-                        ),
+                            ),
                     ),
                 )
             assertEquals("review-1", review.paramsObject.string("reviewId"))
@@ -379,7 +389,7 @@ class CodexProtocolTest {
         }
     }
 
-    private fun <T : RawCodexMessage> assertEventKind(kind: ConversationEventKind, event: T): T {
+    private fun assertEventKind(kind: ConversationEventKind, event: RawCodexMessage): RawCodexMessage {
         assertEquals(kind, event.kind)
         return event
     }

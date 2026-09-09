@@ -341,125 +341,75 @@ impl AgentClient {
         options: TurnOptions<'_>,
     ) -> Result<Option<String>, AgentError> {
         use conversation_presentation::state::SendPlan;
+        let params = InputParams {
+            thread_id,
+            input,
+            client_user_message_id,
+            expected_turn_id: None,
+            options: TurnOptions::default(),
+        };
         match plan {
             SendPlan::Steer { turn_id } => {
-                self.steer_turn(thread_id, &turn_id, input, client_user_message_id)
-                    .await?;
+                self.request::<_, serde::de::IgnoredAny>(
+                    "turn/steer",
+                    &InputParams {
+                        expected_turn_id: Some(&turn_id),
+                        ..params
+                    },
+                )
+                .await?;
                 Ok(Some(turn_id))
             }
             SendPlan::Queue => {
-                self.queue_turn(thread_id, input, client_user_message_id)
-                    .await?;
+                let result = self.request("thread/queue/add", &params).await?;
+                checked(result, "thread/queue/add", |result| {
+                    required_id(&result["queuedSubmission"], "id")
+                        .map(|_| ())
+                        .or_else(|_| invalid("queued submission ID is missing"))
+                })?;
                 Ok(None)
             }
             SendPlan::Start { cwd, resume } => {
                 if resume {
-                    self.resume_thread(thread_id, Some(&cwd)).await?;
+                    #[derive(Serialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Resume<'a> {
+                        thread_id: &'a str,
+                        cwd: &'a str,
+                    }
+                    self.request::<_, serde::de::IgnoredAny>(
+                        "thread/resume",
+                        &Resume {
+                            thread_id,
+                            cwd: &cwd,
+                        },
+                    )
+                    .await?;
                 }
-                self.start_turn(thread_id, input, client_user_message_id, options)
-                    .await
-                    .map(Some)
+                let mut result: Value = self
+                    .request("turn/start", &InputParams { options, ..params })
+                    .await?;
+                let id = result
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .or_else(|| result["turn"]["id"].as_str());
+                if id.is_none_or(|id| id.trim().is_empty()) {
+                    return Err(AgentError::InvalidPayload {
+                        method: "turn/start",
+                        message: "turn ID is missing".into(),
+                        raw: result,
+                    });
+                }
+                let Value::String(id) = (if result["turnId"].is_string() {
+                    result["turnId"].take()
+                } else {
+                    result["turn"]["id"].take()
+                }) else {
+                    unreachable!("validated turn ID")
+                };
+                Ok(Some(id))
             }
             SendPlan::Reject { message } => invalid(message),
-        }
-    }
-
-    async fn resume_thread(&self, thread_id: &str, cwd: Option<&str>) -> Result<(), AgentError> {
-        let mut params = json!({"threadId":thread_id});
-        if let Some(cwd) = cwd {
-            params["cwd"] = cwd.into();
-        }
-        self.request::<_, Value>("thread/resume", &params)
-            .await
-            .map(|_| ())
-    }
-
-    async fn start_turn(
-        &self,
-        thread_id: &str,
-        input: &[Value],
-        client_user_message_id: &str,
-        options: TurnOptions<'_>,
-    ) -> Result<String, AgentError> {
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Params<'a> {
-            thread_id: &'a str,
-            input: &'a [Value],
-            client_user_message_id: &'a str,
-            #[serde(flatten)]
-            options: TurnOptions<'a>,
-        }
-        let result: Value = self
-            .request(
-                "turn/start",
-                &Params {
-                    thread_id,
-                    input,
-                    client_user_message_id,
-                    options,
-                },
-            )
-            .await?;
-        let id = result
-            .get("turnId")
-            .and_then(Value::as_str)
-            .or_else(|| result["turn"]["id"].as_str())
-            .filter(|id| !id.trim().is_empty());
-        match id {
-            Some(id) => Ok(id.to_owned()),
-            None => Err(AgentError::InvalidPayload {
-                method: "turn/start",
-                message: "turn ID is missing".into(),
-                raw: result,
-            }),
-        }
-    }
-
-    async fn steer_turn(
-        &self,
-        thread_id: &str,
-        turn_id: &str,
-        input: &[Value],
-        client_user_message_id: &str,
-    ) -> Result<(), AgentError> {
-        self.request::<_, Value>(
-            "turn/steer",
-            &InputParams {
-                thread_id,
-                input,
-                client_user_message_id,
-                expected_turn_id: Some(turn_id),
-            },
-        )
-        .await
-        .map(|_| ())
-    }
-
-    async fn queue_turn(
-        &self,
-        thread_id: &str,
-        input: &[Value],
-        client_user_message_id: &str,
-    ) -> Result<String, AgentError> {
-        let result: Value = self
-            .request(
-                "thread/queue/add",
-                &InputParams {
-                    thread_id,
-                    input,
-                    client_user_message_id,
-                    expected_turn_id: None,
-                },
-            )
-            .await?;
-        match required_id(&result["queuedSubmission"], "id") {
-            Ok(id) => Ok(id.to_owned()),
-            Err(_) => Err(AgentError::InvalidPayload {
-                method: "thread/queue/add",
-                message: "queued submission ID is missing".into(),
-                raw: result,
-            }),
         }
     }
 
@@ -851,6 +801,8 @@ struct InputParams<'a> {
     client_user_message_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     expected_turn_id: Option<&'a str>,
+    #[serde(flatten)]
+    options: TurnOptions<'a>,
 }
 
 #[derive(Serialize, Deserialize)]

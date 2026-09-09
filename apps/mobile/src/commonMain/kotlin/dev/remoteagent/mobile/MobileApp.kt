@@ -138,7 +138,7 @@ internal fun AtomicRef<MobileApp>.publish(action: AppAction, navigate: Boolean =
     val checkpoint =
         when (action) {
             is AppAction.HostEventReceived -> action.event.kind == ConversationEventKind.TurnCompleted
-            is AppAction.SnapshotReceived -> action.result.thread.turns.none { it.status == TurnStatus.InProgress }
+            is AppAction.SnapshotReceived -> action.thread.turns.none { it.status == TurnStatus.InProgress }
             else -> true
         }
     if (checkpoint) saveState()

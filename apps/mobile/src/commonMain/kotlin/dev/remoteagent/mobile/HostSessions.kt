@@ -9,7 +9,6 @@ import kotlinx.coroutines.sync.withLock
 internal data class HostSessions(
     val maxReadBytes: Int,
     val hosts: Map<String, HostSession> = emptyMap(),
-    val nextReadToken: Long = 0,
 )
 
 internal data class HostSession(

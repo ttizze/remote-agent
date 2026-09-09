@@ -1,9 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use agent_client::operations::AgentClient;
-use host_protocol::RpcPeer;
+use host_protocol::{JsonlReader, JsonlWriter, RpcPeer};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 
 /// The same canonical replies are projected by the Kotlin adapter tests.
 /// The Rust side exercises the real RPC peer, operation, and intent decoder.
@@ -16,6 +16,8 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
     );
     for mut case in cases {
         let name = case["name"].as_str().unwrap().to_owned();
+        let expected_result = fixture_value(&case, "result").clone();
+        let expected_error = fixture_value(&case, "errorRaw").clone();
         tokio::time::timeout(Duration::from_secs(3), async {
             let (client, server) = tokio::io::duplex(4096);
             let (reader, writer) = tokio::io::split(client);
@@ -26,12 +28,11 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
                 panic!("fixture exchanges must be an array")
             };
             let serve = tokio::spawn(async move {
-                let (reader, mut writer) = tokio::io::split(server);
-                let mut reader = BufReader::new(reader);
-                let mut line = String::new();
+                let (reader, writer) = tokio::io::split(server);
+                let mut reader = JsonlReader::new(reader);
+                let mut writer = JsonlWriter::new(writer);
                 for mut exchange in exchanges {
-                    line.clear();
-                    assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                    let line = reader.read_line().await.unwrap().expect("expected request");
                     let request: Value = serde_json::from_str(&line).unwrap();
                     if let Some(reply) = exchange.get("reply") {
                         assert_eq!(&request, reply);
@@ -41,19 +42,14 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
                     assert_eq!(request["params"], exchange["params"]);
                     let mut response = exchange["response"].take();
                     response["id"] = request["id"].clone();
-                    writer
-                        .write_all(response.to_string().as_bytes())
-                        .await
-                        .unwrap();
-                    writer.write_all(b"\n").await.unwrap();
+                    writer.write_line(&response.to_string()).await.unwrap();
                 }
                 exchanged.send(()).unwrap();
                 // An extra turn/start after a rejected resume fails here.
-                line.clear();
                 assert_eq!(
-                    reader.read_line(&mut line).await.unwrap(),
-                    0,
-                    "unexpected request: {line}"
+                    reader.read_line().await.unwrap(),
+                    None,
+                    "unexpected request"
                 );
             });
             let result = agent.command_json(&case["command"].to_string()).await;
@@ -61,14 +57,17 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
                 let error = result.unwrap_err();
                 assert!(error.to_string().contains(expected), "{name}: {error}");
                 let native: Value = serde_json::from_str(&error.into_native_error()).unwrap();
-                assert_eq!(native["rawError"], case["errorRaw"], "{name}");
+                assert_eq!(native["rawError"], expected_error, "{name}");
             } else {
                 let value: Value = serde_json::from_str(&result.unwrap()).unwrap();
-                assert_eq!(value, case["result"], "{name}");
+                assert_eq!(value, expected_result, "{name}");
             }
+            // One-way replies must reach the fixture before closing the writer queue.
             received.await.unwrap();
             peer.close();
-            serve.await.unwrap();
+            serve
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
         })
         .await
         .unwrap_or_else(|_| panic!("timed out: {name}"));
@@ -97,9 +96,8 @@ async fn snapshot_completion_precedes_the_next_wire_notification() {
     });
     let serve = tokio::spawn(async move {
         let (reader, mut writer) = tokio::io::split(server);
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        reader.read_line(&mut line).await.unwrap();
+        let mut reader = JsonlReader::new(reader);
+        let line = reader.read_line().await.unwrap().unwrap();
         let request: Value = serde_json::from_str(&line).unwrap();
         let reply =
             serde_json::json!({"id":request["id"],"result":{"thread":{"id":"thread","turns":[]}}});
@@ -139,10 +137,10 @@ async fn generic_host_calls_retain_null_results_and_remote_error_data() {
         let peer = Arc::new(RpcPeer::open(reader, writer, 4096, 4, |_| {}));
         let agent = AgentClient::new(peer.clone(), Duration::from_secs(1));
         let serve = tokio::spawn(async move {
-            let (reader, mut writer) = tokio::io::split(server);
-            let mut reader = BufReader::new(reader);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
+            let (reader, writer) = tokio::io::split(server);
+            let mut reader = JsonlReader::new(reader);
+            let mut writer = JsonlWriter::new(writer);
+            let line = reader.read_line().await.unwrap().unwrap();
             let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["method"], "host/custom");
             assert_eq!(
@@ -151,10 +149,7 @@ async fn generic_host_calls_retain_null_results_and_remote_error_data() {
             );
             let mut response = response;
             response["id"] = request["id"].clone();
-            writer
-                .write_all(format!("{response}\n").as_bytes())
-                .await
-                .unwrap();
+            writer.write_line(&response.to_string()).await.unwrap();
         });
         let result = agent
             .request::<_, Value>(
@@ -171,5 +166,12 @@ async fn generic_host_calls_retain_null_results_and_remote_error_data() {
         }
         serve.await.unwrap();
         peer.close();
+    }
+}
+
+fn fixture_value<'a>(case: &'a Value, field: &str) -> &'a Value {
+    match case[format!("{field}Ref")].as_str() {
+        Some(pointer) => case.pointer(pointer).expect("fixture reference must exist"),
+        None => &case[field],
     }
 }

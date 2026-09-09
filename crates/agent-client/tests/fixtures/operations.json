@@ -52,34 +52,7 @@
         }
       }
     ],
-    "result": {
-      "data": [
-        {
-          "id": "recent",
-          "name": "Recent title",
-          "projectId": "project",
-          "cwd": "/workspace",
-          "futureField": [
-            42
-          ]
-        }
-      ],
-      "projects": [
-        {
-          "id": "project",
-          "name": "Project",
-          "roots": []
-        }
-      ],
-      "moreProjectIds": [
-        "project"
-      ],
-      "hasMoreChats": true,
-      "hasMoreProjects": true,
-      "opaque": {
-        "a": 1
-      }
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "independent-list-limits",
@@ -138,34 +111,7 @@
         }
       }
     ],
-    "result": {
-      "data": [
-        {
-          "id": "recent",
-          "name": "Recent title",
-          "projectId": "project",
-          "cwd": "/workspace",
-          "futureField": [
-            42
-          ]
-        }
-      ],
-      "projects": [
-        {
-          "id": "project",
-          "name": "Project",
-          "roots": []
-        }
-      ],
-      "moreProjectIds": [
-        "project"
-      ],
-      "hasMoreChats": true,
-      "hasMoreProjects": true,
-      "opaque": {
-        "a": 1
-      }
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "malformed-title-list",
@@ -199,12 +145,7 @@
       }
     ],
     "errorContains": "Invalid host/thread/list response",
-    "errorRaw": {
-      "data": [],
-      "projects": [],
-      "hasMoreChats": false,
-      "hasMoreProjects": false
-    }
+    "errorRawRef": "/exchanges/0/response/result"
   },
   {
     "name": "new-thread-options",
@@ -235,17 +176,7 @@
         }
       }
     ],
-    "result": {
-      "thread": {
-        "id": "thread-new",
-        "cwd": "/workspace",
-        "turns": [],
-        "future": {
-          "opaque": 42
-        }
-      },
-      "model": "model-b"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "host-default-directory",
@@ -273,17 +204,7 @@
         }
       }
     ],
-    "result": {
-      "thread": {
-        "id": "thread-new",
-        "cwd": "/default",
-        "turns": [],
-        "future": {
-          "opaque": 42
-        }
-      },
-      "model": "model-b"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "deferred-history",
@@ -332,33 +253,7 @@
         }
       }
     ],
-    "result": {
-      "thread": {
-        "id": "thread-1",
-        "cwd": "/workspace",
-        "turns": [
-          {
-            "id": "turn-1",
-            "status": "completed",
-            "deferredItemIds": [
-              "item-1"
-            ],
-            "items": [
-              {
-                "id": "item-1",
-                "type": "commandExecution",
-                "command": "cat log",
-                "status": "completed"
-              }
-            ]
-          }
-        ],
-        "future": {
-          "opaque": 42
-        }
-      },
-      "model": "model-b"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "wrong-thread",
@@ -392,17 +287,7 @@
       }
     ],
     "errorContains": "thread ID does not match",
-    "errorRaw": {
-      "thread": {
-        "id": "other",
-        "cwd": "/workspace",
-        "turns": [],
-        "future": {
-          "opaque": 42
-        }
-      },
-      "model": "model-b"
-    }
+    "errorRawRef": "/exchanges/0/response/result"
   },
   {
     "name": "missing-thread-id",
@@ -430,11 +315,7 @@
       }
     ],
     "errorContains": "Invalid host/thread/read response",
-    "errorRaw": {
-      "thread": {
-        "cwd": "/workspace"
-      }
-    }
+    "errorRawRef": "/exchanges/0/response/result"
   },
   {
     "name": "older-turns",
@@ -482,30 +363,7 @@
         }
       }
     ],
-    "result": {
-      "thread": {
-        "id": "thread-1",
-        "cwd": "/workspace",
-        "turns": [
-          {
-            "id": "turn-1",
-            "items": [
-              {
-                "id": "item-1",
-                "type": "agentMessage",
-                "text": "older",
-                "future": 17
-              }
-            ]
-          }
-        ],
-        "future": {
-          "opaque": 42
-        },
-        "historyCursor": null
-      },
-      "model": "model-b"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "older-items",
@@ -553,30 +411,7 @@
         }
       }
     ],
-    "result": {
-      "thread": {
-        "id": "thread-1",
-        "cwd": "/workspace",
-        "turns": [
-          {
-            "id": "turn-1",
-            "items": [
-              {
-                "id": "item-1",
-                "type": "agentMessage",
-                "text": "older",
-                "future": 17
-              }
-            ]
-          }
-        ],
-        "future": {
-          "opaque": 42
-        },
-        "historyCursor": null
-      },
-      "model": "model-b"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "full-item",
@@ -610,18 +445,7 @@
         }
       }
     ],
-    "result": {
-      "item": {
-        "id": "item-1",
-        "type": "commandExecution",
-        "command": "cat log",
-        "status": "completed",
-        "aggregatedOutput": "first\nlast",
-        "future": {
-          "b": true
-        }
-      }
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "wrong-item",
@@ -651,13 +475,7 @@
       }
     ],
     "errorContains": "item ID does not match",
-    "errorRaw": {
-      "item": {
-        "id": "other",
-        "type": "agentMessage",
-        "text": "wrong"
-      }
-    }
+    "errorRawRef": "/exchanges/0/response/result"
   },
   {
     "name": "first-turn",
@@ -906,14 +724,7 @@
       }
     ],
     "errorContains": "resume rejected",
-    "errorRaw": {
-      "code": 400,
-      "message": "resume rejected",
-      "future": [
-        1,
-        2
-      ]
-    }
+    "errorRawRef": "/exchanges/0/response/error"
   },
   {
     "name": "steer-input",
@@ -1091,12 +902,7 @@
       }
     ],
     "errorContains": "Invalid thread/queue/add response",
-    "errorRaw": {
-      "queuedSubmission": {
-        "clientUserMessageId": "client-1",
-        "input": []
-      }
-    }
+    "errorRawRef": "/exchanges/0/response/result"
   },
   {
     "name": "attachments-startTurn",
@@ -1497,13 +1303,7 @@
       }
     ],
     "errorContains": "Invalid model/list response",
-    "errorRaw": {
-      "data": [
-        {
-          "id": "a"
-        }
-      ]
-    }
+    "errorRawRef": "/exchanges/0/response/result"
   },
   {
     "name": "remote-error-preserves-payload",
@@ -1533,13 +1333,7 @@
       }
     ],
     "errorContains": "offline",
-    "errorRaw": {
-      "code": 503,
-      "message": "offline",
-      "opaque": {
-        "b": 1
-      }
-    }
+    "errorRawRef": "/exchanges/0/response/error"
   },
   {
     "name": "watchThread sends explicit watch identity",
@@ -1926,11 +1720,7 @@
       }
     ],
     "errorContains": "transcription failed",
-    "errorRaw": {
-      "code": -9,
-      "message": "transcription failed",
-      "future": true
-    }
+    "errorRawRef": "/exchanges/0/response/error"
   },
   {
     "name": "approval-default-decision-numeric-id",

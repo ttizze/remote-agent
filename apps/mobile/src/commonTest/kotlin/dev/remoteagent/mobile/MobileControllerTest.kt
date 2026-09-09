@@ -40,8 +40,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun returning_to_list_after_disconnect_clears_detail_and_allows_reopening() = runBlocking {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         try {
@@ -69,8 +68,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun returning_to_list_preserves_expanded_sections_and_search() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         try {
@@ -161,8 +159,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun reopening_app_returns_to_fresh_list_without_replacing_connection() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val restoration = controller.maintainConnection(scope)
@@ -185,7 +182,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
         val gateway =
             FakeHostGateway().apply {
                 listResult = GatewayResult.Success(listOf(thread.summary))
-                readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
+                readResult = GatewayResult.Success(thread)
             }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
@@ -204,8 +201,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun connect_restores_the_persisted_task_after_loading_lists() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = "thread-1")
 
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
@@ -248,7 +244,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
             )
         val gateway =
             FakeHostGateway().apply {
-                readResult = GatewayResult.Success(ThreadReadResult(initial, emptyList()))
+                readResult = GatewayResult.Success(initial)
                 listResult = GatewayResult.Success(listOf(initial.summary))
             }
         val controller = controller(gateway, selectedThreadId = "thread-1")
@@ -256,7 +252,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
         val restoration = controller.maintainConnection(scope)
         try {
             val newTask = snapshot("new-task").summary
-            gateway.readResult = GatewayResult.Success(ThreadReadResult(latest, emptyList()))
+            gateway.readResult = GatewayResult.Success(latest)
             gateway.listResult = GatewayResult.Success(listOf(latest.summary, newTask))
             controller.restoreConnection(scope)
             assertEquals(latest.turns, controller.state.cache.snapshot(profile.id, "thread-1")?.turns)
@@ -272,8 +268,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun restoration_connects_on_start_and_recovers_after_transport_loss_and_a_failed_retry() = runBlocking {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = "thread-1")
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val secondRead = CompletableDeferred<Unit>()
@@ -290,7 +285,7 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
             assertIs<ConnectionPhase.Connected>(controller.state.selectedView.connection)
             assertEquals(3, gateway.connectedProfiles.size)
             assertEquals(listOf("thread-1", "thread-1"), gateway.readIds)
-            assertEquals(emptyList(), gateway.turnTexts)
+            assertTrue(gateway.sends.isEmpty())
             restoration.cancel()
             gateway.closeStream("closed after stopping restoration")
             assertEquals(3, gateway.connectedProfiles.size)

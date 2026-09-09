@@ -104,14 +104,14 @@ extension ThreadScreen {
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, model.attachments
                        .isEmpty {
-                        Button { model.interrupt(running.turnId) } label: {
+                        Button { model.controller.conversation.interrupt(turnId: running.turnId) } label: {
                             Image(systemName: "stop.fill").font(.system(size: 15))
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
-                        .disabled(state.interruptingTurnId == running.turnId)
-                        .accessibilityLabel(state.interruptingTurnId == running.turnId ? "停止中" : "停止")
+                        .disabled(state.view.interruptingTurnId == running.turnId)
+                        .accessibilityLabel(state.view.interruptingTurnId == running.turnId ? "停止中" : "停止")
                         .accessibilityIdentifier("turn.interrupt.\(running.id)")
                     } else {
                         Button {
@@ -174,8 +174,8 @@ extension ThreadScreen {
     func refreshReview() {
         let directory = model.cwd
         guard !directory.isEmpty, let threadId = conversation.thread?.id else { review = nil; return }
-        model.workspace.reviewWorkspace(cwd: directory) { result, _ in
-            guard model.cwd == directory, model.state.selectedThreadId == threadId else { return }
+        model.controller.workspace.reviewWorkspace(cwd: directory) { result, _ in
+            guard model.cwd == directory, model.state.view.selectedThreadId == threadId else { return }
             if let result {
                 review = WorkspaceReviewSummary(
                     files: result.files.count,
@@ -203,6 +203,6 @@ struct ThreadConversationRow: Identifiable {
         case olderTurns, olderItems(String)
         case user(IosItemView), response(IosItemView, String?), queued(IosItemView)
         case activityHeader(IosTurnView), activity(IosItemView, String)
-        case request(IosTurnRequestView), error(IosTurnErrorView)
+        case request(IosTurnRequestView), error(ThreadErrorPresentation)
     }
 }

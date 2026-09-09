@@ -27,18 +27,7 @@
         }
       }
     ],
-    "result": {
-      "path": "/workspace",
-      "entries": [
-        {
-          "name": "notes.txt",
-          "path": "/workspace/notes.txt",
-          "directory": false,
-          "size": 14
-        }
-      ],
-      "truncated": false
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "read preserves revision BOM and line endings",
@@ -64,14 +53,7 @@
         }
       }
     ],
-    "result": {
-      "path": "/workspace/notes.txt",
-      "revision": "revision-1",
-      "text": "日本語\r\n",
-      "bom": true,
-      "lineEnding": "crlf",
-      "size": 14
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "write passes optimistic revision and exact text",
@@ -101,14 +83,7 @@
         }
       }
     ],
-    "result": {
-      "path": "/workspace/notes.txt",
-      "revision": "revision-2",
-      "text": "修正\r\n",
-      "bom": true,
-      "lineEnding": "crlf",
-      "size": 11
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "workspace review",
@@ -140,20 +115,7 @@
         }
       }
     ],
-    "result": {
-      "branch": "fixture",
-      "additions": 2,
-      "deletions": 1,
-      "files": [
-        {
-          "path": "notes.txt",
-          "status": "modified",
-          "additions": 2,
-          "deletions": 1
-        }
-      ],
-      "diff": "fixture diff"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "read worktree settings",
@@ -177,15 +139,7 @@
         }
       }
     ],
-    "result": {
-      "createOnNewSession": true,
-      "copyOnCreate": true,
-      "copyPaths": [
-        ".env.example",
-        "assets"
-      ],
-      "worktreeDirectory": "/worktrees"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "write worktree settings",
@@ -226,15 +180,7 @@
         }
       }
     ],
-    "result": {
-      "createOnNewSession": true,
-      "copyOnCreate": true,
-      "copyPaths": [
-        ".env.example",
-        "assets"
-      ],
-      "worktreeDirectory": "/worktrees"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "list saved accounts",
@@ -261,18 +207,7 @@
         }
       }
     ],
-    "result": {
-      "accounts": [
-        {
-          "id": "account-a",
-          "email": "fixture@example.test",
-          "planType": "plus",
-          "chatgptAccountId": "synthetic-account"
-        }
-      ],
-      "selectedId": "account-a",
-      "error": null
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "select reports persistence failure without losing selection",
@@ -294,10 +229,7 @@
         }
       }
     ],
-    "result": {
-      "selectedId": "account-a",
-      "persistenceError": "fixture persistence failure"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "start account login",
@@ -317,11 +249,7 @@
         }
       }
     ],
-    "result": {
-      "loginId": "fixture-login",
-      "userCode": "TEST-ONLY",
-      "verificationUrl": "https://example.test/device"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "pending account login",
@@ -342,9 +270,7 @@
         }
       }
     ],
-    "result": {
-      "completed": false
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "completed account login",
@@ -366,10 +292,7 @@
         }
       }
     ],
-    "result": {
-      "completed": true,
-      "accountId": "account-a"
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "cancel account login",
@@ -418,15 +341,7 @@
         }
       }
     ],
-    "result": {
-      "thread": {
-        "id": "fork",
-        "turns": [],
-        "future": {
-          "retained": true
-        }
-      }
-    }
+    "resultRef": "/exchanges/0/response/result"
   },
   {
     "name": "file conflict retains Host error",
@@ -453,10 +368,7 @@
       }
     ],
     "errorContains": "revision changed",
-    "errorRaw": {
-      "code": "revision_conflict",
-      "message": "revision changed"
-    }
+    "errorRawRef": "/exchanges/0/response/error"
   },
   {
     "name": "account switch blocked while active",
@@ -479,9 +391,6 @@
       }
     ],
     "errorContains": "active turn",
-    "errorRaw": {
-      "code": "busy",
-      "message": "active turn"
-    }
+    "errorRawRef": "/exchanges/0/response/error"
   }
 ]

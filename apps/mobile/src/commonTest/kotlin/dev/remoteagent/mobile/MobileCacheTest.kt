@@ -31,28 +31,24 @@ class MobileCacheTest {
                 turns =
                     listOf(CodexTurn("turn-1", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("item-1", "old")))),
             )
-        val result =
-            ThreadReadResult(
-                thread = snapshot,
-                bufferedEvents =
-                    listOf(
-                        notification(
-                            "item/agentMessage/delta",
-                            """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":" new"}""",
-                        ),
-                        notification(
-                            "item/completed",
-                            """{"threadId":"thread-1","turnId":"turn-1","item":{"id":"item-2",
+        val bufferedEvents =
+            listOf(
+                notification(
+                    "item/agentMessage/delta",
+                    """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":" new"}""",
+                ),
+                notification(
+                    "item/completed",
+                    """{"threadId":"thread-1","turnId":"turn-1","item":{"id":"item-2",
                                 "type":"agentMessage","text":"second"}}""",
-                        ),
-                        notification(
-                            "turn/completed",
-                            """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}""",
-                        ),
-                    ),
+                ),
+                notification(
+                    "turn/completed",
+                    """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}""",
+                ),
             )
 
-        val cache = reconcileThreadRead(MobileCache(), "host-1", result, limits)
+        val cache = reconcileThreadRead(MobileCache(), "host-1", snapshot, limits, bufferedEvents)
         val turn = cache.snapshot("host-1", "thread-1")!!.turns.single()
 
         assertEquals(TurnStatus.Completed, turn.status)
@@ -72,7 +68,7 @@ class MobileCacheTest {
         val snapshot = ThreadSnapshot(summary("thread-1"), emptyList())
         val noTurn =
             applyLiveEvent(
-                reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits),
+                reconcileThreadRead(MobileCache(), "host-1", snapshot, limits),
                 "host-1",
                 event,
                 limits,
@@ -89,7 +85,7 @@ class MobileCacheTest {
                 summary("open"),
                 listOf(CodexTurn("turn", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("reply", "First")))),
             )
-        var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(opened, emptyList()), limits)
+        var cache = reconcileThreadRead(MobileCache(), "host-1", opened, limits)
         // A recent-title window can omit an older open thread, and a new
         // in-memory thread has no persisted list entry until its first turn.
         cache = reconcileThreadList(cache, "host-1", listOf(summary("other")), limits)
@@ -164,9 +160,7 @@ class MobileCacheTest {
         val snapshot = ThreadSnapshot(summary = summary, turns = turns)
         val limits = MobileCacheLimits(maxThreads = 1, maxTurnsPerThread = 10, maxApproximateBytes = 1_024)
 
-        val cached =
-            reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
-                .snapshot("host-1", "thread-1")!!
+        val cached = reconcileThreadRead(MobileCache(), "host-1", snapshot, limits).snapshot("host-1", "thread-1")!!
 
         assertEquals(turns.drop(1), cached.turns)
         assertEquals(summary, cached.summary)
@@ -187,7 +181,7 @@ class MobileCacheTest {
                     CodexTurn("turn-3", TurnStatus.Completed),
                 ),
             )
-        var cache = reconcileThreadRead(MobileCache(), "host-a", ThreadReadResult(first, emptyList()), limits)
+        var cache = reconcileThreadRead(MobileCache(), "host-a", first, limits)
         assertEquals(listOf("turn-2", "turn-3"), cache.snapshot("host-a", "one")!!.turns.map { it.id })
         cache =
             reconcileThreadList(
@@ -200,7 +194,7 @@ class MobileCacheTest {
             reconcileThreadRead(
                 cache,
                 "host-b",
-                ThreadReadResult(ThreadSnapshot(summary("other"), emptyList()), emptyList()),
+                ThreadSnapshot(summary("other"), emptyList()),
                 limits,
             )
 
@@ -218,16 +212,14 @@ class MobileCacheTest {
             reconcileThreadRead(
                 MobileCache(),
                 "host-1",
-                ThreadReadResult(
-                    snapshot,
-                    listOf(
-                        notification(
-                            "turn/started",
-                            """{"threadId":"thread-2","turn":{"id":"turn-2","status":"inProgress"}}""",
-                        )
-                    ),
-                ),
+                snapshot,
                 limits,
+                listOf(
+                    notification(
+                        "turn/started",
+                        """{"threadId":"thread-2","turn":{"id":"turn-2","status":"inProgress"}}""",
+                    )
+                ),
             )
 
         assertTrue(cache.snapshot("host-1", "thread-1")!!.turns.isEmpty())
@@ -237,7 +229,7 @@ class MobileCacheTest {
     @Test
     fun completed_turn_timing_survives_a_late_started_notification() {
         val snapshot = ThreadSnapshot(summary("thread-1"), emptyList())
-        var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
+        var cache = reconcileThreadRead(MobileCache(), "host-1", snapshot, limits)
         cache =
             applyLiveEvent(
                 cache,
@@ -271,36 +263,43 @@ class MobileCacheTest {
     fun pending_server_requests_survive_reads_and_resolve_idempotently() {
         for (raw in listOf(null, Json.parseToJsonElement("""{"historyCursor":null}""").jsonObject)) {
             val snapshot = ThreadSnapshot(summary("thread-1"), listOf(CodexTurn("turn-1", TurnStatus.InProgress)), raw)
-            var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
+            var cache = reconcileThreadRead(MobileCache(), "host-1", snapshot, limits)
             val request =
-                CodexServerRequest(
-                    id = "request-1",
+                codexMessage(
+                    extensions = Json.parseToJsonElement("""{"vendor":{"nested":[null,7]}}""").jsonObject,
                     method = "item/tool/requestUserInput",
                     params =
                         Json.parseToJsonElement(
                                 """{"threadId":"thread-1","turnId":"turn-1","questions":[{"question":"Which?"}]}"""
                             )
                             .jsonObject,
+                    id = kotlinx.serialization.json.JsonPrimitive("request-1"),
                 )
 
             cache =
                 applyLiveEvent(
                     cache,
                     "host-1",
-                    RawCodexMessage.ServerRequest(request.wireId, request.method, request.params),
+                    request,
                     limits,
                 )
             cache =
                 applyLiveEvent(
                     cache,
                     "host-1",
-                    RawCodexMessage.ServerRequest(request.wireId, request.method, request.params),
+                    request,
                     limits,
                 )
-            assertEquals(listOf(request), cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests)
+            kotlin.test.assertSame(
+                request,
+                cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests.single(),
+            )
 
-            cache = reconcileThreadRead(cache, "host-1", ThreadReadResult(snapshot, emptyList()), limits)
-            assertEquals(listOf(request), cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests)
+            cache = reconcileThreadRead(cache, "host-1", snapshot, limits)
+            kotlin.test.assertSame(
+                request,
+                cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests.single(),
+            )
 
             cache =
                 applyLiveEvent(
@@ -323,7 +322,7 @@ class MobileCacheTest {
     @Test
     fun completed_turn_event_preserves_its_terminal_error() {
         val snapshot = ThreadSnapshot(summary("thread-1"), listOf(CodexTurn("turn-1", TurnStatus.InProgress)))
-        var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
+        var cache = reconcileThreadRead(MobileCache(), "host-1", snapshot, limits)
         val error =
             CodexTurnError(
                 message = "context full",
@@ -352,7 +351,7 @@ class MobileCacheTest {
         val retrying = CodexTurnError(message = "disconnected", willRetry = true)
         val snapshot =
             ThreadSnapshot(summary("thread-1"), listOf(CodexTurn("turn-1", TurnStatus.InProgress, error = retrying)))
-        var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
+        var cache = reconcileThreadRead(MobileCache(), "host-1", snapshot, limits)
 
         cache =
             applyLiveEvent(
@@ -371,7 +370,7 @@ class MobileCacheTest {
     @Test
     fun late_retrying_stream_error_cannot_reopen_a_successful_turn() {
         val snapshot = ThreadSnapshot(summary("thread-1"), listOf(CodexTurn("turn-1", TurnStatus.Completed)))
-        var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
+        var cache = reconcileThreadRead(MobileCache(), "host-1", snapshot, limits)
 
         cache =
             applyLiveEvent(
@@ -395,10 +394,7 @@ class MobileCacheTest {
             reconcileThreadRead(
                 MobileCache(),
                 "host-1",
-                ThreadReadResult(
-                    ThreadSnapshot(summary, listOf(CodexTurn("turn-1", TurnStatus.InProgress))),
-                    emptyList(),
-                ),
+                ThreadSnapshot(summary, listOf(CodexTurn("turn-1", TurnStatus.InProgress))),
                 limits,
             )
         val active = ThreadStatus.Active(listOf("waitingOnApproval"))
@@ -461,7 +457,7 @@ class MobileCacheTest {
             reconcileThreadRead(
                 MobileCache(),
                 "host-1",
-                ThreadReadResult(snapshot, emptyList()),
+                snapshot,
                 limits.copy(maxApproximateBytes = 64),
             )
 
@@ -506,7 +502,7 @@ class MobileCacheTest {
             reconcileThreadRead(
                 cache,
                 "host-1",
-                ThreadReadResult(ThreadSnapshot(summary("older", 30).copy(projectId = "older")), emptyList()),
+                ThreadSnapshot(summary("older", 30).copy(projectId = "older")),
                 limits,
             )
         assertEquals(listOf("older", "recent", "empty-a", "empty-b"), cache.profile("host-1").projects.map { it.id })
@@ -520,7 +516,7 @@ class MobileCacheTest {
                 reconcileThreadRead(
                     cache,
                     "host-1",
-                    ThreadReadResult(ThreadSnapshot(summary("thread-$number", number.toLong())), emptyList()),
+                    ThreadSnapshot(summary("thread-$number", number.toLong())),
                     limits,
                 )
         }
@@ -528,10 +524,7 @@ class MobileCacheTest {
             reconcileThreadRead(
                 cache,
                 "host-1",
-                ThreadReadResult(
-                    ThreadSnapshot(summary("old-thread", 0), listOf(CodexTurn("old-turn", TurnStatus.Completed))),
-                    emptyList(),
-                ),
+                ThreadSnapshot(summary("old-thread", 0), listOf(CodexTurn("old-turn", TurnStatus.Completed))),
                 limits,
             )
         assertEquals(4, cache.profile("host-1").threadList.size)

@@ -28,7 +28,7 @@ internal suspend fun AtomicRef<MobileApp>.readThread(
         val result =
             value.effects.gateway
                 .command(profile, AgentCommand.ReadThread(threadId, value.effects.deferHistoryItemDetails))
-                .mapGateway { ThreadReadResult(codexThreadFromResponse(it), emptyList()) }
+                .mapGateway(::codexThreadFromResponse)
         // Event callbacks and the read completion share one mutex. Events
         // delivered while the request was in flight are therefore drained
         // after the replacement Snapshot and never race it.
@@ -44,11 +44,9 @@ internal suspend fun AtomicRef<MobileApp>.readThread(
                 } else {
                     result.fold(
                         success = { snapshot ->
-                            val buffered =
-                                (snapshot.bufferedEvents + completion.events).filter {
-                                    it.threadId == snapshot.thread.summary.id
-                                }
-                            dispatch(AppAction.SnapshotReceived(profile.id, snapshot.copy(bufferedEvents = buffered)))
+                            dispatch(
+                                AppAction.SnapshotReceived(profile.id, snapshot, bufferedEvents = completion.events)
+                            )
                         },
                         failure = { dispatch(AppAction.ThreadReadFailed(profile.id, it)) },
                     )

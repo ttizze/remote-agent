@@ -89,24 +89,22 @@ fun acknowledgeMessage(
     )
 }
 
-/**
- * A ThreadReadResult is one atomic UI reconciliation transition: replace the native Codex Thread projection first, then
- * apply any locally buffered events.
- */
+/** Replace the native snapshot, then apply buffered events in one atomic UI transition. */
 fun reconcileThreadRead(
     cache: MobileCache,
     hostIdentity: String,
-    result: ThreadReadResult,
+    thread: ThreadSnapshot,
     limits: MobileCacheLimits,
+    bufferedEvents: List<RawCodexMessage> = emptyList(),
 ): MobileCache {
-    val existing = cache.snapshot(hostIdentity, result.thread.summary.id)
-    val refreshed = mergeHistoryRefresh(existing, result.thread)
+    val existing = cache.snapshot(hostIdentity, thread.summary.id)
+    val refreshed = mergeHistoryRefresh(existing, thread)
     val pending = existing?.submittedMessages.orEmpty()
-    val thread =
+    val retained =
         if (pending.isEmpty()) refreshed
         else {
             val echoed =
-                result.thread.turns
+                thread.turns
                     .asSequence()
                     .flatMap { it.items.asSequence() }
                     .filterIsInstance<CodexItem.UserMessage>()
@@ -117,15 +115,14 @@ fun reconcileThreadRead(
         cache
             .profile(hostIdentity)
             .copy(
-                threadList =
-                    cache.profile(hostIdentity).threadList.replaceById(result.thread.summary.id, result.thread.summary),
-                snapshots = cache.profile(hostIdentity).snapshots + (thread.summary.id to thread),
+                threadList = cache.profile(hostIdentity).threadList.replaceById(thread.summary.id, thread.summary),
+                snapshots = cache.profile(hostIdentity).snapshots + (thread.summary.id to retained),
             )
     // A snapshot response is authoritative for exactly one thread. Do not
     // let a malformed or mixed buffered stream mutate another cached thread.
-    result.bufferedEvents
+    bufferedEvents
         .asSequence()
-        .filter { it.threadId == result.thread.summary.id }
+        .filter { it.threadId == thread.summary.id }
         .forEach { event -> profile = profile.apply(event) }
     return cache.replaceProfile(hostIdentity, profile.bounded(limits))
 }

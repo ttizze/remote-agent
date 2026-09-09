@@ -204,14 +204,22 @@ internal fun reduceHistory(state: AppState, action: AppAction.History, cacheLimi
         is AppAction.SnapshotReceived ->
             if (state.isConnected(action.hostIdentity)) {
                 state
-                    .copy(cache = reconcileThreadRead(state.cache, action.hostIdentity, action.result, cacheLimits))
+                    .copy(
+                        cache =
+                            reconcileThreadRead(
+                                state.cache,
+                                action.hostIdentity,
+                                action.thread,
+                                cacheLimits,
+                                action.bufferedEvents,
+                            )
+                    )
                     .updateView(action.hostIdentity) {
                         if (!action.select) it
                         else
                             it.copy(
-                                selectedThreadId = action.result.thread.summary.id,
-                                unreadCompletedThreadIds =
-                                    it.unreadCompletedThreadIds - action.result.thread.summary.id,
+                                selectedThreadId = action.thread.summary.id,
+                                unreadCompletedThreadIds = it.unreadCompletedThreadIds - action.thread.summary.id,
                                 newThreadCwd = null,
                                 threadDetail = LoadPhase.Ready,
                                 notice = null,

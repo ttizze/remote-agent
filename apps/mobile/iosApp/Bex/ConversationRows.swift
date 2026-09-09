@@ -103,14 +103,14 @@ struct ThreadRequestRow: View {
     private func submit(_ answer: RequestAnswer) {
         busy = true
         error = nil
-        model.respond(request, answer: answer) { message in
+        model.controller.conversation.respond(requestJson: request.requestJson, answer: answer) { message in
             busy = false; error = message; resolved = message == nil
         }
     }
 }
 
 struct ThreadErrorRow: View {
-    let error: IosTurnErrorView
+    let error: ThreadErrorPresentation
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -211,15 +211,15 @@ struct ThreadMessageRow: View {
     }
 
     private func fork(through turnId: String) {
-        guard !forking, let threadId = model.state.selectedThreadId,
+        guard !forking, let threadId = model.state.view.selectedThreadId,
               let host = model.state.selectedProfileId else { return }
         forking = true
         forkError = nil
-        model.forkThread(threadId, through: turnId) { result, error in
+        model.controller.conversation.forkThread(threadId: threadId, lastTurnId: turnId) { result, error in
             forking = false
-            guard model.state.selectedProfileId == host, model.state.selectedThreadId == threadId else { return }
-            if let thread = result?["thread"] as? [String: Any], let id = thread["id"] as? String {
-                model.openThread(id)
+            guard model.state.selectedProfileId == host, model.state.view.selectedThreadId == threadId else { return }
+            if let thread = result.map(jsonObject)?["thread"] as? [String: Any], let id = thread["id"] as? String {
+                model.controller.navigation.openThread(threadId: id)
             } else {
                 forkError = error ?? "会話を分岐できませんでした。"
             }

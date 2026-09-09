@@ -5,9 +5,6 @@ import kotlinx.serialization.json.JsonObject
 internal val RawCodexMessage.paramsObject: JsonObject
     get() = params.asObjectOrNull() ?: JsonObject(mapOf("value" to params))
 
-internal fun RawCodexMessage.ServerRequest.serverRequest(): CodexServerRequest =
-    CodexServerRequest(id.stringOrNull() ?: id.toString(), method, paramsObject, id)
-
 internal val RawCodexMessage.itemId: String?
     get() =
         when (kind) {

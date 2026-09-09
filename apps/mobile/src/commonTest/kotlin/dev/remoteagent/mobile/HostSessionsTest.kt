@@ -66,20 +66,22 @@ class HostSessionsTest {
         val second = assertNotNull(coordinator.beginRead("host-1", "thread-2", generation))
 
         val firstEvent =
-            RawCodexMessage.Notification(
-                "turn/started",
-                buildJsonObject {
-                    put("threadId", JsonPrimitive("thread-1"))
-                    put("turn", (CodexTurn("turn-1", TurnStatus.InProgress)).fixtureJson())
-                },
+            codexMessage(
+                method = "turn/started",
+                params =
+                    buildJsonObject {
+                        put("threadId", JsonPrimitive("thread-1"))
+                        put("turn", (CodexTurn("turn-1", TurnStatus.InProgress)).fixtureJson())
+                    },
             )
         val secondEvent =
-            RawCodexMessage.Notification(
-                "turn/started",
-                buildJsonObject {
-                    put("threadId", JsonPrimitive("thread-2"))
-                    put("turn", (CodexTurn("turn-2", TurnStatus.InProgress)).fixtureJson())
-                },
+            codexMessage(
+                method = "turn/started",
+                params =
+                    buildJsonObject {
+                        put("threadId", JsonPrimitive("thread-2"))
+                        put("turn", (CodexTurn("turn-2", TurnStatus.InProgress)).fixtureJson())
+                    },
             )
         assertEquals(HostReadBufferResult.Buffered, coordinator.bufferEvent(first, firstEvent))
         assertEquals(HostReadBufferResult.NotBuffered, coordinator.bufferEvent(first, secondEvent))
@@ -102,14 +104,15 @@ class HostSessionsTest {
         val generation = byteLimited.beginConnection("host-1")
         val token = assertNotNull(byteLimited.beginRead("host-1", "thread-1", generation))
         val large =
-            RawCodexMessage.Notification(
-                "item/agentMessage/delta",
-                buildJsonObject {
-                    put("threadId", JsonPrimitive("thread-1"))
-                    put("turnId", JsonPrimitive("turn-1"))
-                    put("itemId", JsonPrimitive("item-1"))
-                    put("delta", JsonPrimitive("x".repeat(256)))
-                },
+            codexMessage(
+                method = "item/agentMessage/delta",
+                params =
+                    buildJsonObject {
+                        put("threadId", JsonPrimitive("thread-1"))
+                        put("turnId", JsonPrimitive("turn-1"))
+                        put("itemId", JsonPrimitive("item-1"))
+                        put("delta", JsonPrimitive("x".repeat(256)))
+                    },
             )
 
         assertEquals(HostReadBufferResult.Overflowed, byteLimited.bufferEvent(token, large))
@@ -126,23 +129,25 @@ class HostSessionsTest {
                 HostReadBufferResult.Buffered,
                 countLimited.bufferEvent(
                     countToken,
-                    RawCodexMessage.Notification(
-                        "turn/started",
-                        buildJsonObject {
-                            put("threadId", JsonPrimitive("thread-1"))
-                            put("turn", (CodexTurn("turn-$it", TurnStatus.InProgress)).fixtureJson())
-                        },
+                    codexMessage(
+                        method = "turn/started",
+                        params =
+                            buildJsonObject {
+                                put("threadId", JsonPrimitive("thread-1"))
+                                put("turn", (CodexTurn("turn-$it", TurnStatus.InProgress)).fixtureJson())
+                            },
                     ),
                 ),
             )
         }
         val overflow =
-            RawCodexMessage.Notification(
-                "turn/started",
-                buildJsonObject {
-                    put("threadId", JsonPrimitive("thread-1"))
-                    put("turn", (CodexTurn("turn-256", TurnStatus.InProgress)).fixtureJson())
-                },
+            codexMessage(
+                method = "turn/started",
+                params =
+                    buildJsonObject {
+                        put("threadId", JsonPrimitive("thread-1"))
+                        put("turn", (CodexTurn("turn-256", TurnStatus.InProgress)).fixtureJson())
+                    },
             )
         assertEquals(HostReadBufferResult.Overflowed, countLimited.bufferEvent(countToken, overflow))
         assertTrue(assertNotNull(countLimited.finishRead(countToken)).retryRequired)

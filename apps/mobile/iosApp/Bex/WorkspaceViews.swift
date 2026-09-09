@@ -155,7 +155,7 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func loadDiff() {
         busy = true; error = nil
-        model.workspace.reviewWorkspace(cwd: root) { result, message in
+        model.controller.workspace.reviewWorkspace(cwd: root) { result, message in
             busy = false; error = message
             if let value = result?.diff {
                 diff = value.components(separatedBy: "\n"); showingDiff = true
@@ -165,7 +165,7 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func load(_ directory: String) {
         busy = true; error = nil
-        model.workspace.listFiles(path: directory) { result, message in
+        model.controller.workspace.listFiles(path: directory) { result, message in
             busy = false; error = message
             guard let result else { return }
             path = result.path
@@ -256,7 +256,7 @@ private struct FileEditorSheet: View {
                     Button("保存") {
                         busy = true; error = nil
                         let submitted = text
-                        model.workspace
+                        model.controller.workspace
                             .writeFile(path: entry.path, revision: revision, text: submitted) { result, message in
                                 busy = false; error = message
                                 if let result {
@@ -290,7 +290,7 @@ private struct FileEditorSheet: View {
 
     private func load(restoreDraft: Bool) {
         busy = true; error = nil
-        model.workspace.readFile(path: entry.path) { result, message in
+        model.controller.workspace.readFile(path: entry.path) { result, message in
             busy = false; error = message
             guard let result else { return }
             let version = result.revision

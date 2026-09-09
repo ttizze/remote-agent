@@ -86,7 +86,7 @@ class AppStateTest {
         val read =
             reduce(
                 failed,
-                AppAction.SnapshotReceived(mac.id, ThreadReadResult(ThreadSnapshot(summary("new")), emptyList())),
+                AppAction.SnapshotReceived(mac.id, ThreadSnapshot(summary("new"))),
             )
         assertEquals(emptySet(), read.selectedView.unreadCompletedThreadIds)
     }
@@ -114,7 +114,7 @@ class AppStateTest {
         val visible =
             reduce(
                 interrupted,
-                AppAction.SnapshotReceived(mac.id, ThreadReadResult(ThreadSnapshot(summary("visible")), emptyList())),
+                AppAction.SnapshotReceived(mac.id, ThreadSnapshot(summary("visible"))),
             )
         assertEquals(
             emptySet(),

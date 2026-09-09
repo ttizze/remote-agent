@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Remove duplicate mobile event/request and snapshot-read representations, unused event fan-out, four iOS DTOs, and Swift forwarding methods. Preserve original request envelopes through replies and reuse immutable state in SwiftUI. Consolidate start/steer/queue request construction and remove discarded response allocations.
+- Remove fake send routing and duplicate Kotlin conversation-policy tests; retain adapter checks and move unique policy expectations into the existing Rust tests. Deduplicate repeated operation responses with fixture-local JSON references, preserving all 63 operation cases and their exact expanded values.
+
 - Remove the remaining `MobileClient` request/response API, both client and Codex process RPC wrappers, connected-host metadata, duplicate Mac RPC decoder, and initialization error DTO. Let `CodexAppServer` own the shared peer directly; retain its raw-wire tests on that peer. Route file-transfer grants and all Rust callers through `AgentClient`; use the shared interrupt operation for Mac Stop. Preserve JSON-RPC null results and remote error data.
 - Replace five duplicate persisted-state DTOs with explicit durable/transient fields on immutable state values. Remove unused standalone cache persistence APIs, old cache repair, and iOS `NSUserDefaults` imports. Accept only state format 3, with no migration; existing mobile installations require pairing again.
 

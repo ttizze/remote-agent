@@ -205,10 +205,7 @@ private fun CodexTurn.applyItemMutation(
                     codexTurnError(params.childObject("error") ?: emptyJsonObject())
                         .copy(willRetry = params.boolean("willRetry") == true)
             )
-        ConversationMutation.Request -> {
-            val request = (event as RawCodexMessage.ServerRequest).serverRequest()
-            copy(pendingRequests = pendingRequests.replaceById(request.id, request) { it.id })
-        }
+        ConversationMutation.Request -> copy(pendingRequests = pendingRequests.replaceById(event.id, event) { it.id })
         else -> error("Unknown conversation storage action: $action")
     }
 }

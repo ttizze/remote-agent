@@ -21,7 +21,7 @@ internal class ConversationEventCorpusTest {
                 val message = event.jsonObject
                 snapshot =
                     snapshot.applyConversationEvent(
-                        RawCodexMessage.Notification(message.string("method")!!, message.getValue("params"))
+                        codexMessage(method = message.string("method")!!, params = message.getValue("params"))
                     )
             }
             assertEquals(codexThreadSnapshot(case.getValue("expected")), snapshot, case.string("name"))

@@ -11,15 +11,6 @@ enum class IosScreen {
     Thread,
 }
 
-enum class IosLoadState {
-    Idle,
-    Loading,
-    Ready,
-    Failed,
-}
-
-data class IosProfileView(val id: String, val name: String, val hostIdentity: String)
-
 data class IosThreadSummaryView(
     val id: String,
     val title: String,
@@ -29,8 +20,6 @@ data class IosThreadSummaryView(
     val isActive: Boolean,
     val hasUnreadCompletion: Boolean,
 )
-
-data class IosProjectView(val id: String, val name: String, val roots: List<String>)
 
 class IosItemView internal constructor(internal val source: CodexItem, val isDeferred: Boolean = false) {
     val id: String
@@ -68,16 +57,8 @@ data class IosTurnView(
     val responses: List<IosItemView>,
     val activityInitiallyExpanded: Boolean,
     val activityCanCollapse: Boolean,
-    val error: IosTurnErrorView?,
+    val error: ThreadErrorPresentation?,
     val pendingRequests: List<IosTurnRequestView>,
-)
-
-data class IosTurnErrorView(
-    val title: String,
-    val message: String,
-    val details: String?,
-    val isReconnecting: Boolean,
-    val isRetryable: Boolean,
 )
 
 data class IosTurnRequestView(
@@ -101,29 +82,24 @@ data class IosThreadView(
 
 data class IosAppViewState(
     val screen: IosScreen,
-    val isConnected: Boolean,
-    val isConnecting: Boolean,
-    val profiles: List<IosProfileView>,
+    val profiles: List<HostProfile>,
     val selectedProfileId: String?,
-    val selectedProfileName: String?,
+    val selectedProfile: HostProfile?,
     val pairingError: String?,
-    val connectionError: String?,
     val workingDirectory: String,
-    val projects: List<IosProjectView>,
-    val threadLoadState: IosLoadState,
-    val threadLoadError: String?,
+    val projects: List<CodexProject>,
     val threads: List<IosThreadSummaryView>,
-    val hasMoreProjects: Boolean,
-    val visibleProjectCount: Int,
-    val loadingMoreThreads: Boolean,
-    val loadingHistory: Boolean,
-    val moreProjectIds: Set<String>,
-    val hasMoreChats: Boolean,
-    val selectedThreadId: String?,
-    val isNewThread: Boolean,
-    val notice: String?,
-    val interruptingTurnId: String?,
-)
+    val view: ProfileViewState,
+) {
+    val isConnected: Boolean
+        get() = view.connection == ConnectionPhase.Connected
+
+    val isConnecting: Boolean
+        get() = view.connection == ConnectionPhase.Connecting
+
+    val isNewThread: Boolean
+        get() = view.newThreadCwd != null
+}
 
 /** One immutable projection value per UI owner; unchanged turns and items retain identity. */
 internal data class IosViewProjection(
@@ -218,20 +194,12 @@ private fun AppState.toIosViewState(): IosAppViewState {
         }
     return IosAppViewState(
         screen = screen,
-        isConnected = view.connection == ConnectionPhase.Connected,
-        isConnecting = view.connection == ConnectionPhase.Connecting,
-        profiles = profiles.map { IosProfileView(it.id, it.name, it.id) },
+        profiles = profiles,
         selectedProfileId = selectedProfileId,
-        selectedProfileName = profile?.name,
+        selectedProfile = profile,
         pairingError = pairingError,
-        connectionError = (view.connection as? ConnectionPhase.Failed)?.message,
         workingDirectory = view.newThreadCwd ?: snapshot?.summary?.workingDirectory?.path ?: view.workingDirectoryPath,
-        projects =
-            profileCache?.projects.orEmpty().map { project ->
-                IosProjectView(project.id, project.name, project.roots.map(WorkingDirectory::path))
-            },
-        threadLoadState = view.threadList.toIosLoadState(),
-        threadLoadError = (view.threadList as? LoadPhase.Failed)?.message,
+        projects = profileCache?.projects.orEmpty(),
         threads =
             profileCache?.threadList.orEmpty().map { summary ->
                 IosThreadSummaryView(
@@ -244,26 +212,9 @@ private fun AppState.toIosViewState(): IosAppViewState {
                     hasUnreadCompletion = summary.id in view.unreadCompletedThreadIds,
                 )
             },
-        hasMoreProjects = view.hasMoreProjects,
-        visibleProjectCount = view.visibleProjectCount,
-        loadingMoreThreads = view.loadingMoreThreads,
-        loadingHistory = view.loadingHistory,
-        moreProjectIds = view.moreProjectIds,
-        hasMoreChats = view.hasMoreChats,
-        selectedThreadId = view.selectedThreadId,
-        isNewThread = view.newThreadCwd != null,
-        notice = view.notice,
-        interruptingTurnId = view.interruptingTurnId,
+        view = view,
     )
 }
-
-private fun LoadPhase.toIosLoadState(): IosLoadState =
-    when (this) {
-        LoadPhase.Idle -> IosLoadState.Idle
-        LoadPhase.Loading -> IosLoadState.Loading
-        LoadPhase.Ready -> IosLoadState.Ready
-        is LoadPhase.Failed -> IosLoadState.Failed
-    }
 
 private inline fun CodexTurn.toIosTurnViews(
     submissions: List<SubmittedMessage>,
@@ -293,10 +244,7 @@ private inline fun CodexTurn.toIosTurnViews(
             responses = presentation.responses.map { itemView(it, false) },
             activityInitiallyExpanded = presentation.activityInitiallyExpanded,
             activityCanCollapse = presentation.activityCanCollapse,
-            error =
-                presentation.error?.let { error ->
-                    IosTurnErrorView(error.title, error.message, error.details, error.isReconnecting, error.isRetryable)
-                },
+            error = presentation.error,
             pendingRequests =
                 presentation.pendingRequests.map { request ->
                     this.pendingRequests
@@ -304,14 +252,8 @@ private inline fun CodexTurn.toIosTurnViews(
                         .let { raw ->
                             IosTurnRequestView(
                                 request.id,
-                                kotlinx.serialization.json
-                                    .buildJsonObject {
-                                        put("id", raw.wireId)
-                                        put("method", kotlinx.serialization.json.JsonPrimitive(raw.method))
-                                        put("params", raw.params)
-                                    }
-                                    .toString(),
-                                raw.params.toString(),
+                                raw.raw.toString(),
+                                raw.paramsObject.toString(),
                                 request.form,
                                 request.title,
                                 request.body,

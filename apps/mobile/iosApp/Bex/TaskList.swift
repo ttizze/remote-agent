@@ -17,19 +17,17 @@ struct ThreadsScreen: View {
             ? state.projects : state.projects.filter { groupedThreads[$0.id] != nil }
         let chats = groupedThreads[nil] ?? []
         List {
-            if state.threadLoadState == .failed {
+            if let error = state.view.threadList as? LoadPhaseFailed {
                 Section {
-                    if let error = state.threadLoadError {
-                        BexNotice(text: error)
-                            .taskListRowStyle()
-                    }
-                    Button("再試行") { model.refreshTaskList() }
+                    BexNotice(text: error.message)
+                        .taskListRowStyle()
+                    Button("再試行") { model.controller.navigation.refreshTaskList() }
                         .accessibilityIdentifier("tasks.retry")
                         .taskListRowStyle()
                 }
                 .listSectionSeparator(.hidden)
             }
-            if let notice = state.notice {
+            if let notice = state.view.notice {
                 Section {
                     BexNotice(text: notice)
                         .taskListRowStyle()
@@ -47,7 +45,7 @@ struct ThreadsScreen: View {
             }
             .listSectionSeparator(.hidden)
 
-            ForEach(projects.prefix(Int(state.visibleProjectCount)), id: \.id) { project in
+            ForEach(projects.prefix(Int(state.view.visibleProjectCount)), id: \.id) { project in
                 Section {
                     HStack(spacing: 16) {
                         Button {
@@ -69,7 +67,8 @@ struct ThreadsScreen: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("tasks.project.\(project.id)")
                         .accessibilityValue(expandedProjectIds.contains(project.id) ? "開いています" : "閉じています")
-                        Button { model.openNewThread(cwd: project.roots.first ?? "") } label: {
+                        Button { model.controller.navigation.openNewThread(cwd: project.roots.first?.path ?? "")
+                        } label: {
                             Image(systemName: "square.and.pencil").font(.title3)
                                 .foregroundColor(.secondary).frame(width: 44, height: 44)
                         }
@@ -81,31 +80,36 @@ struct ThreadsScreen: View {
                     if expandedProjectIds.contains(project.id) {
                         let threads = groupedThreads[project.id] ?? []
                         ForEach(threads, id: \.id) { thread in
-                            ThreadListRow(thread: thread, indented: true) { model.openThread(thread.id) }
+                            ThreadListRow(thread: thread, indented: true) {
+                                model.controller.navigation.openThread(threadId: thread.id)
+                            }
                         }
-                        if state.moreProjectIds.contains(project.id) {
-                            Button("もっと見る") { model.expandTaskList(projectId: project.id) }
-                                .padding(.leading, 40)
-                                .disabled(state.loadingMoreThreads)
-                                .accessibilityIdentifier("tasks.project.\(project.id).more")
-                                .taskListRowStyle()
+                        if state.view.moreProjectIds.contains(project.id) {
+                            Button("もっと見る") { model.controller.navigation.expandTaskList(
+                                projects: false,
+                                projectId: project.id
+                            ) }
+                            .padding(.leading, 40)
+                            .disabled(state.view.loadingMoreThreads)
+                            .accessibilityIdentifier("tasks.project.\(project.id).more")
+                            .taskListRowStyle()
                         }
                     }
                 }
                 .listSectionSeparator(.hidden)
             }
 
-            if state.hasMoreProjects {
+            if state.view.hasMoreProjects {
                 Section {
-                    Button("もっと見る") { model.expandTaskList(projects: true) }
-                        .disabled(state.loadingMoreThreads)
+                    Button("もっと見る") { model.controller.navigation.expandTaskList(projects: true, projectId: nil) }
+                        .disabled(state.view.loadingMoreThreads)
                         .accessibilityIdentifier("tasks.projects.more")
                         .taskListRowStyle()
                 }
                 .listSectionSeparator(.hidden)
             }
 
-            if state.threadLoadState == .ready, state.projects.isEmpty {
+            if state.view.threadList is LoadPhaseReady, state.projects.isEmpty {
                 Section {
                     Text("Codexに登録されたプロジェクトはありません")
                         .font(.subheadline)
@@ -116,7 +120,7 @@ struct ThreadsScreen: View {
             }
 
             Section {
-                if state.threadLoadState == .ready, chats.isEmpty {
+                if state.view.threadList is LoadPhaseReady, chats.isEmpty {
                     Text("プロジェクトに属さないチャットはありません")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -124,11 +128,11 @@ struct ThreadsScreen: View {
                         .taskListRowStyle()
                 } else {
                     ForEach(chats, id: \.id) { thread in
-                        ThreadListRow(thread: thread) { model.openThread(thread.id) }
+                        ThreadListRow(thread: thread) { model.controller.navigation.openThread(threadId: thread.id) }
                     }
-                    if state.hasMoreChats {
-                        Button("もっと見る") { model.expandTaskList() }
-                            .disabled(state.loadingMoreThreads)
+                    if state.view.hasMoreChats {
+                        Button("もっと見る") { model.controller.navigation.expandTaskList(projects: false, projectId: nil) }
+                            .disabled(state.view.loadingMoreThreads)
                             .accessibilityIdentifier("tasks.chats.more")
                             .taskListRowStyle()
                     }
@@ -146,10 +150,10 @@ struct ThreadsScreen: View {
         .background(Color(UIColor.systemBackground))
         .accessibilityIdentifier("tasks.list")
         .searchable(text: $search, placement: .toolbar, prompt: "チャットを検索")
-        .refreshable { model.refreshTaskList() }
+        .refreshable { model.controller.navigation.refreshTaskList() }
         .task(id: search) {
             do { try await Task.sleep(nanoseconds: 200_000_000) } catch { return }
-            model.searchTaskList(search)
+            model.controller.navigation.searchTaskList(term: search)
         }
         .navigationBarBackButtonHidden(true)
         .navigationTitle("リモート")
@@ -161,7 +165,7 @@ struct ThreadsScreen: View {
                 VStack(spacing: 1) {
                     Text("リモート").font(.headline)
                     HStack(spacing: 5) {
-                        if state.isConnecting || state.threadLoadState == .loading {
+                        if state.isConnecting || state.view.threadList is LoadPhaseLoading {
                             ProgressView().controlSize(.mini)
                                 .accessibilityLabel(state.isConnecting ? "接続中" : "読み込み中")
                                 .accessibilityIdentifier("connection.progress")
@@ -169,18 +173,18 @@ struct ThreadsScreen: View {
                             Circle().fill(state.isConnected ? Color.green : Color.secondary).frame(width: 6, height: 6)
                         }
                         Image(systemName: "laptopcomputer")
-                        Text(state.selectedProfileName ?? "PC Host").lineLimit(1)
+                        Text(state.selectedProfile?.name ?? "PC Host").lineLimit(1)
                     }
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(
-                        "\(state.selectedProfileName ?? "PC Host")、\(state.isConnected ? "接続済み" : "未接続")"
+                        "\(state.selectedProfile?.name ?? "PC Host")、\(state.isConnected ? "接続済み" : "未接続")"
                     )
                 }
             }
             ToolbarItem(placement: .bottomBar) {
-                Button { model.openNewThread(cwd: "") } label: {
+                Button { model.controller.navigation.openNewThread(cwd: "") } label: {
                     Image(systemName: "square.and.pencil")
                 }
                 .buttonStyle(.borderedProminent)
@@ -189,23 +193,29 @@ struct ThreadsScreen: View {
                 .accessibilityIdentifier("tasks.new.chat")
             }
             ToolbarItem(placement: .navigationBarLeading) {
-                Button { model.showProfiles() } label: { Image(systemName: "line.3.horizontal") }
+                Button { model.controller.hosts.showProfiles() } label: { Image(systemName: "line.3.horizontal") }
                     .accessibilityLabel("PC一覧")
                     .accessibilityIdentifier("tasks.hosts")
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
-                    Button { model.refreshTaskList() } label: { Label("更新", systemImage: "arrow.clockwise") }
-                        .disabled(state.threadLoadState == .loading)
-                        .accessibilityIdentifier("tasks.refresh")
+                    Button { model.controller.navigation.refreshTaskList() } label: { Label(
+                        "更新",
+                        systemImage: "arrow.clockwise"
+                    ) }
+                    .disabled(state.view.threadList is LoadPhaseLoading)
+                    .accessibilityIdentifier("tasks.refresh")
                     Button {
                         if let id = state.selectedProfileId {
-                            worktreeHost = WorktreeSettingsHost(id: id, name: state.selectedProfileName ?? "PC Host")
+                            worktreeHost = WorktreeSettingsHost(id: id, name: state.selectedProfile?.name ?? "PC Host")
                         }
                     } label: { Label("ワークツリー設定", systemImage: "arrow.triangle.branch") }
                         .disabled(!state.isConnected)
                         .accessibilityIdentifier("tasks.worktree-settings")
-                    Button { model.showProfiles() } label: { Label("PC一覧", systemImage: "laptopcomputer") }
+                    Button { model.controller.hosts.showProfiles() } label: { Label(
+                        "PC一覧",
+                        systemImage: "laptopcomputer"
+                    ) }
                 } label: { Image(systemName: "ellipsis") }
                     .accessibilityLabel("その他")
                     .accessibilityIdentifier("tasks.menu")

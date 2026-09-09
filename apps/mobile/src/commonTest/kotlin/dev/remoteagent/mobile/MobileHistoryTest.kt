@@ -140,11 +140,9 @@ class MobileHistoryTest {
         assertEquals(listOf("a", "b"), merged.turns.single().items.map { it.id })
         assertEquals("live", (merged.turns.single().items.last() as CodexItem.AgentMessage).text)
         assertEquals(null, merged.turns.single().olderItemsCursor)
-        val initial = reconcileThreadRead(MobileCache(), "host", ThreadReadResult(merged, emptyList()), limits)
+        val initial = reconcileThreadRead(MobileCache(), "host", merged, limits)
         val fresh = page("""{"id":"b","type":"agentMessage","text":"finished"}""", "\"items-cursor\"")
-        val refreshed =
-            reconcileThreadRead(initial, "host", ThreadReadResult(fresh, emptyList()), limits)
-                .snapshot("host", "thread-1")!!
+        val refreshed = reconcileThreadRead(initial, "host", fresh, limits).snapshot("host", "thread-1")!!
         assertEquals(listOf("a", "b"), refreshed.turns.single().items.map { it.id })
         assertEquals("finished", (refreshed.turns.single().items.last() as CodexItem.AgentMessage).text)
         assertEquals(null, refreshed.turns.single().olderItemsCursor)

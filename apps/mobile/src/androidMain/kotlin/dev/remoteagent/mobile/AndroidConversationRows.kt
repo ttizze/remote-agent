@@ -19,8 +19,6 @@ import androidx.compose.ui.unit.dp
 import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 internal fun LazyListScope.threadHeader(
     state: AppState,
@@ -149,14 +147,7 @@ internal fun LazyListScope.turnConclusion(
                 .first { it.id == turn.turnId }
                 .pendingRequests
                 .first { it.id == request.id }
-        ThreadRequestCard(request, raw.params) { answer ->
-            val message = buildJsonObject {
-                put("id", raw.wireId)
-                put("method", raw.method)
-                put("params", raw.params)
-            }
-            controller.respond(profile, message, answer)
-        }
+        ThreadRequestCard(request, raw.paramsObject) { answer -> controller.respond(profile, raw.raw, answer) }
     }
     turn.error?.let { error -> item(key = "${turn.id}:error") { ThreadErrorCard(error) } }
     items(turn.responses, key = { item -> "${turn.id}:response:${item.id}" }) { item ->

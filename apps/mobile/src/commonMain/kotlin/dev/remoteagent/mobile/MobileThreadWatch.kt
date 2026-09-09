@@ -45,7 +45,7 @@ internal fun AtomicRef<MobileApp>.ensureVisibleThreadWatch(scope: CoroutineScope
 
 internal fun AtomicRef<MobileApp>.receiveThreadWatchNotification(
     hostIdentity: String,
-    message: RawCodexMessage.Notification,
+    message: RawCodexMessage,
 ) {
     val watch = value.watch ?: return
     val target = watch.target

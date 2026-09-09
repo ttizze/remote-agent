@@ -23,7 +23,7 @@ import mobile_client.mobile_client_transfer
 /** Native request execution uses leased handles; replacement never closes a borrowed handle. */
 @OptIn(ExperimentalForeignApi::class)
 internal class IosHostGateway : HostGateway {
-    private val handles = MutableStateFlow<Map<String, NativeHostConnection>>(emptyMap())
+    private val handles = MutableStateFlow<Map<String, Long>>(emptyMap())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> =
@@ -70,7 +70,7 @@ internal class IosHostGateway : HostGateway {
 
     override suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement> =
         withContext(Dispatchers.Default) {
-            handles.value[profile.id]?.handle?.let { current ->
+            handles.value[profile.id]?.let { current ->
                 memScoped {
                     val error = alloc<CPointerVar<ByteVar>>()
                     error.value = null
@@ -82,7 +82,7 @@ internal class IosHostGateway : HostGateway {
 
     override suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String> =
         withContext(Dispatchers.Default) {
-                handles.value[profile.id]?.handle?.let { current ->
+                handles.value[profile.id]?.let { current ->
                     memScoped {
                         val error = alloc<CPointerVar<ByteVar>>()
                         error.value = null
@@ -110,7 +110,7 @@ internal class IosHostGateway : HostGateway {
 
 @OptIn(ExperimentalForeignApi::class)
 private suspend fun connectIosHost(
-    handles: MutableStateFlow<Map<String, NativeHostConnection>>,
+    handles: MutableStateFlow<Map<String, Long>>,
     profile: HostProfile,
     relayToken: String,
     key: ByteArray,

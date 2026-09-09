@@ -121,7 +121,7 @@ private fun MobileCache.applyCacheLimits(limits: MobileCacheLimits): MobileCache
                         reconcileThreadRead(
                             result,
                             hostIdentity,
-                            ThreadReadResult(thread = snapshot, bufferedEvents = emptyList()),
+                            snapshot,
                             limits,
                         )
                 }

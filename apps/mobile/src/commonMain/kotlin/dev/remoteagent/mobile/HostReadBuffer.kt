@@ -25,11 +25,9 @@ internal fun AtomicRef<HostSessions>.beginRead(
     val host = state.hosts[hostIdentity]?.takeIf { it.active && it.generation == generation }
     if (host == null) state to null
     else {
-        val sequence = nextGeneration(state.nextReadToken)
-        val token = HostReadToken(hostIdentity, threadId, generation, sequence)
+        val token = HostReadToken(hostIdentity, threadId, generation)
         state.copy(
-            nextReadToken = sequence,
-            hosts = state.hosts + (hostIdentity to host.copy(reads = host.reads + (threadId to HostReadBuffer(token)))),
+            hosts = state.hosts + (hostIdentity to host.copy(reads = host.reads + (threadId to HostReadBuffer(token))))
         ) to token
     }
 }
@@ -92,8 +90,7 @@ internal fun AtomicRef<HostSessions>.finishRead(token: HostReadToken): HostReadC
 }
 
 /** Opaque identity for one Host/thread read within one connection generation. */
-internal class HostReadToken
-internal constructor(val hostIdentity: String, val threadId: String, val generation: Long, val sequence: Long)
+internal class HostReadToken internal constructor(val hostIdentity: String, val threadId: String, val generation: Long)
 
 /** Result of attempting to hold a live event behind a read barrier. */
 internal enum class HostReadBufferResult(
@@ -114,21 +111,8 @@ internal data class HostReadCompletion(val events: List<RawCodexMessage>, val ov
         get() = overflowed
 }
 
-private fun RawCodexMessage.sessionApproximateBytes(): Int {
-    val extensions =
-        when (this) {
-            is RawCodexMessage.Notification -> extensions
-            is RawCodexMessage.ServerRequest -> extensions
-        }
-    val idBytes = if (this is RawCodexMessage.ServerRequest) id.approximateBytes() else 0
-    return (params.approximateBytes() +
-            extensions.approximateBytes() +
-            idBytes +
-            method.length * CHAR_BYTES +
-            EVENT_OVERHEAD_BYTES)
-        .coerceAtMost(Int.MAX_VALUE.toLong())
-        .toInt()
-}
+private fun RawCodexMessage.sessionApproximateBytes(): Int =
+    raw.approximateBytes().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
 private fun JsonElement.approximateBytes(): Long =
     EVENT_OVERHEAD_BYTES +

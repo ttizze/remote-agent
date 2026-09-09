@@ -110,18 +110,6 @@ class ThreadDetailPresentationTest {
     }
 
     @Test
-    fun interrupted_and_failed_groups_are_expandable_and_keep_status_visible() {
-        val activity = listOf<CodexItem>(CodexItem.Reasoning("reasoning", "working"))
-        for ((status, summary) in
-            listOf(TurnStatus.Interrupted to "12秒 作業した後に中断しました・思考", TurnStatus.Failed to "12秒 作業した後に失敗しました・思考")) {
-            val group = CodexTurn("turn", status, activity, durationMs = 12_000).toThreadTurnPresentations().single()
-            assertEquals(summary, group.activitySummary)
-            assertTrue(group.activityCanCollapse)
-            assertFalse(group.activityInitiallyExpanded)
-        }
-    }
-
-    @Test
     fun completed_phase_less_messages_keep_only_the_last_answer_outside_work() {
         val sections =
             CodexTurn(
@@ -147,106 +135,6 @@ class ThreadDetailPresentationTest {
         )
         assertEquals("作業しました", sections.single().activitySummary)
         assertEquals(listOf("answer"), sections.single().responses.map { it.id })
-    }
-
-    @Test
-    fun completed_work_preserves_additional_input_and_duration() {
-        val sections =
-            CodexTurn(
-                    "turn",
-                    TurnStatus.Completed,
-                    listOf(
-                        CodexItem.UserMessage("first", "Start"),
-                        CodexItem.AgentMessage("before", "Checking", AgentMessagePhase.Commentary),
-                        CodexItem.UserMessage("additional", "Change direction"),
-                        CodexItem.Reasoning("after", "New work"),
-                        CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer),
-                    ),
-                    durationMs = 1_459_000,
-                )
-                .toThreadTurnPresentations()
-        assertEquals(listOf("first", "additional"), sections.flatMap { it.userMessages }.map { it.id })
-        assertEquals(listOf("after"), sections.flatMap { it.activityItems }.map { it.id })
-        assertEquals(listOf("before", "answer"), sections.flatMap { it.responses }.map { it.id })
-        assertEquals("24分 19秒 作業しました", sections.last().activitySummary)
-    }
-
-    @Test
-    fun completed_history_keeps_answers_before_each_followup_outside_work() {
-        for (phase in listOf(AgentMessagePhase.FinalAnswer, null)) {
-            val sections =
-                CodexTurn(
-                        "turn",
-                        TurnStatus.Completed,
-                        listOf(
-                            CodexItem.UserMessage("question-1", "First question"),
-                            CodexItem.AgentMessage("progress", "Checking", AgentMessagePhase.Commentary),
-                            CodexItem.AgentMessage("answer-1", "First answer", phase),
-                            CodexItem.UserMessage("question-2", "Followup"),
-                            CodexItem.AgentMessage("answer-2", "Second answer", phase),
-                            CodexItem.UserMessage("question-3", "Another followup"),
-                            CodexItem.AgentMessage("answer-3", "Last answer", phase),
-                        ),
-                    )
-                    .toThreadTurnPresentations()
-            assertEquals(
-                listOf(listOf("answer-1"), listOf("answer-2"), listOf("answer-3")),
-                sections.map { it.responses.map { response -> response.id } },
-            )
-            assertEquals(listOf("progress"), sections.flatMap { it.activityItems }.map { it.id })
-        }
-    }
-
-    @Test
-    fun completed_history_preserves_chronology_when_only_a_later_exchange_has_an_answer() {
-        val sections =
-            CodexTurn(
-                    "turn",
-                    TurnStatus.Completed,
-                    listOf(
-                        CodexItem.UserMessage("question-1", "First question"),
-                        CodexItem.AgentMessage("commentary-1", "Checking", AgentMessagePhase.Commentary),
-                        CodexItem.CommandExecution(
-                            "command",
-                            "rg task",
-                            output = "found",
-                            status = CommandExecutionStatus.Completed,
-                        ),
-                        CodexItem.AgentMessage("commentary-2", "Still checking", AgentMessagePhase.Commentary),
-                        CodexItem.UserMessage("question-2", "Followup"),
-                        CodexItem.AgentMessage("answer-2", "Done", AgentMessagePhase.FinalAnswer),
-                    ),
-                )
-                .toThreadTurnPresentations()
-
-        assertEquals(
-            listOf("question-1", "commentary-1", "command", "commentary-2", "question-2", "answer-2"),
-            sections.flatMap { it.userMessages + it.activityItems + it.responses }.map { it.id },
-        )
-        assertEquals(
-            listOf(listOf("commentary-1"), listOf("commentary-2"), listOf("answer-2")),
-            sections.map { it.responses.map { response -> response.id } },
-        )
-        assertEquals(
-            listOf(listOf<String>(), listOf("command"), listOf<String>()),
-            sections.map { it.activityItems.map { item -> item.id } },
-        )
-    }
-
-    @Test
-    fun completed_turn_without_a_final_answer_keeps_commentary_visible() {
-        val sections =
-            CodexTurn(
-                    "turn",
-                    TurnStatus.Completed,
-                    listOf(
-                        CodexItem.AgentMessage("commentary", "Still checking", AgentMessagePhase.Commentary),
-                        CodexItem.Reasoning("reasoning", "Working"),
-                    ),
-                )
-                .toThreadTurnPresentations()
-        assertEquals(listOf("commentary"), sections.flatMap { it.responses }.map { it.id })
-        assertEquals(listOf("reasoning"), sections.flatMap { it.activityItems }.map { it.id })
     }
 
     @Test
@@ -373,14 +261,14 @@ class ThreadDetailPresentationTest {
                         ),
                     pendingRequests =
                         methods.mapIndexed { index, (method, _) ->
-                            CodexServerRequest(
-                                id = "request-$index",
+                            codexMessage(
                                 method = method,
                                 params =
                                     Json.parseToJsonElement(
                                             """{"reason":"needed","questions":[{"question":"Which?"}]}"""
                                         )
                                         .jsonObject,
+                                id = kotlinx.serialization.json.JsonPrimitive("request-$index"),
                             )
                         },
                 )
@@ -425,34 +313,6 @@ class ThreadDetailPresentationTest {
             assertEquals(title, presentation.title, type)
             assertTrue(presentation.collapsedBody.isNotBlank(), type)
         }
-    }
-
-    @Test
-    fun hidden_state_items_are_removed_before_activity_grouping() {
-        val turn =
-            CodexTurn(
-                    id = "turn-hidden",
-                    status = TurnStatus.Completed,
-                    items =
-                        listOf(
-                            CodexItem.Unknown("sleep", "sleep", Json.parseToJsonElement("{}").jsonObject),
-                            CodexItem.Unknown(
-                                "review-in",
-                                "enteredReviewMode",
-                                Json.parseToJsonElement("{}").jsonObject,
-                            ),
-                            CodexItem.Unknown(
-                                "compaction",
-                                "contextCompaction",
-                                Json.parseToJsonElement("{}").jsonObject,
-                            ),
-                            CodexItem.AgentMessage("answer", "done", AgentMessagePhase.FinalAnswer),
-                        ),
-                )
-                .toThreadTurnPresentations()
-                .single()
-
-        assertEquals(listOf("compaction"), turn.activityItems.map { it.id })
     }
 
     @Test

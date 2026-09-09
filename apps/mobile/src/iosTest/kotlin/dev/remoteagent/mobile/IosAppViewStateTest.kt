@@ -127,7 +127,7 @@ class IosAppViewStateTest {
         assertNotSame(original, project(updated).thread)
         assertEquals("after!", project(updated).thread!!.turns.single().responses.single().expandedBody())
         assertNotSame(navigation, project(updated.copy(pairingError = "Pairing failed")).app)
-        assertEquals("conversation", project(updated).app.selectedThreadId)
+        assertEquals("conversation", project(updated).app.view.selectedThreadId)
     }
 
     @Test

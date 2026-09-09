@@ -23,7 +23,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
     fun older_history_coalesces_loads_and_discards_a_page_after_navigation() = runBlocking {
         val gateway = FakeHostGateway()
         val current = thread.copy(raw = Json.parseToJsonElement("""{"historyCursor":"opaque"}""") as JsonObject)
-        gateway.readResult = GatewayResult.Success(ThreadReadResult(current, emptyList()))
+        gateway.readResult = GatewayResult.Success(current)
         val controller = controller(gateway)
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         try {
@@ -61,7 +61,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
     fun events_during_read_are_applied_after_snapshot_and_other_threads_do_not_mix() {
         val gateway =
             FakeHostGateway().apply {
-                readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList()))
+                readResult = GatewayResult.Success(thread)
                 listResult = GatewayResult.Success(listOf(thread.summary))
             }
         val controller = controller(gateway)
@@ -117,8 +117,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
                 turns = thread.turns.map { it.copy(status = TurnStatus.Completed) },
                 raw = Json.parseToJsonElement("""{"path":"/fixture/rollout.jsonl"}""") as JsonObject,
             )
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(initial, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(initial) }
         val controller = controller(gateway, selectedThreadId = "thread-1", cachedThread = initial)
         val scope = CoroutineScope(coroutineContext + SupervisorJob())
         val registered = CompletableDeferred<Long>()
@@ -153,7 +152,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
             assertFalse(enteredLoading)
             assertEquals("thread-1", controller.state.selectedView.selectedThreadId)
             assertNull(controller.state.selectedView.notice)
-            assertTrue(gateway.turnTexts.isEmpty())
+            assertTrue(gateway.sends.isEmpty())
             controller.showThreadList(profile)
             withTimeout(5_000) { unregistered.await() }
             val staleRead = CompletableDeferred<Unit>()
@@ -173,8 +172,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
     @Test
     fun notifications_from_another_client_update_the_open_thread_immediately() {
         val initial = thread.copy(turns = emptyList())
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(initial, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(initial) }
         val controller = controller(gateway, selectedThreadId = "thread-1", cachedThread = initial)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
 
@@ -194,8 +192,7 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun read_buffer_overflow_surfaces_a_retryable_failure() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, cacheLimits = MobileCacheLimits(maxApproximateBytes = 64))
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
         gateway.readHook = {

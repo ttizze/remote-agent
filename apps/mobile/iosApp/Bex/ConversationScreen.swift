@@ -31,13 +31,13 @@ struct ThreadScreen: View {
         model.cwd + (conversation.thread?.turns.map { "\($0.id):\($0.status)" }.joined(separator: ",") ?? "")
     }
 
-    private var project: IosProjectView? {
-        state.projects.first { $0.roots.contains(model.cwd) }
+    private var project: CodexProject? {
+        state.projects.first { $0.roots.contains { $0.path == model.cwd } }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if let notice = state.notice {
+            if let notice = state.view.notice {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation.thread {
@@ -84,7 +84,7 @@ struct ThreadScreen: View {
                     historyBoundaries = boundaries
                     loadVisibleHistory()
                 }
-                .onChange(of: state.loadingHistory) {
+                .onChange(of: state.view.loadingHistory) {
                     if !$0 {
                         historyRequestPending = false
                     }
@@ -182,7 +182,7 @@ extension ThreadScreen {
             }
             Text([
                 project?.name ?? (model.cwd.isEmpty ? "" : URL(fileURLWithPath: model.cwd).lastPathComponent),
-                state.selectedProfileName ?? "Mac"
+                state.selectedProfile?.name ?? "Mac"
             ].filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
         }
@@ -191,7 +191,7 @@ extension ThreadScreen {
 
     var conversationActions: some View {
         HStack(spacing: 0) {
-            Button { model.openNewThread(cwd: model.cwd) } label: {
+            Button { model.controller.navigation.openNewThread(cwd: model.cwd) } label: {
                 Image(systemName: "square.and.pencil").font(.title2).frame(width: 44, height: 44)
             }.accessibilityLabel("新しい会話").accessibilityIdentifier("task.new")
             Menu {
@@ -203,7 +203,7 @@ extension ThreadScreen {
                 }
                 Button {
                     if let id = conversation.thread?.id {
-                        model.openThread(id)
+                        model.controller.navigation.openThread(threadId: id)
                     }
                     refreshReview()
                 } label: { Label("更新", systemImage: "arrow.clockwise") }
@@ -229,27 +229,29 @@ extension ThreadScreen {
                     }
                 }
             } label: {
-                contextLabel(state.selectedProfileName ?? "環境を選択", icon: "laptopcomputer")
+                contextLabel(state.selectedProfile?.name ?? "環境を選択", icon: "laptopcomputer")
                 if state.isConnecting {
                     ProgressView().controlSize(.small)
                 }
             }
-            .accessibilityLabel("環境: \(state.selectedProfileName ?? "未選択")")
+            .accessibilityLabel("環境: \(state.selectedProfile?.name ?? "未選択")")
             .accessibilityIdentifier("task.environment")
             Menu {
-                Button { model.openNewThread(cwd: "") } label: {
+                Button { model.controller.navigation.openNewThread(cwd: "") } label: {
                     Label("チャット", systemImage: "bubble.left.and.bubble.right")
                 }
                 ForEach(state.projects, id: \.id) { project in
-                    ForEach(project.roots, id: \.self) { root in
-                        Button { model.openNewThread(cwd: root) } label: {
-                            Label(project.roots.count == 1 ? project.name : root,
-                                  systemImage: root == model.cwd ? "checkmark" : "folder")
+                    ForEach(project.roots, id: \.path) { root in
+                        Button { model.controller.navigation.openNewThread(cwd: root.path) } label: {
+                            Label(project.roots.count == 1 ? project.name : root.path,
+                                  systemImage: root.path == model.cwd ? "checkmark" : "folder")
                         }
                     }
                 }
-                if state.hasMoreProjects {
-                    Button("さらにプロジェクトを読み込む") { model.expandTaskList(projects: true) }
+                if state.view.hasMoreProjects {
+                    Button("さらにプロジェクトを読み込む") {
+                        model.controller.navigation.expandTaskList(projects: true, projectId: nil)
+                    }
                 }
             } label: {
                 contextLabel(

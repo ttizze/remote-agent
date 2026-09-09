@@ -9,7 +9,7 @@ struct ModelSettingsSheet: View {
             List {
                 ForEach(model.settings.accounts, id: \.id) { account in
                     Section {
-                        Button { model.settingsActions.selectAccount(id: account.id) } label: {
+                        Button { model.controller.settings.selectAccount(id: account.id) } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "person.crop.circle").font(.title2)
                                 VStack(alignment: .leading, spacing: 3) {
@@ -26,7 +26,7 @@ struct ModelSettingsSheet: View {
                         .accessibilityValue(account.id == model.settings.selectedId ? "選択中" : "")
                         .disabled(model.settings.selecting)
                         if account.id == model.settings.selectedId {
-                            Button { model.settingsActions.chooseModel(value: "") } label: {
+                            Button { model.controller.settings.chooseModel(value: "") } label: {
                                 HStack {
                                     Text("Codex の既定モデル").foregroundColor(.primary)
                                     Spacer()
@@ -37,7 +37,7 @@ struct ModelSettingsSheet: View {
                             }
                             .accessibilityIdentifier("model.choice.default")
                             ForEach(model.settings.models, id: \.id) { choice in
-                                Button { model.settingsActions.chooseModel(value: choice.model) } label: {
+                                Button { model.controller.settings.chooseModel(value: choice.model) } label: {
                                     HStack {
                                         Text(choice.displayName).foregroundColor(.primary)
                                         Spacer()
@@ -60,7 +60,7 @@ struct ModelSettingsSheet: View {
                         Picker("推論の強度", selection: Binding(
                             get: { model.settings.selectedEffort
                             },
-                            set: model.settingsActions.chooseEffort
+                            set: model.controller.settings.chooseEffort
                         )) {
                             ForEach(current.reasoningEfforts, id: \.self) { Text($0).tag($0) }
                         }
@@ -77,9 +77,9 @@ struct ModelSettingsSheet: View {
                            url.scheme == "https" {
                             Link("ログインページを開く", destination: url)
                         }
-                        Button("ログインをキャンセル") { model.settingsActions.cancelAccountLogin() }
+                        Button("ログインをキャンセル") { model.controller.settings.cancelAccountLogin() }
                     } else {
-                        Button { model.settingsActions.startAccountLogin() } label: { Label(
+                        Button { model.controller.settings.startAccountLogin() } label: { Label(
                             "Codex アカウントを追加",
                             systemImage: "plus"
                         ) }
@@ -104,14 +104,14 @@ struct ModelSettingsSheet: View {
         .onAppear { refresh() }
         .onChange(of: scenePhase) { phase in
             if phase == .active {
-                model.settingsActions.setAccountLoginPolling(enabled: true)
+                model.controller.settings.setAccountLoginPolling(enabled: true)
             }
         }
-        .onDisappear { model.settingsActions.setAccountLoginPolling(enabled: false) }
+        .onDisappear { model.controller.settings.setAccountLoginPolling(enabled: false) }
     }
 
     private func refresh() {
-        model.settingsActions.refreshAccounts()
-        model.settingsActions.loadModels()
+        model.controller.settings.refreshAccounts()
+        model.controller.settings.loadModels()
     }
 }

@@ -60,7 +60,7 @@ private suspend fun AtomicRef<MobileApp>.startConversation(
                     dispatchIfCurrent(profile.id, generation) {
                         AppAction.SnapshotReceived(
                             profile.id,
-                            ThreadReadResult(snapshot, emptyList()),
+                            snapshot,
                             select = current?.selectedThreadId == null && current?.newThreadCwd == cwd,
                         )
                     }

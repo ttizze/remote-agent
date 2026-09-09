@@ -60,8 +60,7 @@ internal class MobileConnectionControllerTest : MobileControllerTestFixture() {
 
     @Test
     fun read_completion_after_disconnect_does_not_apply_snapshot_or_notice() {
-        val gateway =
-            FakeHostGateway().apply { readResult = GatewayResult.Success(ThreadReadResult(thread, emptyList())) }
+        val gateway = FakeHostGateway().apply { readResult = GatewayResult.Success(thread) }
         val controller = controller(gateway, selectedThreadId = null, cachedThread = null)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
         gateway.readHook = { controller.disconnect(profile.id) }
@@ -79,11 +78,11 @@ internal class MobileConnectionControllerTest : MobileControllerTestFixture() {
         val gateway =
             FakeHostGateway().apply {
                 listResult = GatewayResult.Success(listOf(summary("thread-1", "/workspace")))
-                turnResult = GatewayResult.Failure("stale turn failure")
+                sendResult = GatewayResult.Failure("stale turn failure")
             }
         val controller = controller(gateway, selectedThreadId = null, cachedThread = null)
         runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
-        gateway.turnHook = { controller.disconnect(profile.id) }
+        gateway.sendHook = { controller.disconnect(profile.id) }
 
         runSuspend { controller.startTurn(profile, "thread-1", "hello") }
 

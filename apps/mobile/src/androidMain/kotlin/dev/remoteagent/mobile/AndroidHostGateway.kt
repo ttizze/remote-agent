@@ -11,7 +11,7 @@ import kotlinx.serialization.json.JsonElement
 
 /** Android adapter over the native raw Codex JSON-RPC client. */
 class AndroidHostGateway(private val context: Context) : HostGateway {
-    private val connections = MutableStateFlow<Map<String, NativeHostConnection>>(emptyMap())
+    private val connections = MutableStateFlow<Map<String, Long>>(emptyMap())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = invokeAndroidHost {

@@ -563,6 +563,13 @@ mod presentation_tests {
     fn completed_empty_turn_does_not_restore_thinking() {
         let turn = json!({"id":"turn","status":"completed","items":[{"id":"u","type":"userMessage","text":"追加メッセージ"}]});
         assert!(project(&turn).next().unwrap().label.is_none());
+        let turn = json!({"id":"turn","status":"completed","items":[
+            {"id":"a","type":"agentMessage","phase":"commentary"},
+            {"id":"r","type":"reasoning"}
+        ]});
+        let parts: Vec<_> = project(&turn).collect();
+        assert_eq!(parts[0].role(0, &turn["items"][0]), Role::Response);
+        assert_eq!(parts[1].role(1, &turn["items"][1]), Role::Activity);
     }
     fn order(turn: &Value) -> Vec<String> {
         project(turn)
@@ -623,6 +630,28 @@ mod presentation_tests {
             );
             assert_eq!(parts[0].label.as_deref(), Some("作業内容"));
             assert_eq!(parts[1].label.as_deref(), Some("24分 19秒 作業しました"));
+
+            let turn = json!({"id":"turn","status":"completed","items":[
+                {"id":"u1","type":"userMessage"},
+                {"id":"progress","type":"agentMessage","phase":"commentary"},
+                {"id":"f1","type":"agentMessage","phase":phase},
+                {"id":"u2","type":"userMessage"},
+                {"id":"f2","type":"agentMessage","phase":phase},
+                {"id":"u3","type":"userMessage"},
+                {"id":"f3","type":"agentMessage","phase":phase}
+            ]});
+            let parts: Vec<_> = project(&turn).collect();
+            assert_eq!(parts.len(), 3);
+            for (index, part) in parts.iter().enumerate() {
+                assert_eq!(
+                    rows(part, &turn, Role::Response).collect::<Vec<_>>(),
+                    [&turn["items"][[2, 4, 6][index]]]
+                );
+                assert_eq!(
+                    rows(part, &turn, Role::Activity).count(),
+                    usize::from(index == 0)
+                );
+            }
         }
     }
     #[test]
@@ -636,14 +665,31 @@ mod presentation_tests {
             {"id":"answer","type":"agentMessage","phase":"final_answer"}
         ]});
         assert_eq!(order(&turn), ["u1", "a1", "c", "a2", "u2", "answer"]);
-        let responses: Vec<_> = project(&turn)
-            .flat_map(|part| {
-                rows(&part, &turn, Role::Response)
-                    .map(|item| text(item, "id").to_owned())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert_eq!(responses, ["a1", "a2", "answer"]);
+        let parts: Vec<_> = project(&turn).collect();
+        for (index, part) in parts.iter().enumerate() {
+            assert_eq!(
+                rows(part, &turn, Role::Response).collect::<Vec<_>>(),
+                [&turn["items"][[1, 3, 5][index]]]
+            );
+            assert_eq!(
+                rows(part, &turn, Role::Activity).count(),
+                usize::from(index == 1)
+            );
+        }
+
+        let turn = json!({"id":"turn","status":"completed","durationMs":1459000,"items":[
+            {"id":"u1","type":"userMessage"},
+            {"id":"a1","type":"agentMessage","phase":"commentary"},
+            {"id":"u2","type":"userMessage"},
+            {"id":"r","type":"reasoning"},
+            {"id":"answer","type":"agentMessage","phase":"final_answer"}
+        ]});
+        assert_eq!(order(&turn), ["u1", "a1", "u2", "r", "answer"]);
+        let parts: Vec<_> = project(&turn).collect();
+        assert_eq!(parts[0].role(1, &turn["items"][1]), Role::Response);
+        assert_eq!(parts[1].role(3, &turn["items"][3]), Role::Activity);
+        assert_eq!(parts[1].role(4, &turn["items"][4]), Role::Response);
+        assert_eq!(parts[1].label.as_deref(), Some("24分 19秒 作業しました"));
     }
     #[test]
     fn failures_and_interruptions_keep_partial_responses_and_status() {
@@ -658,6 +704,7 @@ mod presentation_tests {
             assert_eq!(order(&turn), ["a", "r"]);
             let last = project(&turn).last().unwrap();
             assert!(last.last && last.collapsible);
+            assert!(!last.initially_expanded);
             assert_eq!(last.label.as_deref(), Some(expected));
         }
     }
@@ -671,6 +718,17 @@ mod presentation_tests {
         ]});
         assert_eq!(project(&turn).count(), 1);
         assert_eq!(order(&turn), ["a", "b"]);
+        let turn = json!({"id":"turn","status":"completed","items":[
+            {"id":"sleep","type":"sleep"},
+            {"id":"review","type":"enteredReviewMode"},
+            {"id":"compaction","type":"contextCompaction"},
+            {"id":"answer","type":"agentMessage","phase":"final_answer"}
+        ]});
+        let part = project(&turn).next().unwrap();
+        assert_eq!(
+            rows(&part, &turn, Role::Activity).collect::<Vec<_>>(),
+            [&turn["items"][2]]
+        );
     }
 }
 
