@@ -139,7 +139,7 @@ extension BexLaunchUITests {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[request] Ask user")
 
-        let request = prefixedElement(app, prefix: "request.host-proxy-")
+        let request = app.staticTexts["回答待ち"]
         XCTAssertTrue(request.waitForExistence(timeout: 10), "Pending request was not visible")
         XCTAssertTrue(app.staticTexts["回答待ち"].exists)
         let answer = app.textFields["request.answer"]

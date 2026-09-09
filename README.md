@@ -1,12 +1,12 @@
 # Bex
 
-Bex controls a long-lived Codex App Server through a separate Rust Host daemon. The current migration makes `agent-core` the state owner for the headless CLI, GPUI, SwiftUI and Compose clients. See [ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md).
+Bex controls a long-lived Codex App Server through a separate Rust Host daemon. `agent-core` is the state owner for the headless CLI, GPUI, SwiftUI and Compose clients. See [ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md).
 
-The core, headless CLI, daemon and GPUI desktop now use iroh and the same JSONL peer. Desktop dispatches Store intents and renders immutable snapshots. Mobile still uses its previous interfaces until the UniFFI cutover; the mobile descriptions below record behavior to preserve.
+The headless CLI, daemon, GPUI desktop and native mobile clients use iroh and the same JSONL peer. Desktop, SwiftUI and Compose dispatch Store intents and render immutable snapshots. Mobile accesses Store through generated UniFFI bindings.
 
 ## Core and headless client
 
-`agent-core` contains typed RPC operations, immutable serde models, `Snapshot`, the pure `reduce` function, and `Store`. Store owns one `RwLock<Arc<Snapshot>>`; subscribers receive immutable snapshots and submit typed `Intent`s. Deltas copy only the changed thread/turn/item path. JSON persistence is `serde_json::to_vec(&snapshot)` with no version wrapper or migration layer. Unknown model fields and raw RPC errors are retained.
+`agent-core` contains typed RPC operations, immutable serde models, `Snapshot`, the pure `reduce` function, and `Store`. Store publishes immutable `Arc<Snapshot>` values through Tokio watch; subscribers receive snapshots and submit typed `Intent`s. Deltas copy only the changed thread/turn/item path. JSON persistence is `serde_json::to_vec(&snapshot)` with no version wrapper or migration layer. Unknown model fields and raw RPC errors are retained.
 
 `RpcPeer` exposes one typed request and one raw request. One ordered stream carries notifications, server requests and response markers. Store uses the markers to apply typed responses before later deltas while allowing approval responses during other requests. Closing waits for stream shutdown; iroh streams wait for acknowledgment of the final data. Applications must also await endpoint closure before terminating their runtime.
 
@@ -90,7 +90,7 @@ All clients connect directly through iroh. Management RPCs (`host/status`, `host
 
 Public iroh relays are the default. `--relay-url` supplies a custom list; `--no-relay` restricts isolated fixtures to direct local addresses. SSH, the custom Phoenix relay, and their repository deployment scripts are removed. This source change does not decommission previously deployed Fly infrastructure.
 
-## Existing Mac setup (pending UI cutover)
+## Mac setup
 
 Build and open the Mac app from the repository root:
 
@@ -103,7 +103,7 @@ Mac builds require a stable signing certificate. Both build commands use the sam
 
 When switching an existing installation from ad-hoc signing, choose **Always Allow / 常に許可** for the Host's existing Keychain entries once. Later builds signed with the same certificate identity and `app.bex.host` identifier retain that authorization. This does not grant other applications access or bypass a locked Keychain. Changing the signing identity or resetting permissions requires authorization again. See [Apple's designated-requirement explanation](https://developer.apple.com/library/archive/technotes/tn2206/_index.html).
 
-The old UI's relay settings and invitation screen are not compatible with this daemon. The next migration replaces them with Store and iroh connections.
+Host management uses Store and iroh for invitations, paired devices and registered remote Hosts.
 
 ## Working with Codex
 

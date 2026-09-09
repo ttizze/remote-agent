@@ -50,7 +50,7 @@ extension BexAppViewModel {
     }
 
     func dismissPairing() {
-        screen = selectedProfileId == nil ? .profiles : .threads
+        screen = .profiles
     }
 
     func showProfiles() {
@@ -78,11 +78,11 @@ extension BexAppViewModel {
     func expandTaskList(projects: Bool = false, projectId: String? = nil) {
         var query = snapshot.listQuery()
         if let projectId {
-            query.projectThreadLimits[projectId, default: 5] += 5
+            query.projectThreadLimits[projectId, default: 5] += 10
         } else if projects {
-            query.projectLimit += 5
+            query.projectLimit += 10
         } else {
-            query.chatLimit += 5
+            query.chatLimit += 10
         }
         loadingThreads = true
         perform(.listThreads(query: query)) { [weak self] _ in self?.loadingThreads = false }
@@ -104,7 +104,13 @@ extension BexAppViewModel {
     }
 
     func openThread(_ id: String) {
-        perform(.openThread(id: id)); screen = .thread
+        let host = selectedProfileId
+        let previousScreen = screen
+        perform(.openThread(id: id)) { [weak self] result in
+            guard let self, case .success = result, selectedProfileId == host,
+                  screen == previousScreen, snapshot.navigation().threadId == id else { return }
+            screen = .thread
+        }
     }
 
     func loadOlderHistory(_ turnId: String?) {

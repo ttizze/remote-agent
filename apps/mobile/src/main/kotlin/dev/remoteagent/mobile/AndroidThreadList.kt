@@ -110,10 +110,10 @@ internal fun AndroidAppModel.expand(projects: Boolean = false, projectId: String
                     projectThreadLimits =
                         query.projectThreadLimits +
                             (projectId to
-                                ((query.projectThreadLimits[projectId] ?: THREAD_PAGE_SIZE) + THREAD_PAGE_SIZE))
+                                ((query.projectThreadLimits[projectId] ?: THREAD_PAGE_SIZE) + THREAD_PAGE_INCREMENT))
                 )
-            projects -> query.copy(projectLimit = query.projectLimit + THREAD_PAGE_SIZE)
-            else -> query.copy(chatLimit = query.chatLimit + THREAD_PAGE_SIZE)
+            projects -> query.copy(projectLimit = query.projectLimit + THREAD_PAGE_INCREMENT)
+            else -> query.copy(chatLimit = query.chatLimit + THREAD_PAGE_INCREMENT)
         }
     perform(Intent.ListThreads(expanded))
 }
@@ -153,5 +153,7 @@ internal fun AndroidAppModel.send(complete: (Result<Outcome>) -> Unit) {
 }
 
 private const val THREAD_PAGE_SIZE = 5u
+
+private const val THREAD_PAGE_INCREMENT = 10u
 
 private const val SEARCH_DEBOUNCE_MILLIS = 200L

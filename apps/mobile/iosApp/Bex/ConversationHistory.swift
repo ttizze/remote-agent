@@ -5,8 +5,7 @@ import UniformTypeIdentifiers
 
 /// History and row presentation
 extension ThreadScreen {
-    /// Give native list virtualization one stable identity per conversation row.
-    /// Whole-turn containers and size-change anchoring loop on large histories.
+    /// Give lazy conversation rows stable identities across streamed updates.
     func activityIsExpanded(_ turn: TurnPresentation) -> Bool {
         guard let override = activityExpansionOverrides[turn.id], override.status == turn.status else {
             return turn.activityInitiallyExpanded
