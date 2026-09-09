@@ -14,6 +14,48 @@ import kotlinx.serialization.json.JsonElement
 
 internal class MobileAccountsTest : MobileControllerTestFixture() {
     @Test
+    fun repeated_login_actions_share_the_pending_login_and_failed_cancel_keeps_it() = runBlocking {
+        val scope = persistenceScope()
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway)
+        controller.connect(profile, scope)
+        val started = CompletableDeferred<Unit>()
+        val response = CompletableDeferred<GatewayResult<String>>()
+        var loginCalls = 0
+        var state = AccountSettingsState()
+        val subscription = controller.observeAccounts { state = it }
+        gateway.agentBlock = { command ->
+            when (command) {
+                AgentCommand.StartAccountLogin -> {
+                    loginCalls++
+                    started.complete(Unit)
+                    response.await()
+                }
+                is AgentCommand.CancelAccountLogin -> GatewayResult.Failure("cancel failed")
+                else -> error("Unexpected account operation: $command")
+            }
+        }
+        val login = scope.launch { controller.startAccountLogin() }
+        withTimeout(5_000) { started.await() }
+        controller.startAccountLogin()
+        assertEquals(1, loginCalls)
+        response.complete(
+            GatewayResult.Success(
+                """{"loginId":"fixture-login","userCode":"code","verificationUrl":"https://example.test/login"}"""
+            )
+        )
+        withTimeout(5_000) { login.join() }
+        controller.pauseAccountPolling()
+        controller.startAccountLogin()
+        assertEquals(1, loginCalls)
+        controller.cancelAccountLogin()
+        assertEquals("fixture-login", state.login?.loginId)
+        assertEquals("cancel failed", state.error)
+        assertFalse(state.startingLogin)
+        subscription.cancel()
+    }
+
+    @Test
     fun retired_connection_cannot_publish_an_account_selection_or_fork_result() = runBlocking {
         val scope = persistenceScope()
         val gateway = FakeHostGateway()

@@ -15,9 +15,11 @@ sealed interface AgentCommand {
 
     @Serializable
     @SerialName("watchThread")
-    data class WatchThread(val threadId: String, val watchId: Long, val path: String) : AgentCommand
+    data class WatchThread(val threadId: String, val watchKey: Long, val watchId: Long, val path: String) : AgentCommand
 
-    @Serializable @SerialName("unwatchThread") data class UnwatchThread(val watchId: Long) : AgentCommand
+    @Serializable
+    @SerialName("unwatchThread")
+    data class UnwatchThread(val watchKey: Long, val watchId: Long) : AgentCommand
 
     @Serializable @SerialName("models") data object Models : AgentCommand
 

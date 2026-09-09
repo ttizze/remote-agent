@@ -7,7 +7,6 @@ import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.value
-import mobile_client.mobile_client_account_transition
 import mobile_client.mobile_client_classify_event
 import mobile_client.mobile_client_conversation_transition
 import mobile_client.mobile_client_present_conversation
@@ -39,7 +38,3 @@ internal actual fun nativeConversationTransition(
             flags.toUInt(),
         )
         .toInt()
-
-@OptIn(ExperimentalForeignApi::class)
-internal actual fun nativeAccountTransition(event: Int, flags: Int): Int =
-    mobile_client_account_transition(event.toUInt(), flags.toUInt()).toInt()

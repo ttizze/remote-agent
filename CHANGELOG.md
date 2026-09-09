@@ -4,7 +4,8 @@
 
 - Centralize Mac/mobile agent operations and pure conversation, history, lifecycle, and submission decisions in Rust. Keep Kotlin mobile coordination and native UI adapters thin; preserve unknown payload metadata without copying conversation bodies through the native bridge. Exercise both adapters with 72 shared fixture cases.
 - Share the asynchronous JSONL RPC engine and preserve snapshot-before-notification delivery. Move Host title/history projection into its own owner while retaining session routing and authorization in the RPC service.
-- Split Mac main and Side Chat into independent native conversation views and watches with shared Host catalogue, management, and draft resources. Replace mutable Host/draft services with plain state values and pure transitions.
+- Keep Mac main and Side Chat as independent native views sharing one RPC per Host and one ordered reply/event queue. Give each view an independent history watch; a closed or recreated Side cannot cancel Main. Share Host catalogue, management, and draft resources without mutable Host/draft services. Remove the stale catalogue input from desktop submission decisions.
+- Remove redundant desktop completion/management layers, the mobile account flag bridge, and intermediate history-selection types. Keep account operations in Rust, mobile UI lifecycle in Kotlin, and history bodies moved through pure reconciliation.
 
 - Share one Mac draft writer between main and Side Chat, preserving their separate files and pending saves when either view closes.
 

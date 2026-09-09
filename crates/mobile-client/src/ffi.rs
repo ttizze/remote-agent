@@ -599,11 +599,6 @@ pub extern "C" fn mobile_client_conversation_transition(
     conversation_presentation::state::transition_code(kind, status, current_status, item, flags)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn mobile_client_account_transition(event: u32, flags: u32) -> u32 {
-    agent_client::accounts::transition(event, flags) as u32
-}
-
 #[cfg(test)]
 mod presentation_tests {
     use super::*;

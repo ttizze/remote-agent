@@ -1,220 +1,62 @@
-//! History selection policy. Plans reference existing values; bodies stay in
-//! their native owner and repeated native turn IDs retain their occurrences.
+//! Owned history reconciliation shared by desktop and native metadata adapters.
+//! Bodies move once; repeated turn IDs retain their separate occurrences.
 use crate::{array, text};
-use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum Source {
-    Previous,
-    Incoming,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Selection {
-    pub source: Source,
-    pub index: usize,
-}
-
-/// Existing live values win overlap. Items within an older page deduplicate;
-/// repeated turns within that page remain separate native occurrences.
-pub fn prepend(previous: &[Value], incoming: &[Value], items: bool) -> Vec<Selection> {
-    let mut known: HashSet<&str> = previous.iter().map(|value| text(value, "id")).collect();
-    let mut selection = Vec::with_capacity(previous.len() + incoming.len());
-    for (index, value) in incoming.iter().enumerate() {
-        let id = text(value, "id");
-        let include = if items {
-            known.insert(id)
-        } else {
-            !known.contains(id)
-        };
-        if include {
-            selection.push(Selection {
-                source: Source::Incoming,
-                index,
-            });
-        }
-    }
-    selection.extend((0..previous.len()).map(|index| Selection {
-        source: Source::Previous,
-        index,
-    }));
-    selection
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ItemSelection {
-    #[serde(flatten)]
-    pub value: Selection,
-    pub deferred: bool,
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TurnSelection {
-    #[serde(flatten)]
-    pub value: Selection,
-    pub previous_turn: Option<usize>,
-    pub items: Option<Vec<ItemSelection>>,
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RefreshPlan {
-    pub turns: Vec<TurnSelection>,
-    pub preserve_cursor: bool,
-}
 
 fn deferred(turn: &Value, item: &Value) -> bool {
     array(&turn["deferredItemIds"])
         .iter()
         .any(|id| *id == item["id"])
 }
+
 fn has_more(turn: &Value) -> bool {
     turn["itemsHasMore"]
         .as_bool()
         .unwrap_or_else(|| turn["itemsNextCursor"].as_str().is_some())
 }
-fn items(previous: &Value, incoming: &Value) -> Option<Vec<ItemSelection>> {
-    let old = array(&previous["items"]);
-    let new = array(&incoming["items"]);
-    if new.is_empty() {
-        return has_more(incoming).then(|| {
-            old.iter()
-                .enumerate()
-                .map(|(index, item)| ItemSelection {
-                    value: Selection {
-                        source: Source::Previous,
-                        index,
-                    },
-                    deferred: deferred(previous, item),
-                })
-                .collect()
-        });
-    }
-    let boundary = old.iter().position(|item| item["id"] == new[0]["id"])?;
-    let mut selection = Vec::with_capacity(boundary + new.len());
-    selection.extend(
-        old[..boundary]
-            .iter()
-            .enumerate()
-            .map(|(index, item)| ItemSelection {
-                value: Selection {
-                    source: Source::Previous,
-                    index,
-                },
-                deferred: deferred(previous, item),
-            }),
-    );
-    let mut consumed = vec![false; old.len() - boundary];
-    for (index, item) in new.iter().enumerate() {
-        // A summary must not discard a detail already fetched by the native
-        // owner. Match each old occurrence once, including duplicate item IDs.
-        let matched = old[boundary..]
-            .iter()
-            .enumerate()
-            .find(|(offset, old_item)| !consumed[*offset] && old_item["id"] == item["id"])
-            .map(|(offset, _)| offset);
-        if let Some(offset) = matched {
-            consumed[offset] = true;
-        }
-        if let Some(offset) = matched.filter(|offset| {
-            deferred(incoming, item) && !deferred(previous, &old[boundary + offset])
-        }) {
-            selection.push(ItemSelection {
-                value: Selection {
-                    source: Source::Previous,
-                    index: boundary + offset,
-                },
-                deferred: false,
-            });
-        } else {
-            selection.push(ItemSelection {
-                value: Selection {
-                    source: Source::Incoming,
-                    index,
-                },
-                deferred: deferred(incoming, item),
-            });
-        }
-    }
-    Some(selection)
-}
 
-pub fn refresh(previous: &Value, incoming: &Value) -> RefreshPlan {
-    let old = array(&previous["turns"]);
-    let new = array(&incoming["turns"]);
-    let boundary =
-        if previous.get("historyCursor").is_some() && incoming.get("historyCursor").is_some() {
-            new.first()
-                .and_then(|first| old.iter().position(|turn| turn["id"] == first["id"]))
-        } else {
-            None
-        };
-    let mut turns = Vec::with_capacity(boundary.unwrap_or(0) + new.len());
-    if let Some(boundary) = boundary {
-        turns.extend((0..boundary).map(|index| TurnSelection {
-            value: Selection {
-                source: Source::Previous,
-                index,
-            },
-            previous_turn: None,
-            items: None,
-        }));
-        let mut consumed = vec![false; old.len() - boundary];
-        for (index, turn) in new.iter().enumerate() {
-            let previous_turn = old[boundary..]
-                .iter()
-                .enumerate()
-                .find(|(offset, previous)| !consumed[*offset] && previous["id"] == turn["id"])
-                .map(|(offset, _)| {
-                    consumed[offset] = true;
-                    boundary + offset
-                });
-            turns.push(TurnSelection {
-                value: Selection {
-                    source: Source::Incoming,
-                    index,
-                },
-                items: previous_turn.and_then(|previous_index| items(&old[previous_index], turn)),
-                previous_turn,
-            });
-        }
-    } else {
-        turns.extend((0..new.len()).map(|index| TurnSelection {
-            value: Selection {
-                source: Source::Incoming,
-                index,
-            },
-            previous_turn: None,
-            items: None,
-        }));
-    }
-    RefreshPlan {
-        turns,
-        preserve_cursor: boundary.is_some(),
+fn take_array(value: &mut Value) -> Vec<Value> {
+    match value.take() {
+        Value::Array(values) => values,
+        _ => Vec::new(),
     }
 }
 
-/// Prepending items applies the same live-value and detail-selection policy as
-/// refresh; deferred IDs are derived only from the selected source occurrences.
-pub fn prepend_items(previous: &Value, incoming: &Value) -> Vec<ItemSelection> {
-    prepend(array(&previous["items"]), array(&incoming["items"]), true)
+fn prepend_items(turn: &mut Value, older: &mut Value) {
+    let previous = take_array(&mut turn["items"]);
+    let incoming = take_array(&mut older["items"]);
+    let mut known: HashSet<&str> = previous.iter().map(|item| text(item, "id")).collect();
+    // Keep borrowed IDs while deciding which page entries survive. Only new
+    // entries need a bit; no source/index plan or copies of IDs are retained.
+    let include: Vec<bool> = incoming
+        .iter()
+        .map(|item| known.insert(text(item, "id")))
+        .collect();
+    drop(known);
+    let mut items = Vec::with_capacity(previous.len() + incoming.len());
+    let mut ids = Vec::new();
+    for (item, source) in incoming
         .into_iter()
-        .map(|value| {
-            let turn = match value.source {
-                Source::Previous => previous,
-                Source::Incoming => incoming,
-            };
-            let deferred = deferred(turn, &turn["items"][value.index]);
-            ItemSelection { value, deferred }
-        })
-        .collect()
+        .zip(include)
+        .filter_map(|(item, keep)| keep.then_some((item, &*older)))
+        .chain(previous.into_iter().map(|item| (item, &*turn)))
+    {
+        if deferred(source, &item) {
+            ids.push(item["id"].clone());
+        }
+        items.push(item);
+    }
+    turn["items"] = Value::Array(items);
+    turn["deferredItemIds"] = Value::Array(ids);
+    turn["itemsHasMore"] = json!(has_more(older));
+    turn["itemsNextCursor"] = older["itemsNextCursor"].take();
+    if !older["openingUserMessage"].is_null() {
+        turn["openingUserMessage"] = older["openingUserMessage"].take();
+    }
 }
 
-/// Check the cursor before changing owned state; delayed pages cannot overwrite live content.
+/// Validate before changing state; delayed pages cannot overwrite live content.
 pub fn merge_older(
     mut previous: Value,
     mut page: Value,
@@ -243,33 +85,15 @@ pub fn merge_older(
             if !older["itemsNextCursor"].is_null() && older["itemsNextCursor"] == *cursor {
                 return Err("履歴カーソルが進みませんでした".into());
             }
-            let values = older["items"]
-                .as_array_mut()
-                .ok_or("履歴の項目がありません")?;
-            if values.iter().any(|item| text(item, "id").is_empty()) {
+            if older["items"]
+                .as_array()
+                .ok_or("履歴の項目がありません")?
+                .iter()
+                .any(|item| text(item, "id").is_empty())
+            {
                 return Err("履歴の項目IDがありません".into());
             }
-            let selection = prepend_items(turn, older);
-            let mut items = Vec::with_capacity(selection.len());
-            let mut deferred = Vec::new();
-            for selected in selection {
-                let source = match selected.value.source {
-                    Source::Previous => &mut *turn,
-                    Source::Incoming => &mut *older,
-                };
-                let item = source["items"][selected.value.index].take();
-                if selected.deferred {
-                    deferred.push(item["id"].clone());
-                }
-                items.push(item);
-            }
-            turn["items"] = Value::Array(items);
-            turn["deferredItemIds"] = Value::Array(deferred);
-            turn["itemsHasMore"] = json!(has_more(older));
-            turn["itemsNextCursor"] = older["itemsNextCursor"].take();
-            if !older["openingUserMessage"].is_null() {
-                turn["openingUserMessage"] = older["openingUserMessage"].take();
-            }
+            prepend_items(turn, older);
             Ok(0)
         } else {
             if previous["historyCursor"] != *cursor {
@@ -286,22 +110,18 @@ pub fn merge_older(
             {
                 return Err("履歴カーソルが進みませんでした".into());
             }
-            let selection = prepend(
-                array(&previous["turns"]),
-                array(&page["thread"]["turns"]),
-                false,
+            let old = take_array(&mut previous["turns"]);
+            let new = take_array(&mut page["thread"]["turns"]);
+            let known: HashSet<&str> = old.iter().map(|turn| text(turn, "id")).collect();
+            let mut turns = Vec::with_capacity(old.len() + new.len());
+            // Page-local duplicate turn IDs represent separate native occurrences.
+            turns.extend(
+                new.into_iter()
+                    .filter(|turn| !known.contains(text(turn, "id"))),
             );
-            let added = selection.len() - array(&previous["turns"]).len();
-            let turns = selection
-                .into_iter()
-                .map(|selected| {
-                    let source = match selected.source {
-                        Source::Previous => &mut previous,
-                        Source::Incoming => &mut page["thread"],
-                    };
-                    source["turns"][selected.index].take()
-                })
-                .collect();
+            let added = turns.len();
+            drop(known);
+            turns.extend(old);
             previous["turns"] = Value::Array(turns);
             previous["historyCursor"] = page["thread"]["historyCursor"].take();
             Ok(added)
@@ -310,50 +130,95 @@ pub fn merge_older(
     (previous, result)
 }
 
-pub fn merge_refresh(mut previous: Value, mut fresh: Value) -> (Value, Result<(), String>) {
-    let result = (|| {
-        if fresh["id"] != previous["id"] || !fresh["turns"].is_array() {
-            return Err("更新された履歴が不正です".into());
+fn refresh_items(previous: &mut Value, fresh: &mut Value) {
+    let old = array(&previous["items"]);
+    let new = array(&fresh["items"]);
+    let boundary = if new.is_empty() {
+        if !has_more(fresh) {
+            return;
         }
-        let plan = refresh(&previous, &fresh);
-        let mut turns = Vec::with_capacity(plan.turns.len());
-        for selected in plan.turns {
-            let mut turn = match selected.value.source {
-                Source::Previous => previous["turns"][selected.value.index].take(),
-                Source::Incoming => fresh["turns"][selected.value.index].take(),
-            };
-            if let Some(selection) = selected.items {
-                let old_turn = &mut previous["turns"][selected.previous_turn.unwrap()];
-                let mut items = Vec::with_capacity(selection.len());
-                let mut deferred = Vec::new();
-                for selected in selection {
-                    let source = match selected.value.source {
-                        Source::Previous => &mut *old_turn,
-                        Source::Incoming => &mut turn,
-                    };
-                    let item = source["items"][selected.value.index].take();
-                    if selected.deferred {
-                        deferred.push(item["id"].clone());
-                    }
-                    items.push(item);
-                }
-                turn["items"] = Value::Array(items);
-                turn["deferredItemIds"] = Value::Array(deferred);
-                turn["itemsHasMore"] = json!(has_more(old_turn));
-                turn["itemsNextCursor"] = old_turn["itemsNextCursor"].take();
-                if turn["openingUserMessage"].is_null() && !old_turn["openingUserMessage"].is_null()
-                {
-                    turn["openingUserMessage"] = old_turn["openingUserMessage"].take();
-                }
+        old.len()
+    } else {
+        let Some(index) = old.iter().position(|item| item["id"] == new[0]["id"]) else {
+            return;
+        };
+        index
+    };
+    let mut old = take_array(&mut previous["items"]);
+    let new = take_array(&mut fresh["items"]);
+    let mut items = Vec::with_capacity(boundary + new.len());
+    let mut ids = Vec::new();
+    for item in &mut old[..boundary] {
+        if deferred(previous, item) {
+            ids.push(item["id"].clone());
+        }
+        items.push(item.take());
+    }
+    let mut consumed = vec![false; old.len() - boundary];
+    for item in new {
+        let matched = old[boundary..]
+            .iter()
+            .enumerate()
+            .find(|(index, value)| !consumed[*index] && value["id"] == item["id"])
+            .map(|(index, _)| index);
+        if let Some(index) = matched {
+            consumed[index] = true;
+        }
+        let is_deferred = deferred(fresh, &item);
+        if let Some(index) =
+            matched.filter(|index| is_deferred && !deferred(previous, &old[boundary + index]))
+        {
+            items.push(old[boundary + index].take());
+        } else {
+            if is_deferred {
+                ids.push(item["id"].clone());
             }
-            turns.push(turn);
+            items.push(item);
         }
-        fresh["turns"] = Value::Array(turns);
-        if plan.preserve_cursor {
-            fresh["historyCursor"] = previous["historyCursor"].take();
+    }
+    fresh["items"] = Value::Array(items);
+    fresh["deferredItemIds"] = Value::Array(ids);
+    fresh["itemsHasMore"] = json!(has_more(previous));
+    fresh["itemsNextCursor"] = previous["itemsNextCursor"].take();
+    if fresh["openingUserMessage"].is_null() && !previous["openingUserMessage"].is_null() {
+        fresh["openingUserMessage"] = previous["openingUserMessage"].take();
+    }
+}
+
+pub fn merge_refresh(mut previous: Value, mut fresh: Value) -> (Value, Result<(), String>) {
+    if fresh["id"] != previous["id"] || !fresh["turns"].is_array() {
+        return (previous, Err("更新された履歴が不正です".into()));
+    }
+    let boundary =
+        if previous.get("historyCursor").is_some() && fresh.get("historyCursor").is_some() {
+            array(&fresh["turns"]).first().and_then(|first| {
+                array(&previous["turns"])
+                    .iter()
+                    .position(|turn| turn["id"] == first["id"])
+            })
+        } else {
+            None
+        };
+    let Some(boundary) = boundary else {
+        return (fresh, Ok(()));
+    };
+    let mut old = take_array(&mut previous["turns"]);
+    let new = take_array(&mut fresh["turns"]);
+    let mut turns = Vec::with_capacity(boundary + new.len());
+    turns.extend(old[..boundary].iter_mut().map(Value::take));
+    let mut consumed = vec![false; old.len() - boundary];
+    for mut turn in new {
+        if let Some((index, previous_turn)) = old[boundary..]
+            .iter_mut()
+            .enumerate()
+            .find(|(index, previous)| !consumed[*index] && previous["id"] == turn["id"])
+        {
+            consumed[index] = true;
+            refresh_items(previous_turn, &mut turn);
         }
-        previous = fresh;
-        Ok(())
-    })();
-    (previous, result)
+        turns.push(turn);
+    }
+    fresh["turns"] = Value::Array(turns);
+    fresh["historyCursor"] = previous["historyCursor"].take();
+    (fresh, Ok(()))
 }

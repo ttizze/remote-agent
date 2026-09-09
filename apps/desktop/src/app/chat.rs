@@ -4,14 +4,14 @@ mod dictation;
 mod view;
 use dictation::{Dictation, DictationEvent, Phase};
 
+// Main and Side reuse stable watch keys. Reopening a view must still issue a
+// newer revision than its late registration/cancellation on the shared socket.
+static NEXT_LOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 type Apply =
     Box<dyn FnOnce(&mut ConversationView, &mut Window, &mut Context<ConversationView>) + Send>;
-enum Event {
+pub(super) enum Event {
     Dictation(uuid::Uuid, DictationEvent),
-    Rpc {
-        epoch: u64,
-        event: rpc::Event,
-    },
     Done {
         epoch: u64,
         apply: Apply,
@@ -100,11 +100,9 @@ struct ProjectedTurn {
 }
 
 pub(super) struct ConversationSession {
-    rpc: Rpc,
     pub(super) host: Rc<host::Connection>,
     epoch: u64,
     pub(super) connected: bool,
-    pub(super) remote: String,
     load_generation: u64,
     pub(super) cwd: String,
     pub(super) selected: String,
@@ -119,15 +117,10 @@ pub(super) struct ConversationSession {
     item_details: HashMap<(String, String), DetailLoad>,
     detail_request: u64,
 }
-impl Drop for ConversationSession {
-    fn drop(&mut self) {
-        self.rpc.close();
-    }
-}
-
 pub(super) struct ConversationView {
     pub(super) session: ConversationSession,
-    tx: async_channel::Sender<Event>,
+    id: EntityId,
+    tx: async_channel::Sender<super::Event>,
     manager: Rpc,
     manager_session: Entity<Management>,
     host_subscription: Option<Subscription>,
@@ -160,6 +153,11 @@ pub(super) struct ConversationView {
     dirty_rows: Option<std::ops::Range<usize>>,
     conversation_pending: bool,
 }
+impl Drop for ConversationView {
+    fn drop(&mut self) {
+        self.stop_history_watch();
+    }
+}
 impl ConversationView {
     pub(super) fn new(
         management: (Rpc, Entity<Management>),
@@ -171,9 +169,8 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> Self {
         let (manager, manager_session) = management;
-        let (tx, rx) = async_channel::unbounded();
-        let remote = host.remote.clone();
-        let rpc = Self::connect(&tx, 1, &remote);
+        let tx = host.events.clone();
+        let connected = host.state.read(cx).connected;
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Codex に依頼する")
@@ -184,17 +181,6 @@ impl ConversationView {
             .error(draft_scope)
             .unwrap_or_default()
             .to_owned();
-        cx.spawn_in(window, async move |view, cx| {
-            while let Ok(event) = rx.recv().await {
-                if view
-                    .update_in(cx, |view, window, cx| view.event(event, window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
         let effort_slider = cx.new(|_| slider::SliderState::new().max(1.).step(1.));
         let subscriptions = vec![
             cx.subscribe(&drafts, |s, _, error: &drafts::SaveError, cx| {
@@ -246,11 +232,9 @@ impl ConversationView {
         });
         let mut desktop = Self {
             session: ConversationSession {
-                rpc,
                 host,
                 epoch: 1,
-                connected: false,
-                remote,
+                connected,
                 load_generation: 0,
                 cwd,
                 selected: String::new(),
@@ -265,6 +249,7 @@ impl ConversationView {
                 item_details: HashMap::new(),
                 detail_request: 0,
             },
+            id: cx.entity_id(),
             tx,
             manager,
             manager_session,
@@ -305,20 +290,30 @@ impl ConversationView {
         desktop.restore_draft(window, cx);
         desktop
     }
-    fn connect(tx: &async_channel::Sender<Event>, epoch: u64, remote: &str) -> Rpc {
-        let tx = tx.clone();
-        let target = if remote.is_empty() {
-            json!({"target":"local"})
-        } else {
-            json!({"target":"remote","profileId":remote})
-        };
-        Rpc::connect(
-            platform::state_dir().join("host.sock"),
-            target,
-            move |event| {
-                let _ = tx.send_blocking(Event::Rpc { epoch, event });
-            },
-        )
+    fn complete<T: Send + 'static>(
+        &mut self,
+        busy: bool,
+        apply: impl FnOnce(&mut Self, Result<T, String>, &mut Window, &mut Context<Self>)
+        + Send
+        + 'static,
+    ) -> impl FnOnce(Result<T, String>) + Send + 'static {
+        if busy {
+            self.busy += 1;
+            self.error.clear();
+        }
+        let tx = self.tx.clone();
+        let epoch = self.session.epoch;
+        let id = self.id;
+        move |result| {
+            let _ = tx.send_blocking(super::Event::Chat(
+                id,
+                Event::Done {
+                    epoch,
+                    busy,
+                    apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
+                },
+            ));
+        }
     }
 
     fn work(
@@ -327,23 +322,11 @@ impl ConversationView {
         task: impl FnOnce() -> Result<Value, String> + Send + 'static,
         apply: impl FnOnce(&mut Self, Value, &mut Window, &mut Context<Self>) + Send + 'static,
     ) {
-        if busy {
-            self.busy += 1;
-            self.error.clear();
-        }
-        let tx = self.tx.clone();
-        let epoch = self.session.epoch;
-        std::thread::spawn(move || {
-            let result = task();
-            let _ = tx.send_blocking(Event::Done {
-                epoch,
-                apply: Box::new(move |s, w, cx| match result {
-                    Ok(value) => apply(s, value, w, cx),
-                    Err(error) => s.error = error,
-                }),
-                busy,
-            });
+        let done = self.complete(busy, move |s, result, w, cx| match result {
+            Ok(value) => apply(s, value, w, cx),
+            Err(error) => s.error = error,
         });
+        std::thread::spawn(move || done(task()));
     }
 
     fn request(
@@ -354,107 +337,25 @@ impl ConversationView {
         busy: bool,
         apply: impl FnOnce(&mut Self, Value, &mut Window, &mut Context<Self>) + Send + 'static,
     ) {
-        self.request_result(
-            manager,
-            method,
-            params,
-            busy,
-            move |s, result, w, cx| match result {
-                Ok(value) => apply(s, value, w, cx),
-                Err(error) => s.error = error,
-            },
-        );
-    }
-
-    fn request_result(
-        &mut self,
-        manager: bool,
-        method: &'static str,
-        params: Value,
-        busy: bool,
-        apply: impl FnOnce(&mut Self, Result<Value, String>, &mut Window, &mut Context<Self>)
-        + Send
-        + 'static,
-    ) {
-        if busy {
-            self.busy += 1;
-            self.error.clear();
-        }
-        let tx = self.tx.clone();
-        let epoch = self.session.epoch;
+        let done = self.complete(busy, move |s, result, w, cx| match result {
+            Ok(value) => apply(s, value, w, cx),
+            Err(error) => s.error = error,
+        });
         let rpc = if manager {
             &self.manager
         } else {
-            &self.session.rpc
+            &self.session.host.rpc
         };
-        rpc.request_async(method, params, move |result| {
-            let _ = tx.send_blocking(Event::Done {
-                epoch,
-                apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
-                busy,
-            });
-        });
-    }
-
-    fn agent_request<T, F, Fut>(
-        &mut self,
-        busy: bool,
-        operation: F,
-        apply: impl FnOnce(&mut Self, Result<T, String>, &mut Window, &mut Context<Self>)
-        + Send
-        + 'static,
-    ) where
-        T: Send + 'static,
-        F: FnOnce(agent_client::operations::AgentClient) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<T, agent_client::operations::AgentError>>
-            + Send
-            + 'static,
-    {
-        if busy {
-            self.busy += 1;
-            self.error.clear();
-        }
-        let tx = self.tx.clone();
-        let epoch = self.session.epoch;
-        self.session.rpc.agent_async(operation, move |result| {
-            let _ = tx.send_blocking(Event::Done {
-                epoch,
-                busy,
-                apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
-            });
-        });
-    }
-
-    fn read_thread(
-        &mut self,
-        busy: bool,
-        id: String,
-        apply: impl FnOnce(&mut Self, Result<Value, String>, &mut Window, &mut Context<Self>)
-        + Send
-        + 'static,
-    ) {
-        if busy {
-            self.busy += 1;
-            self.error.clear();
-        }
-        let tx = self.tx.clone();
-        let epoch = self.session.epoch;
-        self.session.rpc.read_thread(id, move |result| {
-            let _ = tx.send_blocking(Event::Done {
-                epoch,
-                busy,
-                apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
-            });
-        });
+        rpc.request_async(method, params, done);
     }
 
     fn thread_draft_key(&self, id: &str) -> String {
         format!(
             "{}:{id}",
-            if self.session.remote.is_empty() {
+            if self.session.host.remote.is_empty() {
                 "local"
             } else {
-                &self.session.remote
+                &self.session.host.remote
             }
         )
     }
@@ -502,7 +403,7 @@ impl ConversationView {
             .update(cx, |state, cx| state.set_value(value, window, cx));
     }
 
-    fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             Event::Dictation(id, event) => self.dictation_event(id, event, window, cx),
             Event::Done { epoch, apply, busy } => {
@@ -513,61 +414,77 @@ impl ConversationView {
                     apply(self, window, cx);
                 }
             }
-            Event::Rpc { epoch, event } => {
-                if epoch != self.session.epoch {
-                    return;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn accepts(&self, host: EntityId, event: &rpc::Event) -> bool {
+        if self.session.host.state.entity_id() != host {
+            return false;
+        }
+        let rpc::Event::Message(message) = event else {
+            return true;
+        };
+        if let Some(key) = message["params"]["watchKey"].as_u64() {
+            return key == self.draft_scope as u64;
+        }
+        // Requests stay available when navigating to their conversation later.
+        message.get("id").is_some()
+            || message["method"] == "serverRequest/resolved"
+            || message["params"]["threadId"]
+                .as_str()
+                .is_none_or(|id| id == self.session.selected)
+    }
+
+    pub(super) fn receive_rpc(
+        &mut self,
+        event: rpc::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            rpc::Event::Connected(online, reason) => {
+                self.session.connected = online;
+                if online {
+                    self.error.clear();
+                    self.session.conversation.requests.clear();
+                    if !self.session.selected.is_empty() {
+                        self.open_thread(self.session.selected.clone(), window, cx);
+                    }
+                } else {
+                    self.cancel_recording();
+                    self.error = reason;
                 }
-                match event {
-                    rpc::Event::Connected(online, reason) => {
-                        self.session.connected = online;
-                        if online {
-                            self.error.clear();
-                            self.session.conversation.requests.clear();
-                            if !self.session.selected.is_empty() {
-                                self.open_thread(self.session.selected.clone(), window, cx);
-                            }
+            }
+            rpc::Event::Message(message) => {
+                if matches!(
+                    text(&message, "method"),
+                    "host/thread/changed" | "host/thread/watchFailed"
+                ) {
+                    if self.session.history_watch.is_some()
+                        && message["params"]["watchId"].as_u64() == self.session.history_watch
+                        && message["params"]["threadId"] == self.session.selected
+                    {
+                        if message["method"] == "host/thread/watchFailed" {
+                            self.error =
+                                "会話の自動更新が停止しました。再読み込みしてください".into();
                         } else {
-                            self.cancel_recording();
-                            self.error = reason;
+                            self.queue_history_refresh(window, cx);
                         }
                     }
-                    rpc::Event::Message(message) => {
-                        if matches!(
-                            text(&message, "method"),
-                            "host/thread/changed" | "host/thread/watchFailed"
-                        ) {
-                            if self.session.history_watch.is_some()
-                                && message["params"]["watchId"].as_u64()
-                                    == self.session.history_watch
-                                && message["params"]["threadId"] == self.session.selected
-                            {
-                                if message["method"] == "host/thread/watchFailed" {
-                                    self.error =
-                                        "会話の自動更新が停止しました。再読み込みしてください"
-                                            .into();
-                                } else {
-                                    self.queue_history_refresh(window, cx);
-                                }
-                            }
-                            cx.notify();
-                            return;
-                        }
-                        let completed = message["method"] == "turn/completed";
-                        let change = {
-                            let (next, result) = agent_client::conversation::reduce(
-                                std::mem::take(&mut self.session.conversation),
-                                message,
-                            );
-                            self.session.conversation = next;
-                            result
-                        };
-                        if completed && change.turn.is_some() {
-                            self.refresh_review();
-                        }
-                        if change.changed() {
-                            self.conversation_changed(change, window, cx);
-                            return;
-                        }
+                } else {
+                    let completed = message["method"] == "turn/completed";
+                    let (next, change) = agent_client::conversation::reduce(
+                        std::mem::take(&mut self.session.conversation),
+                        message,
+                    );
+                    self.session.conversation = next;
+                    if completed && change.turn.is_some() {
+                        self.refresh_review();
+                    }
+                    if change.changed() {
+                        self.conversation_changed(change, window, cx);
+                        return;
                     }
                 }
             }
@@ -866,12 +783,8 @@ impl ConversationView {
             return;
         }
         let path = self.session.cwd.clone();
-        self.agent_request(
+        let done = self.complete::<(String, Result<WorkspaceReview, AgentError>)>(
             false,
-            move |client| async move {
-                let review = client.review_workspace(&path).await;
-                Ok((path, review))
-            },
             |s, result, _, _| match result {
                 Ok((path, result)) if path == s.session.cwd => match result {
                     Ok(review) => {
@@ -886,6 +799,13 @@ impl ConversationView {
                 Err(error) => s.review_error = error,
                 _ => {}
             },
+        );
+        self.session.host.rpc.agent_async(
+            move |client| async move {
+                let review = client.review_workspace(&path).await;
+                Ok((path, review))
+            },
+            done,
         );
     }
 
@@ -911,7 +831,7 @@ impl ConversationView {
 
     pub(super) fn new_thread(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_recording();
-        self.session.load_generation += 1;
+        self.session.load_generation = NEXT_LOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.release_content();
         self.session.selected.clear();
         self.session.conversation.thread = Value::Null;
@@ -924,9 +844,9 @@ impl ConversationView {
 
     pub(super) fn open_thread(&mut self, id: String, _: &mut Window, _: &mut Context<Self>) {
         self.cancel_recording();
-        self.session.load_generation += 1;
+        self.session.load_generation = NEXT_LOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let generation = self.session.load_generation;
-        self.read_thread(true, id, move |s, result, w, cx| {
+        let done = self.complete::<Value>(true, move |s, result, w, cx| {
             if generation != s.session.load_generation {
                 return;
             }
@@ -951,14 +871,15 @@ impl ConversationView {
             s.refresh_review();
             s.watch_history();
         });
+        self.session.host.rpc.read_thread(id, done);
     }
 
     fn stop_history_watch(&mut self) {
         if let Some(watch_id) = self.session.history_watch.take() {
-            self.agent_request(
-                false,
-                move |client| async move { client.unwatch_thread(watch_id).await },
-                |_, _, _, _| {},
+            let key = self.draft_scope as u64;
+            self.session.host.rpc.agent_async(
+                move |client| async move { client.unwatch_thread(key, watch_id).await },
+                |_| {},
             );
         }
         self.session.history_refresh_pending = false;
@@ -974,22 +895,23 @@ impl ConversationView {
         };
         let generation = self.session.load_generation;
         let thread = self.session.selected.clone();
+        let key = self.draft_scope as u64;
         self.session.history_watch = Some(generation);
-        self.agent_request(
-            false,
-            move |client| async move { client.watch_thread(&thread, generation, &path).await },
-            move |s, result, w, cx| {
-                if s.session.history_watch != Some(generation) {
-                    return;
+        let done = self.complete::<()>(false, move |s, result, w, cx| {
+            if s.session.history_watch != Some(generation) {
+                return;
+            }
+            match result {
+                Ok(_) => s.queue_history_refresh(w, cx),
+                Err(error) => {
+                    s.error = format!("会話の自動更新を開始できません: {error}");
+                    s.session.history_watch = None;
                 }
-                match result {
-                    Ok(_) => s.queue_history_refresh(w, cx),
-                    Err(error) => {
-                        s.error = format!("会話の自動更新を開始できません: {error}");
-                        s.session.history_watch = None;
-                    }
-                }
-            },
+            }
+        });
+        self.session.host.rpc.agent_async(
+            move |client| async move { client.watch_thread(&thread, key, generation, &path).await },
+            done,
         );
     }
 
@@ -1011,7 +933,7 @@ impl ConversationView {
                 s.session.history_refresh_dirty = false;
                 let revision = s.session.conversation_revision;
                 let id = s.session.selected.clone();
-                s.read_thread(false, id, move |s, result, w, cx| {
+                let done = s.complete::<Value>(false, move |s, result, w, cx| {
                     if s.session.history_watch != Some(generation) {
                         return;
                     }
@@ -1043,6 +965,7 @@ impl ConversationView {
                         s.queue_history_refresh(w, cx);
                     }
                 });
+                s.session.host.rpc.read_thread(id, done);
             });
         })
         .detach();
@@ -1060,14 +983,8 @@ impl ConversationView {
         self.list.remeasure_items(0..1);
         let generation = self.session.load_generation;
         let id = self.session.selected.clone();
-        self.agent_request(
+        let done = self.complete::<(conversation::HistoryPage, Result<Value, AgentError>)>(
             false,
-            move |client| async move {
-                let result = client
-                    .read_older(&id, page.cursor.as_str(), page.turn.as_deref(), true)
-                    .await;
-                Ok((page, result))
-            },
             move |s, result, w, cx| {
                 if generation != s.session.load_generation {
                     return;
@@ -1135,6 +1052,15 @@ impl ConversationView {
                 }
             },
         );
+        self.session.host.rpc.agent_async(
+            move |client| async move {
+                let result = client
+                    .read_older(&id, page.cursor.as_str(), page.turn.as_deref(), true)
+                    .await;
+                Ok((page, result))
+            },
+            done,
+        );
         cx.notify();
     }
 
@@ -1170,43 +1096,43 @@ impl ConversationView {
         );
         let generation = self.session.load_generation;
         let id = self.session.selected.clone();
-        self.agent_request(
-            false,
+        let done = self.complete::<Value>(false, move |s, result, _, _| {
+            if generation != s.session.load_generation
+                || !s
+                    .session
+                    .item_details
+                    .get(&key)
+                    .is_some_and(|state| state.request == request && state.error.is_none())
+            {
+                return;
+            }
+            match result.and_then(|mut value| {
+                let (next, result) = agent_client::conversation::apply_detail(
+                    std::mem::take(&mut s.session.conversation),
+                    &key.0,
+                    &key.1,
+                    value["item"].take(),
+                );
+                s.session.conversation = next;
+                result
+            }) {
+                Ok(_) => {
+                    s.session.conversation_revision += 1;
+                    s.session.item_details.remove(&key);
+                    s.projected_turns.clear();
+                }
+                Err(error) => {
+                    s.session.item_details.get_mut(&key).unwrap().error = Some(error);
+                }
+            }
+            if s.expanded_items.contains(&key.1) {
+                s.pause_tail();
+            }
+            s.remeasure_item(&key.0);
+        });
+        self.session.host.rpc.agent_async(
             move |client| async move { client.read_item(&id, &turn_id, &item_id).await },
-            move |s, result, _, _| {
-                if generation != s.session.load_generation
-                    || !s
-                        .session
-                        .item_details
-                        .get(&key)
-                        .is_some_and(|state| state.request == request && state.error.is_none())
-                {
-                    return;
-                }
-                match result.and_then(|mut value| {
-                    let (next, result) = agent_client::conversation::apply_detail(
-                        std::mem::take(&mut s.session.conversation),
-                        &key.0,
-                        &key.1,
-                        value["item"].take(),
-                    );
-                    s.session.conversation = next;
-                    result
-                }) {
-                    Ok(_) => {
-                        s.session.conversation_revision += 1;
-                        s.session.item_details.remove(&key);
-                        s.projected_turns.clear();
-                    }
-                    Err(error) => {
-                        s.session.item_details.get_mut(&key).unwrap().error = Some(error);
-                    }
-                }
-                if s.expanded_items.contains(&key.1) {
-                    s.pause_tail();
-                }
-                s.remeasure_item(&key.0);
-            },
+            done,
         );
     }
 
@@ -1217,12 +1143,10 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) {
         self.stop_history_watch();
-        self.session.rpc.close();
         self.session.epoch += 1;
-        self.session.remote = host.remote.clone();
-        self.session.rpc = Self::connect(&self.tx, self.session.epoch, &self.session.remote);
-        self.session.connected = false;
+        self.session.connected = host.state.read(cx).connected;
         self.session.host = host;
+        self.busy = 0;
         self.model.clear();
         self.subscribe_host(cx);
         self.session.conversation = Conversation::default();
@@ -1290,17 +1214,8 @@ impl ConversationView {
         if self.session.selected.is_empty() {
             let generation = self.session.load_generation;
             let cwd = self.session.cwd.clone();
-            self.agent_request(
+            let done = self.complete::<(Submission, Result<Value, AgentError>)>(
                 true,
-                move |client| async move {
-                    let result = client
-                        .start_thread(
-                            &cwd,
-                            (!submission.model.is_empty()).then_some(submission.model.as_str()),
-                        )
-                        .await;
-                    Ok((submission, result))
-                },
                 move |s, result, w, cx| {
                     let (submission, result) = match result {
                         Ok(result) => result,
@@ -1349,19 +1264,24 @@ impl ConversationView {
                     s.send_turn(id, plan, submission);
                 },
             );
+            self.session.host.rpc.agent_async(
+                move |client| async move {
+                    let result = client
+                        .start_thread(
+                            &cwd,
+                            (!submission.model.is_empty()).then_some(submission.model.as_str()),
+                        )
+                        .await;
+                    Ok((submission, result))
+                },
+                done,
+            );
         } else {
-            let listed = self
-                .session
-                .host
-                .state
-                .read(cx)
-                .threads
-                .iter()
-                .find(|thread| thread["id"] == self.session.selected)
-                .unwrap_or(&Value::Null);
+            // Selection always installs a read/start snapshot. The catalogue
+            // is only a fallback for clients restoring a persisted cache.
             let plan = conversation_presentation::state::plan_send(
                 &self.session.conversation.thread,
-                listed,
+                &Value::Null,
             );
             self.send_turn(self.session.selected.clone(), plan, submission);
         }
@@ -1373,50 +1293,8 @@ impl ConversationView {
         plan: conversation_presentation::state::SendPlan,
         submission: Submission,
     ) {
-        self.agent_request(
+        let done = self.complete::<(String, Submission, Result<Option<String>, AgentError>)>(
             true,
-            move |client| async move {
-                use conversation_presentation::state::SendPlan;
-                let result = match plan {
-                    SendPlan::Steer { turn_id } => client
-                        .steer_turn(&id, &turn_id, &submission.input, &submission.id)
-                        .await
-                        .map(|()| Some(turn_id)),
-                    SendPlan::Queue => client
-                        .queue_turn(&id, &submission.input, &submission.id)
-                        .await
-                        .map(|_| None),
-                    SendPlan::Start { cwd, resume } => {
-                        let resumed = if resume {
-                            client.resume_thread(&id, Some(&cwd)).await
-                        } else {
-                            Ok(())
-                        };
-                        match resumed {
-                            Err(error) => Err(error),
-                            Ok(()) => client
-                                .start_turn(
-                                    &id,
-                                    &submission.input,
-                                    &submission.id,
-                                    agent_client::operations::TurnOptions {
-                                        model: (!submission.model.is_empty())
-                                            .then_some(submission.model.as_str()),
-                                        effort: (!submission.effort.is_empty())
-                                            .then_some(submission.effort.as_str()),
-                                        service_tier_for_turn: Some(&submission.service_tier),
-                                    },
-                                )
-                                .await
-                                .map(Some),
-                        }
-                    }
-                    SendPlan::Reject { message } => Err(
-                        agent_client::operations::AgentError::InvalidResponse(message.into()),
-                    ),
-                };
-                Ok((id, submission, result))
-            },
             move |s, result, w, cx| {
                 let (id, submission, result) = match result {
                     Ok(result) => result,
@@ -1467,6 +1345,51 @@ impl ConversationView {
                 s.sync_list(false);
                 s.refresh_threads(cx);
             },
+        );
+        self.session.host.rpc.agent_async(
+            move |client| async move {
+                use conversation_presentation::state::SendPlan;
+                let result = match plan {
+                    SendPlan::Steer { turn_id } => client
+                        .steer_turn(&id, &turn_id, &submission.input, &submission.id)
+                        .await
+                        .map(|()| Some(turn_id)),
+                    SendPlan::Queue => client
+                        .queue_turn(&id, &submission.input, &submission.id)
+                        .await
+                        .map(|_| None),
+                    SendPlan::Start { cwd, resume } => {
+                        let resumed = if resume {
+                            client.resume_thread(&id, Some(&cwd)).await
+                        } else {
+                            Ok(())
+                        };
+                        match resumed {
+                            Err(error) => Err(error),
+                            Ok(()) => client
+                                .start_turn(
+                                    &id,
+                                    &submission.input,
+                                    &submission.id,
+                                    agent_client::operations::TurnOptions {
+                                        model: (!submission.model.is_empty())
+                                            .then_some(submission.model.as_str()),
+                                        effort: (!submission.effort.is_empty())
+                                            .then_some(submission.effort.as_str()),
+                                        service_tier_for_turn: Some(&submission.service_tier),
+                                    },
+                                )
+                                .await
+                                .map(Some),
+                        }
+                    }
+                    SendPlan::Reject { message } => Err(
+                        agent_client::operations::AgentError::InvalidResponse(message.into()),
+                    ),
+                };
+                Ok((id, submission, result))
+            },
+            done,
         );
     }
 
@@ -1573,7 +1496,7 @@ impl ConversationView {
         &mut self,
         sources: impl FnOnce() -> Result<Vec<String>, String> + Send + 'static,
     ) {
-        let remote = self.session.remote.clone();
+        let remote = self.session.host.remote.clone();
         let cwd = self.session.cwd.clone();
         let manager = self.manager.clone();
         let key = self.draft_key();
@@ -1605,7 +1528,7 @@ impl ConversationView {
     }
 
     fn download(&mut self, source: String) {
-        let remote = self.session.remote.clone();
+        let remote = self.session.host.remote.clone();
         let manager = self.manager.clone();
         self.work(true,move||{let Some(destination)=platform::choose("download")? else{return Ok(Value::Null);};if remote.is_empty(){let mut input=std::fs::File::open(source).map_err(|e|e.to_string())?;let mut out=std::fs::OpenOptions::new().write(true).create_new(true).open(&destination).map_err(|e|e.to_string())?;std::io::copy(&mut input,&mut out).map_err(|e|e.to_string())?;}else{manager.request("host/transfer",json!({"profileId":remote,"direction":"download","source":source,"destination":destination}))?;}Ok(Value::Null)},|_,_,_,_|{});
     }
@@ -1651,7 +1574,7 @@ impl ConversationView {
     }
 
     fn respond(&mut self, id: Value, result: Value) {
-        let client = self.session.rpc.clone();
+        let client = self.session.host.rpc.clone();
         let key = id.clone();
         self.work(
             true,

@@ -23,7 +23,7 @@ pub(super) struct Dictation {
     rpc: Rpc,
 }
 
-pub(super) enum DictationEvent {
+pub(in crate::app) enum DictationEvent {
     Recording,
     Audio(Result<String, String>),
     Transcript(Result<Value, String>),
@@ -52,6 +52,7 @@ impl ConversationView {
             let stdout = child.stdout.take().unwrap();
             let id = uuid::Uuid::new_v4();
             let tx = self.tx.clone();
+            let view = self.id;
             std::thread::spawn(move || {
                 let result = (|| -> Result<String, String> {
                     for line in BufReader::new(stdout).lines() {
@@ -61,8 +62,11 @@ impl ConversationView {
                             return Err(error.into());
                         }
                         if value["recording"] == true {
-                            tx.send_blocking(Event::Dictation(id, DictationEvent::Recording))
-                                .map_err(|_| "録音を中止しました。")?;
+                            tx.send_blocking(super::super::Event::Chat(
+                                view,
+                                Event::Dictation(id, DictationEvent::Recording),
+                            ))
+                            .map_err(|_| "録音を中止しました。")?;
                         } else if value["complete"] == true {
                             let audio = std::fs::read(directory.path().join("recording.pcm"))
                                 .map_err(|e| e.to_string())?;
@@ -77,7 +81,10 @@ impl ConversationView {
                 let _ = child.kill();
                 let _ = child.wait();
                 drop(directory);
-                let _ = tx.send_blocking(Event::Dictation(id, DictationEvent::Audio(result)));
+                let _ = tx.send_blocking(super::super::Event::Chat(
+                    view,
+                    Event::Dictation(id, DictationEvent::Audio(result)),
+                ));
             });
             Ok::<_, std::io::Error>(Dictation {
                 id,
@@ -88,7 +95,7 @@ impl ConversationView {
                 draft: String::new(),
                 files: Vec::new(),
                 control,
-                rpc: self.session.rpc.clone(),
+                rpc: self.session.host.rpc.clone(),
             })
         })();
         match result {
@@ -148,13 +155,14 @@ impl ConversationView {
             DictationEvent::Audio(Ok(audio)) => {
                 state.control = None;
                 let tx = self.tx.clone();
+                let view = self.id;
                 state.rpc.request_async(
                     "host/dictation/transcribe",
                     json!({"audio": audio}),
                     move |result| {
-                        let _ = tx.send_blocking(Event::Dictation(
-                            id,
-                            DictationEvent::Transcript(result),
+                        let _ = tx.send_blocking(super::super::Event::Chat(
+                            view,
+                            Event::Dictation(id, DictationEvent::Transcript(result)),
                         ));
                     },
                 );

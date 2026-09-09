@@ -158,7 +158,9 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
             withTimeout(5_000) { unregistered.await() }
             val staleRead = CompletableDeferred<Unit>()
             gateway.readHook = { staleRead.complete(Unit) }
-            gateway.emit(notification("host/thread/changed", """{"watchId":$revision,"threadId":"thread-1"}"""))
+            gateway.emit(
+                notification("host/thread/changed", """{"watchKey":1,"watchId":$revision,"threadId":"thread-1"}""")
+            )
             assertNull(withTimeoutOrNull(250) { staleRead.await() })
             assertNull(controller.state.selectedView.selectedThreadId)
         } finally {

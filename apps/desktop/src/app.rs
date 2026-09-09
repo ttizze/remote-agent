@@ -1,4 +1,5 @@
 use agent_client::conversation::{self, Conversation, array, text};
+use agent_client::operations::AgentError;
 mod clipboard;
 mod drafts;
 mod host;
@@ -26,7 +27,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use host_protocol::api::{FileEntry, WorkspaceReview, WorktreeSettings};
+use host_protocol::api::{FileDocument, FileEntry, FileList, WorkspaceReview, WorktreeSettings};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -40,7 +41,10 @@ enum Event {
         apply: Apply,
         busy: bool,
     },
-    Management(host::ManagementInput),
+    ManagerConnected(bool),
+    RefreshManager,
+    Rpc(EntityId, rpc::Event),
+    Chat(EntityId, chat::Event),
     Catalogue(EntityId, host::CatalogueInput),
     DraftError(drafts::SaveError),
 }
@@ -70,12 +74,10 @@ struct OpenFile {
 
 struct ReviewSource {
     host: Rc<host::Connection>,
-    rpc: Rpc,
     cwd: String,
 }
 pub(crate) struct Desktop {
     tx: async_channel::Sender<Event>,
-    rpc: Rpc,
     manager: Rpc,
     manager_session: Entity<Management>,
     manager_timer: Option<tokio::task::AbortHandle>,
@@ -145,7 +147,6 @@ impl Desktop {
                 cx,
             )
         });
-        let rpc = host.rpc.clone();
         let remote = String::new();
         let cwd = String::new();
         let error = String::new();
@@ -284,7 +285,6 @@ impl Desktop {
         ];
         let mut desktop = Self {
             tx,
-            rpc,
             manager,
             manager_session,
             manager_timer,
@@ -353,29 +353,39 @@ impl Desktop {
             });
         }
     }
-    fn work(
+    fn complete<T: Send + 'static>(
         &mut self,
         busy: bool,
-        task: impl FnOnce() -> Result<Value, String> + Send + 'static,
-        apply: impl FnOnce(&mut Self, Value, &mut Window, &mut Context<Self>) + Send + 'static,
-    ) {
+        apply: impl FnOnce(&mut Self, Result<T, String>, &mut Window, &mut Context<Self>)
+        + Send
+        + 'static,
+    ) -> impl FnOnce(Result<T, String>) + Send + 'static {
         if busy {
             self.busy += 1;
             self.error.clear();
         }
         let tx = self.tx.clone();
         let epoch = self.epoch;
-        std::thread::spawn(move || {
-            let result = task();
+        move |result| {
             let _ = tx.send_blocking(Event::Done {
                 epoch,
-                apply: Box::new(move |s, w, cx| match result {
-                    Ok(value) => apply(s, value, w, cx),
-                    Err(error) => s.error = error,
-                }),
                 busy,
+                apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
             });
+        }
+    }
+
+    fn work(
+        &mut self,
+        busy: bool,
+        task: impl FnOnce() -> Result<Value, String> + Send + 'static,
+        apply: impl FnOnce(&mut Self, Value, &mut Window, &mut Context<Self>) + Send + 'static,
+    ) {
+        let done = self.complete(busy, move |s, result, w, cx| match result {
+            Ok(value) => apply(s, value, w, cx),
+            Err(error) => s.error = error,
         });
+        std::thread::spawn(move || done(task()));
     }
 
     fn request(
@@ -386,72 +396,16 @@ impl Desktop {
         busy: bool,
         apply: impl FnOnce(&mut Self, Value, &mut Window, &mut Context<Self>) + Send + 'static,
     ) {
-        self.request_result(
-            manager,
-            method,
-            params,
-            busy,
-            move |s, result, w, cx| match result {
-                Ok(value) => apply(s, value, w, cx),
-                Err(error) => s.error = error,
-            },
-        );
-    }
-
-    fn request_result(
-        &mut self,
-        manager: bool,
-        method: &'static str,
-        params: Value,
-        busy: bool,
-        apply: impl FnOnce(&mut Self, Result<Value, String>, &mut Window, &mut Context<Self>)
-        + Send
-        + 'static,
-    ) {
-        if busy {
-            self.busy += 1;
-            self.error.clear();
-        }
-        let tx = self.tx.clone();
-        let epoch = self.epoch;
-        let rpc = if manager { &self.manager } else { &self.rpc };
-        rpc.request_async(method, params, move |result| {
-            let _ = tx.send_blocking(Event::Done {
-                epoch,
-                apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
-                busy,
-            });
+        let done = self.complete(busy, move |s, result, w, cx| match result {
+            Ok(value) => apply(s, value, w, cx),
+            Err(error) => s.error = error,
         });
-    }
-
-    fn agent_request<T, F, Fut>(
-        &mut self,
-        rpc: Rpc,
-        busy: bool,
-        operation: F,
-        apply: impl FnOnce(&mut Self, Result<T, String>, &mut Window, &mut Context<Self>)
-        + Send
-        + 'static,
-    ) where
-        T: Send + 'static,
-        F: FnOnce(agent_client::operations::AgentClient) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<T, agent_client::operations::AgentError>>
-            + Send
-            + 'static,
-    {
-        if busy {
-            self.busy += 1;
-            self.error.clear();
-        }
-        let tx = self.tx.clone();
-        let epoch = self.epoch;
-        rpc.agent_async(operation, move |result| {
-            let _ = tx.send_blocking(Event::Done {
-                epoch,
-                busy,
-                apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
-            });
-        });
+        let rpc = if manager {
+            &self.manager
+        } else {
+            &self.host.rpc
+        };
+        rpc.request_async(method, params, done);
     }
 
     fn editor_key(&self, path: &Path) -> String {
@@ -470,27 +424,26 @@ impl Desktop {
         if !self.host.state.read(cx).connected || self.worktree_saving {
             return;
         }
-        self.agent_request(
-            self.rpc.clone(),
-            false,
+        let done = self.complete::<WorktreeSettings>(false, |s, result, w, cx| {
+            let settings = match result {
+                Ok(settings) => settings,
+                Err(error) => {
+                    s.error = error.to_string();
+                    return;
+                }
+            };
+            s.worktree_copy_paths.update(cx, |input, cx| {
+                input.set_value(settings.copy_paths.join("\n"), w, cx)
+            });
+            s.worktree_directory.update(cx, |input, cx| {
+                input.set_value(&settings.worktree_directory, w, cx)
+            });
+            s.worktree_settings = Some(settings);
+            s.worktree_saved = false;
+        });
+        self.host.rpc.agent_async(
             |client| async move { client.worktree_settings().await },
-            |s, result, w, cx| {
-                let settings = match result {
-                    Ok(settings) => settings,
-                    Err(error) => {
-                        s.error = error.to_string();
-                        return;
-                    }
-                };
-                s.worktree_copy_paths.update(cx, |input, cx| {
-                    input.set_value(settings.copy_paths.join("\n"), w, cx)
-                });
-                s.worktree_directory.update(cx, |input, cx| {
-                    input.set_value(&settings.worktree_directory, w, cx)
-                });
-                s.worktree_settings = Some(settings);
-                s.worktree_saved = false;
-            },
+            done,
         );
     }
 
@@ -536,44 +489,64 @@ impl Desktop {
         self.worktree_saving = true;
         self.error.clear();
         let previous = self.worktree_settings.replace(settings.clone());
-        self.agent_request(
-            self.rpc.clone(),
-            false,
+        let done = self.complete::<WorktreeSettings>(false, move |s, result, _, cx| {
+            s.worktree_saving = false;
+            match result {
+                Ok(settings) => {
+                    s.worktree_saved = s.worktree_directory.read(cx).value().trim()
+                        == settings.worktree_directory
+                        && s.worktree_copy_paths
+                            .read(cx)
+                            .value()
+                            .lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .eq(settings.copy_paths.iter().map(String::as_str));
+                    s.worktree_settings = Some(settings);
+                }
+                Err(error) => {
+                    s.worktree_settings = previous;
+                    s.error = error;
+                }
+            }
+            if let Some(pending) = s.worktree_save_pending.take()
+                && Some(&pending) != s.worktree_settings.as_ref()
+            {
+                s.worktree_saved = false;
+                s.persist_worktree_settings(pending);
+            }
+        });
+        self.host.rpc.agent_async(
             move |client| async move { client.update_worktree_settings(&settings).await },
-            move |s, result, _, cx| {
-                s.worktree_saving = false;
-                match result {
-                    Ok(settings) => {
-                        s.worktree_saved = s.worktree_directory.read(cx).value().trim()
-                            == settings.worktree_directory
-                            && s.worktree_copy_paths
-                                .read(cx)
-                                .value()
-                                .lines()
-                                .map(str::trim)
-                                .filter(|line| !line.is_empty())
-                                .eq(settings.copy_paths.iter().map(String::as_str));
-                        s.worktree_settings = Some(settings);
-                    }
-                    Err(error) => {
-                        s.worktree_settings = previous;
-                        s.error = error;
-                    }
-                }
-                if let Some(pending) = s.worktree_save_pending.take()
-                    && Some(&pending) != s.worktree_settings.as_ref()
-                {
-                    s.worktree_saved = false;
-                    s.persist_worktree_settings(pending);
-                }
-            },
+            done,
         );
     }
 
-    fn refresh_manager(&self, _: &App) {
-        let _ = self
-            .tx
-            .send_blocking(Event::Management(host::ManagementInput::Refresh));
+    fn refresh_manager(&mut self, cx: &App) {
+        if !self.manager_session.read(cx).connected {
+            return;
+        }
+        self.request(true, "host/status", json!({}), false, |s, value, _, cx| {
+            s.manager_session.update(cx, |state, cx| {
+                state.status = value;
+                cx.notify();
+            });
+        });
+        self.request(
+            true,
+            "host/listRemotes",
+            json!({}),
+            false,
+            |s, value, _, cx| {
+                s.manager_session.update(cx, |state, cx| {
+                    state.hosts = match value {
+                        Value::Array(hosts) => hosts,
+                        _ => Vec::new(),
+                    };
+                    cx.notify();
+                });
+            },
+        );
     }
 
     fn refresh_threads(&self, _: &mut App) {
@@ -654,70 +627,66 @@ impl Desktop {
         self.tab = Tab::Chat;
         self.panel_open = true;
         self.panel = Panel::Files;
-        self.agent_request(
-            self.rpc.clone(),
-            true,
-            move |client| async move { client.list_files(Path::new(&path)).await },
-            |s, result, w, cx| {
-                let files = match result {
-                    Ok(files) => files,
-                    Err(error) => {
-                        s.error = error;
-                        return;
-                    }
-                };
-                s.path.update(cx, |i, cx| {
-                    i.set_value(files.path.to_string_lossy().into_owned(), w, cx)
-                });
-                s.entries = files.entries;
-                if files.truncated {
-                    s.error =
-                        "先頭2,000件を表示しています。下位フォルダを選択してください。".into();
+        let done = self.complete::<FileList>(true, |s, result, w, cx| {
+            let files = match result {
+                Ok(files) => files,
+                Err(error) => {
+                    s.error = error;
+                    return;
                 }
-            },
+            };
+            s.path.update(cx, |i, cx| {
+                i.set_value(files.path.to_string_lossy().into_owned(), w, cx)
+            });
+            s.entries = files.entries;
+            if files.truncated {
+                s.error = "先頭2,000件を表示しています。下位フォルダを選択してください。".into();
+            }
+        });
+        self.host.rpc.agent_async(
+            move |client| async move { client.list_files(Path::new(&path)).await },
+            done,
         );
     }
 
     fn edit(&mut self, path: String, reload: bool) {
-        self.agent_request(
-            self.rpc.clone(),
-            true,
-            move |client| async move { client.read_file(Path::new(&path)).await },
-            move |s, result, w, cx| {
-                let mut document = match result {
-                    Ok(document) => document,
-                    Err(error) => {
-                        s.error = error;
-                        return;
-                    }
-                };
-                let key = s.editor_key(&document.path);
-                if reload {
-                    let scope = drafts::Scope::Main;
-                    drafts::update(&s.drafts, scope, cx, |mut cache| {
-                        if let Some(files) = cache["files"].as_object_mut() {
-                            files.remove(&key);
-                        }
-                        cache
-                    });
+        let done = self.complete::<FileDocument<'static>>(true, move |s, result, w, cx| {
+            let mut document = match result {
+                Ok(document) => document,
+                Err(error) => {
+                    s.error = error;
+                    return;
                 }
-                let saved = &s.drafts.read(cx).cache(drafts::Scope::Main)["files"][&key];
-                let value = if saved.is_object() {
-                    if saved["revision"] != document.revision {
-                        s.error =
-                            "ホストのファイルが変更されています。下書きを保持しました。".into();
+            };
+            let key = s.editor_key(&document.path);
+            if reload {
+                let scope = drafts::Scope::Main;
+                drafts::update(&s.drafts, scope, cx, |mut cache| {
+                    if let Some(files) = cache["files"].as_object_mut() {
+                        files.remove(&key);
                     }
-                    document.revision = text(saved, "revision").to_owned();
-                    text(saved, "text").to_owned()
-                } else {
-                    document.text.into_owned()
-                };
-                s.editor = Some(OpenFile {
-                    path: document.path.into_owned(),
-                    revision: document.revision,
+                    cache
                 });
-                s.editor_input.update(cx, |i, cx| i.set_value(value, w, cx));
-            },
+            }
+            let saved = &s.drafts.read(cx).cache(drafts::Scope::Main)["files"][&key];
+            let value = if saved.is_object() {
+                if saved["revision"] != document.revision {
+                    s.error = "ホストのファイルが変更されています。下書きを保持しました。".into();
+                }
+                document.revision = text(saved, "revision").to_owned();
+                text(saved, "text").to_owned()
+            } else {
+                document.text.into_owned()
+            };
+            s.editor = Some(OpenFile {
+                path: document.path.into_owned(),
+                revision: document.revision,
+            });
+            s.editor_input.update(cx, |i, cx| i.set_value(value, w, cx));
+        });
+        self.host.rpc.agent_async(
+            move |client| async move { client.read_file(Path::new(&path)).await },
+            done,
         );
     }
 
@@ -730,41 +699,40 @@ impl Desktop {
         let path = editor.path.clone();
         let revision = editor.revision.clone();
         let input = submitted.clone();
-        self.agent_request(
-            self.rpc.clone(),
-            true,
-            move |client| async move { client.write_file(&path, &revision, &input).await },
-            move |s, result, w, cx| {
-                let document = match result {
-                    Ok(document) => document,
-                    Err(error) => {
-                        s.error = error;
-                        return;
-                    }
-                };
-                let scope = drafts::Scope::Main;
-                drafts::update(&s.drafts, scope, cx, |mut cache| {
-                    if cache["files"][&key]["text"].as_str() == Some(submitted.as_str()) {
-                        cache["files"].as_object_mut().unwrap().remove(&key);
-                    }
-                    cache
-                });
-                if s.editor
-                    .as_ref()
-                    .is_some_and(|editor| editor.path == *document.path)
-                {
-                    let unchanged = s.editor_input.read(cx).value().as_ref() == submitted.as_str();
-                    s.editor = Some(OpenFile {
-                        path: document.path.into_owned(),
-                        revision: document.revision,
-                    });
-                    if unchanged {
-                        s.editor_input
-                            .update(cx, |i, cx| i.set_value(document.text.into_owned(), w, cx));
-                    }
+        let done = self.complete::<FileDocument<'static>>(true, move |s, result, w, cx| {
+            let document = match result {
+                Ok(document) => document,
+                Err(error) => {
+                    s.error = error;
+                    return;
                 }
-                s.chat.update(cx, |chat, _| chat.refresh_review());
-            },
+            };
+            let scope = drafts::Scope::Main;
+            drafts::update(&s.drafts, scope, cx, |mut cache| {
+                if cache["files"][&key]["text"].as_str() == Some(submitted.as_str()) {
+                    cache["files"].as_object_mut().unwrap().remove(&key);
+                }
+                cache
+            });
+            if s.editor
+                .as_ref()
+                .is_some_and(|editor| editor.path == *document.path)
+            {
+                let unchanged = s.editor_input.read(cx).value().as_ref() == submitted.as_str();
+                s.editor = Some(OpenFile {
+                    path: document.path.into_owned(),
+                    revision: document.revision,
+                });
+                if unchanged {
+                    s.editor_input
+                        .update(cx, |i, cx| i.set_value(document.text.into_owned(), w, cx));
+                }
+            }
+            s.chat.update(cx, |chat, _| chat.refresh_review());
+        });
+        self.host.rpc.agent_async(
+            move |client| async move { client.write_file(&path, &revision, &input).await },
+            done,
         );
     }
 
@@ -812,20 +780,35 @@ impl Desktop {
             Event::DraftError(error) => {
                 self.drafts.update(cx, |_, cx| cx.emit(error));
             }
-            Event::Management(input) => {
-                let effect = self.manager_session.update(cx, |state, cx| {
-                    let (next, effect) = host::reduce_management(std::mem::take(state), input);
-                    *state = next;
+            Event::ManagerConnected(connected) => {
+                let start = self.manager_session.update(cx, |state, cx| {
+                    state.connected = connected;
+                    let start = !connected && !state.attempted_start;
+                    state.attempted_start |= start;
                     cx.notify();
-                    effect
+                    start
                 });
-                if let Some(effect) = effect
-                    && let Some(error) = host::run_management(effect, &self.manager, &self.tx)
+                if start {
+                    let done = self.complete(false, |s, result, _, cx| {
+                        if let Err(error) = result {
+                            s.error = error;
+                            s.set_tab(Tab::Settings, cx);
+                        }
+                    });
+                    std::thread::spawn(move || done(platform::start_host(None)));
+                }
+                self.refresh_manager(cx);
+            }
+            Event::RefreshManager => self.refresh_manager(cx),
+            Event::Chat(id, event) => {
+                if let Some(view) = [&self.chat, self.side_chat.as_ref().unwrap_or(&self.chat)]
+                    .into_iter()
+                    .find(|view| view.entity_id() == id)
                 {
-                    self.error = error;
-                    self.set_tab(Tab::Settings, cx);
+                    view.update(cx, |view, cx| view.event(event, window, cx));
                 }
             }
+            Event::Rpc(id, event) => self.receive_rpc(id, event, window, cx),
             Event::Catalogue(id, input) => {
                 if let Some(connection) = self
                     .host_leases
@@ -838,6 +821,66 @@ impl Desktop {
             }
         }
         cx.notify();
+    }
+    fn receive_rpc(
+        &mut self,
+        id: EntityId,
+        event: rpc::Event,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self
+            .host_leases
+            .values()
+            .filter_map(Weak::upgrade)
+            .find(|connection| connection.state.entity_id() == id)
+        else {
+            return;
+        };
+        match &event {
+            rpc::Event::Connected(connected, reason) => {
+                host::receive(
+                    &connection,
+                    host::CatalogueInput::Connected(*connected, reason.clone()),
+                    cx,
+                );
+            }
+            rpc::Event::Message(message) => {
+                connection.state.update(cx, |state, cx| {
+                    state.indicators = host::reduce_indicators(
+                        std::mem::take(&mut state.indicators),
+                        message,
+                        state.visible.as_deref(),
+                    );
+                    cx.notify();
+                });
+            }
+        }
+        let main = self.chat.read(cx).accepts(id, &event);
+        let side = self
+            .side_chat
+            .as_ref()
+            .filter(|side| side.read(cx).accepts(id, &event));
+        if main {
+            if let Some(side) = side {
+                side.update(cx, |view, cx| {
+                    view.receive_rpc(
+                        match &event {
+                            rpc::Event::Connected(ready, reason) => {
+                                rpc::Event::Connected(*ready, reason.clone())
+                            }
+                            rpc::Event::Message(value) => rpc::Event::Message(value.clone()),
+                        },
+                        window,
+                        cx,
+                    )
+                });
+            }
+            self.chat
+                .update(cx, |view, cx| view.receive_rpc(event, window, cx));
+        } else if let Some(side) = side {
+            side.update(cx, |view, cx| view.receive_rpc(event, window, cx));
+        }
     }
     fn set_tab(&mut self, tab: Tab, cx: &mut App) {
         self.tab = tab;
@@ -883,8 +926,7 @@ impl Desktop {
         let changed_cwd = state.session.cwd != self.cwd;
         if changed_host {
             self.host = state.session.host.clone();
-            self.rpc = self.host.rpc.clone();
-            self.remote = state.session.remote.clone();
+            self.remote = state.session.host.remote.clone();
             self.epoch += 1;
             self.busy = 0;
             self.worktree_settings = None;
@@ -935,7 +977,6 @@ impl Desktop {
         let source = source.read(cx);
         self.review_source = Some(ReviewSource {
             host: source.session.host.clone(),
-            rpc: source.session.host.rpc.clone(),
             cwd: source.session.cwd.clone(),
         });
         self.review = source.review.clone();
@@ -949,16 +990,11 @@ impl Desktop {
         let Some(source) = &self.review_source else {
             return;
         };
-        let rpc = source.rpc.clone();
+        let rpc = source.host.rpc.clone();
         let cwd = source.cwd.clone();
         let host = source.host.state.entity_id();
-        self.agent_request(
-            rpc,
+        let done = self.complete::<(String, Result<WorkspaceReview, AgentError>)>(
             false,
-            move |client| async move {
-                let review = client.review_workspace(&cwd).await;
-                Ok((cwd, review))
-            },
             move |s, result, _, _| match result {
                 Ok((cwd, result))
                     if s.review_source.as_ref().is_some_and(|source| {
@@ -979,6 +1015,13 @@ impl Desktop {
                 Err(error) => s.review_error = error,
                 _ => {}
             },
+        );
+        rpc.agent_async(
+            move |client| async move {
+                let review = client.review_workspace(&cwd).await;
+                Ok((cwd, review))
+            },
+            done,
         );
     }
 }

@@ -95,14 +95,6 @@ uint32_t mobile_client_classify_event(const char *method, int32_t is_request);
 uint32_t mobile_client_conversation_transition(uint32_t kind, uint32_t status,
     uint32_t current_status, uint32_t item, uint32_t flags);
 
-/* Account events: select=0, startLogin=1, listReply=2, selectionReply=3,
- * loginReply=4, statusReply=5, cancelReply=6.
- * Flags: selecting=1, sameSelection=2, hasLogin=4, startingLogin=8,
- * failed=16, completed=32. Actions: ignore=0, beginSelection=1, beginLogin=2,
- * applyList=3, applySelection=4, applyLogin=5, completeLogin=6, clearLogin=7,
- * showError=8, selectionFailed=9, loginFailed=10, continuePolling=11. */
-uint32_t mobile_client_account_transition(uint32_t event, uint32_t flags);
-
 void mobile_client_string_free(char *value);
 
 #ifdef __cplusplus

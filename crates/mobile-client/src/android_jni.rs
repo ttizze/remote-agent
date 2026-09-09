@@ -262,15 +262,6 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeConversation_conversati
     ) as jint
 }
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeConversation_accountTransition(
-    _env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    event: jint,
-    flags: jint,
-) -> jint {
-    agent_client::accounts::transition(event as u32, flags as u32) as jint
-}
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_agentCommand(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,

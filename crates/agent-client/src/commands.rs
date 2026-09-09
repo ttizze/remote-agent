@@ -30,11 +30,13 @@ pub enum Command<'a> {
     WatchThread {
         #[serde(borrow)]
         thread_id: Cow<'a, str>,
+        watch_key: u64,
         watch_id: u64,
         #[serde(borrow)]
         path: Cow<'a, str>,
     },
     UnwatchThread {
+        watch_key: u64,
         watch_id: u64,
     },
     ListThreads {
@@ -152,10 +154,17 @@ impl AgentClient {
             Command::SessionImages { thread_id } => encode(self.session_images(&thread_id).await),
             Command::WatchThread {
                 thread_id,
+                watch_key,
                 watch_id,
                 path,
-            } => encode(self.watch_thread(&thread_id, watch_id, &path).await),
-            Command::UnwatchThread { watch_id } => encode(self.unwatch_thread(watch_id).await),
+            } => encode(
+                self.watch_thread(&thread_id, watch_key, watch_id, &path)
+                    .await,
+            ),
+            Command::UnwatchThread {
+                watch_key,
+                watch_id,
+            } => encode(self.unwatch_thread(watch_key, watch_id).await),
             Command::Models => encode(self.models().await),
             Command::ListThreads { query } => encode(self.list_threads(&query).await),
             Command::ReadThread {

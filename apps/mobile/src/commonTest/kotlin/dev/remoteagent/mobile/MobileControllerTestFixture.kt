@@ -92,7 +92,7 @@ internal abstract class MobileControllerTestFixture {
                 notification(
                     "host/thread/changed",
                     """
-                {"watchId":$revision,"threadId":"thread-1"}
+                {"watchKey":1,"watchId":$revision,"threadId":"thread-1"}
             """,
                 )
             )

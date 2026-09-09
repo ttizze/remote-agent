@@ -31,71 +31,57 @@ private fun MobileController.publishAccounts(value: AccountSettingsState) {
     accountObservers.toList().forEach { it(value) }
 }
 
-private suspend inline fun <reified T> MobileController.requestAccount(command: AgentCommand): GatewayResult<T> {
+private suspend inline fun <reified T> MobileController.requestAccount(command: AgentCommand): GatewayResult<T>? {
     val profile = state.selectedProfile ?: return GatewayResult.Failure("接続先が選択されていません")
-    return requestAgent(profile.id, command).mapGateway { accountJson.decodeFromString<T>(it) }
+    val selected = accountHost
+    val token = accountGeneration
+    val result = requestAgent(profile.id, command).mapGateway { accountJson.decodeFromString<T>(it) }
+    return result.takeIf { accountHost == selected && accountGeneration == token }
 }
 
 internal suspend fun MobileController.refreshAccounts() {
     syncAccountHost()
-    val selected = accountHost
-    val token = accountGeneration
-    val result = requestAccount<HostAccountList>(AgentCommand.Accounts)
-    if (accountHost != selected || accountGeneration != token) return
-    when (accountAction(accountState, AccountEvent.ListReply, failed = result is GatewayResult.Failure)) {
-        AccountAction.ApplyList -> {
-            val value = (result as GatewayResult.Success).value
+    when (val result = requestAccount<HostAccountList>(AgentCommand.Accounts) ?: return) {
+        is GatewayResult.Success ->
             publishAccounts(
-                accountState.copy(accounts = value.accounts, selectedId = value.selectedId, error = value.error)
+                accountState.copy(
+                    accounts = result.value.accounts,
+                    selectedId = result.value.selectedId,
+                    error = result.value.error,
+                )
             )
-        }
-        AccountAction.ShowError -> publishAccounts(accountState.copy(error = (result as GatewayResult.Failure).message))
-        else -> error("Invalid account list transition")
+        is GatewayResult.Failure -> publishAccounts(accountState.copy(error = result.message))
     }
     resumeAccountPolling()
 }
 
 internal suspend fun MobileController.selectAccount(id: String) {
     syncAccountHost()
-    if (
-        accountAction(accountState, AccountEvent.Select, sameSelection = accountState.selectedId == id) ==
-            AccountAction.Ignore
-    )
-        return
-    val selected = accountHost
-    val token = accountGeneration
+    if (accountState.selecting || accountState.selectedId == id) return
     publishAccounts(accountState.copy(selecting = true, error = null))
-    val result = requestAccount<HostAccountSelection>(AgentCommand.SelectAccount(id))
-    if (accountHost != selected || accountGeneration != token) return
-    when (accountAction(accountState, AccountEvent.SelectionReply, failed = result is GatewayResult.Failure)) {
-        AccountAction.ApplySelection -> {
-            val value = (result as GatewayResult.Success).value
+    when (val result = requestAccount<HostAccountSelection>(AgentCommand.SelectAccount(id)) ?: return) {
+        is GatewayResult.Success ->
             publishAccounts(
-                accountState.copy(selecting = false, selectedId = value.selectedId, error = value.persistenceError)
+                accountState.copy(
+                    selecting = false,
+                    selectedId = result.value.selectedId,
+                    error = result.value.persistenceError,
+                )
             )
-        }
-        AccountAction.SelectionFailed ->
-            publishAccounts(accountState.copy(selecting = false, error = (result as GatewayResult.Failure).message))
-        else -> error("Invalid account selection transition")
+        is GatewayResult.Failure -> publishAccounts(accountState.copy(selecting = false, error = result.message))
     }
 }
 
 internal suspend fun MobileController.startAccountLogin() {
     syncAccountHost()
-    if (accountAction(accountState, AccountEvent.StartLogin) == AccountAction.Ignore) return
-    val selected = accountHost
-    val token = accountGeneration
+    if (accountState.login != null || accountState.startingLogin) return
     publishAccounts(accountState.copy(startingLogin = true, error = null))
-    val result = requestAccount<HostAccountLogin>(AgentCommand.StartAccountLogin)
-    if (accountHost != selected || accountGeneration != token) return
-    when (accountAction(accountState, AccountEvent.LoginReply, failed = result is GatewayResult.Failure)) {
-        AccountAction.ApplyLogin -> {
-            publishAccounts(accountState.copy(startingLogin = false, login = (result as GatewayResult.Success).value))
+    when (val result = requestAccount<HostAccountLogin>(AgentCommand.StartAccountLogin) ?: return) {
+        is GatewayResult.Success -> {
+            publishAccounts(accountState.copy(startingLogin = false, login = result.value))
             resumeAccountPolling()
         }
-        AccountAction.LoginFailed ->
-            publishAccounts(accountState.copy(startingLogin = false, error = (result as GatewayResult.Failure).message))
-        else -> error("Invalid account login transition")
+        is GatewayResult.Failure -> publishAccounts(accountState.copy(startingLogin = false, error = result.message))
     }
 }
 
@@ -114,31 +100,23 @@ internal fun MobileController.resumeAccountPolling() {
     accountPolling = persistenceScope.launch {
         while (true) {
             delay(ACCOUNT_POLL_INTERVAL_MS)
-            val result = requestAccount<HostAccountLoginStatus>(AgentCommand.AccountLoginStatus(login.loginId))
+            val result =
+                requestAccount<HostAccountLoginStatus>(AgentCommand.AccountLoginStatus(login.loginId)) ?: return@launch
             if (accountHost != selected || accountGeneration != token || accountState.login != login) return@launch
-            val completed = (result as? GatewayResult.Success)?.value?.completed == true
-            when (
-                accountAction(
-                    accountState,
-                    AccountEvent.StatusReply,
-                    failed = result is GatewayResult.Failure,
-                    completed = completed,
-                )
-            ) {
-                AccountAction.ShowError -> {
+            when (result) {
+                is GatewayResult.Failure -> {
                     accountPolling = null
-                    publishAccounts(accountState.copy(error = (result as GatewayResult.Failure).message))
+                    publishAccounts(accountState.copy(error = result.message))
                     return@launch
                 }
-                AccountAction.CompleteLogin -> {
-                    accountPolling = null
-                    publishAccounts(accountState.copy(login = null))
-                    refreshAccounts()
-                    (result as GatewayResult.Success).value.accountId?.let { selectAccount(it) }
-                    return@launch
-                }
-                AccountAction.ContinuePolling -> Unit
-                else -> error("Invalid account polling transition")
+                is GatewayResult.Success ->
+                    if (result.value.completed) {
+                        accountPolling = null
+                        publishAccounts(accountState.copy(login = null))
+                        refreshAccounts()
+                        result.value.accountId?.let { selectAccount(it) }
+                        return@launch
+                    }
             }
         }
     }
@@ -147,17 +125,12 @@ internal fun MobileController.resumeAccountPolling() {
 internal suspend fun MobileController.cancelAccountLogin() {
     syncAccountHost()
     val login = accountState.login ?: return
-    val selected = accountHost
-    val token = accountGeneration
     pauseAccountPolling()
-    val result = requestAccount<JsonElement>(AgentCommand.CancelAccountLogin(login.loginId))
-    if (accountHost != selected || accountGeneration != token) return
-    when (accountAction(accountState, AccountEvent.CancelReply, failed = result is GatewayResult.Failure)) {
-        AccountAction.ClearLogin -> {
+    when (val result = requestAccount<JsonElement>(AgentCommand.CancelAccountLogin(login.loginId)) ?: return) {
+        is GatewayResult.Success -> {
             publishAccounts(accountState.copy(login = null, error = null))
             refreshAccounts()
         }
-        AccountAction.ShowError -> publishAccounts(accountState.copy(error = (result as GatewayResult.Failure).message))
-        else -> error("Invalid account cancellation transition")
+        is GatewayResult.Failure -> publishAccounts(accountState.copy(error = result.message))
     }
 }

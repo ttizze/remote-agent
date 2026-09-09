@@ -37,7 +37,7 @@ internal fun MobileController.receiveThreadWatchNotification(
     message: RawCodexMessage.Notification,
 ) {
     val target = threadWatchTarget ?: return
-    val params = message.params.asObjectOrNull() ?: return
+    val params = message.params.asObjectOrNull()?.takeIf { it.long("watchKey") == VISIBLE_THREAD_WATCH_KEY } ?: return
     if (
         target.profile.id == hostIdentity &&
             params.long("watchId") == threadWatchRevision &&
@@ -91,7 +91,10 @@ private fun MobileController.visibleThreadWatchTarget(): ThreadWatchTarget? {
 private suspend fun MobileController.watchThread(target: ThreadWatchTarget, changes: Channel<Unit>, revision: Long) {
     try {
         val registered =
-            gateway.agentCommand(target.profile, AgentCommand.WatchThread(target.threadId, revision, target.path))
+            gateway.agentCommand(
+                target.profile,
+                AgentCommand.WatchThread(target.threadId, VISIBLE_THREAD_WATCH_KEY, revision, target.path),
+            )
         if (registered is GatewayResult.Failure) {
             if (threadWatchTarget == target && threadWatchRevision == revision) {
                 dispatch(AppAction.ThreadReadFailed(target.profile.id, "会話の自動更新を開始できません: ${registered.message}"))
@@ -113,10 +116,11 @@ private suspend fun MobileController.watchThread(target: ThreadWatchTarget, chan
     } finally {
         withContext(NonCancellable) {
             if (isConnected(target.profile.id, target.generation)) {
-                gateway.agentCommand(target.profile, AgentCommand.UnwatchThread(revision))
+                gateway.agentCommand(target.profile, AgentCommand.UnwatchThread(VISIBLE_THREAD_WATCH_KEY, revision))
             }
         }
     }
 }
 
+private const val VISIBLE_THREAD_WATCH_KEY = 1L
 private const val THREAD_WATCH_COALESCE_MS = 100L

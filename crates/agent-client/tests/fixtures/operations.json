@@ -1458,6 +1458,7 @@
     "command": {
       "type": "watchThread",
       "threadId": "thread",
+      "watchKey": 3,
       "watchId": 17,
       "path": "/fixture/rollout.jsonl"
     },
@@ -1466,12 +1467,14 @@
         "method": "host/thread/watch",
         "params": {
           "threadId": "thread",
-          "watchId": 17,
+          "watchKey": 3,
+      "watchId": 17,
           "path": "/fixture/rollout.jsonl"
         },
         "response": {
           "result": {
-            "watchId": 17
+            "watchKey": 3,
+      "watchId": 17
           }
         }
       }
@@ -1482,17 +1485,20 @@
     "name": "unwatchThread sends explicit watch identity",
     "command": {
       "type": "unwatchThread",
+      "watchKey": 3,
       "watchId": 17
     },
     "exchanges": [
       {
         "method": "host/thread/unwatch",
         "params": {
-          "watchId": 17
+          "watchKey": 3,
+      "watchId": 17
         },
         "response": {
           "result": {
-            "watchId": 17
+            "watchKey": 3,
+      "watchId": 17
           }
         }
       }

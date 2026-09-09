@@ -35,8 +35,6 @@ internal object NativeConversation {
     external fun classifyEvent(method: String): Int
 
     external fun conversationTransition(kind: Int, status: Int, currentStatus: Int, item: Int, flags: Int): Int
-
-    external fun accountTransition(event: Int, flags: Int): Int
 }
 
 internal actual fun nativeConversationPresentation(request: String): String =
@@ -51,6 +49,3 @@ internal actual fun nativeConversationTransition(
     item: Int,
     flags: Int,
 ): Int = NativeConversation.conversationTransition(kind, status, currentStatus, item, flags)
-
-internal actual fun nativeAccountTransition(event: Int, flags: Int): Int =
-    NativeConversation.accountTransition(event, flags)

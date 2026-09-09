@@ -196,7 +196,7 @@ impl ConversationView {
     ) -> AnyElement {
         let key = format!(
             "{}:{}:{encoded}:{}",
-            self.session.remote, self.session.cwd, source
+            self.session.host.remote, self.session.cwd, source
         );
         if !self.images.contains_key(&key) {
             let source = std::sync::Arc::new(source.to_owned());
@@ -209,7 +209,7 @@ impl ConversationView {
                 },
             );
             let cwd = self.session.cwd.clone();
-            let remote = self.session.remote.clone();
+            let remote = self.session.host.remote.clone();
             let manager = self.manager.clone();
             let destination = self
                 .image_dir
@@ -358,7 +358,7 @@ impl ConversationView {
             );
             return;
         }
-        let remote = self.session.remote.clone();
+        let remote = self.session.host.remote.clone();
         let manager = self.manager.clone();
         let directory = self.image_dir.path().to_owned();
         self.work(false, move || {
@@ -395,9 +395,8 @@ impl ConversationView {
             error: String::new(),
         });
         let thread = self.session.selected.clone();
-        self.agent_request(
+        let done = self.complete::<Vec<agent_client::operations::SessionImage>>(
             false,
-            move |client| async move { client.session_images(&thread).await },
             move |s, result, _, _| {
                 let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| gallery.id == id)
                 else {
@@ -425,6 +424,10 @@ impl ConversationView {
                     gallery.list.scroll_to_reveal_item(selected);
                 }
             },
+        );
+        self.session.host.rpc.agent_async(
+            move |client| async move { client.session_images(&thread).await },
+            done,
         );
         cx.notify();
     }
@@ -478,7 +481,7 @@ impl ConversationView {
         );
         let key = format!(
             "{}:{}:{encoded}:{}",
-            self.session.remote, self.session.cwd, source
+            self.session.host.remote, self.session.cwd, source
         );
         let ready = self
             .images
@@ -551,7 +554,7 @@ impl ConversationView {
         let (source, encoded) = gallery.current_image();
         let key = format!(
             "{}:{}:{encoded}:{}",
-            self.session.remote, self.session.cwd, source
+            self.session.host.remote, self.session.cwd, source
         );
         let Some(ImageSource::Resource(resource)) =
             self.images.get(&key).and_then(|image| image.path.clone())
@@ -1377,7 +1380,7 @@ impl ConversationView {
                         },
                     ));
                 }
-                if state.session.remote.is_empty() {
+                if state.session.host.remote.is_empty() {
                     let target = entity.clone();
                     menu = menu.item(PopupMenuItem::new("別のフォルダを選択…").on_click(
                         move |_, _, cx| {
@@ -1619,7 +1622,8 @@ impl ConversationView {
                         .large()
                         .disabled(
                             !self.session.connected
-                                || (!self.session.remote.is_empty() && self.session.cwd.is_empty())
+                                || (!self.session.host.remote.is_empty()
+                                    && self.session.cwd.is_empty())
                                 || self.busy > 0
                                 || phase.is_some(),
                         ),
@@ -1647,7 +1651,7 @@ impl ConversationView {
                         .child(host_menu(
                             "composer-host",
                             &self.manager_session,
-                            &self.session.remote,
+                            &self.session.host.remote,
                             self.busy > 0 || self.dictation.is_some(),
                             cx,
                             |_, id, _, cx| cx.emit(Intent::SelectHost(id)),

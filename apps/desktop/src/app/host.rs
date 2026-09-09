@@ -16,58 +16,8 @@ pub(super) struct Management {
     pub(super) connected: bool,
     pub(super) status: Value,
     pub(super) hosts: Vec<Value>,
-    attempted_start: bool,
+    pub(super) attempted_start: bool,
 }
-pub(super) enum ManagementInput {
-    Connected(bool),
-    Status(Result<Value, String>),
-    Hosts(Result<Value, String>),
-    Started(Result<(), String>),
-    Refresh,
-}
-pub(super) enum ManagementEffect {
-    Refresh,
-    StartHost,
-    Error(String),
-}
-
-pub(super) fn reduce_management(
-    mut state: Management,
-    input: ManagementInput,
-) -> (Management, Option<ManagementEffect>) {
-    let effect = match input {
-        ManagementInput::Connected(connected) => {
-            state.connected = connected;
-            if connected {
-                Some(ManagementEffect::Refresh)
-            } else if !state.attempted_start {
-                state.attempted_start = true;
-                Some(ManagementEffect::StartHost)
-            } else {
-                None
-            }
-        }
-        ManagementInput::Status(Ok(value)) => {
-            state.status = value;
-            None
-        }
-        ManagementInput::Hosts(Ok(Value::Array(hosts))) => {
-            state.hosts = hosts;
-            None
-        }
-        ManagementInput::Hosts(Ok(_)) => {
-            state.hosts.clear();
-            None
-        }
-        ManagementInput::Started(Ok(())) => None,
-        ManagementInput::Status(Err(error))
-        | ManagementInput::Hosts(Err(error))
-        | ManagementInput::Started(Err(error)) => Some(ManagementEffect::Error(error)),
-        ManagementInput::Refresh => state.connected.then_some(ManagementEffect::Refresh),
-    };
-    (state, effect)
-}
-
 pub(super) fn connect_management(
     tx: &async_channel::Sender<Event>,
 ) -> (Rpc, Option<tokio::task::AbortHandle>) {
@@ -77,8 +27,7 @@ pub(super) fn connect_management(
         json!({"target":"manager"}),
         move |event| {
             if let rpc::Event::Connected(connected, _) = event {
-                let _ =
-                    events.send_blocking(Event::Management(ManagementInput::Connected(connected)));
+                let _ = events.send_blocking(Event::ManagerConnected(connected));
             }
         },
     );
@@ -88,11 +37,7 @@ pub(super) fn connect_management(
             .spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(4)).await;
-                    if clock
-                        .send(Event::Management(ManagementInput::Refresh))
-                        .await
-                        .is_err()
-                    {
+                    if clock.send(Event::RefreshManager).await.is_err() {
                         break;
                     }
                 }
@@ -100,35 +45,6 @@ pub(super) fn connect_management(
             .abort_handle()
     });
     (rpc, timer)
-}
-
-pub(super) fn run_management(
-    effect: ManagementEffect,
-    rpc: &Rpc,
-    tx: &async_channel::Sender<Event>,
-) -> Option<String> {
-    match effect {
-        ManagementEffect::Refresh => {
-            let events = tx.clone();
-            rpc.request_async("host/status", json!({}), move |result| {
-                let _ = events.send_blocking(Event::Management(ManagementInput::Status(result)));
-            });
-            let events = tx.clone();
-            rpc.request_async("host/listRemotes", json!({}), move |result| {
-                let _ = events.send_blocking(Event::Management(ManagementInput::Hosts(result)));
-            });
-        }
-        ManagementEffect::StartHost => {
-            let events = tx.clone();
-            std::thread::spawn(move || {
-                let _ = events.send_blocking(Event::Management(ManagementInput::Started(
-                    platform::start_host(None),
-                )));
-            });
-        }
-        ManagementEffect::Error(error) => return Some(error),
-    }
-    None
 }
 
 /// A value projected by native views; it contains no connection or worker.
@@ -143,7 +59,7 @@ pub(super) struct Catalogue {
     pub(super) more: Value,
     pub(super) indicators: TaskIndicators,
     pub(super) error: String,
-    visible: Option<String>,
+    pub(super) visible: Option<String>,
     list_generation: u64,
     model_generation: u64,
 }
@@ -153,7 +69,7 @@ pub(super) enum Notice {
 }
 impl EventEmitter<Notice> for Catalogue {}
 pub(super) enum CatalogueInput {
-    Rpc(rpc::Event),
+    Connected(bool, String),
     Titles(u64, Result<Value, String>),
     Models(u64, Result<Vec<Value>, String>),
     Refresh,
@@ -176,7 +92,7 @@ pub(super) fn reduce_catalogue(
 ) -> (Catalogue, CatalogueEffects) {
     let mut effects = CatalogueEffects::default();
     match input {
-        CatalogueInput::Rpc(rpc::Event::Connected(connected, reason)) => {
+        CatalogueInput::Connected(connected, reason) => {
             state.connected = connected;
             effects.notice = Some(Notice::Connected(connected));
             state.list_generation += 1;
@@ -189,10 +105,6 @@ pub(super) fn reduce_catalogue(
             } else {
                 state.error = reason;
             }
-        }
-        CatalogueInput::Rpc(rpc::Event::Message(message)) => {
-            state.indicators =
-                reduce_indicators(state.indicators, &message, state.visible.as_deref());
         }
         CatalogueInput::Titles(generation, result) if generation == state.list_generation => {
             match result {
@@ -272,7 +184,7 @@ pub(super) struct Connection {
     pub(super) remote: String,
     pub(super) rpc: Rpc,
     pub(super) state: Entity<Catalogue>,
-    events: async_channel::Sender<Event>,
+    pub(super) events: async_channel::Sender<Event>,
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -305,7 +217,7 @@ pub(super) fn acquire(
         platform::state_dir().join("host.sock"),
         target,
         move |event| {
-            let _ = tx.send_blocking(Event::Catalogue(id, CatalogueInput::Rpc(event)));
+            let _ = tx.send_blocking(Event::Rpc(id, event));
         },
     );
     let connection = Rc::new(Connection {
@@ -378,7 +290,7 @@ impl TaskIndicators {
             .unwrap_or(thread["status"]["type"] == "active")
     }
 }
-fn reduce_indicators(
+pub(super) fn reduce_indicators(
     mut state: TaskIndicators,
     message: &Value,
     visible: Option<&str>,

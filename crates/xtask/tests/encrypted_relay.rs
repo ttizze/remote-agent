@@ -576,7 +576,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let item = mobile.request("host/thread/item/read", json!({"threadId":"p5-1","turnId":"turn-p5-1","itemId":"answer-p5-1"})).await.unwrap();
         assert_eq!(item["item"]["text"], "History for Project 05 conversation 01");
         let mut changes = mobile.subscribe();
-        mobile.request("host/thread/watch", json!({"watchId":1,"threadId":"p5-1","path":rollout})).await.unwrap();
+        mobile.request("host/thread/watch", json!({"watchKey":1,"watchId":1,"threadId":"p5-1","path":rollout})).await.unwrap();
         std::fs::write(&rollout, "external client persisted a reply\n").unwrap();
         let changed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -584,8 +584,8 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
                 if event["method"] == "host/thread/changed" { break event; }
             }
         }).await.expect("rollout changes must cross the encrypted relay");
-        assert_eq!(changed["params"], json!({"watchId":1,"threadId":"p5-1"}));
-        mobile.request("host/thread/unwatch", json!({"watchId":1})).await.unwrap();
+        assert_eq!(changed["params"], json!({"watchKey":1,"watchId":1,"threadId":"p5-1"}));
+        mobile.request("host/thread/unwatch", json!({"watchKey":1,"watchId":1})).await.unwrap();
         mobile.close(); drop(runner); serving.await.unwrap(); drop(service);
         Arc::try_unwrap(server).ok().expect("Codex process retained").shutdown().await.unwrap();
         relay_server.kill().await.unwrap(); relay_server.wait().await.unwrap();

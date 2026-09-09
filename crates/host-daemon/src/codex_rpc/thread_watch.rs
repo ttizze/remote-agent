@@ -10,12 +10,12 @@ use serde_json::{Value, json};
 
 use super::routing::{SessionId, SessionRouter};
 
-/// One visible persisted conversation per authenticated connection. Native
+/// Independently watched conversations on each authenticated connection. Native
 /// turn/item events cover work owned by our Codex process; another process's
 /// rollout must be observed without trying to take its active writer lock.
 #[derive(Clone, Default)]
 pub(super) struct ThreadWatches {
-    slots: Arc<Mutex<HashMap<SessionId, Slot>>>,
+    slots: Arc<Mutex<HashMap<SessionId, HashMap<u64, Slot>>>>,
 }
 
 #[cfg(test)]
@@ -56,7 +56,7 @@ mod tests {
                 owner.id(),
                 router.clone(),
                 "host/thread/watch".into(),
-                json!({"watchId":1,"threadId":"open","path":path}),
+                json!({"watchKey":1,"watchId":1,"threadId":"open","path":path}),
             )
             .await
             .unwrap();
@@ -73,6 +73,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_views_on_one_connection_watch_and_cancel_independently() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = [
+            directory.path().join("main.jsonl"),
+            directory.path().join("side.jsonl"),
+        ];
+        let router = SessionRouter::new();
+        let mut session = router.open_session(16);
+        let watches = ThreadWatches::default();
+        for (key, path) in paths.iter().enumerate() {
+            fs::write(path, "initial\n").unwrap();
+            watches.request(session.id(), router.clone(), "host/thread/watch".into(),
+                json!({"watchKey":key,"watchId":1,"threadId":format!("thread-{key}"),"path":path}))
+                .await.unwrap();
+        }
+        for path in &paths {
+            append(path);
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut seen = [false; 2];
+            while !seen.into_iter().all(|value| value) {
+                let event = changed(&mut session, 1).await;
+                let key = event["params"]["watchKey"].as_u64().unwrap() as usize;
+                assert_eq!(event["params"]["threadId"], format!("thread-{key}"));
+                seen[key] = true;
+            }
+        })
+        .await
+        .unwrap();
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/unwatch".into(),
+                json!({"watchKey":0,"watchId":1}),
+            )
+            .await
+            .unwrap();
+        // Drain events already delivered by the OS before cancellation.
+        while matches!(
+            tokio::time::timeout(Duration::from_millis(300), session.recv()).await,
+            Ok(Some(_))
+        ) {}
+        for path in &paths {
+            append(path);
+        }
+        let event = changed(&mut session, 1).await;
+        assert_eq!(event["params"]["watchKey"], 1);
+        assert_eq!(event["params"]["threadId"], "thread-1");
+        // A reopened Main reuses its key with a newer revision. A late close
+        // from the old view must not stop either currently visible view.
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/watch".into(),
+                json!({"watchKey":0,"watchId":2,"threadId":"reopened","path":paths[0]}),
+            )
+            .await
+            .unwrap();
+        watches
+            .request(
+                session.id(),
+                router.clone(),
+                "host/thread/unwatch".into(),
+                json!({"watchKey":0,"watchId":1}),
+            )
+            .await
+            .unwrap();
+        append(&paths[0]);
+        assert_eq!(
+            changed(&mut session, 2).await["params"]["threadId"],
+            "reopened"
+        );
+        watches.clear_session(session.id());
+        while matches!(
+            tokio::time::timeout(Duration::from_millis(300), session.recv()).await,
+            Ok(Some(_))
+        ) {}
+        for path in &paths {
+            append(path);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), session.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn stale_registration_and_cancellation_cannot_replace_the_newer_watch() {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.jsonl");
@@ -82,7 +172,8 @@ mod tests {
         let router = SessionRouter::new();
         let mut session = router.open_session(16);
         let watches = ThreadWatches::default();
-        let register = |revision, path| json!({"watchId":revision,"threadId":"open","path":path});
+        let register =
+            |revision, path| json!({"watchKey":1,"watchId":revision,"threadId":"open","path":path});
         watches
             .request(
                 session.id(),
@@ -97,7 +188,7 @@ mod tests {
                 session.id(),
                 router.clone(),
                 "host/thread/unwatch".into(),
-                json!({"watchId":1}),
+                json!({"watchKey":1,"watchId":1}),
             )
             .await
             .unwrap();
@@ -120,7 +211,7 @@ mod tests {
                 session.id(),
                 router.clone(),
                 "host/thread/unwatch".into(),
-                json!({"watchId":2}),
+                json!({"watchKey":1,"watchId":2}),
             )
             .await
             .unwrap();
@@ -157,6 +248,7 @@ struct Slot {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WatchParams {
+    watch_key: u64,
     watch_id: u64,
     thread_id: String,
     path: PathBuf,
@@ -165,6 +257,7 @@ struct WatchParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UnwatchParams {
+    watch_key: u64,
     watch_id: u64,
 }
 
@@ -184,7 +277,7 @@ impl ThreadWatches {
             if method == "host/thread/unwatch" {
                 let params: UnwatchParams =
                     serde_json::from_value(params).map_err(|error| error.to_string())?;
-                watches.unwatch(session, params.watch_id);
+                watches.unwatch(session, params.watch_key, params.watch_id);
                 return Ok(json!({}));
             }
             let params: WatchParams =
@@ -207,7 +300,11 @@ impl ThreadWatches {
         }
         let previous = {
             let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
-            let slot = slots.entry(session).or_default();
+            let slot = slots
+                .entry(session)
+                .or_default()
+                .entry(params.watch_key)
+                .or_default();
             if params.watch_id <= slot.revision {
                 return Ok(());
             }
@@ -231,13 +328,14 @@ impl ThreadWatches {
                 .ok_or("rollout filename is missing")?,
         );
         let event_router = router.clone();
+        let watch_key = params.watch_key;
         let watch_id = params.watch_id;
         let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let message = match event {
                 Ok(event) if !matches!(event.kind, EventKind::Access(_)) &&
                     (event.need_rescan() || event.paths.iter().any(|changed| changed == &path)) =>
-                    json!({"method":"host/thread/changed","params":{"watchId":watch_id,"threadId":params.thread_id}}),
-                Err(_) => json!({"method":"host/thread/watchFailed","params":{"watchId":watch_id,"threadId":params.thread_id}}),
+                    json!({"method":"host/thread/changed","params":{"watchKey":watch_key,"watchId":watch_id,"threadId":params.thread_id}}),
+                Err(_) => json!({"method":"host/thread/watchFailed","params":{"watchKey":watch_key,"watchId":watch_id,"threadId":params.thread_id}}),
                 _ => return,
             };
             let _ = event_router.send_line(session, message.to_string());
@@ -253,6 +351,7 @@ impl ThreadWatches {
         let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(slot) = slots
             .get_mut(&session)
+            .and_then(|slots| slots.get_mut(&watch_key))
             .filter(|slot| slot.revision == watch_id && slot.enabled)
         {
             slot.watcher = Some(watcher);
@@ -260,10 +359,10 @@ impl ThreadWatches {
         Ok(())
     }
 
-    fn unwatch(&self, session: SessionId, revision: u64) {
+    fn unwatch(&self, session: SessionId, key: u64, revision: u64) {
         let previous = {
             let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
-            let slot = slots.entry(session).or_default();
+            let slot = slots.entry(session).or_default().entry(key).or_default();
             if revision < slot.revision {
                 return;
             }

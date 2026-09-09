@@ -178,21 +178,25 @@ impl AgentClient {
     pub async fn watch_thread(
         &self,
         thread_id: &str,
+        watch_key: u64,
         watch_id: u64,
         path: &str,
     ) -> Result<(), AgentError> {
         self.request::<_, Empty>(
             "host/thread/watch",
-            &json!({"threadId":thread_id,"watchId":watch_id,"path":path}),
+            &json!({"threadId":thread_id,"watchKey":watch_key,"watchId":watch_id,"path":path}),
         )
         .await
         .map(|_| ())
     }
 
-    pub async fn unwatch_thread(&self, watch_id: u64) -> Result<(), AgentError> {
-        self.request::<_, Empty>("host/thread/unwatch", &json!({"watchId":watch_id}))
-            .await
-            .map(|_| ())
+    pub async fn unwatch_thread(&self, watch_key: u64, watch_id: u64) -> Result<(), AgentError> {
+        self.request::<_, Empty>(
+            "host/thread/unwatch",
+            &json!({"watchKey":watch_key,"watchId":watch_id}),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Traverse both turn and item cursors. Keep image values only while paging;
