@@ -102,16 +102,8 @@ async fn main() {
         .await
         .unwrap();
     service.start();
-    let runtime = Arc::new(
-        HostRuntime::new(
-            service,
-            endpoint,
-            credentials,
-            "検証 Host".into(),
-            Relays::Disabled,
-        )
-        .await,
-    );
+    let runtime =
+        Arc::new(HostRuntime::new(service, endpoint, credentials, "検証 Host".into()).await);
     let stop = CancellationToken::new();
     let running = tokio::spawn(runtime.run(stop.clone()));
     println!("UI fixture ready: {}", state.display());

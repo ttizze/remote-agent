@@ -45,7 +45,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     } else {
         Relays::Custom(config.relay_url)
     };
-    let endpoint = Endpoint::bind(credentials.host_identity().await, relays.clone())
+    let endpoint = Endpoint::bind(credentials.host_identity().await, relays)
         .await
         .map_err(|e| e.to_string())?;
     let app_server_config = codex_app_server::AppServerConfig {
@@ -69,8 +69,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         .enable_accounts(directory.join("codex-accounts"), app_server_config)
         .await?;
     service.start();
-    let runtime =
-        Arc::new(HostRuntime::new(service, endpoint, credentials, config.name, relays).await);
+    let runtime = Arc::new(HostRuntime::new(service, endpoint, credentials, config.name).await);
     // This file contains a public endpoint address, never a private key or invitation.
     std::fs::write(directory.join("host.ticket"), runtime.ticket().to_string())
         .map_err(|e| e.to_string())?;

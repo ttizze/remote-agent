@@ -1,9 +1,7 @@
 use crate::{CodexRpcService, HostCredentials, RemoteHostProfile, SessionId};
 use agent_core::{
     peer::{PeerEvent, RpcPeer},
-    transport::{
-        Endpoint, IncomingSession, NodeId, PairingTicket, Relays, Session, Ticket, authorize,
-    },
+    transport::{Endpoint, IncomingSession, NodeId, PairingTicket, Session, Ticket, authorize},
 };
 use host_protocol::{RpcMessageKind, classify_message};
 use serde::Deserialize;
@@ -22,7 +20,6 @@ pub struct HostRuntime {
     credentials: Arc<HostCredentials>,
     local_node: NodeId,
     name: String,
-    relays: Relays,
     active: Mutex<BTreeMap<SessionId, Session>>,
 }
 impl HostRuntime {
@@ -31,7 +28,6 @@ impl HostRuntime {
         endpoint: Endpoint,
         credentials: Arc<HostCredentials>,
         name: String,
-        relays: Relays,
     ) -> Self {
         let local_node = credentials.local_identity().await.node_id();
         Self {
@@ -40,7 +36,6 @@ impl HostRuntime {
             credentials,
             local_node,
             name,
-            relays,
             active: Mutex::new(BTreeMap::new()),
         }
     }
@@ -216,7 +211,7 @@ impl HostRuntime {
                     | "host/invite"
                     | "host/revoke"
                     | "host/listRemotes"
-                    | "host/pairRemote"
+                    | "host/registerRemote"
                     | "host/removeRemote"
             )
         );
@@ -304,45 +299,20 @@ impl HostRuntime {
                     .collect::<Vec<_>>(),
             )
             .map_err(|e| e.to_string()),
-            "host/pairRemote" => {
+            "host/registerRemote" => {
                 #[derive(Deserialize)]
-                struct Pair {
-                    invitation: PairingTicket,
+                struct Register {
+                    ticket: Ticket,
                     name: String,
                 }
-                let params: Pair =
-                    serde_json::from_value(params).map_err(|_| "invalid remote invitation")?;
-                if now() >= params.invitation.expires_at {
-                    return Err("invitation expired".into());
-                }
-                // Pair the desktop's durable identity, which will connect directly.
-                let endpoint =
-                    Endpoint::bind(self.credentials.local_identity().await, self.relays.clone())
-                        .await
-                        .map_err(|e| e.to_string())?;
-                let connection = endpoint
-                    .connect(&params.invitation.endpoint)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let peer = connection
-                    .open_peer(Duration::from_secs(20), 8)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let result = peer
-                    .request::<_, Value>(
-                        "host/pair",
-                        &json!({"invitation":params.invitation.invitation}),
-                    )
-                    .await;
-                let closed = peer.close().await;
-                connection.close();
-                endpoint.close().await;
-                result.map_err(|e| e.to_string())?;
-                closed.map_err(|e| e.to_string())?;
+                let params: Register =
+                    serde_json::from_value(params).map_err(|_| "invalid remote profile")?;
+                // Pairing runs on the client's existing endpoint. The Host only
+                // persists its local client's destination; it never binds that key.
                 let profile = RemoteHostProfile {
-                    id: params.invitation.endpoint.node_id(),
+                    id: params.ticket.node_id(),
                     name: params.name,
-                    ticket: params.invitation.endpoint,
+                    ticket: params.ticket,
                 };
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();

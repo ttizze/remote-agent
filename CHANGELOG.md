@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pair remote Hosts through the client's existing endpoint, then save destinations with `host/registerRemote`. Remove the daemon path that opened another endpoint with the same local-client identity.
+
 - Isolate failed iroh handshakes, gate incoming streams behind persisted authorization, and reserve a separate admission pool for pairing. Keep unanswered approvals pending beyond five minutes, register passive clients without a dummy RPC, and stop the daemon when its App Server event stream ends. Add an explicit file-key backend for headless servers, move blocking credential work off Tokio workers, and replace the obsolete iOS fixture socket wait. Cover malformed file deltas, real daemon wire models, Store pagination, expired invitations, credential growth and upstream disconnects.
 
 - Reject malformed file-change delta targets without poisoning Store state. Require incoming iroh sessions to pass the persisted allowlist before exposing streams. Distinguish endpoint shutdown from individual handshake failures. Preserve daemon project-root objects and structured tool results, with captured daemon wire responses and Store pagination regression coverage.

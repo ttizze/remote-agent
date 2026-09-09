@@ -81,7 +81,6 @@ impl Fixture {
                 endpoint,
                 credentials.clone(),
                 "isolated Host".into(),
-                Relays::Disabled,
             )
             .await,
         );
@@ -424,24 +423,36 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         let second = Fixture::start(b.path()).await;
         let local_a = first.local().await;
         let local_b = second.local().await;
-        let invitation = rpc(&local_b.peer, "host/invite", json!({})).await;
+        let invitation: PairingTicket =
+            serde_json::from_value(rpc(&local_b.peer, "host/invite", json!({})).await).unwrap();
+        let direct_session = local_a
+            .endpoint
+            .connect(&invitation.endpoint)
+            .await
+            .unwrap();
+        let direct_peer = direct_session
+            .open_peer(Duration::from_secs(10), 128)
+            .await
+            .unwrap();
+        rpc(
+            &direct_peer,
+            "host/pair",
+            json!({"invitation":invitation.invitation}),
+        )
+        .await;
         let profile = rpc(
             &local_a.peer,
-            "host/pairRemote",
-            json!({"invitation":invitation,"name":"remote fixture"}),
+            "host/registerRemote",
+            json!({"ticket":invitation.endpoint,"name":"remote fixture"}),
         )
         .await;
         assert_eq!(profile["id"], json!(second.ticket.node_id()));
-        let direct = second
-            .connect(first.credentials.local_identity().await)
-            .await;
         assert_eq!(
-            rpc(&direct.peer, "thread/list", json!({})).await["data"],
+            rpc(&direct_peer, "thread/list", json!({})).await["data"],
             json!([])
         );
         assert!(
-            direct
-                .peer
+            direct_peer
                 .request::<_, Value>("host/invite", &json!({}))
                 .await
                 .is_err()
@@ -460,7 +471,8 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
             rpc(&local_a.peer, "host/listRemotes", json!({})).await,
             json!([])
         );
-        direct.close().await;
+        direct_peer.close().await.unwrap();
+        direct_session.close();
         local_a.close().await;
         local_b.close().await;
         first.close().await;
@@ -942,4 +954,35 @@ async fn passive_client_can_approve_after_five_minutes_without_reconnecting() {
         sender.close().await;
         fixture.close().await;
     }).await.expect("unattended approval deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unpaired_connections_cannot_exhaust_authorized_session_slots() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::start(directory.path()).await;
+        let mut strangers = Vec::new();
+        for _ in 0..80 {
+            let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                .await
+                .unwrap();
+            let session = endpoint.connect(&fixture.ticket).await.ok();
+            strangers.push((endpoint, session));
+        }
+        let local = fixture.local().await;
+        assert_eq!(
+            rpc(&local.peer, "thread/list", json!({})).await["data"],
+            json!([])
+        );
+        for (endpoint, session) in strangers {
+            if let Some(session) = session {
+                session.close();
+            }
+            endpoint.close().await;
+        }
+        local.close().await;
+        fixture.close().await;
+    })
+    .await
+    .expect("authorized admission deadline");
 }
