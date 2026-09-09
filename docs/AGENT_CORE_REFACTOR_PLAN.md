@@ -10,9 +10,41 @@
 
 ## 進捗
 
-- 完了: SSH 接続を `relay-transport::ssh` に、RPC とファイル転送を `agent-core::client` に移動。ビルドは通っている
-- 方針変更: `relay-transport::ssh` は以後触らず、iroh 採用時に削除する。`agent-core::client` の peer は汎用ストリーム上に置く
-- 未着手: iroh 検証、`Snapshot` / `Store`、UniFFI、Linux / Windows ビルド
+- PR #3(`codex/agent-core-peer`): JSONL peer を `agent-core::peer` に統合し、`codex-app-server/peer.rs`、`mobile-client/rpc.rs`、`desktop/rpc.rs`、fixture サーバの重複を削除。`clap`、`RawValue` による ID 書き換え、汎用ストリーム上のファイル転送も完了。正味 -2 行。下記「実装指示」の修正を入れてからマージする
+- 未着手: iroh 検証、`Snapshot` / `Store`、`agent-cli`、UniFFI、Linux / Windows ビルド
+
+## 実装指示
+
+### 原則: 「移す」ではなく「設計して古い形を消す」
+
+PR #2 が失敗した原因は、既存の desktop と Kotlin の形を残したまま上に共有層を足したことにある。PR #3 でも、`mobile-client` の `client.rs` と `transport.rs`、desktop の `rpc.rs` がそのまま `agent-core` に入っており、同じ兆候が出ている。以後は次を守る。
+
+- `agent-core` に入れるものは、「全体像」の図にある `transport`(iroh)、`client`(型付き操作)、`peer`、`Snapshot` / `reduce` / `Store`、`agent-cli` だけ。図に無いものは `apps/` か FFI 側のアダプタに置く。
+- 既存コードを rename や移動で core に持ち込まない。core の API は先に理想の形で書き、既存の呼び出し元をそれに合わせて書き換えるか捨てる。
+- API の変種を呼び出し元ごとに増やさない。peer の request は「型付き 1 つ + raw 1 つ」、イベント配信は「通知とサーバ要求を含む順序付きストリーム 1 本」まで減らす。3 つの利用者の癖に合わせて 7 種類の request と 3 種類の配信モードを持つ現状は、第 1 段階の完了までに解消する。
+- 各 PR で `agent-core` の `Cargo.toml` と `pub` 一覧を見て、図に無い依存や型が増えていないか確認する。
+
+### PR #3 への修正(マージ前)
+
+1. `agent-core/src/rpc.rs` を `apps/desktop/src/rpc.rs` に戻す。unix socket、`target` ヘッダ、グローバル tokio runtime、同期コールバック、日本語エラー文字列は desktop のアダプタであり、第 3 段階で消える。core に置かない。
+2. `agent-core/src/client.rs` と `transport.rs` を `mobile-client` に戻す。`MobileClientConfig { relay, host_identity, pairing_ticket }` は SSH とリレーの概念で、iroh 化で丸ごと消える。`agent-core` の `Cargo.toml` から `russh` と `relay-transport` を外す。
+3. 結果として `agent-core` は `peer` と `transfers` だけになる。それが第 1 段階の正しい着地点。
+4. peer の request 変種と配信モードは、この PR では増やさない。減らすのは次の PR で行う。
+
+### 第 1 段階(agent-core の完成)の進め方
+
+- 型付きモデルと `client`(操作)は、既存の `app.rs` や `CommonCodexClient.kt` から移さず、フィクスチャ corpus(87 ケース)を仕様として新規に書く。既存コードはメソッド名と検証内容を確認する参照にだけ使う。
+- `Snapshot` / `reduce` / `Store` も同様に、desktop の `conversation.rs` と Kotlin の `ConversationTransitions.kt` から移さない。両方の振る舞いをフィクスチャに落としてから新規に書く。
+- `transport` は iroh 検証(第 0 段階)の結果を待ってから着手する。それまでは `tokio::io::duplex` で peer と `Store` をテストする。
+- `agent-cli` を最初に作り、以後の全段階でこれを結合テストの基準にする。
+- 完了判定: `agent-core` の `Cargo.toml` に `russh`、`relay-transport`、`gpui` 系、`jni` が無い。`pub` な型と関数が図の 5 要素に収まっている。`&mut self` を持つのは `Store` だけ。
+
+### 第 2〜4 段階の進め方
+
+- daemon、desktop、mobile の順に、それぞれ「`agent-core` の API に合わせて書き直す」。core 側に合わせる変更を入れたくなったら、それは core の設計漏れなので core を直す。アダプタ側に回避コードを書かない。
+- desktop の `app.rs` は `Store` の上に新規に書く。既存の `event`、`reduce`、`submit`、`load_*` を移植しない。`view.rs` は `Arc<Snapshot>` を受ける形に直す。
+- mobile は Kotlin common を段階的に減らさず、UniFFI バインディングができた時点で `commonMain` を丸ごと削除する。
+- 各段階の完了判定は「進め方」の各段階に記載の通り。旧 UI が動くことは条件にしない。
 
 ## 現状
 
@@ -177,6 +209,8 @@ Kotlin common 側の自作(`GatewayResult`、`CodexJsonFields.kt`、`Random` に
 
 ## レビュー基準
 
+- `agent-core` の公開面に、「全体像」の図に無いものが存在しない。`Cargo.toml` の依存も同様。
+- 既存コードの rename や移動で core を作らない。core は先に理想の形で書く。
 - データ型に `Job`、ソケット、コールバック、ロックを入れない。
 - `agent-core` で `&mut self` を持つのは `Store` だけ。
 - UI 層に setter や controller を作らない。状態変更は `store.dispatch(intent)` 経由。
