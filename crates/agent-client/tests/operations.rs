@@ -21,6 +21,7 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
             let (reader, writer) = tokio::io::split(client);
             let peer = Arc::new(RpcPeer::open(reader, writer, 1024 * 1024, 4, |_| {}));
             let agent = AgentClient::new(peer.clone(), Duration::from_secs(1));
+            let (exchanged, received) = tokio::sync::oneshot::channel();
             let Value::Array(exchanges) = case["exchanges"].take() else {
                 panic!("fixture exchanges must be an array")
             };
@@ -32,6 +33,10 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
                     line.clear();
                     assert!(reader.read_line(&mut line).await.unwrap() > 0);
                     let request: Value = serde_json::from_str(&line).unwrap();
+                    if let Some(reply) = exchange.get("reply") {
+                        assert_eq!(&request, reply);
+                        continue;
+                    }
                     assert_eq!(request["method"], exchange["method"]);
                     assert_eq!(request["params"], exchange["params"]);
                     let mut response = exchange["response"].take();
@@ -42,6 +47,7 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
                         .unwrap();
                     writer.write_all(b"\n").await.unwrap();
                 }
+                exchanged.send(()).unwrap();
                 // An extra turn/start after a rejected resume fails here.
                 line.clear();
                 assert_eq!(
@@ -60,6 +66,7 @@ async fn operation_corpus_preserves_requests_results_and_failures() {
                 let value: Value = serde_json::from_str(&result.unwrap()).unwrap();
                 assert_eq!(value, case["result"], "{name}");
             }
+            received.await.unwrap();
             peer.close();
             serve.await.unwrap();
         })

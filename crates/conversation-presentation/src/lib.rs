@@ -6,6 +6,8 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 pub mod history;
+pub mod models;
+pub mod requests;
 pub mod state;
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -420,6 +422,24 @@ fn tool_title(item: &Value) -> String {
 pub fn present_json(request: &str) -> Result<String, String> {
     let mut request: Value = serde_json::from_str(request).map_err(|e| e.to_string())?;
     let result = match text(&request, "operation") {
+        "request" => serde_json::to_value(requests::request_presentation(
+            text(&request, "method"),
+            &request["params"],
+        ))
+        .map_err(|e| e.to_string())?,
+        "error" => serde_json::to_value(requests::error_presentation(
+            &request["error"],
+            text(&request, "status"),
+        ))
+        .map_err(|e| e.to_string())?,
+        "modelSettings" => {
+            let (effort, tier, index) = models::supported_model_settings(
+                request.get("model").filter(|value| !value.is_null()),
+                text(&request, "effort"),
+                text(&request, "tier"),
+            );
+            json!({"effort":effort,"tier":tier,"index":index})
+        }
         "watchPath" => serde_json::to_value(state::watch_path(&request["thread"]))
             .map_err(|e| e.to_string())?,
         "sendPlan" => {

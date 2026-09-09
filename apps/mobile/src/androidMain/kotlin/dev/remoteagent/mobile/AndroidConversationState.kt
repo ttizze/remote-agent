@@ -69,10 +69,9 @@ internal fun ConversationScrollEffects(
     val contentVersion = conversationContentVersion(snapshot)
     LaunchedEffect(listState) {
         snapshotFlow {
-                val layout = listState.layoutInfo
-                listState.isScrollInProgress to
-                    (layout.visibleItemsInfo.lastOrNull()?.index == layout.totalItemsCount - 1)
-            }
+            val layout = listState.layoutInfo
+            listState.isScrollInProgress to (layout.visibleItemsInfo.lastOrNull()?.index == layout.totalItemsCount - 1)
+        }
             .collect { (isScrolling, isAtBottom) -> if (isScrolling) followingLatest = isAtBottom }
     }
     LaunchedEffect(listState.firstVisibleItemIndex, listState.isScrollInProgress) {

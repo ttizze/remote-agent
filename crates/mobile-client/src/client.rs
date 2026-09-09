@@ -197,3 +197,98 @@ impl Drop for MobileClient {
         self.close();
     }
 }
+
+#[cfg(test)]
+mod native_handle_tests {
+    use super::*;
+    use crate::ffi;
+    use host_protocol::{JsonlReader, JsonlWriter};
+    use std::ffi::{CStr, CString};
+
+    fn connected_peer(runtime: &'static tokio::runtime::Runtime) -> (u64, tokio::io::DuplexStream) {
+        runtime.block_on(async {
+            let (client, server) = tokio::io::duplex(4096);
+            let peer = RpcPeer::open(client, 4096, Duration::from_secs(5)).unwrap();
+            let client = MobileClient {
+                session: StdMutex::new(None),
+                peer,
+                host: ConnectedHost {
+                    relay_url: "fixture".into(),
+                    runner_id: "fixture".into(),
+                    host_identity: Ed25519PublicKey::from_bytes([1; 32]),
+                },
+            };
+            (ffi::register_client(runtime, client).unwrap(), server)
+        })
+    }
+
+    #[test]
+    fn closing_native_handle_rejects_new_calls_but_keeps_an_inflight_call_alive() {
+        let runtime = host_protocol::rpc_runtime().unwrap();
+        let (id, server) = connected_peer(runtime);
+        let (started, received) = std::sync::mpsc::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let (closed, transport_closed) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let (reader, writer) = tokio::io::split(server);
+            let mut reader = JsonlReader::new(reader);
+            let mut writer = JsonlWriter::new(writer);
+            let request: Value =
+                serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "model/list");
+            started.send(()).unwrap();
+            wait.await.unwrap();
+            writer
+                .write_line(
+                    &serde_json::json!({"id":request["id"],"result":{"data":[],"nextCursor":null}})
+                        .to_string(),
+                )
+                .await
+                .unwrap();
+            closed
+                .send(reader.read_line().await.unwrap().is_none())
+                .unwrap();
+        });
+        let pending = std::thread::spawn(move || {
+            let command = CString::new(r#"{"type":"models"}"#).unwrap();
+            let mut error = std::ptr::null_mut();
+            // SAFETY: C strings and output pointers are valid for the call;
+            // each returned string is released exactly once.
+            unsafe {
+                let result = ffi::mobile_client_agent_command(id, command.as_ptr(), &mut error);
+                assert!(error.is_null());
+                assert!(!result.is_null());
+                let text = CStr::from_ptr(result).to_str().unwrap().to_owned();
+                ffi::mobile_client_string_free(result);
+                text
+            }
+        });
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+        ffi::mobile_client_close(id);
+        ffi::mobile_client_close(id);
+        let (replacement, _server) = connected_peer(runtime);
+        assert_ne!(
+            replacement, id,
+            "retired IDs must never identify another connection"
+        );
+        let mut error = std::ptr::null_mut();
+        // SAFETY: stale IDs are values, and the output pointer remains writable.
+        unsafe {
+            assert!(ffi::mobile_client_next_event(id, &mut error).is_null());
+            assert!(!error.is_null());
+            assert_eq!(
+                CStr::from_ptr(error).to_str().unwrap(),
+                "mobile client handle is closed"
+            );
+            ffi::mobile_client_string_free(error);
+        }
+        release.send(()).unwrap();
+        assert_eq!(pending.join().unwrap(), "[]");
+        assert!(
+            transport_closed
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+        );
+        ffi::mobile_client_close(replacement);
+    }
+}

@@ -1,54 +1,52 @@
 package dev.remoteagent.mobile
 
+import kotlinx.atomicfu.AtomicRef
+import kotlinx.atomicfu.getAndUpdate
+import kotlinx.atomicfu.update
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Keep restoring the selected Host while the application scope is alive. */
-internal fun MobileController.maintainConnection(scope: CoroutineScope): HostEventSubscription {
+internal fun AtomicRef<MobileApp>.maintainConnection(scope: CoroutineScope): HostEventSubscription {
     val observation = observe {
         ensureSelectedConnection(scope)
         ensureVisibleThreadWatch(scope)
     }
     return HostEventSubscription {
         observation.cancel()
-        foregroundRefreshJob?.cancel()
-        foregroundRefreshJob = null
-        reconnectJob?.cancel()
-        reconnectJob = null
-        threadWatchTarget = null
-        threadWatchJob?.cancel()
-        threadWatchJob = null
-        threadWatchChanges?.close()
-        threadWatchChanges = null
+        val previous = getAndUpdate { it.copy(foregroundRefreshJob = null, reconnectJob = null, watch = null) }
+        previous.foregroundRefreshJob?.cancel()
+        previous.reconnectJob?.cancel()
+        previous.watch?.job?.cancel()
+        previous.watch?.changes?.close()
     }
 }
 
-internal fun MobileController.restoreConnection(scope: CoroutineScope) {
+internal fun AtomicRef<MobileApp>.restoreConnection(scope: CoroutineScope) {
     when (state.selectedView.connection) {
         ConnectionPhase.Connected -> refreshAfterForeground(scope)
         ConnectionPhase.Connecting -> Unit
         else -> {
-            reconnectJob?.cancel()
-            reconnectJob = null
+            getAndUpdate { it.copy(reconnectJob = null) }.reconnectJob?.cancel()
             ensureSelectedConnection(scope)
         }
     }
 }
 
-private fun MobileController.refreshAfterForeground(scope: CoroutineScope) {
-    if (foregroundRefreshJob?.isActive == true || reconnectJob?.isActive == true) return
+private fun AtomicRef<MobileApp>.refreshAfterForeground(scope: CoroutineScope) {
+    if (value.foregroundRefreshJob?.isActive == true || value.reconnectJob?.isActive == true) return
     val profile = state.selectedProfile
-    val generation = profile?.let { sessions.currentGeneration(it.id) }
+    val generation = profile?.let { value.effects.sessions.currentGeneration(it.id) }
     if (profile != null && generation != null) {
         val job = scope.launch(start = CoroutineStart.LAZY) { refreshVisibleState(profile, generation) }
-        foregroundRefreshJob = job
+        update { it.copy(foregroundRefreshJob = job) }
         job.start()
     }
 }
 
-internal fun MobileController.openApp(scope: CoroutineScope) {
+internal fun AtomicRef<MobileApp>.openApp(scope: CoroutineScope) {
     state.selectedProfileId?.let {
         dispatch(AppAction.ThreadListSearchChanged(it, ""))
         dispatch(AppAction.ThreadListOpened(it))
@@ -56,22 +54,20 @@ internal fun MobileController.openApp(scope: CoroutineScope) {
     restoreConnection(scope)
 }
 
-internal fun MobileController.ensureSelectedConnection(scope: CoroutineScope) {
+internal fun AtomicRef<MobileApp>.ensureSelectedConnection(scope: CoroutineScope) {
     val profile = state.selectedProfile
-    if (reconnectHostId != profile?.id) {
-        val previousJob = reconnectJob
-        val previousRefresh = foregroundRefreshJob
-        reconnectJob = null
-        foregroundRefreshJob = null
-        reconnectHostId = profile?.id
-        previousRefresh?.cancel()
-        previousJob?.cancel()
+    if (value.reconnectHostId != profile?.id) {
+        val previous = getAndUpdate {
+            it.copy(reconnectJob = null, foregroundRefreshJob = null, reconnectHostId = profile?.id)
+        }
+        previous.foregroundRefreshJob?.cancel()
+        previous.reconnectJob?.cancel()
     }
     if (profile == null) return
     if (
         state.showingPairing ||
             state.selectedView.connection == ConnectionPhase.Connected ||
-            reconnectJob?.isActive == true
+            value.reconnectJob?.isActive == true
     )
         return
     val job =
@@ -86,13 +82,29 @@ internal fun MobileController.ensureSelectedConnection(scope: CoroutineScope) {
                 current = state.selectedProfile
             }
         }
-    reconnectJob = job
+    update { it.copy(reconnectJob = job) }
     job.start()
 }
 
 /** Snapshot one live generation before starting an asynchronous intent. */
-internal fun MobileController.connectedGeneration(hostIdentity: String): Long? =
-    sessions.currentGeneration(hostIdentity)?.takeIf { isConnected(hostIdentity, it) }
+internal fun AtomicRef<MobileApp>.connectedGeneration(hostIdentity: String): Long? =
+    value.effects.sessions.currentGeneration(hostIdentity)?.takeIf { isConnected(hostIdentity, it) }
+
+internal fun AtomicRef<MobileApp>.isConnected(hostIdentity: String, generation: Long): Boolean =
+    value.effects.sessions.isCurrent(hostIdentity, generation) &&
+        state.profileViews[hostIdentity]?.connection == ConnectionPhase.Connected
+
+internal inline fun AtomicRef<MobileApp>.ifCurrent(hostIdentity: String, generation: Long, block: () -> Unit) {
+    if (value.effects.sessions.isCurrent(hostIdentity, generation)) block()
+}
+
+internal inline fun AtomicRef<MobileApp>.dispatchIfCurrent(
+    hostIdentity: String,
+    generation: Long,
+    action: () -> AppAction,
+) {
+    ifCurrent(hostIdentity, generation) { dispatch(action()) }
+}
 
 private const val INITIAL_RECONNECT_DELAY_MS = 1_000L
 private const val MAX_RECONNECT_DELAY_MS = 30_000L

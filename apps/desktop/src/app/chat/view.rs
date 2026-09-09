@@ -980,13 +980,20 @@ impl ConversationView {
                 }
             }
             if projection.last && !turn["error"].is_null() {
+                let error = conversation_presentation::requests::error_presentation(
+                    &turn["error"],
+                    text(turn, "status"),
+                );
                 body = body.child(
-                    div().text_color(rgb(0xff8e86)).child(
-                        turn["error"]["message"]
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| turn["error"].to_string()),
-                    ),
+                    v_flex()
+                        .text_color(rgb(0xff8e86))
+                        .child(error.title)
+                        .child(error.message.to_owned())
+                        .children(
+                            error
+                                .details
+                                .map(|details| div().text_sm().child(details.to_owned())),
+                        ),
                 );
             }
             for item in (projection.start..projection.end)
@@ -1043,6 +1050,7 @@ impl ConversationView {
         let key = &request["id"];
         let id = request["id"].clone();
         let params = &request["params"];
+        let presentation = request_presentation(text(request, "method"), params);
         let Some(inputs) = self.requests.get(key) else {
             return div().into_any_element();
         };
@@ -1051,7 +1059,7 @@ impl ConversationView {
             .p_4()
             .rounded_lg()
             .bg(rgb(0x30312a))
-            .child("操作の確認・回答")
+            .child(presentation.title)
             .child(
                 TextView::markdown(
                     SharedString::from(format!("request-{key}")),
@@ -1067,7 +1075,7 @@ impl ConversationView {
                 .child("回答を送信しました。Host の確認を待っています。")
                 .into_any_element();
         }
-        if !inputs.questions.is_empty() {
+        if presentation.form == "questions" {
             for q in &inputs.questions {
                 let input = q.input.clone();
                 body = body.child(q.prompt.clone());
@@ -1089,60 +1097,35 @@ impl ConversationView {
                 cx,
                 move |s, _, cx| {
                     let inputs = &s.requests[&id];
-                    let mut answers = serde_json::Map::new();
-                    for q in &inputs.questions {
-                        let value = q.input.read(cx).value();
-                        if value.trim().is_empty() {
-                            s.error = "すべての質問に回答してください".into();
-                            return;
-                        }
-                        answers.insert(q.id.clone(), json!({"answers":[value.as_ref()]}));
-                    }
-                    s.respond(id.clone(), json!({"answers":answers}));
+                    let answers = inputs
+                        .questions
+                        .iter()
+                        .map(|q| (q.id.clone(), q.input.read(cx).value().to_string()))
+                        .collect();
+                    s.respond(id.clone(), RequestAnswer::Answers { answers });
                 },
             ));
-        } else if matches!(
-            text(request, "method"),
-            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
-        ) {
-            let defaults = json!(["accept", "acceptForSession", "decline", "cancel"]);
-            let decisions = if params["availableDecisions"].is_array() {
-                &params["availableDecisions"]
-            } else {
-                &defaults
-            };
+        } else if presentation.form == "decision" {
             let mut row = h_flex().gap_2().flex_wrap();
-            for (i, decision) in array(decisions).iter().enumerate() {
+            for (i, label) in presentation.decisions.into_iter().enumerate() {
                 let id = id.clone();
-                let decision = decision.clone();
-                let label = match decision.as_str() {
-                    Some("accept") => "許可".into(),
-                    Some("acceptForSession") => "このセッションで許可".into(),
-                    Some("decline") => "拒否".into(),
-                    Some("cancel") => "中止".into(),
-                    _ => decision.to_string(),
-                };
                 row = row.child(button(
                     format!("decision-{key}-{i}"),
-                    label,
+                    label.into_owned(),
                     cx,
-                    move |s, _, _| s.respond(id.clone(), json!({"decision":decision})),
+                    move |s, _, _| s.respond(id.clone(), RequestAnswer::Decision { index: i }),
                 ));
             }
             body = body.child(row);
-        } else if request["method"] == "item/permissions/requestApproval" {
+        } else if presentation.form == "permissions" {
             let denied = id.clone();
-            let permissions = params["permissions"].clone();
             body = body
                 .child(button(
                     format!("allow-{key}"),
                     "今回の権限を許可",
                     cx,
                     move |s, _, _| {
-                        s.respond(
-                            id.clone(),
-                            json!({"permissions":permissions,"scope":"turn"}),
-                        )
+                        s.respond(id.clone(), RequestAnswer::Permissions { allow: true })
                     },
                 ))
                 .child(button(
@@ -1150,7 +1133,7 @@ impl ConversationView {
                     "拒否",
                     cx,
                     move |s, _, _| {
-                        s.respond(denied.clone(), json!({"permissions":{},"scope":"turn"}))
+                        s.respond(denied.clone(), RequestAnswer::Permissions { allow: false })
                     },
                 ));
         } else {
@@ -1161,11 +1144,13 @@ impl ConversationView {
                     format!("raw-{key}"),
                     "回答を送信",
                     cx,
-                    move |s, _, cx| match serde_json::from_str(
-                        s.requests[&id].raw.read(cx).value().as_ref(),
-                    ) {
-                        Ok(value) => s.respond(id.clone(), value),
-                        Err(e) => s.error = e.to_string(),
+                    move |s, _, cx| {
+                        s.respond(
+                            id.clone(),
+                            RequestAnswer::Raw {
+                                json: s.requests[&id].raw.read(cx).value().to_string().into(),
+                            },
+                        )
                     },
                 ));
         }

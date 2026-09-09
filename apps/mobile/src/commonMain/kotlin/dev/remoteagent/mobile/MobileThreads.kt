@@ -1,61 +1,65 @@
 package dev.remoteagent.mobile
 
-internal suspend fun MobileController.showThreadList(profile: HostProfile) {
+import kotlinx.atomicfu.AtomicRef
+import kotlinx.atomicfu.getAndUpdate
+import kotlinx.atomicfu.update
+
+internal suspend fun AtomicRef<MobileApp>.showThreadList(profile: HostProfile) {
     // Native back navigation must commit even while the transport is disconnected.
     dispatch(AppAction.ThreadListOpened(profile.id))
-    val generation = sessions.currentGeneration(profile.id) ?: return
+    val generation = value.effects.sessions.currentGeneration(profile.id) ?: return
     listThreads(profile, generation)
 }
 
-internal suspend fun MobileController.listThreads(profile: HostProfile) {
-    val generation = sessions.currentGeneration(profile.id) ?: return
+internal suspend fun AtomicRef<MobileApp>.listThreads(profile: HostProfile) {
+    val generation = value.effects.sessions.currentGeneration(profile.id) ?: return
     listThreads(profile, generation)
 }
 
-internal suspend fun MobileController.listThreads(profile: HostProfile, generation: Long, refresh: Boolean = true) {
+internal suspend fun AtomicRef<MobileApp>.listThreads(profile: HostProfile, generation: Long, refresh: Boolean = true) {
     if (!isConnected(profile.id, generation)) return
-    if (listLoads[profile.id] == generation) {
-        pendingListRefresh += profile.id
-        return
+    val previous = getAndUpdate {
+        if (it.listLoads[profile.id] == generation) it.copy(pendingListRefresh = it.pendingListRefresh + profile.id)
+        else it.copy(listLoads = it.listLoads + (profile.id to generation))
     }
-    listLoads[profile.id] = generation
+    if (previous.listLoads[profile.id] == generation) return
     try {
         do {
-            pendingListRefresh.remove(profile.id)
+            update { it.copy(pendingListRefresh = it.pendingListRefresh - profile.id) }
             if (!refreshThreadList(profile, generation, refresh)) break
-        } while (isConnected(profile.id, generation) && profile.id in pendingListRefresh)
+        } while (isConnected(profile.id, generation) && profile.id in value.pendingListRefresh)
     } finally {
-        if (listLoads[profile.id] == generation) listLoads.remove(profile.id)
+        update { if (it.listLoads[profile.id] == generation) it.copy(listLoads = it.listLoads - profile.id) else it }
     }
 }
 
-internal suspend fun MobileController.expandTaskList(
+internal suspend fun AtomicRef<MobileApp>.expandTaskList(
     profile: HostProfile,
     projects: Boolean,
     projectId: String? = null,
 ) {
     dispatch(AppAction.ThreadListExpanded(profile.id, projects, projectId))
-    val generation = sessions.currentGeneration(profile.id) ?: return
+    val generation = value.effects.sessions.currentGeneration(profile.id) ?: return
     listThreads(profile, generation, refresh = false)
 }
 
-internal suspend fun MobileController.searchTaskList(profile: HostProfile, term: String) {
+internal suspend fun AtomicRef<MobileApp>.searchTaskList(profile: HostProfile, term: String) {
     if (state.profileViews[profile.id]?.threadSearchTerm == term.trim()) return
     dispatch(AppAction.ThreadListSearchChanged(profile.id, term.trim()))
-    val generation = sessions.currentGeneration(profile.id) ?: return
+    val generation = value.effects.sessions.currentGeneration(profile.id) ?: return
     listThreads(profile, generation, refresh = false)
 }
 
-internal fun MobileController.openNewThread(profile: HostProfile, cwd: String) {
+internal fun AtomicRef<MobileApp>.openNewThread(profile: HostProfile, cwd: String) {
     dispatch(AppAction.NewThreadOpened(profile.id, cwd))
 }
 
-internal suspend fun MobileController.refreshVisibleState(profile: HostProfile, generation: Long) {
+internal suspend fun AtomicRef<MobileApp>.refreshVisibleState(profile: HostProfile, generation: Long) {
     listThreads(profile, generation)
     state.profileViews[profile.id]?.selectedThreadId?.let { threadId -> readThread(profile, threadId, generation) }
 }
 
-internal fun MobileController.threadListQuery(hostIdentity: String): ThreadListQuery {
+internal fun AtomicRef<MobileApp>.threadListQuery(hostIdentity: String): ThreadListQuery {
     val view = state.profileViews[hostIdentity] ?: ProfileViewState()
     return ThreadListQuery(
         view.visibleProjectCount,
@@ -65,14 +69,15 @@ internal fun MobileController.threadListQuery(hostIdentity: String): ThreadListQ
     )
 }
 
-private suspend fun MobileController.refreshThreadList(
+private suspend fun AtomicRef<MobileApp>.refreshThreadList(
     profile: HostProfile,
     generation: Long,
     refresh: Boolean,
 ): Boolean {
     val query = threadListQuery(profile.id)
     dispatchIfCurrent(profile.id, generation) { AppAction.ThreadListLoading(profile.id, append = !refresh) }
-    val result = gateway.codex.listThreads(profile, query)
+    val result =
+        value.effects.gateway.command(profile, AgentCommand.ListThreads(query)).mapGateway(::parseThreadListPage)
     if (query != threadListQuery(profile.id)) return true
     return when (result) {
         is GatewayResult.Failure -> {

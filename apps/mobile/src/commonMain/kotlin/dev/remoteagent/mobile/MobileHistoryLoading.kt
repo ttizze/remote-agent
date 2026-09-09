@@ -1,13 +1,14 @@
 package dev.remoteagent.mobile
 
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.sync.withLock
 
-internal suspend fun MobileController.readThread(profile: HostProfile, threadId: String) {
-    val generation = sessions.currentGeneration(profile.id) ?: return
+internal suspend fun AtomicRef<MobileApp>.readThread(profile: HostProfile, threadId: String) {
+    val generation = value.effects.sessions.currentGeneration(profile.id) ?: return
     readThread(profile, threadId, generation)
 }
 
-internal suspend fun MobileController.readThread(
+internal suspend fun AtomicRef<MobileApp>.readThread(
     profile: HostProfile,
     threadId: String,
     generation: Long,
@@ -22,17 +23,20 @@ internal suspend fun MobileController.readThread(
         dispatchIfCurrent(profile.id, generation) { AppAction.ThreadSelected(profile.id, threadId) }
         dispatchIfCurrent(profile.id, generation) { AppAction.ThreadReadLoading(profile.id, threadId) }
     }
-    val token = sessions.beginRead(profile.id, threadId, generation) ?: return
+    val token = value.effects.sessions.beginRead(profile.id, threadId, generation) ?: return
     try {
-        val result = gateway.codex.readThread(profile, threadId)
+        val result =
+            value.effects.gateway
+                .command(profile, AgentCommand.ReadThread(threadId, value.effects.deferHistoryItemDetails))
+                .mapGateway { ThreadReadResult(codexThreadFromResponse(it), emptyList()) }
         // Event callbacks and the read completion share one mutex. Events
         // delivered while the request was in flight are therefore drained
         // after the replacement Snapshot and never race it.
-        eventMutex.withLock {
-            val completion = sessions.finishRead(token)
+        value.effects.eventMutex.withLock {
+            val completion = value.effects.sessions.finishRead(token)
             if (
                 completion != null &&
-                    sessions.isCurrent(profile.id, generation) &&
+                    value.effects.sessions.isCurrent(profile.id, generation) &&
                     state.profileViews[profile.id]?.selectedThreadId == threadId
             ) {
                 if (completion.overflowed) {
@@ -54,21 +58,27 @@ internal suspend fun MobileController.readThread(
     } finally {
         // Navigation can cancel a background read while a notification is
         // buffered. Do not leave that thread behind an abandoned barrier.
-        sessions.finishRead(token)
+        value.effects.sessions.finishRead(token)
     }
 }
 
-internal suspend fun MobileController.loadOlderHistory(profile: HostProfile, turnId: String? = null) {
+internal suspend fun AtomicRef<MobileApp>.loadOlderHistory(profile: HostProfile, turnId: String? = null) {
     val generation = connectedGeneration(profile.id) ?: return
     val snapshot = selectedHistoryPage(profile.id, turnId) ?: return
     val threadId = snapshot.summary.id
     val cursor = snapshot.historyCursor(turnId)
-    val navigation = historyNavigation
+    val navigation = value.historyNavigation
     dispatch(AppAction.HistoryLoading(profile.id, true))
     try {
-        val result = historyClient.readOlderHistory(profile, threadId, cursor, turnId)
-        eventMutex.withLock {
-            if (!isConnected(profile.id, generation) || historyNavigation != navigation) return@withLock
+        val result =
+            value.effects.gateway
+                .command(
+                    profile,
+                    AgentCommand.ReadOlder(threadId, cursor, turnId, value.effects.deferHistoryItemDetails),
+                )
+                .mapGateway(::codexThreadFromResponse)
+        value.effects.eventMutex.withLock {
+            if (!isConnected(profile.id, generation) || value.historyNavigation != navigation) return@withLock
             val current = state.cache.snapshot(profile.id, threadId) ?: return@withLock
             when (result) {
                 is GatewayResult.Success -> {
@@ -89,14 +99,14 @@ internal suspend fun MobileController.loadOlderHistory(profile: HostProfile, tur
     } finally {
         if (
             isConnected(profile.id, generation) &&
-                historyNavigation == navigation &&
+                value.historyNavigation == navigation &&
                 state.profileViews[profile.id]?.loadingHistory == true
         )
             dispatch(AppAction.HistoryLoading(profile.id, false))
     }
 }
 
-private fun MobileController.selectedHistoryPage(hostIdentity: String, turnId: String?): ThreadSnapshot? {
+private fun AtomicRef<MobileApp>.selectedHistoryPage(hostIdentity: String, turnId: String?): ThreadSnapshot? {
     val view = state.profileViews[hostIdentity] ?: return null
     val snapshot = view.selectedThreadId?.let { state.cache.snapshot(hostIdentity, it) }
     return when {

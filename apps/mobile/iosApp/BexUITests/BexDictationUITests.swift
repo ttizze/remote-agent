@@ -25,6 +25,8 @@ extension BexLaunchUITests {
         #endif
         XCUIApplication().resetAuthorizationStatus(for: .microphone)
         let app = try connectedSimulatorApp()
+        addTeardownBlock { _ = try self.simulatorFixture("dictation/restore-account") }
+        try simulatorFixture("dictation/no-account")
         let compose = app.buttons["tasks.new.project.simulator-project"]
         XCTAssertTrue(compose.waitForExistence(timeout: 10)); compose.tap()
         let prompt = app.descendants(matching: .any)["task.message"]

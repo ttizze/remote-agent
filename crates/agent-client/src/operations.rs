@@ -44,6 +44,36 @@ impl AgentClient {
         Self { peer, deadline }
     }
 
+    pub async fn transcribe(&self, audio: &str) -> Result<String, AgentError> {
+        #[derive(Serialize)]
+        struct Audio<'a> {
+            audio: &'a str,
+        }
+        let mut result: Value = self
+            .request("host/dictation/transcribe", &Audio { audio })
+            .await?;
+        if !result["text"]
+            .as_str()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            return invalid("音声を認識できませんでした。もう一度録音してください。");
+        }
+        let Value::String(text) = result["text"].take() else {
+            unreachable!()
+        };
+        Ok(text)
+    }
+
+    pub async fn respond(
+        &self,
+        request: &Value,
+        answer: RequestAnswer<'_>,
+    ) -> Result<(), AgentError> {
+        let line = response_line(request, answer).map_err(AgentError::InvalidResponse)?;
+        self.peer.send_raw(&line).await?;
+        Ok(())
+    }
+
     pub async fn list_threads(&self, query: &Value) -> Result<Value, AgentError> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -301,11 +331,40 @@ impl AgentClient {
         })
     }
 
-    pub async fn resume_thread(
+    /// Execute the shared submission decision without retaining client settings.
+    pub async fn send_turn(
         &self,
         thread_id: &str,
-        cwd: Option<&str>,
-    ) -> Result<(), AgentError> {
+        plan: conversation_presentation::state::SendPlan,
+        input: &[Value],
+        client_user_message_id: &str,
+        options: TurnOptions<'_>,
+    ) -> Result<Option<String>, AgentError> {
+        use conversation_presentation::state::SendPlan;
+        match plan {
+            SendPlan::Steer { turn_id } => {
+                self.steer_turn(thread_id, &turn_id, input, client_user_message_id)
+                    .await?;
+                Ok(Some(turn_id))
+            }
+            SendPlan::Queue => {
+                self.queue_turn(thread_id, input, client_user_message_id)
+                    .await?;
+                Ok(None)
+            }
+            SendPlan::Start { cwd, resume } => {
+                if resume {
+                    self.resume_thread(thread_id, Some(&cwd)).await?;
+                }
+                self.start_turn(thread_id, input, client_user_message_id, options)
+                    .await
+                    .map(Some)
+            }
+            SendPlan::Reject { message } => invalid(message),
+        }
+    }
+
+    async fn resume_thread(&self, thread_id: &str, cwd: Option<&str>) -> Result<(), AgentError> {
         let mut params = json!({"threadId":thread_id});
         if let Some(cwd) = cwd {
             params["cwd"] = cwd.into();
@@ -315,7 +374,7 @@ impl AgentClient {
             .map(|_| ())
     }
 
-    pub async fn start_turn(
+    async fn start_turn(
         &self,
         thread_id: &str,
         input: &[Value],
@@ -357,7 +416,7 @@ impl AgentClient {
         }
     }
 
-    pub async fn steer_turn(
+    async fn steer_turn(
         &self,
         thread_id: &str,
         turn_id: &str,
@@ -377,7 +436,7 @@ impl AgentClient {
         .map(|_| ())
     }
 
-    pub async fn queue_turn(
+    async fn queue_turn(
         &self,
         thread_id: &str,
         input: &[Value],
@@ -608,6 +667,114 @@ impl AgentClient {
         let raw = self.peer.request_raw(&line, self.deadline).await?;
         decode_response(&raw)
     }
+}
+
+/// UI input only. The original request supplies wire IDs, decisions and permissions.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RequestAnswer<'a> {
+    Decision {
+        index: usize,
+    },
+    Permissions {
+        allow: bool,
+    },
+    Answers {
+        answers: std::collections::BTreeMap<String, String>,
+    },
+    Raw {
+        #[serde(borrow)]
+        json: Cow<'a, str>,
+    },
+}
+
+fn response_line(request: &Value, answer: RequestAnswer<'_>) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Reply<'a, T> {
+        id: &'a Value,
+        result: T,
+    }
+    #[derive(Serialize)]
+    struct Decision<T> {
+        decision: T,
+    }
+    #[derive(Serialize)]
+    struct Permissions<'a> {
+        permissions: &'a Value,
+        scope: &'static str,
+    }
+    #[derive(Serialize)]
+    struct Answers<T> {
+        answers: T,
+    }
+    struct QuestionAnswers<'a> {
+        questions: &'a Value,
+        answers: &'a std::collections::BTreeMap<String, String>,
+    }
+    impl Serialize for QuestionAnswers<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(None)?;
+            for question in self
+                .questions
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+            {
+                let Some(key) = question["id"].as_str() else {
+                    continue;
+                };
+                let value = self
+                    .answers
+                    .get(key)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| serde::ser::Error::custom("すべての質問に回答してください"))?;
+                map.serialize_entry(key, &Answers { answers: [value] })?;
+            }
+            map.end()
+        }
+    }
+    let id = &request["id"];
+    let params = &request["params"];
+    match answer {
+        RequestAnswer::Decision { index } => {
+            let decision = conversation_presentation::requests::decision_at(params, index)
+                .ok_or("承認の選択肢が無効です")?;
+            serde_json::to_string(&Reply {
+                id,
+                result: Decision { decision },
+            })
+        }
+        RequestAnswer::Permissions { allow } => {
+            let empty = Value::Object(Default::default());
+            let permissions = if allow {
+                params.get("permissions").unwrap_or(&empty)
+            } else {
+                &empty
+            };
+            serde_json::to_string(&Reply {
+                id,
+                result: Permissions {
+                    permissions,
+                    scope: "turn",
+                },
+            })
+        }
+        RequestAnswer::Answers { answers } => serde_json::to_string(&Reply {
+            id,
+            result: Answers {
+                answers: QuestionAnswers {
+                    questions: &params["questions"],
+                    answers: &answers,
+                },
+            },
+        }),
+        RequestAnswer::Raw { json } => {
+            let result: Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            serde_json::to_string(&Reply { id, result })
+        }
+    }
+    .map_err(|e| e.to_string())
 }
 
 fn request_line<P: Serialize + ?Sized>(method: &str, params: &P) -> Result<String, AgentError> {

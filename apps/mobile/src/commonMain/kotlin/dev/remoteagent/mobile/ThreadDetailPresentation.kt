@@ -22,6 +22,7 @@ internal data class ThreadTurnPresentation(
     val pendingRequests: List<ThreadRequestPresentation>,
 )
 
+@Serializable
 internal data class ThreadErrorPresentation(
     val title: String,
     val message: String,
@@ -30,7 +31,19 @@ internal data class ThreadErrorPresentation(
     val isRetryable: Boolean,
 )
 
-internal data class ThreadRequestPresentation(val id: String, val kind: String, val title: String, val body: String)
+@Serializable
+data class RequestQuestion(val id: String, val prompt: String, val options: List<String>, val secret: Boolean)
+
+@Serializable
+internal data class ThreadRequestPresentation(
+    val id: String = "",
+    val kind: String,
+    val form: String,
+    val title: String,
+    val body: String,
+    val questions: List<RequestQuestion>,
+    val decisions: List<String>,
+)
 
 /** Rust returns source indices; Kotlin keeps ownership of all message bodies. */
 internal fun ThreadSnapshot.conversationSegments(): List<ThreadTurnPresentation> = turns.flatMap { turn ->

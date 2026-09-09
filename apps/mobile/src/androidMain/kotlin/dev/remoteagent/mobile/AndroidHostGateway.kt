@@ -1,15 +1,18 @@
 package dev.remoteagent.mobile
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 
 /** Android adapter over the native raw Codex JSON-RPC client. */
 class AndroidHostGateway(private val context: Context) : HostGateway {
-    private val connections = AndroidHostConnections()
-    override val codex = CommonCodexClient(this)
+    private val connections = MutableStateFlow<Map<String, NativeHostConnection>>(emptyMap())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile> = invokeAndroidHost {
         val reference = payload.hostIdentity
@@ -20,7 +23,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         AndroidCredentialStore(context, "relay:$reference").save(payload.relayToken.encodeToByteArray())
         val profile = HostProfile(payload.runnerId, payload.hostName, payload.relayUrl, payload.hostIdentity, reference)
         try {
-            openAndroidHost(profile, payload.relayToken, key, payload.ticket).close()
+            NativeHostTransport.close(openAndroidHost(profile, payload.relayToken, key, payload.ticket))
         } finally {
             key.fill(0)
         }
@@ -31,7 +34,7 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
         GatewayResult.Success(listOf(profile.relayUrl))
 
     override suspend fun connect(profile: HostProfile): GatewayResult<Unit> = invokeAndroidHost {
-        connections.retire(profile.id)
+        connections.replaceNativeHost(profile.id, null, NativeHostTransport::close)
         val key =
             AndroidCredentialStore(context, "key:${profile.deviceIdentityReference}").load()
                 ?: error("Device key is unavailable; pair again")
@@ -45,59 +48,32 @@ class AndroidHostGateway(private val context: Context) : HostGateway {
                 key.fill(0)
                 token.fill(0)
             }
-        connections.replace(profile.id, handle)
+        connections.replaceNativeHost(profile.id, handle, NativeHostTransport::close)
     }
 
     override suspend fun disconnect(profile: HostProfile): GatewayResult<Unit> = invokeAndroidHost {
-        connections.retire(profile.id)
+        connections.replaceNativeHost(profile.id, null, NativeHostTransport::close)
     }
 
     override suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement> =
         invokeAndroidHost {
             Json.parseToJsonElement(
-                connections.withHandle(profile) { NativeHostTransport.transfer(it, params.toString()) }
+                NativeHostTransport.transfer(connections.nativeHandle(profile.id), params.toString())
             )
         }
 
     override suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String> =
-        invokeAndroidHost { connections.withHandle(profile) { NativeHostTransport.agentCommand(it, command.encode()) } }
-            .agentResult()
-
-    override suspend fun rawRequest(
-        profile: HostProfile,
-        method: String,
-        params: JsonElement,
-    ): GatewayResult<JsonElement> = invokeAndroidHost {
-        val raw =
-            connections.withHandle(profile) { handle -> NativeHostTransport.request(handle, method, params.toString()) }
-        Json.parseToJsonElement(raw)
-    }
-
-    override suspend fun respondResult(
-        profile: HostProfile,
-        requestId: JsonElement,
-        result: JsonElement,
-    ): GatewayResult<Unit> = invokeAndroidHost {
-        connections.withHandle(profile) { handle ->
-            check(NativeHostTransport.respondResult(handle, requestId.toString(), result.toString()))
+        invokeAndroidHost {
+            NativeHostTransport.agentCommand(connections.nativeHandle(profile.id), command.encode())
         }
-    }
-
-    override suspend fun respondError(
-        profile: HostProfile,
-        requestId: JsonElement,
-        error: JsonElement,
-    ): GatewayResult<Unit> = invokeAndroidHost {
-        connections.withHandle(profile) { handle ->
-            check(NativeHostTransport.respondError(handle, requestId.toString(), error.toString()))
-        }
-    }
+        .agentResult()
 
     override fun subscribeRaw(
         profile: HostProfile,
         onMessage: (RawCodexMessage) -> Unit,
         onClosed: (String) -> Unit,
-    ): HostEventSubscription = connections.subscribe(profile, onMessage, onClosed)
+    ): HostEventSubscription =
+        connections.subscribeNativeHost(profile.id, scope, NativeHostTransport::nextEvent, onMessage, onClosed)
 }
 
 private suspend fun <T> invokeAndroidHost(block: () -> T): GatewayResult<T> =

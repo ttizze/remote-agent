@@ -5,6 +5,7 @@ import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.startCoroutine
 import kotlin.test.AfterTest
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,8 +13,15 @@ import kotlinx.coroutines.Runnable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 
 internal abstract class MobileControllerTestFixture {
     protected val persistenceScopes = mutableListOf<CoroutineScope>()
@@ -105,12 +113,12 @@ internal abstract class MobileControllerTestFixture {
         workingDirectory: String = "/workspace",
         cachedThread: ThreadSnapshot? = thread,
         cacheLimits: MobileCacheLimits = MobileCacheLimits(),
-    ): MobileController {
+    ): AtomicRef<MobileApp> {
         val initialCache =
             cachedThread?.let {
                 reconcileThreadRead(MobileCache(), profile.id, ThreadReadResult(it, emptyList()), cacheLimits)
             } ?: MobileCache()
-        return MobileController(
+        return mobileApp(
             gateway = gateway,
             repository =
                 InMemoryMobileRepository(
@@ -133,9 +141,6 @@ internal abstract class MobileControllerTestFixture {
         )
     }
 
-    protected fun notification(method: String, params: String): RawCodexMessage.Notification =
-        RawCodexMessage.Notification(method, Json.parseToJsonElement(params))
-
     protected fun snapshot(id: String): ThreadSnapshot =
         ThreadSnapshot(
             summary =
@@ -157,9 +162,7 @@ internal abstract class MobileControllerTestFixture {
                 ),
         )
 
-    protected class FakeHostGateway : HostGateway, CodexGateway {
-        override val codex: CodexGateway
-            get() = this
+    protected class FakeHostGateway : HostGateway {
 
         var discoveryResult: GatewayResult<List<String>> = GatewayResult.Success(emptyList())
         var connectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
@@ -174,9 +177,7 @@ internal abstract class MobileControllerTestFixture {
         var interruptResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectResult: GatewayResult<Unit> = GatewayResult.Success(Unit)
         var disconnectBlock: (suspend () -> GatewayResult<Unit>)? = null
-        var agentBlock: (suspend (AgentCommand) -> GatewayResult<String>)? = null
-        var rawBlock: (suspend (String, JsonElement) -> GatewayResult<JsonElement>)? = null
-        var rawHook: ((String, JsonElement) -> Unit)? = null
+        var agentBlock: (suspend (AgentCommand) -> GatewayResult<String>?)? = null
         var readHook: (() -> Unit)? = null
         var callback: ((RawCodexMessage) -> Unit)? = null
         var closeCallback: ((String) -> Unit)? = null
@@ -231,92 +232,82 @@ internal abstract class MobileControllerTestFixture {
 
         var listBlock: (suspend (ThreadListQuery) -> GatewayResult<ThreadListPage>)? = null
 
-        override suspend fun listThreads(profile: HostProfile, query: ThreadListQuery): GatewayResult<ThreadListPage> {
-            listQueries += query
-            listHook?.invoke()
-            listBlock?.let {
-                return it(query)
+        override suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String> {
+            agentBlock?.invoke(command)?.let {
+                return it
             }
-            return when (val result = projectResult) {
-                is GatewayResult.Success -> listResult.mapGateway { ThreadListPage(it, result.value) }
-                is GatewayResult.Failure -> result
+            val result: GatewayResult<JsonElement> =
+                when (command) {
+                    AgentCommand.Models -> GatewayResult.Success(JsonArray(emptyList()))
+                    is AgentCommand.ListThreads -> {
+                        listQueries += command.query
+                        listHook?.invoke()
+                        val page =
+                            listBlock?.invoke(command.query)
+                                ?: when (val projects = projectResult) {
+                                    is GatewayResult.Success ->
+                                        listResult.mapGateway { ThreadListPage(it, projects.value) }
+                                    is GatewayResult.Failure -> projects
+                                }
+                        page.mapGateway { it.fixtureJson() }
+                    }
+                    is AgentCommand.ReadThread -> {
+                        readIds += command.threadId
+                        readHook?.invoke()
+                        readResult.mapGateway { it.thread.fixtureResponse() }
+                    }
+                    is AgentCommand.StartThread -> {
+                        startCalls += 1
+                        startCwds += command.cwd
+                        startResult.mapGateway { it.fixtureResponse() }
+                    }
+                    is AgentCommand.SendTurn -> send(command)
+                    is AgentCommand.InterruptTurn -> {
+                        interruptHook?.invoke()
+                        interruptResult.mapGateway { JsonNull }
+                    }
+                    else -> error("No response configured for native agent intent: $command")
+                }
+            return result.mapGateway(JsonElement::toString)
+        }
+
+        private fun send(command: AgentCommand.SendTurn): GatewayResult<JsonElement> {
+            // Only transport effects are controlled here; use the real shared routing policy.
+            val plan =
+                Json.parseToJsonElement(
+                        nativeConversationPresentation(
+                            buildJsonObject {
+                                put("operation", "sendPlan")
+                                put("snapshot", command.snapshot)
+                                put("listed", command.listed)
+                            }
+                                .toString()
+                        )
+                    )
+                    .jsonObject
+            submittedClientIds += command.input.clientUserMessageId
+            return when (plan.string("action")) {
+                "steer" -> {
+                    val turnId = plan.string("turnId")!!
+                    steerHook?.invoke()
+                    steerTurnIds += turnId
+                    steerTexts += command.input.text
+                    steerResult.mapGateway { JsonPrimitive(turnId) }
+                }
+                "queue" -> {
+                    queueThreadIds += command.threadId
+                    queueTexts += command.input.text
+                    queueResult.mapGateway { JsonNull }
+                }
+                "start" -> {
+                    turnResumes += plan.boolean("resume")!!
+                    turnCwds += plan.string("cwd")!!
+                    turnTexts += command.input.text
+                    turnHook?.invoke()
+                    turnResult.mapGateway(::JsonPrimitive)
+                }
+                else -> GatewayResult.Failure(plan.string("message")!!)
             }
-        }
-
-        override suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult> {
-            readIds += threadId
-            readHook?.invoke()
-            return readResult
-        }
-
-        override suspend fun startThread(
-            profile: HostProfile,
-            cwd: String,
-            options: CodexTurnOptions,
-        ): GatewayResult<ThreadSnapshot> {
-            startCalls += 1
-            startCwds += cwd
-            return startResult
-        }
-
-        override suspend fun startTurn(
-            profile: HostProfile,
-            threadId: String,
-            cwd: String,
-            input: CodexTurnInput,
-            resume: Boolean,
-            options: CodexTurnOptions,
-        ): GatewayResult<String> {
-            submittedClientIds += input.clientUserMessageId
-            turnResumes += resume
-            turnCwds += cwd
-            turnTexts += input.text
-            turnHook?.invoke()
-            return turnResult
-        }
-
-        override suspend fun steerTurn(
-            profile: HostProfile,
-            threadId: String,
-            turnId: String,
-            input: CodexTurnInput,
-        ): GatewayResult<Unit> {
-            submittedClientIds += input.clientUserMessageId
-            steerHook?.invoke()
-            steerTurnIds += turnId
-            steerTexts += input.text
-            return steerResult
-        }
-
-        override suspend fun queueTurn(
-            profile: HostProfile,
-            threadId: String,
-            input: CodexTurnInput,
-        ): GatewayResult<String> {
-            submittedClientIds += input.clientUserMessageId
-            queueThreadIds += threadId
-            queueTexts += input.text
-            return queueResult
-        }
-
-        override suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit> {
-            interruptHook?.invoke()
-            return interruptResult
-        }
-
-        override suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String> =
-            requireNotNull(agentBlock) { "No response configured for native agent intent" }(command)
-
-        override suspend fun rawRequest(
-            profile: HostProfile,
-            method: String,
-            params: JsonElement,
-        ): GatewayResult<JsonElement> {
-            rawBlock?.let {
-                return it(method, params)
-            }
-            rawHook?.invoke(method, params)
-            return GatewayResult.Success(JsonObject(emptyMap()))
         }
 
         override fun subscribeRaw(
@@ -331,18 +322,6 @@ internal abstract class MobileControllerTestFixture {
                 if (callback === onMessage) callback = null
             }
         }
-
-        override suspend fun respondResult(
-            profile: HostProfile,
-            requestId: JsonElement,
-            result: JsonElement,
-        ): GatewayResult<Unit> = GatewayResult.Success(Unit)
-
-        override suspend fun respondError(
-            profile: HostProfile,
-            requestId: JsonElement,
-            error: JsonElement,
-        ): GatewayResult<Unit> = GatewayResult.Success(Unit)
 
         fun emit(message: RawCodexMessage) {
             callback?.invoke(message)
@@ -403,6 +382,9 @@ internal abstract class MobileControllerTestFixture {
     }
 }
 
+internal fun notification(method: String, params: String): RawCodexMessage.Notification =
+    RawCodexMessage.Notification(method, Json.parseToJsonElement(params))
+
 internal class InMemoryMobileRepository(initial: AppState = AppState()) : MobileRepository {
     private var state = initial
 
@@ -411,4 +393,118 @@ internal class InMemoryMobileRepository(initial: AppState = AppState()) : Mobile
     override fun save(state: AppState) {
         this.state = state
     }
+}
+
+private fun ThreadSummary.fixtureJson(): JsonObject = buildJsonObject {
+    raw?.forEach { (key, value) -> put(key, value) }
+    put("id", id)
+    put("name", name)
+    put("preview", preview)
+    put("cwd", workingDirectory.path)
+    put("projectId", projectId)
+    put("createdAt", createdAtMs)
+    put("updatedAt", updatedAtMs)
+    put("status", Json.encodeToJsonElement(ThreadStatus.serializer(), status))
+}
+
+private fun ThreadSnapshot.fixtureResponse(): JsonObject = buildJsonObject {
+    put(
+        "thread",
+        buildJsonObject {
+            summary.fixtureJson().forEach { (key, value) -> put(key, value) }
+            raw?.forEach { (key, value) -> if (key !in setOf("id", "cwd", "status")) put(key, value) }
+            put("turns", JsonArray(turns.map(CodexTurn::fixtureJson)))
+        },
+    )
+}
+
+internal fun CodexTurn.fixtureJson(): JsonObject = buildJsonObject {
+    raw?.forEach { (key, value) -> put(key, value) }
+    put("id", id)
+    put("status", Json.encodeToJsonElement(TurnStatus.serializer(), status))
+    startedAtMs?.let { put("startedAt", it / 1000) }
+    completedAtMs?.let { put("completedAt", it / 1000) }
+    durationMs?.let { put("durationMs", it) }
+    error?.let { put("error", Json.encodeToJsonElement(CodexTurnError.serializer(), it)) }
+    put("items", JsonArray(items.map(CodexItem::fixtureJson)))
+}
+
+internal fun CodexItem.fixtureJson(): JsonObject =
+    when (val item = this) {
+        is CodexItem.Unknown -> item.raw
+        is CodexItem.CommandExecution ->
+            JsonObject(
+                Json.encodeToJsonElement<CodexItem>(item).jsonObject +
+                    ("aggregatedOutput" to JsonPrimitive(item.output))
+            )
+        is CodexItem.UserMessage ->
+            buildJsonObject {
+                put("id", item.id)
+                put("type", "userMessage")
+                put("clientId", item.clientId)
+                put(
+                    "content",
+                    JsonArray(
+                        listOf(
+                            buildJsonObject {
+                                put("type", "text")
+                                put("text", item.text)
+                            }
+                        ) +
+                            item.imageSources.map {
+                                buildJsonObject {
+                                    put("type", "localImage")
+                                    put("path", it)
+                                }
+                            }
+                    ),
+                )
+            }
+        is CodexItem.FileChange ->
+            buildJsonObject {
+                put("id", item.id)
+                put("type", "fileChange")
+                put("status", Json.encodeToJsonElement(FileChangeStatus.serializer(), item.status))
+                put(
+                    "changes",
+                    JsonArray(
+                        item.changes.map { change ->
+                            buildJsonObject {
+                                put("path", change.path)
+                                put("diff", change.diff)
+                                put(
+                                    "kind",
+                                    buildJsonObject {
+                                        put("type", Json.encodeToJsonElement(FileUpdateKind.serializer(), change.kind))
+                                    },
+                                )
+                            }
+                        }
+                    ),
+                )
+            }
+        else -> Json.encodeToJsonElement<CodexItem>(item).jsonObject
+    }
+
+private fun ThreadListPage.fixtureJson(): JsonObject = buildJsonObject {
+    put("data", JsonArray(threads.map { it.fixtureJson() }))
+    put(
+        "projects",
+        JsonArray(
+            projects.map { project ->
+                buildJsonObject {
+                    project.raw?.forEach { (key, value) -> put(key, value) }
+                    put("id", project.id)
+                    put("name", project.name)
+                    put("roots", JsonArray(project.roots.map { buildJsonObject { put("path", it.path) } }))
+                    put("position", project.position)
+                    put("createdAt", project.createdAtMs)
+                    put("updatedAt", project.updatedAtMs)
+                }
+            }
+        ),
+    )
+    put("moreProjectIds", JsonArray(moreProjectIds.map(::JsonPrimitive)))
+    put("hasMoreChats", hasMoreChats)
+    put("hasMoreProjects", hasMoreProjects)
 }

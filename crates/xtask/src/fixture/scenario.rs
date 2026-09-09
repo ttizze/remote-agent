@@ -56,7 +56,10 @@ pub(super) async fn run(
         "failed",
         "interrupted",
         "request",
+        "secret-request",
         "approval",
+        "permissions",
+        "raw-request",
         "items",
         "history",
         "duplicate",
@@ -119,7 +122,7 @@ pub(super) async fn run(
     match scenario {
         "retry" => context.notify("error", &json!({"threadId":thread_id,"turnId":turn_id,"willRetry":true,
             "error":{"message":"stream disconnected","additionalDetails":"attempt 2 of 5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}))?,
-        "request" | "approval" => {
+        "request" | "secret-request" | "approval" | "permissions" | "raw-request" => {
             let request_id = format!("fixture-request-{suffix}");
             let (sender, receiver) = tokio::sync::oneshot::channel();
             context.pending.borrow_mut().insert(request_id.clone(), sender);
@@ -128,6 +131,17 @@ pub(super) async fn run(
                 params["questions"] = json!([{"id":"continue","header":"継続","question":"このまま続けますか？",
                     "options":[{"label":"続ける","description":"作業を進めます"},{"label":"見直す","description":"方針を見直します"}],"isOther":true,"isSecret":false}]);
                 "item/tool/requestUserInput"
+            } else if scenario == "secret-request" {
+                params["questions"] = json!([{"id":"secret","question":"検証用の合言葉を入力してください",
+                    "options":[],"isOther":true,"isSecret":true}]);
+                "item/tool/requestUserInput"
+            } else if scenario == "permissions" {
+                params["reason"] = "検証用ネットワーク権限の確認".into();
+                params["permissions"] = json!({"network":{"enabled":true}});
+                "item/permissions/requestApproval"
+            } else if scenario == "raw-request" {
+                params["message"] = "検証用ツールへの応答".into();
+                "item/tool/call"
             } else {
                 params["command"] = "echo fixture".into();
                 params["cwd"] = thread.borrow().metadata["cwd"].clone();

@@ -11,6 +11,12 @@ import kotlinx.serialization.json.decodeFromJsonElement
 /** Native intent binding. Rust owns each operation's RPC and state semantics. */
 @Serializable
 sealed interface AgentCommand {
+    @Serializable @SerialName("transcribe") data class Transcribe(val audio: String) : AgentCommand
+
+    @Serializable
+    @SerialName("respond")
+    data class Respond(val request: JsonElement, val answer: RequestAnswer) : AgentCommand
+
     @Serializable @SerialName("sessionImages") data class SessionImages(val threadId: String) : AgentCommand
 
     @Serializable
@@ -45,23 +51,15 @@ sealed interface AgentCommand {
     @Serializable @SerialName("startThread") data class StartThread(val cwd: String, val model: String?) : AgentCommand
 
     @Serializable
-    @SerialName("startTurn")
-    data class StartTurn(
+    @SerialName("sendTurn")
+    data class SendTurn(
         val threadId: String,
-        val cwd: String,
+        val snapshot: JsonElement,
+        val listed: JsonElement,
         val input: CodexTurnInput,
-        val resume: Boolean,
         val model: String?,
         val effort: String?,
     ) : AgentCommand
-
-    @Serializable
-    @SerialName("steerTurn")
-    data class SteerTurn(val threadId: String, val turnId: String, val input: CodexTurnInput) : AgentCommand
-
-    @Serializable
-    @SerialName("queueTurn")
-    data class QueueTurn(val threadId: String, val input: CodexTurnInput) : AgentCommand
 
     @Serializable
     @SerialName("interruptTurn")
@@ -98,6 +96,17 @@ sealed interface AgentCommand {
     data class ForkThread(val threadId: String, val lastTurnId: String) : AgentCommand
 }
 
+@Serializable
+sealed interface RequestAnswer {
+    @Serializable @SerialName("decision") data class Decision(val index: Int) : RequestAnswer
+
+    @Serializable @SerialName("permissions") data class Permissions(val allow: Boolean) : RequestAnswer
+
+    @Serializable @SerialName("answers") data class Answers(val answers: Map<String, String>) : RequestAnswer
+
+    @Serializable @SerialName("raw") data class Raw(val json: String) : RequestAnswer
+}
+
 private val agentCommandJson = Json { encodeDefaults = true }
 
 internal fun AgentCommand.encode(): String = agentCommandJson.encodeToString(this)
@@ -110,3 +119,6 @@ internal fun GatewayResult<String>.agentResult(): GatewayResult<String> {
     val error = Json.decodeFromJsonElement<AgentFailure>(rawError)
     return GatewayResult.Failure(error.message, error.rawError)
 }
+
+internal suspend fun HostGateway.command(profile: HostProfile, command: AgentCommand): GatewayResult<JsonElement> =
+    agentCommand(profile, command).mapGateway(Json::parseToJsonElement)

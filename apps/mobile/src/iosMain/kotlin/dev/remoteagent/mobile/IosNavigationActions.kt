@@ -1,10 +1,11 @@
 package dev.remoteagent.mobile
 
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 class IosNavigationActions
-internal constructor(private val controller: MobileController, private val scope: CoroutineScope) {
+internal constructor(private val controller: AtomicRef<MobileApp>, private val scope: CoroutineScope) {
     fun refreshTaskList() = withSelectedProfile { profile -> controller.listThreads(profile) }
 
     fun expandTaskList(projects: Boolean, projectId: String?) = withSelectedProfile { profile ->

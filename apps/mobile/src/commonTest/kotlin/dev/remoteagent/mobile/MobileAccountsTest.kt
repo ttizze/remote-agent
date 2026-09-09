@@ -22,8 +22,8 @@ internal class MobileAccountsTest : MobileControllerTestFixture() {
         val started = CompletableDeferred<Unit>()
         val response = CompletableDeferred<GatewayResult<String>>()
         var loginCalls = 0
-        var state = AccountSettingsState()
-        val subscription = controller.observeAccounts { state = it }
+        var state = AgentSettingsState()
+        val subscription = controller.observeSettings { state = it }
         gateway.agentBlock = { command ->
             when (command) {
                 AgentCommand.StartAccountLogin -> {
@@ -32,7 +32,7 @@ internal class MobileAccountsTest : MobileControllerTestFixture() {
                     response.await()
                 }
                 is AgentCommand.CancelAccountLogin -> GatewayResult.Failure("cancel failed")
-                else -> error("Unexpected account operation: $command")
+                else -> null
             }
         }
         val login = scope.launch { controller.startAccountLogin() }
@@ -61,8 +61,8 @@ internal class MobileAccountsTest : MobileControllerTestFixture() {
         val gateway = FakeHostGateway()
         val controller = controller(gateway)
         controller.connect(profile, scope)
-        var state: AccountSettingsState? = null
-        val subscription = controller.observeAccounts { state = it }
+        var state: AgentSettingsState? = null
+        val subscription = controller.observeSettings { state = it }
         val response = CompletableDeferred<GatewayResult<String>>()
         gateway.agentBlock = { response.await() }
         val selection = scope.launch { controller.selectAccount("new-account") }
@@ -88,8 +88,8 @@ internal class MobileAccountsTest : MobileControllerTestFixture() {
         val controller = controller(gateway)
         controller.connect(profile, scope)
         var statusCalls = 0
-        val selected = CompletableDeferred<AccountSettingsState>()
-        val subscription = controller.observeAccounts { if (it.selectedId == "new-account") selected.complete(it) }
+        val selected = CompletableDeferred<AgentSettingsState>()
+        val subscription = controller.observeSettings { if (it.selectedId == "new-account") selected.complete(it) }
         gateway.agentBlock = { command ->
             val body =
                 when (command) {
@@ -103,9 +103,9 @@ internal class MobileAccountsTest : MobileControllerTestFixture() {
                     AgentCommand.Accounts ->
                         """{"accounts":[{"id":"new-account","email":"fixture@example.test","planType":"test"}]}"""
                     is AgentCommand.SelectAccount -> """{"selectedId":"new-account"}"""
-                    else -> error("Unexpected account operation: $command")
+                    else -> null
                 }
-            GatewayResult.Success(body)
+            body?.let { GatewayResult.Success(it) }
         }
         controller.startAccountLogin()
         controller.pauseAccountPolling()
@@ -118,5 +118,39 @@ internal class MobileAccountsTest : MobileControllerTestFixture() {
         assertEquals(listOf("new-account"), final.accounts.map { it.id })
         assertEquals(1, statusCalls)
         subscription.cancel()
+    }
+
+    @Test
+    fun changing_accounts_discards_an_older_catalog_and_resolves_choices_with_shared_policy() = runBlocking {
+        val scope = persistenceScope()
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway)
+        controller.connect(profile, scope)
+        val stale = CompletableDeferred<GatewayResult<String>>()
+        var modelCalls = 0
+        val catalog =
+            """[{"id":"new-model","model":"new-model","displayName":"New model",
+            "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]}]"""
+        gateway.agentBlock = { command ->
+            when (command) {
+                AgentCommand.Models -> if (++modelCalls == 1) stale.await() else GatewayResult.Success(catalog)
+                is AgentCommand.SelectAccount -> GatewayResult.Success("""{"selectedId":"new-account"}""")
+                else -> null
+            }
+        }
+        val observation = controller.observeSettings {}
+        try {
+            assertEquals(1, modelCalls)
+            controller.selectAccount("new-account")
+            assertEquals(listOf("new-model"), controller.settingsState.models.map { it.id })
+            stale.complete(GatewayResult.Success("[]"))
+            assertEquals(listOf("new-model"), controller.settingsState.models.map { it.id })
+            controller.chooseModel("new-model")
+            controller.chooseEffort("unsupported")
+            assertEquals("low", controller.settingsState.selectedEffort)
+            assertEquals(CodexTurnOptions("new-model", "low"), controller.state.turnChoices[profile.id])
+        } finally {
+            observation.cancel()
+        }
     }
 }

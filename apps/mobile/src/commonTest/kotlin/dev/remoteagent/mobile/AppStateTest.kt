@@ -72,7 +72,11 @@ class AppStateTest {
         val connected = reduce(reduce(AppState(), AppAction.ProfilePaired(mac)), AppAction.ConnectSucceeded(mac.id))
         val listed = reduce(connected, AppAction.ThreadListLoaded(mac.id, listOf(summary("old"), summary("new"))))
         assertEquals(emptySet(), listed.selectedView.unreadCompletedThreadIds)
-        val completed = receive(listed, ThreadEvent.TurnCompleted("new", CodexTurn("turn", TurnStatus.Completed)))
+        val completed =
+            receive(
+                listed,
+                notification("turn/completed", """{"threadId":"new","turn":{"id":"turn","status":"completed"}}"""),
+            )
         assertEquals(setOf("new"), completed.selectedView.unreadCompletedThreadIds)
         val refreshed = reduce(completed, AppAction.ThreadListLoaded(mac.id, listOf(summary("old"), summary("new"))))
         assertEquals(setOf("new"), refreshed.selectedView.unreadCompletedThreadIds)
@@ -90,10 +94,22 @@ class AppStateTest {
     @Test
     fun existing_idle_failed_interrupted_and_visible_completions_do_not_mark_unread() {
         val connected = reduce(reduce(AppState(), AppAction.ProfilePaired(mac)), AppAction.ConnectSucceeded(mac.id))
-        val idle = receive(connected, ThreadEvent.ThreadStatusChanged("old", status = ThreadStatus.Idle))
-        val failed = receive(idle, ThreadEvent.TurnCompleted("failed", CodexTurn("turn", TurnStatus.Failed)))
+        val idle =
+            receive(connected, notification("thread/status/changed", """{"threadId":"old","status":{"type":"idle"}}"""))
+        val failed =
+            receive(
+                idle,
+                notification("turn/completed", """{"threadId":"failed","turn":{"id":"turn","status":"failed"}}"""),
+            )
         val interrupted =
-            receive(failed, ThreadEvent.TurnCompleted("stopped", CodexTurn("turn", TurnStatus.Interrupted)))
+            receive(
+                failed,
+                notification(
+                    "turn/completed",
+                    """{"threadId":"stopped",
+                    "turn":{"id":"turn","status":"interrupted"}}""",
+                ),
+            )
         assertEquals(emptySet(), interrupted.selectedView.unreadCompletedThreadIds)
         val visible =
             reduce(
@@ -102,20 +118,34 @@ class AppStateTest {
             )
         assertEquals(
             emptySet(),
-            receive(visible, ThreadEvent.TurnCompleted("visible", CodexTurn("turn", TurnStatus.Completed)))
+            receive(
+                    visible,
+                    notification(
+                        "turn/completed",
+                        """{"threadId":"visible","turn":{"id":"turn","status":"completed"}}""",
+                    ),
+                )
                 .selectedView
                 .unreadCompletedThreadIds,
         )
         val otherHost = reduce(visible, AppAction.ProfilePaired(linux))
         val completed =
-            receive(otherHost, ThreadEvent.TurnCompleted("visible", CodexTurn("turn", TurnStatus.Completed)))
+            receive(
+                otherHost,
+                notification("turn/completed", """{"threadId":"visible","turn":{"id":"turn","status":"completed"}}"""),
+            )
         assertEquals(setOf("visible"), completed.profileViews.getValue(mac.id).unreadCompletedThreadIds)
         assertEquals(emptySet(), completed.selectedView.unreadCompletedThreadIds)
-        val restarted = receive(completed, ThreadEvent.TurnStarted("visible", CodexTurn("next", TurnStatus.InProgress)))
+        val restarted =
+            receive(
+                completed,
+                notification("turn/started", """{"threadId":"visible","turn":{"id":"next","status":"inProgress"}}"""),
+            )
         assertEquals(emptySet(), restarted.profileViews.getValue(mac.id).unreadCompletedThreadIds)
     }
 
-    private fun receive(state: AppState, event: ThreadEvent) = reduce(state, AppAction.HostEventReceived(mac.id, event))
+    private fun receive(state: AppState, event: RawCodexMessage) =
+        reduce(state, AppAction.HostEventReceived(mac.id, event))
 
     private fun summary(id: String) =
         ThreadSummary(

@@ -125,11 +125,11 @@ internal class MobileHistoryControllerTest : MobileControllerTestFixture() {
         val unregistered = CompletableDeferred<Unit>()
         gateway.agentBlock = { command ->
             when (command) {
-                is AgentCommand.WatchThread -> registered.complete(command.watchId)
-                is AgentCommand.UnwatchThread -> unregistered.complete(Unit)
-                else -> error("Unexpected intent: $command")
+                is AgentCommand.WatchThread ->
+                    GatewayResult.Success("null").also { registered.complete(command.watchId) }
+                is AgentCommand.UnwatchThread -> GatewayResult.Success("null").also { unregistered.complete(Unit) }
+                else -> null
             }
-            GatewayResult.Success("null")
         }
         var enteredLoading = false
         val initialRefresh = CompletableDeferred<Unit>()

@@ -199,18 +199,6 @@ impl Rpc {
         });
     }
 
-    pub(crate) fn respond(&self, id: Value, result: Value) -> Result<(), String> {
-        let peer = self
-            .0
-            .connection
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or("Host に接続していません")?;
-        rpc_runtime()?
-            .block_on(peer.send_raw(&json!({"id":id,"result":result}).to_string()))
-            .map_err(|error| error.to_string())
-    }
     pub(crate) fn close(&self) {
         self.0.stopped.send_replace(true);
         let peer = self.0.connection.lock().unwrap().take();
@@ -393,8 +381,19 @@ mod tests {
         assert!(
             matches!(rx.recv_timeout(Duration::from_secs(4)).unwrap(),Event::Message(v) if v["id"]=="approval")
         );
-        client
-            .respond(json!("approval"), json!({"decision":"decline"}))
+        let (responded, response) = mpsc::channel();
+        client.agent_async(
+            |agent| async move {
+                agent.respond(
+                    &json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{}}),
+                    agent_client::operations::RequestAnswer::Decision { index: 2 },
+                ).await
+            },
+            move |result| { responded.send(result).unwrap(); },
+        );
+        response
+            .recv_timeout(Duration::from_secs(4))
+            .unwrap()
             .unwrap();
         server.join().unwrap();
         client.close();

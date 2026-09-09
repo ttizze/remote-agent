@@ -31,18 +31,26 @@
               "x86_64-linux-android"
             ];
           };
-          androidSdk = (pkgs.androidenv.composeAndroidPackages {
-            platformVersions = [ "36" ];
-            buildToolsVersions = [ "35.0.0" "36.0.0" ];
+          androidSdkOptions = {
+            platformVersions = [ "37.0" ];
+            # AGP's KMP library target requires its default 36.0.0 build tools.
+            buildToolsVersions = [ "36.0.0" "37.0.0" ];
             includeNDK = true;
             includeEmulator = false;
             includeSystemImages = false;
-          }).androidsdk;
+          };
+          androidSdk = (pkgs.androidenv.composeAndroidPackages androidSdkOptions).androidsdk;
+          androidUiSdk = (pkgs.androidenv.composeAndroidPackages (androidSdkOptions // {
+            includeEmulator = true;
+            includeSystemImages = true;
+            systemImageTypes = [ "google_apis" ];
+            abiVersions = [ (if pkgs.stdenv.hostPlatform.isAarch64 then "arm64-v8a" else "x86_64") ];
+          })).androidsdk;
         in
-        {
+        rec {
           default = pkgs.mkShell {
             packages = with pkgs; [
-              gradle
+              gradle_9
               jdk21
               rustToolchain
               cargo-ndk
@@ -72,6 +80,13 @@
                 unset LD
               fi
             '';
+          };
+          android-ui = pkgs.mkShell {
+            inputsFrom = [ default ];
+            packages = [ androidUiSdk ];
+            JAVA_HOME = pkgs.jdk21.home;
+            ANDROID_HOME = "${androidUiSdk}/libexec/android-sdk";
+            ANDROID_SDK_ROOT = "${androidUiSdk}/libexec/android-sdk";
           };
         });
     };

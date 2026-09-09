@@ -1,19 +1,14 @@
 package dev.remoteagent.mobile
 
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonPrimitive
 
 class IosConversationActions
-internal constructor(
-    private val controller: MobileController,
-    private val scope: CoroutineScope,
-    private val dependencies: IosMobileDependencies,
-) {
+internal constructor(private val controller: AtomicRef<MobileApp>, private val scope: CoroutineScope) {
     fun sendTurn(
         text: String,
         attachments: List<CodexAttachment>,
@@ -32,7 +27,7 @@ internal constructor(
         }
     }
 
-    fun respond(requestIdJson: String, responseJson: String, completion: (String?) -> Unit) {
+    fun respond(requestJson: String, answer: RequestAnswer, completion: (String?) -> Unit) {
         val profile =
             controller.state.selectedProfile
                 ?: run {
@@ -41,14 +36,7 @@ internal constructor(
                 }
         scope.launch {
             try {
-                when (
-                    val result =
-                        controller.respond(
-                            profile,
-                            Json.parseToJsonElement(requestIdJson),
-                            Json.parseToJsonElement(responseJson),
-                        )
-                ) {
+                when (val result = controller.respond(profile, Json.parseToJsonElement(requestJson), answer)) {
                     is GatewayResult.Success -> completion(null)
                     is GatewayResult.Failure -> completion(result.message)
                 }
@@ -75,7 +63,12 @@ internal constructor(
                     return
                 }
         scope.launch {
-            when (val result = dependencies.gateway.codex.readItemDetails(profile, threadId, turnId, itemId)) {
+            when (
+                val result =
+                    controller.value.effects.gateway
+                        .command(profile, AgentCommand.ReadItem(threadId, turnId, itemId))
+                        .mapGateway { codexItem((it as JsonObject).getValue("item")).expandedThreadItemBody() }
+            ) {
                 is GatewayResult.Success -> completion(result.value, null)
                 is GatewayResult.Failure -> completion(null, result.message)
             }
@@ -91,7 +84,7 @@ internal constructor(
                 }
         scope.launch {
             try {
-                val sources = dependencies.gateway.sessionImages(profile, threadId)
+                val sources = controller.value.effects.gateway.sessionImages(profile, threadId)
                 completion(sources, null)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
@@ -109,18 +102,9 @@ internal constructor(
                     return
                 }
         scope.launch {
-            val result =
-                dependencies.gateway.rawRequest(
-                    profile,
-                    "host/dictation/transcribe",
-                    buildJsonObject { put("audio", audio) },
-                )
+            val result = controller.value.effects.gateway.command(profile, AgentCommand.Transcribe(audio))
             when (result) {
-                is GatewayResult.Success -> {
-                    val text = (result.value as? JsonObject)?.get("text") as? JsonPrimitive
-                    if (text?.isString == true && text.content.isNotBlank()) completion(text.content, null)
-                    else completion(null, "文字起こしの応答が無効です。")
-                }
+                is GatewayResult.Success -> completion(result.value.jsonPrimitive.content, null)
                 is GatewayResult.Failure -> completion(null, result.message)
             }
         }
@@ -130,20 +114,5 @@ internal constructor(
         val profile = controller.state.selectedProfile ?: return
         val threadId = controller.state.selectedView.selectedThreadId ?: return
         scope.launch { controller.interrupt(profile, threadId, turnId) }
-    }
-
-    fun listModels(completion: (List<CodexModel>?, String?) -> Unit) {
-        val profile =
-            controller.state.selectedProfile
-                ?: run {
-                    completion(null, "接続先が選択されていません")
-                    return
-                }
-        scope.launch {
-            when (val result = dependencies.gateway.codex.listModels(profile)) {
-                is GatewayResult.Success -> completion(result.value, null)
-                is GatewayResult.Failure -> completion(null, result.message)
-            }
-        }
     }
 }

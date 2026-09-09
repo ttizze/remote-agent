@@ -1,6 +1,10 @@
 package dev.remoteagent.mobile
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -27,7 +31,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import kotlin.time.Clock
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,7 +54,7 @@ fun RemoteAgentApp(
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val persistenceScope =
         remember(gateway, repository) { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
-    val controller = remember(gateway, repository) { MobileController(gateway, repository, persistenceScope) }
+    val controller = remember(gateway, repository) { mobileApp(gateway, repository, persistenceScope) }
     var state by remember(controller) { mutableStateOf(controller.state) }
     DisposableEffect(controller) {
         val observation = controller.observe { state = it }
@@ -97,7 +103,7 @@ fun RemoteAgentApp(
 @Composable
 private fun AppContent(
     state: AppState,
-    controller: MobileController,
+    controller: AtomicRef<MobileApp>,
     scope: CoroutineScope,
     requestQrScan: ((onContents: (String) -> Unit) -> Unit)?,
     nowMs: () -> Long,
@@ -134,6 +140,7 @@ private fun PairingScreen(
     modifier: Modifier,
 ) {
     var contents by remember { mutableStateOf("") }
+    val requestNetworkAccess = rememberNetworkAccessRequest()
     Column(modifier = modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("PCとペアリング", style = MaterialTheme.typography.headlineMedium)
         Text("PC Host ManagerのQRコードを読み取ります。QRの内容はこの端末に保存しません。")
@@ -147,7 +154,9 @@ private fun PairingScreen(
             label = { Text("ペアリングQR（手入力）") },
             minLines = 3,
         )
-        Button(onClick = { onPair(contents) }, enabled = contents.isNotBlank()) { Text("ペアリング") }
+        Button(onClick = { requestNetworkAccess { onPair(contents) } }, enabled = contents.isNotBlank()) {
+            Text("ペアリング")
+        }
         pairingError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Button(onClick = onCancel) { Text("戻る") }
     }
@@ -178,7 +187,12 @@ private fun HostSelectionScreen(
 }
 
 @Composable
-private fun HostFlowScreen(state: AppState, controller: MobileController, scope: CoroutineScope, modifier: Modifier) {
+private fun HostFlowScreen(
+    state: AppState,
+    controller: AtomicRef<MobileApp>,
+    scope: CoroutineScope,
+    modifier: Modifier,
+) {
     val profile = requireNotNull(state.selectedProfile)
     val view = state.selectedView
     when (view.connection) {
@@ -224,15 +238,42 @@ private fun ConnectScreen(
     onBack: () -> Unit,
     modifier: Modifier,
 ) {
+    val requestNetworkAccess = rememberNetworkAccessRequest()
     Column(modifier = modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(profile.name, style = MaterialTheme.typography.headlineMedium)
         Text(profile.relayUrl)
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onDiscover) { Text("検出") }
-            Button(onClick = onConnect) { Text("接続") }
+            Button(onClick = { requestNetworkAccess(onDiscover) }) { Text("検出") }
+            Button(onClick = { requestNetworkAccess(onConnect) }) { Text("接続") }
         }
         Button(onClick = onBack) { Text("PC一覧") }
+    }
+}
+
+@Composable
+private fun rememberNetworkAccessRequest(): (() -> Unit) -> Unit {
+    val context = LocalContext.current
+    var pending by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val permission =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+            // Public relays remain usable when local-network access is denied.
+            val operation = pending
+            pending = null
+            operation?.invoke()
+        }
+    return remember(context, permission) {
+        { operation ->
+            if (
+                ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_LOCAL_NETWORK) ==
+                    PackageManager.PERMISSION_GRANTED
+            ) {
+                operation()
+            } else {
+                pending = operation
+                permission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+            }
+        }
     }
 }
 

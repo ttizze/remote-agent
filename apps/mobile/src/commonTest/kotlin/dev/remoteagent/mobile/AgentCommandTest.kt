@@ -4,9 +4,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 
 /** Wire behavior moved to the shared Rust operation corpus. These tests protect the mobile adapter. */
-internal class CommonCodexClientTest : MobileControllerTestFixture() {
+internal class AgentCommandTest : MobileControllerTestFixture() {
     @Test
     fun turn_options_are_explicit_per_submission_and_not_retained_by_the_adapter() = runSuspend {
         val commands = mutableListOf<AgentCommand>()
@@ -21,28 +22,34 @@ internal class CommonCodexClientTest : MobileControllerTestFixture() {
                     )
                 }
             }
-        val client = CommonCodexClient(gateway)
         val options = CodexTurnOptions("model-b", "high")
-        client.startThread(profile, "/workspace", options)
-        client.startTurn(
+        gateway.command(profile, AgentCommand.StartThread("/workspace", options.model))
+        gateway.command(
             profile,
-            "thread-1",
-            "/workspace",
-            CodexTurnInput("first", clientUserMessageId = "client-1"),
-            false,
-            options,
+            AgentCommand.SendTurn(
+                "thread-1",
+                JsonNull,
+                JsonNull,
+                CodexTurnInput("first", clientUserMessageId = "client-1"),
+                options.model,
+                options.effort,
+            ),
         )
-        client.startTurn(
+        gateway.command(
             profile.copy(hostIdentity = "other-host"),
-            "thread-2",
-            "/other",
-            CodexTurnInput("next", clientUserMessageId = "client-2"),
-            true,
+            AgentCommand.SendTurn(
+                "thread-2",
+                JsonNull,
+                JsonNull,
+                CodexTurnInput("next", clientUserMessageId = "client-2"),
+                null,
+                null,
+            ),
         )
         assertEquals("model-b", assertIs<AgentCommand.StartThread>(commands[0]).model)
-        assertEquals("high", assertIs<AgentCommand.StartTurn>(commands[1]).effort)
-        assertEquals(null, assertIs<AgentCommand.StartTurn>(commands[2]).model)
-        assertEquals(null, assertIs<AgentCommand.StartTurn>(commands[2]).effort)
+        assertEquals("high", assertIs<AgentCommand.SendTurn>(commands[1]).effort)
+        assertEquals(null, assertIs<AgentCommand.SendTurn>(commands[2]).model)
+        assertEquals(null, assertIs<AgentCommand.SendTurn>(commands[2]).effort)
     }
 
     @Test

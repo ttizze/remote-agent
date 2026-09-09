@@ -21,13 +21,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 @Composable
 internal fun ThreadListScreen(
     state: AppState,
-    controller: MobileController,
+    controller: AtomicRef<MobileApp>,
     scope: CoroutineScope,
     modifier: Modifier,
 ) {

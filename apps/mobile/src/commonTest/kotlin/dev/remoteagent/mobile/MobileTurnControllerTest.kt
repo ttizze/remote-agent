@@ -7,8 +7,39 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 internal class MobileTurnControllerTest : MobileControllerTestFixture() {
+    @Test
+    fun request_validation_failure_stays_in_the_editor_instead_of_leaving_a_turn_notice() {
+        val gateway = FakeHostGateway()
+        val controller = controller(gateway)
+        runSuspend { controller.connect(profile, CoroutineScope(Dispatchers.Unconfined)) }
+        val request =
+            kotlinx.serialization.json.Json.parseToJsonElement(
+                """
+                {"id":"question-1","method":"item/tool/requestUserInput",
+                 "params":{"questions":[{"id":"continue"}]}}
+                """
+            )
+        gateway.agentBlock = { command ->
+            if (command is AgentCommand.Respond) GatewayResult.Failure("すべての質問に回答してください") else null
+        }
+        runSuspend {
+            val failed = controller.respond(profile, request, RequestAnswer.Answers(emptyMap()))
+            assertEquals("すべての質問に回答してください", assertIs<GatewayResult.Failure>(failed).message)
+        }
+        assertNull(controller.state.selectedView.notice)
+        gateway.agentBlock = { command -> if (command is AgentCommand.Respond) GatewayResult.Success("null") else null }
+        runSuspend {
+            assertIs<GatewayResult.Success<Unit>>(
+                controller.respond(profile, request, RequestAnswer.Answers(mapOf("continue" to "続ける")))
+            )
+        }
+        assertNull(controller.state.selectedView.notice)
+    }
+
     @Test
     fun opening_a_new_chat_and_leaving_without_sending_creates_nothing() {
         val gateway = FakeHostGateway()
@@ -427,7 +458,14 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
             applyLiveEvent(
                 restored,
                 profile.id,
-                ThreadEvent.ItemCompleted("thread-1", snapshot.turns.single().id, echoed),
+                RawCodexMessage.Notification(
+                    "item/completed",
+                    buildJsonObject {
+                        put("threadId", JsonPrimitive("thread-1"))
+                        put("turnId", JsonPrimitive(snapshot.turns.single().id))
+                        put("item", (echoed).fixtureJson())
+                    },
+                ),
                 MobileCacheLimits(),
             )
         assertEquals(

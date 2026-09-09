@@ -4,9 +4,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 
 internal class ConversationEventCorpusTest {
     @Test
@@ -20,7 +21,7 @@ internal class ConversationEventCorpusTest {
                 val message = event.jsonObject
                 snapshot =
                     snapshot.applyConversationEvent(
-                        codexThreadEvent(message.string("method")!!, message.getValue("params"))
+                        RawCodexMessage.Notification(message.string("method")!!, message.getValue("params"))
                     )
             }
             assertEquals(codexThreadSnapshot(case.getValue("expected")), snapshot, case.string("name"))
@@ -31,17 +32,22 @@ internal class ConversationEventCorpusTest {
     fun native_projection_uses_the_same_submission_corpus_as_rust() {
         val resource = requireNotNull(javaClass.getResourceAsStream("/submission.json"))
         val cases = resource.bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonArray }
-        val format = Json { classDiscriminator = "action" }
         for (entry in cases) {
             val case = entry.jsonObject
             val snapshot = case["snapshot"]?.takeUnless { it == JsonNull }?.let(::codexThreadSnapshot)
             val listed = case["listed"]?.takeUnless { it == JsonNull }?.let(::codexThreadSummary)
-            val plan = planTurnSubmission(snapshot, listed)
-            assertEquals(
-                case.getValue("expected"),
-                format.encodeToJsonElement(SendPlan.serializer(), plan),
-                case.string("name"),
-            )
+            val plan =
+                Json.parseToJsonElement(
+                    nativeConversationPresentation(
+                        buildJsonObject {
+                            put("operation", "sendPlan")
+                            put("snapshot", snapshot.submissionMetadata())
+                            put("listed", listed.submissionMetadata())
+                        }
+                            .toString()
+                    )
+                )
+            assertEquals(case.getValue("expected"), plan, case.string("name"))
         }
     }
 }

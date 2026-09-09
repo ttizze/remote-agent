@@ -22,13 +22,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 @Composable
 internal fun ThreadDetailScreen(
     state: AppState,
-    controller: MobileController,
+    controller: AtomicRef<MobileApp>,
     scope: CoroutineScope,
     modifier: Modifier,
 ) {
@@ -73,9 +74,7 @@ internal fun ThreadDetailScreen(
                 onOlderHistory,
             )
             turnActivity(turn, expandedItemIds, activityExpansionOverrides)
-            turnConclusion(turn, view) { turnId ->
-                selectedThreadId?.let { scope.launch { controller.interrupt(profile, it, turnId) } }
-            }
+            turnConclusion(turn, state, controller, scope)
         }
         items(queuedMessages, key = { "queued:${it.clientId}" }) { message -> QueuedMessage(message) }
 

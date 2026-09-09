@@ -39,7 +39,7 @@ internal class MobilePersistenceControllerTest : MobileControllerTestFixture() {
                 }
             }
         val gateway = FakeHostGateway()
-        val controller = MobileController(gateway, repository, persistenceScope())
+        val controller = mobileApp(gateway, repository, persistenceScope())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         try {
             controller.connect(profile, scope)
@@ -98,7 +98,7 @@ internal class MobilePersistenceControllerTest : MobileControllerTestFixture() {
                     saved += state
                 }
             }
-        val controller = MobileController(FakeHostGateway(), repository, persistenceScope())
+        val controller = mobileApp(FakeHostGateway(), repository, persistenceScope())
         try {
             controller.dispatch(AppAction.PairingOpened)
             withTimeout(5_000) { started.await() }
@@ -119,7 +119,7 @@ internal class MobilePersistenceControllerTest : MobileControllerTestFixture() {
     @Test
     fun persistence_failure_keeps_memory_and_observers_current_then_retries_on_next_transition() = runBlocking {
         val repository = FailingOnceMobileRepository(AppState(profiles = listOf(profile)))
-        val controller = MobileController(FakeHostGateway(), repository, persistenceScope())
+        val controller = mobileApp(FakeHostGateway(), repository, persistenceScope())
         var observed: AppState? = null
         controller.observe { observed = it }
 

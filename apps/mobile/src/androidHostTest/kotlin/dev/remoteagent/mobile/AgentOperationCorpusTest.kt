@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 
 internal class AgentOperationCorpusTest : MobileControllerTestFixture() {
@@ -37,8 +38,7 @@ internal class AgentOperationCorpusTest : MobileControllerTestFixture() {
                         failure ?: GatewayResult.Success(case.getValue("result").toString())
                     }
                 }
-            val client = CommonCodexClient(gateway, deferItemDetails = true)
-            val projected = project(client, command)
+            val projected = project(gateway, command)
             if (failure != null) {
                 assertEquals(failure, projected, name)
                 continue
@@ -49,31 +49,20 @@ internal class AgentOperationCorpusTest : MobileControllerTestFixture() {
         }
     }
 
-    private suspend fun project(client: CommonCodexClient, command: AgentCommand): GatewayResult<*> =
-        when (command) {
-            is AgentCommand.ListThreads -> client.listThreads(profile, command.query)
-            is AgentCommand.ReadThread -> client.readThread(profile, command.threadId)
-            is AgentCommand.ReadOlder ->
-                client.readOlderHistory(profile, command.threadId, command.cursor, command.turnId)
-            is AgentCommand.ReadItem ->
-                client.readItemDetails(profile, command.threadId, command.turnId, command.itemId)
-            is AgentCommand.StartThread ->
-                client.startThread(profile, command.cwd, CodexTurnOptions(command.model, null))
-            is AgentCommand.StartTurn ->
-                client.startTurn(
-                    profile,
-                    command.threadId,
-                    command.cwd,
-                    command.input,
-                    command.resume,
-                    CodexTurnOptions(command.model, command.effort),
-                )
-            is AgentCommand.SteerTurn -> client.steerTurn(profile, command.threadId, command.turnId, command.input)
-            is AgentCommand.QueueTurn -> client.queueTurn(profile, command.threadId, command.input)
-            is AgentCommand.InterruptTurn -> client.interrupt(profile, command.threadId, command.turnId)
-            AgentCommand.Models -> client.listModels(profile)
-            else -> client.command(profile, command)
+    private suspend fun project(gateway: HostGateway, command: AgentCommand): GatewayResult<*> {
+        if (command == AgentCommand.Models) return gateway.listModels(profile)
+        return gateway.command(profile, command).mapGateway { value ->
+            when (command) {
+                is AgentCommand.ListThreads -> parseThreadListPage(value)
+                is AgentCommand.ReadThread -> ThreadReadResult(codexThreadFromResponse(value), emptyList())
+                is AgentCommand.ReadOlder,
+                is AgentCommand.StartThread -> codexThreadFromResponse(value)
+                is AgentCommand.ReadItem -> codexItem((value as JsonObject).getValue("item")).expandedThreadItemBody()
+                is AgentCommand.SendTurn -> (value as JsonPrimitive).contentOrNull
+                else -> value
+            }
         }
+    }
 
     private fun assertProjection(expected: JsonElement, value: Any?, command: AgentCommand, name: String) {
         when (value) {
@@ -99,6 +88,7 @@ internal class AgentOperationCorpusTest : MobileControllerTestFixture() {
                     else (expected as JsonPrimitive).content
                 assertEquals(text, value, name)
             }
+            null,
             Unit -> assertEquals(JsonNull, expected, name)
             else -> error("Missing projection assertion for $value")
         }

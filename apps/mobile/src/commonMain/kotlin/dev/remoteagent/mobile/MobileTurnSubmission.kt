@@ -1,16 +1,18 @@
 package dev.remoteagent.mobile
 
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 
-internal suspend fun MobileController.startTurn(
+internal suspend fun AtomicRef<MobileApp>.startTurn(
     profile: HostProfile,
     threadId: String,
     text: String,
@@ -19,21 +21,23 @@ internal suspend fun MobileController.startTurn(
 ): Boolean {
     val generation = connectedGeneration(profile.id) ?: return false
     val cached = state.cache.snapshot(profile.id, threadId)
-    val input = CodexTurnInput(text, attachments, clientUserMessageIdGenerator())
+    val input = CodexTurnInput(text, attachments, value.effects.newMessageId())
     val displayText = input.displayText()
     val listed = state.cache.profile(profile.id).threadList.lastOrNull { it.id == threadId }
-    val plan = planTurnSubmission(cached, listed)
-    var acceptedTurnId = (plan as? SendPlan.Steer)?.turnId
     val result =
-        when (plan) {
-            is SendPlan.Steer -> gateway.codex.steerTurn(profile, threadId, plan.turnId, input)
-            SendPlan.Queue -> gateway.codex.queueTurn(profile, threadId, input)
-            is SendPlan.Start ->
-                gateway.codex.startTurn(profile, threadId, plan.cwd, input, plan.resume, options).also {
-                    if (it is GatewayResult.Success) acceptedTurnId = it.value
-                }
-            is SendPlan.Reject -> GatewayResult.Failure(plan.message)
-        }
+        value.effects.gateway
+            .command(
+                profile,
+                AgentCommand.SendTurn(
+                    threadId,
+                    cached.submissionMetadata(),
+                    listed.submissionMetadata(),
+                    input,
+                    options.model,
+                    options.effort,
+                ),
+            )
+            .mapGateway { (it as JsonPrimitive).contentOrNull }
     return when (result) {
         is GatewayResult.Failure -> {
             dispatchIfCurrent(profile.id, generation) { AppAction.TurnFailed(profile.id, result.message) }
@@ -41,7 +45,7 @@ internal suspend fun MobileController.startTurn(
         }
         is GatewayResult.Success -> {
             dispatchIfCurrent(profile.id, generation) {
-                AppAction.MessageAccepted(profile.id, threadId, input.submission(cached, displayText, acceptedTurnId))
+                AppAction.MessageAccepted(profile.id, threadId, input.submission(cached, displayText, result.value))
             }
             // Acceptance precedes persistence; subscribed items carry the subsequent body updates.
             true
@@ -49,49 +53,31 @@ internal suspend fun MobileController.startTurn(
     }
 }
 
-@Serializable
-internal sealed interface SendPlan {
-    @Serializable @SerialName("steer") data class Steer(val turnId: String) : SendPlan
+internal fun ThreadSummary?.submissionMetadata(): JsonElement =
+    this?.let {
+        buildJsonObject {
+            put("cwd", it.workingDirectory.path)
+            put("status", Json.encodeToJsonElement(ThreadStatus.serializer(), it.status))
+        }
+    } ?: JsonNull
 
-    @Serializable @SerialName("queue") data object Queue : SendPlan
-
-    @Serializable @SerialName("start") data class Start(val cwd: String, val resume: Boolean) : SendPlan
-
-    @Serializable @SerialName("reject") data class Reject(val message: String) : SendPlan
-}
-
-private val sendPlanJson = Json { classDiscriminator = "action" }
-
-internal fun planTurnSubmission(snapshot: ThreadSnapshot?, listed: ThreadSummary?): SendPlan {
-    fun summary(value: ThreadSummary) = buildJsonObject {
-        put("cwd", value.workingDirectory.path)
-        put("status", Json.encodeToJsonElement(ThreadStatus.serializer(), value.status))
-    }
-    val request = buildJsonObject {
-        put("operation", "sendPlan")
-        put(
-            "snapshot",
-            snapshot?.let {
-                buildJsonObject {
-                    summary(it.summary).forEach { (key, value) -> put(key, value) }
-                    put(
-                        "turns",
-                        JsonArray(
-                            it.turns.map { turn ->
-                                buildJsonObject {
-                                    put("id", turn.id)
-                                    put("status", Json.encodeToJsonElement(TurnStatus.serializer(), turn.status))
-                                }
-                            }
-                        ),
-                    )
-                }
-            } ?: JsonNull,
-        )
-        put("listed", listed?.let(::summary) ?: JsonNull)
-    }
-    return sendPlanJson.decodeFromString<SendPlan>(nativeConversationPresentation(request.toString()))
-}
+internal fun ThreadSnapshot?.submissionMetadata(): JsonElement =
+    this?.let {
+        buildJsonObject {
+            (it.summary.submissionMetadata() as JsonObject).forEach { (key, value) -> put(key, value) }
+            put(
+                "turns",
+                JsonArray(
+                    it.turns.map { turn ->
+                        buildJsonObject {
+                            put("id", turn.id)
+                            put("status", Json.encodeToJsonElement(TurnStatus.serializer(), turn.status))
+                        }
+                    }
+                ),
+            )
+        }
+    } ?: JsonNull
 
 private fun CodexTurnInput.displayText(): String = buildString {
     append(text)
@@ -112,24 +98,22 @@ private fun CodexTurnInput.submission(cached: ThreadSnapshot?, displayText: Stri
         attachments.mapNotNull { if (it.isImage) it.path else null },
     )
 
-internal suspend fun MobileController.respond(
+internal suspend fun AtomicRef<MobileApp>.respond(
     profile: HostProfile,
-    requestId: kotlinx.serialization.json.JsonElement,
-    response: kotlinx.serialization.json.JsonElement,
+    request: kotlinx.serialization.json.JsonElement,
+    answer: RequestAnswer,
 ): GatewayResult<Unit> {
-    val generation = connectedGeneration(profile.id) ?: return GatewayResult.Failure("接続が切れています")
-    val result = gateway.respondResult(profile, requestId, response)
-    if (result is GatewayResult.Failure)
-        dispatchIfCurrent(profile.id, generation) { AppAction.TurnFailed(profile.id, result.message) }
-    return result
+    if (connectedGeneration(profile.id) == null) return GatewayResult.Failure("接続が切れています")
+    // The request editor owns validation errors; a rejected answer is not a failed turn.
+    return value.effects.gateway.command(profile, AgentCommand.Respond(request, answer)).mapGateway { Unit }
 }
 
-internal suspend fun MobileController.interrupt(profile: HostProfile, threadId: String, turnId: String) {
-    val generation = sessions.currentGeneration(profile.id) ?: return
+internal suspend fun AtomicRef<MobileApp>.interrupt(profile: HostProfile, threadId: String, turnId: String) {
+    val generation = value.effects.sessions.currentGeneration(profile.id) ?: return
     if (!isConnected(profile.id, generation)) return
     dispatchIfCurrent(profile.id, generation) { AppAction.InterruptStarted(profile.id, turnId) }
-    gateway.codex
-        .interrupt(profile, threadId, turnId)
+    value.effects.gateway
+        .command(profile, AgentCommand.InterruptTurn(threadId, turnId))
         .fold(
             success = { dispatchIfCurrent(profile.id, generation) { AppAction.InterruptFinished(profile.id) } },
             failure = { message ->
@@ -139,7 +123,7 @@ internal suspend fun MobileController.interrupt(profile: HostProfile, threadId: 
         )
 }
 
-internal fun MobileController.cachedWorkingDirectory(hostIdentity: String, threadId: String): String? {
+internal fun AtomicRef<MobileApp>.cachedWorkingDirectory(hostIdentity: String, threadId: String): String? {
     val cache = state.cache.profile(hostIdentity)
     val snapshotCwd = cache.snapshots[threadId]?.summary?.workingDirectory?.path
     if (!snapshotCwd.isNullOrBlank()) return snapshotCwd

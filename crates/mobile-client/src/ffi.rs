@@ -3,10 +3,14 @@
 //! or logs the caller-supplied PKCS#8 key.
 
 use std::{
+    collections::HashMap,
     ffi::{CStr, CString, c_char},
     panic::AssertUnwindSafe,
     ptr,
-    sync::Mutex,
+    sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -86,6 +90,40 @@ pub struct Handle {
     events: Mutex<broadcast::Receiver<String>>,
 }
 
+// Only native resources live in this registry. IDs never repeat, including after
+// close, so racing or stale FFI calls cannot borrow a replacement connection.
+static HANDLES: LazyLock<Mutex<HashMap<u64, Arc<Handle>>>> = LazyLock::new(Default::default);
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn borrow_handle(id: u64) -> Result<Arc<Handle>, String> {
+    HANDLES
+        .lock()
+        .map_err(|_| "handle lock poisoned")?
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "mobile client handle is closed".to_owned())
+}
+
+pub(crate) fn register_client(
+    runtime: &'static tokio::runtime::Runtime,
+    client: MobileClient,
+) -> Result<u64, String> {
+    let events = client.subscribe();
+    let handle = Handle {
+        runtime,
+        client,
+        events: Mutex::new(events),
+    };
+    let id = NEXT_HANDLE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| "mobile client handles exhausted")?;
+    HANDLES
+        .lock()
+        .map_err(|_| "handle lock poisoned")?
+        .insert(id, Arc::new(handle));
+    Ok(id)
+}
+
 fn set_error(out: *mut *mut c_char, error: impl ToString) {
     if !out.is_null() {
         let text =
@@ -105,29 +143,12 @@ fn input_string<'a>(input: *const c_char) -> Result<&'a str, String> {
         .map_err(|_| "input is not UTF-8".to_owned())
 }
 
-pub(crate) fn connect_handle(config: CConfig, key: &[u8]) -> Result<*mut Handle, String> {
+pub(crate) fn connect_handle(config: CConfig, key: &[u8]) -> Result<u64, String> {
     let runtime = host_protocol::rpc_runtime()?;
     let client = runtime
         .block_on(MobileClient::connect(config.into(), key))
         .map_err(|error| error.to_string())?;
-    let events = client.subscribe();
-    Ok(Box::into_raw(Box::new(Handle {
-        runtime,
-        client,
-        events: Mutex::new(events),
-    })))
-}
-
-pub(crate) fn request_json(
-    handle: &Handle,
-    method: String,
-    params_json: String,
-) -> Result<String, String> {
-    let result = handle
-        .runtime
-        .block_on(handle.client.request_raw(method, params_json))
-        .map_err(encode_mobile_error)?;
-    serde_json::to_string(&result).map_err(|_| "failed to encode response".to_owned())
+    register_client(runtime, client)
 }
 
 pub(crate) fn agent_command_json(handle: &Handle, command: &str) -> Result<String, String> {
@@ -144,36 +165,6 @@ fn encode_mobile_error(error: MobileClientError) -> String {
     }
 }
 
-pub(crate) fn respond_result_json(
-    handle: &Handle,
-    request_id_json: &str,
-    result_json: &str,
-) -> Result<(), String> {
-    handle
-        .runtime
-        .block_on(handle.client.respond_raw(
-            request_id_json.to_owned(),
-            "result",
-            result_json.to_owned(),
-        ))
-        .map_err(|error| error.to_string())
-}
-
-pub(crate) fn respond_error_json(
-    handle: &Handle,
-    request_id_json: &str,
-    error_json: &str,
-) -> Result<(), String> {
-    handle
-        .runtime
-        .block_on(handle.client.respond_raw(
-            request_id_json.to_owned(),
-            "error",
-            error_json.to_owned(),
-        ))
-        .map_err(|error| error.to_string())
-}
-
 pub(crate) fn next_event_json(handle: &Handle) -> Result<Option<String>, String> {
     let mut events = handle.events.lock().map_err(|_| "event lock poisoned")?;
     match events.try_recv() {
@@ -183,12 +174,14 @@ pub(crate) fn next_event_json(handle: &Handle) -> Result<Option<String>, String>
     }
 }
 
-pub(crate) fn close_handle(handle: *mut Handle) {
-    if !handle.is_null() {
-        // SAFETY: caller transfers ownership exactly once to close.
-        let handle = unsafe { Box::from_raw(handle) };
-        handle.client.close();
-    }
+pub(crate) fn close_handle(id: u64) {
+    // Release the registry reference outside its lock. Existing calls retain
+    // their own Arc; the transport closes when the last call has returned.
+    let retired = HANDLES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id);
+    drop(retired);
 }
 
 /// Connects and returns an opaque mobile-client handle.
@@ -203,12 +196,12 @@ pub unsafe extern "C" fn mobile_client_connect(
     device_pkcs8: *const u8,
     device_pkcs8_len: usize,
     error_out: *mut *mut c_char,
-) -> *mut Handle {
+) -> u64 {
     if !error_out.is_null() {
         // SAFETY: checked non-null and owned by the caller.
         unsafe { *error_out = ptr::null_mut() };
     }
-    let result = std::panic::catch_unwind(|| -> Result<*mut Handle, String> {
+    let result = std::panic::catch_unwind(|| -> Result<u64, String> {
         let config: CConfig = serde_json::from_str(input_string(config_json)?)
             .map_err(|_| "invalid config JSON".to_owned())?;
         if device_pkcs8.is_null() || device_pkcs8_len == 0 {
@@ -222,53 +215,11 @@ pub unsafe extern "C" fn mobile_client_connect(
         Ok(Ok(handle)) => handle,
         Ok(Err(error)) => {
             set_error(error_out, error);
-            ptr::null_mut()
+            0
         }
         Err(_) => {
             set_error(error_out, "mobile client panicked");
-            ptr::null_mut()
-        }
-    }
-}
-
-/// Sends one request through a live opaque handle.
-///
-/// # Safety
-/// `handle` must be live and exclusively retained by the caller; all
-/// string inputs must be valid NUL-terminated UTF-8. If non-null,
-/// `error_out` must be writable for one `char *`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mobile_client_request(
-    handle: *mut Handle,
-    method: *const c_char,
-    params_json: *const c_char,
-    error_out: *mut *mut c_char,
-) -> *mut c_char {
-    if !error_out.is_null() {
-        // SAFETY: checked non-null and owned by the caller.
-        unsafe { *error_out = ptr::null_mut() };
-    }
-    if handle.is_null() {
-        set_error(error_out, "null mobile client handle");
-        return ptr::null_mut();
-    }
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<CString, String> {
-        let method = input_string(method)?.to_owned();
-        let params = input_string(params_json)?.to_owned();
-        // SAFETY: checked non-null and the handle remains owned by caller.
-        let handle = unsafe { &*handle };
-        CString::new(request_json(handle, method, params)?)
-            .map_err(|_| "response contains NUL".to_owned())
-    }));
-    match result {
-        Ok(Ok(value)) => value.into_raw(),
-        Ok(Err(error)) => {
-            set_error(error_out, error);
-            ptr::null_mut()
-        }
-        Err(_) => {
-            set_error(error_out, "mobile client panicked");
-            ptr::null_mut()
+            0
         }
     }
 }
@@ -276,12 +227,11 @@ pub unsafe extern "C" fn mobile_client_request(
 /// Executes a typed agent intent through the shared PC/mobile client.
 ///
 /// # Safety
-/// `handle` must be live and exclusively retained by the caller; all
-/// string inputs must be valid NUL-terminated UTF-8. If non-null,
+/// String inputs must be valid NUL-terminated UTF-8. If non-null,
 /// `error_out` must be writable for one `char *`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mobile_client_agent_command(
-    handle: *mut Handle,
+    handle: u64,
     command_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
@@ -289,15 +239,10 @@ pub unsafe extern "C" fn mobile_client_agent_command(
         // SAFETY: checked non-null and owned by the caller.
         unsafe { *error_out = ptr::null_mut() };
     }
-    if handle.is_null() {
-        set_error(error_out, "null mobile client handle");
-        return ptr::null_mut();
-    }
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<CString, String> {
         let command = input_string(command_json)?;
-        // SAFETY: checked non-null and the handle remains owned by caller.
-        let handle = unsafe { &*handle };
-        CString::new(agent_command_json(handle, command)?)
+        let handle = borrow_handle(handle)?;
+        CString::new(agent_command_json(&handle, command)?)
             .map_err(|_| "response contains NUL".to_owned())
     }));
     match result {
@@ -316,24 +261,18 @@ pub unsafe extern "C" fn mobile_client_agent_command(
 /// Returns the next notification or Host request in wire order, if available.
 ///
 /// # Safety
-/// `handle` must be live. If non-null, `error_out` must be writable for
+/// If non-null, `error_out` must be writable for
 /// one `char *`; non-null returned strings use `mobile_client_string_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mobile_client_next_event(
-    handle: *mut Handle,
+    handle: u64,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
     if !error_out.is_null() {
         // SAFETY: checked non-null and owned by the caller.
         unsafe { *error_out = ptr::null_mut() };
     }
-    if handle.is_null() {
-        set_error(error_out, "null mobile client handle");
-        return ptr::null_mut();
-    }
-    // SAFETY: checked non-null and the handle remains owned by caller.
-    let handle = unsafe { &*handle };
-    match next_event_json(handle) {
+    match borrow_handle(handle).and_then(|handle| next_event_json(&handle)) {
         Ok(Some(notification)) => CString::new(notification).unwrap().into_raw(),
         Ok(None) => ptr::null_mut(),
         Err(error) => {
@@ -343,97 +282,10 @@ pub unsafe extern "C" fn mobile_client_next_event(
     }
 }
 
-/// Responds successfully to a Host-initiated request. `request_id_json`
-/// must be a JSON number or string, and `result_json` may be any JSON
-/// value. Returns 1 on success and 0 on failure.
-///
-/// # Safety
-/// `handle` must remain live and every string pointer must designate a
-/// NUL-terminated UTF-8 string. If non-null, `error_out` must be writable.
+/// Retires a handle. Concurrent calls finish before its transport is destroyed.
+/// Repeated close and stale handle IDs are harmless.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mobile_client_respond_result(
-    handle: *mut Handle,
-    request_id_json: *const c_char,
-    result_json: *const c_char,
-    error_out: *mut *mut c_char,
-) -> i32 {
-    if !error_out.is_null() {
-        // SAFETY: checked non-null and owned by the caller.
-        unsafe { *error_out = ptr::null_mut() };
-    }
-    if handle.is_null() {
-        set_error(error_out, "null mobile client handle");
-        return 0;
-    }
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
-        let request_id = input_string(request_id_json)?;
-        let result = input_string(result_json)?;
-        // SAFETY: checked non-null and the handle remains owned by caller.
-        let handle = unsafe { &*handle };
-        respond_result_json(handle, request_id, result)
-    }));
-    match result {
-        Ok(Ok(())) => 1,
-        Ok(Err(error)) => {
-            set_error(error_out, error);
-            0
-        }
-        Err(_) => {
-            set_error(error_out, "mobile client panicked");
-            0
-        }
-    }
-}
-
-/// Responds with a structured RPC error to a Host-initiated request.
-/// `error_json` must contain the raw error object, including `code`,
-/// `message`, and optional `data`. Returns 1 on success and 0 on failure.
-///
-/// # Safety
-/// `handle` must remain live and every string pointer must designate a
-/// NUL-terminated UTF-8 string. If non-null, `error_out` must be writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mobile_client_respond_error(
-    handle: *mut Handle,
-    request_id_json: *const c_char,
-    error_json: *const c_char,
-    error_out: *mut *mut c_char,
-) -> i32 {
-    if !error_out.is_null() {
-        // SAFETY: checked non-null and owned by the caller.
-        unsafe { *error_out = ptr::null_mut() };
-    }
-    if handle.is_null() {
-        set_error(error_out, "null mobile client handle");
-        return 0;
-    }
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<(), String> {
-        let request_id = input_string(request_id_json)?;
-        let error = input_string(error_json)?;
-        // SAFETY: checked non-null and the handle remains owned by caller.
-        let handle = unsafe { &*handle };
-        respond_error_json(handle, request_id, error)
-    }));
-    match result {
-        Ok(Ok(())) => 1,
-        Ok(Err(error)) => {
-            set_error(error_out, error);
-            0
-        }
-        Err(_) => {
-            set_error(error_out, "mobile client panicked");
-            0
-        }
-    }
-}
-
-/// Closes and destroys an opaque handle.
-///
-/// # Safety
-/// `handle` must originate from `mobile_client_connect` and be passed
-/// exactly once, after all concurrent calls that borrow it have returned.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn mobile_client_close(handle: *mut Handle) {
+pub extern "C" fn mobile_client_close(handle: u64) {
     close_handle(handle);
 }
 
@@ -498,11 +350,11 @@ pub(crate) fn transfer_json(handle: &Handle, params: &str) -> Result<String, Str
 /// Transfers a picked file over a dedicated encrypted channel.
 ///
 /// # Safety
-/// The handle must remain live until this blocking call returns. Inputs must
-/// be NUL-terminated UTF-8 and error_out, if non-null, writable for one pointer.
+/// Inputs must be NUL-terminated UTF-8 and error_out, if non-null, writable
+/// for one pointer. The call retains its handle through completion.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mobile_client_transfer(
-    handle: *mut Handle,
+    handle: u64,
     params_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut c_char {
@@ -511,14 +363,10 @@ pub unsafe extern "C" fn mobile_client_transfer(
             *error_out = ptr::null_mut();
         }
     }
-    if handle.is_null() {
-        set_error(error_out, "null mobile client handle");
-        return ptr::null_mut();
-    }
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<CString, String> {
         let params = input_string(params_json)?;
-        let handle = unsafe { &*handle };
-        CString::new(transfer_json(handle, params)?)
+        let handle = borrow_handle(handle)?;
+        CString::new(transfer_json(&handle, params)?)
             .map_err(|_| "transfer result contains NUL".into())
     }));
     match result {

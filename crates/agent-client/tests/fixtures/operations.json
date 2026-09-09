@@ -662,17 +662,23 @@
   {
     "name": "first-turn",
     "command": {
-      "type": "startTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
-      "cwd": "/workspace",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
-      "resume": false,
       "model": null,
-      "effort": null
+      "effort": null,
+      "snapshot": {
+        "cwd": "/workspace",
+        "status": {
+          "type": "idle"
+        },
+        "turns": []
+      },
+      "listed": null
     },
     "exchanges": [
       {
@@ -702,17 +708,23 @@
   {
     "name": "selected-options",
     "command": {
-      "type": "startTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
-      "cwd": "/workspace",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
-      "resume": false,
       "model": "model-b",
-      "effort": "high"
+      "effort": "high",
+      "snapshot": {
+        "cwd": "/workspace",
+        "status": {
+          "type": "idle"
+        },
+        "turns": []
+      },
+      "listed": null
     },
     "exchanges": [
       {
@@ -744,17 +756,23 @@
   {
     "name": "explicit-cwd-first",
     "command": {
-      "type": "startTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
-      "cwd": "/first",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
-      "resume": true,
       "model": null,
-      "effort": null
+      "effort": null,
+      "snapshot": {
+        "cwd": "/first",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": []
+      },
+      "listed": null
     },
     "exchanges": [
       {
@@ -794,17 +812,23 @@
   {
     "name": "explicit-cwd-second",
     "command": {
-      "type": "startTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
-      "cwd": "/second",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
-      "resume": true,
       "model": null,
-      "effort": null
+      "effort": null,
+      "snapshot": {
+        "cwd": "/second",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": []
+      },
+      "listed": null
     },
     "exchanges": [
       {
@@ -844,17 +868,23 @@
   {
     "name": "failed-resume-stops-send",
     "command": {
-      "type": "startTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
-      "cwd": "/workspace",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
-      "resume": true,
       "model": null,
-      "effort": null
+      "effort": null,
+      "snapshot": {
+        "cwd": "/workspace",
+        "status": {
+          "type": "notLoaded"
+        },
+        "turns": []
+      },
+      "listed": null
     },
     "exchanges": [
       {
@@ -888,14 +918,24 @@
   {
     "name": "steer-input",
     "command": {
-      "type": "steerTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
-      "turnId": "turn-1"
+      "snapshot": {
+        "turns": [
+          {
+            "id": "turn-1",
+            "status": "inProgress"
+          }
+        ]
+      },
+      "listed": null,
+      "model": null,
+      "effort": null
     },
     "exchanges": [
       {
@@ -917,18 +957,26 @@
         }
       }
     ],
-    "result": null
+    "result": "turn-1"
   },
   {
     "name": "queue-input",
     "command": {
-      "type": "queueTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
-      }
+      },
+      "snapshot": {
+        "status": {
+          "type": "active"
+        }
+      },
+      "listed": null,
+      "model": null,
+      "effort": null
     },
     "exchanges": [
       {
@@ -953,18 +1001,26 @@
         }
       }
     ],
-    "result": "queued-1"
+    "result": null
   },
   {
     "name": "queue-fresh-identity",
     "command": {
-      "type": "queueTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
       "input": {
         "text": "again",
         "attachments": [],
         "clientUserMessageId": "client-2"
-      }
+      },
+      "snapshot": {
+        "status": {
+          "type": "active"
+        }
+      },
+      "listed": null,
+      "model": null,
+      "effort": null
     },
     "exchanges": [
       {
@@ -989,18 +1045,26 @@
         }
       }
     ],
-    "result": "queued-2"
+    "result": null
   },
   {
     "name": "malformed-queue",
     "command": {
-      "type": "queueTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
-      }
+      },
+      "snapshot": {
+        "status": {
+          "type": "active"
+        }
+      },
+      "listed": null,
+      "model": null,
+      "effort": null
     },
     "exchanges": [
       {
@@ -1037,7 +1101,7 @@
   {
     "name": "attachments-startTurn",
     "command": {
-      "type": "startTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
       "input": {
         "text": "",
@@ -1055,10 +1119,16 @@
         ],
         "clientUserMessageId": "client-1"
       },
-      "cwd": "/workspace",
-      "resume": false,
       "model": null,
-      "effort": null
+      "effort": null,
+      "snapshot": {
+        "cwd": "/workspace",
+        "status": {
+          "type": "idle"
+        },
+        "turns": []
+      },
+      "listed": null
     },
     "exchanges": [
       {
@@ -1090,7 +1160,7 @@
   {
     "name": "attachments-steerTurn",
     "command": {
-      "type": "steerTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
       "input": {
         "text": "",
@@ -1108,7 +1178,17 @@
         ],
         "clientUserMessageId": "client-1"
       },
-      "turnId": "turn-1"
+      "snapshot": {
+        "turns": [
+          {
+            "id": "turn-1",
+            "status": "inProgress"
+          }
+        ]
+      },
+      "listed": null,
+      "model": null,
+      "effort": null
     },
     "exchanges": [
       {
@@ -1134,12 +1214,12 @@
         }
       }
     ],
-    "result": null
+    "result": "turn-1"
   },
   {
     "name": "attachments-queueTurn",
     "command": {
-      "type": "queueTurn",
+      "type": "sendTurn",
       "threadId": "thread-1",
       "input": {
         "text": "",
@@ -1156,7 +1236,15 @@
           }
         ],
         "clientUserMessageId": "client-1"
-      }
+      },
+      "snapshot": {
+        "status": {
+          "type": "active"
+        }
+      },
+      "listed": null,
+      "model": null,
+      "effort": null
     },
     "exchanges": [
       {
@@ -1185,7 +1273,7 @@
         }
       }
     ],
-    "result": "queued-1"
+    "result": null
   },
   {
     "name": "interrupt",
@@ -1468,13 +1556,13 @@
         "params": {
           "threadId": "thread",
           "watchKey": 3,
-      "watchId": 17,
+          "watchId": 17,
           "path": "/fixture/rollout.jsonl"
         },
         "response": {
           "result": {
             "watchKey": 3,
-      "watchId": 17
+            "watchId": 17
           }
         }
       }
@@ -1493,12 +1581,12 @@
         "method": "host/thread/unwatch",
         "params": {
           "watchKey": 3,
-      "watchId": 17
+          "watchId": 17
         },
         "response": {
           "result": {
             "watchKey": 3,
-      "watchId": 17
+            "watchId": 17
           }
         }
       }
@@ -1729,6 +1817,486 @@
       }
     ],
     "errorContains": "カーソル",
+    "errorRaw": null
+  },
+  {
+    "name": "transcription-text",
+    "command": {
+      "type": "transcribe",
+      "audio": "fixture-audio"
+    },
+    "exchanges": [
+      {
+        "method": "host/dictation/transcribe",
+        "params": {
+          "audio": "fixture-audio"
+        },
+        "response": {
+          "result": {
+            "text": "  文字起こし\n"
+          }
+        }
+      }
+    ],
+    "result": "  文字起こし\n"
+  },
+  {
+    "name": "transcription-missing-text",
+    "command": {
+      "type": "transcribe",
+      "audio": "fixture-audio"
+    },
+    "exchanges": [
+      {
+        "method": "host/dictation/transcribe",
+        "params": {
+          "audio": "fixture-audio"
+        },
+        "response": {
+          "result": {}
+        }
+      }
+    ],
+    "errorContains": "音声を認識できませんでした",
+    "errorRaw": null
+  },
+  {
+    "name": "transcription-blank-text",
+    "command": {
+      "type": "transcribe",
+      "audio": "fixture-audio"
+    },
+    "exchanges": [
+      {
+        "method": "host/dictation/transcribe",
+        "params": {
+          "audio": "fixture-audio"
+        },
+        "response": {
+          "result": {
+            "text": " \n"
+          }
+        }
+      }
+    ],
+    "errorContains": "音声を認識できませんでした",
+    "errorRaw": null
+  },
+  {
+    "name": "transcription-wrong-text-type",
+    "command": {
+      "type": "transcribe",
+      "audio": "fixture-audio"
+    },
+    "exchanges": [
+      {
+        "method": "host/dictation/transcribe",
+        "params": {
+          "audio": "fixture-audio"
+        },
+        "response": {
+          "result": {
+            "text": 7
+          }
+        }
+      }
+    ],
+    "errorContains": "音声を認識できませんでした",
+    "errorRaw": null
+  },
+  {
+    "name": "transcription-remote-error",
+    "command": {
+      "type": "transcribe",
+      "audio": "fixture-audio"
+    },
+    "exchanges": [
+      {
+        "method": "host/dictation/transcribe",
+        "params": {
+          "audio": "fixture-audio"
+        },
+        "response": {
+          "error": {
+            "code": -9,
+            "message": "transcription failed",
+            "future": true
+          }
+        }
+      }
+    ],
+    "errorContains": "transcription failed",
+    "errorRaw": {
+      "code": -9,
+      "message": "transcription failed",
+      "future": true
+    }
+  },
+  {
+    "name": "approval-default-decision-numeric-id",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": 7,
+        "method": "item/commandExecution/requestApproval",
+        "params": {}
+      },
+      "answer": {
+        "type": "decision",
+        "index": 2
+      }
+    },
+    "exchanges": [
+      {
+        "reply": {
+          "id": 7,
+          "result": {
+            "decision": "decline"
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "approval-custom-decision-preserved",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "approval",
+        "method": "item/fileChange/requestApproval",
+        "params": {
+          "availableDecisions": [
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "git",
+                  "status"
+                ],
+                "future": {
+                  "value": 1
+                }
+              }
+            },
+            "cancel"
+          ]
+        }
+      },
+      "answer": {
+        "type": "decision",
+        "index": 0
+      }
+    },
+    "exchanges": [
+      {
+        "reply": {
+          "id": "approval",
+          "result": {
+            "decision": {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "git",
+                  "status"
+                ],
+                "future": {
+                  "value": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "approval-invalid-choice-does-not-send",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "approval",
+        "method": "item/fileChange/requestApproval",
+        "params": {
+          "availableDecisions": [
+            {
+              "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": [
+                  "git",
+                  "status"
+                ],
+                "future": {
+                  "value": 1
+                }
+              }
+            },
+            "cancel"
+          ]
+        }
+      },
+      "answer": {
+        "type": "decision",
+        "index": 2
+      }
+    },
+    "exchanges": [],
+    "errorContains": "承認の選択肢が無効です",
+    "errorRaw": null
+  },
+  {
+    "name": "permission-allow-preserves-unknown-fields",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "permissions",
+        "method": "item/permissions/requestApproval",
+        "params": {
+          "permissions": {
+            "filesystem": {
+              "write": [
+                "/fixture"
+              ]
+            },
+            "network": true,
+            "future": {
+              "scope": "special"
+            }
+          }
+        }
+      },
+      "answer": {
+        "type": "permissions",
+        "allow": true
+      }
+    },
+    "exchanges": [
+      {
+        "reply": {
+          "id": "permissions",
+          "result": {
+            "permissions": {
+              "filesystem": {
+                "write": [
+                  "/fixture"
+                ]
+              },
+              "network": true,
+              "future": {
+                "scope": "special"
+              }
+            },
+            "scope": "turn"
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "permission-deny",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "permissions",
+        "method": "item/permissions/requestApproval",
+        "params": {
+          "permissions": {
+            "filesystem": {
+              "write": [
+                "/fixture"
+              ]
+            },
+            "network": true,
+            "future": {
+              "scope": "special"
+            }
+          }
+        }
+      },
+      "answer": {
+        "type": "permissions",
+        "allow": false
+      }
+    },
+    "exchanges": [
+      {
+        "reply": {
+          "id": "permissions",
+          "result": {
+            "permissions": {},
+            "scope": "turn"
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "question-answers-preserve-text",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "questions",
+        "method": "item/tool/requestUserInput",
+        "params": {
+          "questions": [
+            {
+              "id": "first",
+              "question": "Question 1"
+            },
+            {
+              "id": "second",
+              "question": "Question 2"
+            }
+          ]
+        }
+      },
+      "answer": {
+        "type": "answers",
+        "answers": {
+          "second": "second line\n",
+          "first": " first ",
+          "not-requested": "ignored"
+        }
+      }
+    },
+    "exchanges": [
+      {
+        "reply": {
+          "id": "questions",
+          "result": {
+            "answers": {
+              "first": {
+                "answers": [
+                  " first "
+                ]
+              },
+              "second": {
+                "answers": [
+                  "second line\n"
+                ]
+              }
+            }
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "question-missing-answer-does-not-send",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "questions",
+        "method": "item/tool/requestUserInput",
+        "params": {
+          "questions": [
+            {
+              "id": "first",
+              "question": "Question 1"
+            },
+            {
+              "id": "second",
+              "question": "Question 2"
+            }
+          ]
+        }
+      },
+      "answer": {
+        "type": "answers",
+        "answers": {
+          "first": "one"
+        }
+      }
+    },
+    "exchanges": [],
+    "errorContains": "すべての質問に回答してください",
+    "errorRaw": null
+  },
+  {
+    "name": "question-blank-answer-does-not-send",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "questions",
+        "method": "item/tool/requestUserInput",
+        "params": {
+          "questions": [
+            {
+              "id": "first",
+              "question": "Question 1"
+            },
+            {
+              "id": "second",
+              "question": "Question 2"
+            }
+          ]
+        }
+      },
+      "answer": {
+        "type": "answers",
+        "answers": {
+          "first": "one",
+          "second": " \n"
+        }
+      }
+    },
+    "exchanges": [],
+    "errorContains": "すべての質問に回答してください",
+    "errorRaw": null
+  },
+  {
+    "name": "raw-future-response",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "future",
+        "method": "future/input",
+        "params": {
+          "future": true
+        }
+      },
+      "answer": {
+        "type": "raw",
+        "json": "{\"future\":[1,null,{\"ok\":true}]}"
+      }
+    },
+    "exchanges": [
+      {
+        "reply": {
+          "id": "future",
+          "result": {
+            "future": [
+              1,
+              null,
+              {
+                "ok": true
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "result": null
+  },
+  {
+    "name": "raw-invalid-json-does-not-send",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "future",
+        "method": "future/input",
+        "params": {
+          "future": true
+        }
+      },
+      "answer": {
+        "type": "raw",
+        "json": "{"
+      }
+    },
+    "exchanges": [],
+    "errorContains": "EOF",
     "errorRaw": null
   }
 ]

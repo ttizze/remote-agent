@@ -2,18 +2,24 @@ import org.gradle.api.tasks.Exec
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    id("com.ncorti.ktfmt.gradle")
     id("io.gitlab.arturbosch.detekt")
     id("org.jetbrains.kotlin.multiplatform")
-    id("com.android.application")
+    id("com.android.kotlin.multiplatform.library")
     id("org.jetbrains.compose")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+    // ktfmt detects the Android KMP plugin when it is applied.
+    id("com.ncorti.ktfmt.gradle")
 }
 
 ktfmt {
     kotlinLangStyle()
     maxWidth.set(120)
+}
+
+// Filter before traversal so Native compiler scratch files cannot race script discovery.
+tasks.withType<com.ncorti.ktfmt.gradle.tasks.KtfmtBaseTask>().configureEach {
+    if (name.endsWith("Scripts")) setSource(fileTree(projectDir) { include("*.kts") })
 }
 
 detekt {
@@ -29,7 +35,13 @@ val mobileCargo = providers.environmentVariable("MOBILE_CARGO").orElse("cargo")
 val mobileRustc = providers.environmentVariable("MOBILE_RUSTC").orElse("rustc")
 
 kotlin {
-    androidTarget { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
+    android {
+        namespace = "dev.remoteagent.mobile.shared"
+        compileSdk = 37
+        minSdk = 37
+        compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
+        withHostTest {}
+    }
 
     listOf(iosArm64() to "aarch64-apple-ios", iosSimulatorArm64() to "aarch64-apple-ios-sim").forEach {
         (target, rustTarget) ->
@@ -42,7 +54,7 @@ kotlin {
                     environment("CXX", providers.environmentVariable("MOBILE_CXX").orElse("/usr/bin/clang++").get())
                     environment("CARGO_TARGET_AARCH64_APPLE_IOS_LINKER", "/usr/bin/clang")
                     environment("CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER", "/usr/bin/clang")
-                    environment("IPHONEOS_DEPLOYMENT_TARGET", "15.0")
+                    environment("IPHONEOS_DEPLOYMENT_TARGET", "26.0")
                 }
                 commandLine(
                     mobileCargo.get(),
@@ -89,6 +101,7 @@ kotlin {
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
         }
         commonTest.dependencies { implementation(kotlin("test")) }
+        getByName("androidHostTest").resources.srcDir(rootProject.file("crates/agent-client/tests/fixtures"))
         androidMain.dependencies {
             implementation("androidx.activity:activity-compose:1.12.4")
             implementation("org.jetbrains.compose.foundation:foundation:1.11.1")
@@ -100,63 +113,6 @@ kotlin {
             implementation("com.google.mlkit:barcode-scanning:17.3.0")
         }
     }
-}
-
-val buildMobileClientAndroid by
-    tasks.registering(Exec::class) {
-        workingDir(rootProject.projectDir)
-        environment("RUSTC", mobileRustc.get())
-        commandLine(
-            mobileCargo.get(),
-            "ndk",
-            "--target",
-            "arm64-v8a",
-            "--target",
-            "x86_64",
-            "--output-dir",
-            project.file("src/androidMain/jniLibs").absolutePath,
-            "build",
-            "--package",
-            "mobile-client",
-            "--release",
-            "--features",
-            "jni",
-        )
-        inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
-        inputs.dir(rootProject.file("crates/agent-client"))
-        inputs.dir(rootProject.file("crates/conversation-presentation"))
-        inputs.dir(rootProject.file("crates/host-protocol"))
-        inputs.dir(rootProject.file("crates/relay-transport"))
-        inputs.dir(rootProject.file("crates/mobile-client"))
-        outputs.files(
-            project.file("src/androidMain/jniLibs/arm64-v8a/libmobile_client.so"),
-            project.file("src/androidMain/jniLibs/x86_64/libmobile_client.so"),
-        )
-    }
-
-tasks
-    .matching { task -> task.name.matches(Regex("merge.*JniLibFolders")) }
-    .configureEach { dependsOn(buildMobileClientAndroid) }
-
-android {
-    namespace = "dev.remoteagent.mobile"
-    compileSdk = 36
-
-    defaultConfig {
-        applicationId = "dev.remoteagent.mobile"
-        minSdk = 26
-        targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    sourceSets.getByName("main").jniLibs.srcDir("src/androidMain/jniLibs")
-    sourceSets.getByName("test").resources.srcDir(rootProject.file("crates/agent-client/tests/fixtures"))
 }
 
 // JVM unit tests execute the same JNI implementation as Android, using a host

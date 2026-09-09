@@ -238,6 +238,10 @@ internal class MobileControllerTest : MobileControllerTestFixture() {
                         CodexTurn(
                             id = "latest-turn",
                             status = TurnStatus.Completed,
+                            raw =
+                                kotlinx.serialization.json.Json.parseToJsonElement(
+                                    """{"id":"latest-turn","status":"completed"}"""
+                                ) as kotlinx.serialization.json.JsonObject,
                             items = listOf(CodexItem.AgentMessage("latest-answer", "Reply written while backgrounded")),
                         )
                     )

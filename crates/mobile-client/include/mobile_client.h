@@ -10,7 +10,8 @@
 extern "C" {
 #endif
 
-typedef struct MobileClientHandle MobileClientHandle;
+/* Opaque, non-reused ID. Zero denotes a failed connection. */
+typedef uint64_t MobileClientHandle;
 
 /*
  * Allocates an Ed25519 PKCS#8 document encoded as unpadded base64url.
@@ -26,50 +27,27 @@ char *mobile_client_generate_device_key(char **error_out);
  * requestTimeoutMs. hostIdentity and pairingTicket are the
  * host-protocol base64url values. device_pkcs8 is secure-storage output.
  */
-MobileClientHandle *mobile_client_connect(
+MobileClientHandle mobile_client_connect(
     const char *config_json,
     const uint8_t *device_pkcs8,
     size_t device_pkcs8_len,
     char **error_out);
 
-/* params_json must be one JSON value. The request is forwarded to Codex as-is. */
-char *mobile_client_request(
-    MobileClientHandle *handle,
-    const char *method,
-    const char *params_json,
-    char **error_out);
-
 /* Typed agent intent; shares operations with the native Mac client. */
-char *mobile_client_agent_command(MobileClientHandle *handle, const char *command_json, char **error_out);
+char *mobile_client_agent_command(MobileClientHandle handle, const char *command_json, char **error_out);
 
 /* Next raw notification or Host request, in wire order. NULL means empty unless
  * *error_out is set. Overflow/closure require reconnect and resynchronization. */
-char *mobile_client_next_event(MobileClientHandle *handle, char **error_out);
-
-/*
- * Answers a Host-initiated request. request_id_json must be the raw JSON
- * number/string from next_event. Return value is 1 on success and 0
- * on failure; on failure, *error_out receives a string when non-NULL.
- */
-int mobile_client_respond_result(
-    MobileClientHandle *handle,
-    const char *request_id_json,
-    const char *result_json,
-    char **error_out);
-
-int mobile_client_respond_error(
-    MobileClientHandle *handle,
-    const char *request_id_json,
-    const char *error_json,
-    char **error_out);
+char *mobile_client_next_event(MobileClientHandle handle, char **error_out);
 
 /* params: {direction:"upload",source,directory,fileName} or
  * {direction:"download",source,destination}. Download never overwrites.
  * Returns result JSON; file bytes use a separate SSH channel. */
-char *mobile_client_transfer(MobileClientHandle *handle, const char *params_json, char **error_out);
+char *mobile_client_transfer(MobileClientHandle handle, const char *params_json, char **error_out);
 
-/* Consumes handle; call exactly once after all request calls have returned. */
-void mobile_client_close(MobileClientHandle *handle);
+/* Retires the ID; outstanding calls retain the connection until they finish.
+ * Repeated close is harmless and stale IDs fail without accessing freed memory. */
+void mobile_client_close(MobileClientHandle handle);
 
 /* Pure conversation presentation; no connection handle or source bodies needed.
  * Operations: turn (metadata + pending anchors), item (title metadata),

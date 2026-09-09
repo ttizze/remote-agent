@@ -6,7 +6,13 @@ config:
 naming:
   FunctionNaming:
     ignoreAnnotated: ['Composable']
+    # Preserve the default test policy with AGP 9's renamed source sets.
+    excludes: ['**/test/**', '**/androidTest/**', '**/commonTest/**', '**/jvmTest/**', '**/androidHostTest/**', '**/androidDeviceTest/**', '**/jsTest/**', '**/iosTest/**']
 
 complexity:
   LongParameterList:
     ignoreDefaultParameters: true
+
+style:
+  MagicNumber:
+    excludes: ['**/test/**', '**/androidTest/**', '**/commonTest/**', '**/jvmTest/**', '**/androidHostTest/**', '**/androidDeviceTest/**', '**/jsTest/**', '**/iosTest/**', '**/*.kts']

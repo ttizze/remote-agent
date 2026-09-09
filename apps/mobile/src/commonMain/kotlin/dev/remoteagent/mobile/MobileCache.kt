@@ -129,7 +129,7 @@ fun reconcileThreadRead(
 fun applyLiveEvent(
     cache: MobileCache,
     hostIdentity: String,
-    event: ThreadEvent,
+    event: RawCodexMessage,
     limits: MobileCacheLimits,
 ): MobileCache {
     val profile = cache.profile(hostIdentity)
@@ -140,35 +140,40 @@ fun applyLiveEvent(
 private fun MobileCache.replaceProfile(hostIdentity: String, profile: ProfileMobileCache): MobileCache =
     if (profiles[hostIdentity] === profile) this else copy(profiles = profiles + (hostIdentity to profile))
 
-private fun ProfileMobileCache.apply(event: ThreadEvent): ProfileMobileCache =
-    when (event) {
-        is ThreadEvent.Unknown -> this
-        is ThreadEvent.ThreadStatusChanged -> applyThreadStatus(event)
+private fun ProfileMobileCache.apply(event: RawCodexMessage): ProfileMobileCache =
+    when (event.kind) {
+        ConversationEventKind.Unknown -> this
+        ConversationEventKind.ThreadStatusChanged -> applyThreadStatus(event)
         else -> applyBodyEvent(event)
     }
 
-private fun ProfileMobileCache.applyThreadStatus(event: ThreadEvent.ThreadStatusChanged): ProfileMobileCache {
+private fun ProfileMobileCache.applyThreadStatus(event: RawCodexMessage): ProfileMobileCache {
+    val status = codexThreadStatus(event.paramsObject["status"])
     val updatedList = threadList.map { summary ->
-        if (summary.id == event.threadId) summary.copy(status = event.status) else summary
+        if (summary.id == event.threadId) summary.copy(status = status) else summary
     }
     val snapshot = snapshots[event.threadId]
     val updatedSnapshots =
         if (snapshot == null) snapshots
-        else snapshots + (event.threadId to snapshot.copy(summary = snapshot.summary.copy(status = event.status)))
+        else snapshots + (event.threadId to snapshot.copy(summary = snapshot.summary.copy(status = status)))
     return copy(threadList = updatedList, snapshots = updatedSnapshots)
 }
 
-private fun ProfileMobileCache.applyBodyEvent(event: ThreadEvent): ProfileMobileCache {
+private fun ProfileMobileCache.applyBodyEvent(event: RawCodexMessage): ProfileMobileCache {
     val existing = snapshots[event.threadId] ?: return this
     val updated = existing.applyConversationEvent(event)
     return if (updated === existing) this
     else {
         val echoed =
-            when (event) {
-                is ThreadEvent.ItemStarted -> event.item as? CodexItem.UserMessage
-                is ThreadEvent.ItemCompleted -> event.item as? CodexItem.UserMessage
+            when (event.kind) {
+                ConversationEventKind.ItemStarted,
+                ConversationEventKind.ItemCompleted ->
+                    event.paramsObject
+                        .childObject("item")
+                        ?.takeIf { it.string("type") == "userMessage" }
+                        ?.string("clientId")
                 else -> null
-            }?.clientId
+            }
         val reconciled =
             if (echoed == null || updated.submittedMessages.isEmpty()) updated
             else

@@ -57,7 +57,7 @@ class CodexProtocolTest {
     @Test
     fun unknown_notification_does_not_change_display_cache() {
         val event =
-            codexThreadEvent(
+            RawCodexMessage.Notification(
                 "item/futureThing",
                 json.parseToJsonElement(
                     """
@@ -66,12 +66,12 @@ class CodexProtocolTest {
                 ),
                 JsonObject(mapOf("vendor" to json.parseToJsonElement("true"))),
             )
-        val unknown = assertIs<ThreadEvent.Unknown>(event)
+        val unknown = assertEventKind(ConversationEventKind.Unknown, event)
         val cache = MobileCache()
         val updated = applyLiveEvent(cache, "host-1", unknown, MobileCacheLimits())
 
         assertEquals("item/futureThing", unknown.method)
-        assertEquals(42, unknown.raw["extra"]?.jsonObject?.get("value")?.toString()?.toInt())
+        assertEquals(42, unknown.paramsObject["extra"]?.jsonObject?.get("value")?.toString()?.toInt())
         assertEquals("true", unknown.extensions["vendor"]?.toString())
         kotlin.test.assertSame(cache, updated)
     }
@@ -107,7 +107,7 @@ class CodexProtocolTest {
         assertEquals("project-1", summary.projectId)
 
         val event =
-            codexThreadEvent(
+            RawCodexMessage.Notification(
                 "turn/completed",
                 json.parseToJsonElement(
                     """
@@ -115,7 +115,12 @@ class CodexProtocolTest {
             """
                 ),
             )
-        assertEquals(TurnStatus.Interrupted, assertIs<ThreadEvent.TurnCompleted>(event).turn.status)
+        assertEquals(
+            TurnStatus.Interrupted,
+            assertEventKind(ConversationEventKind.TurnCompleted, event)
+                .let { codexTurn(it.paramsObject.getValue("turn")) }
+                .status,
+        )
     }
 
     @Test
@@ -171,19 +176,21 @@ class CodexProtocolTest {
     @Test
     fun turn_events_keep_server_timing() {
         val started =
-            assertIs<ThreadEvent.TurnStarted>(
-                codexThreadEvent(
+            assertEventKind(
+                ConversationEventKind.TurnStarted,
+                RawCodexMessage.Notification(
                     "turn/started",
                     json.parseToJsonElement(
                         """
                 {"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress","startedAt":10}}
             """
                     ),
-                )
+                ),
             )
         val completed =
-            assertIs<ThreadEvent.TurnCompleted>(
-                codexThreadEvent(
+            assertEventKind(
+                ConversationEventKind.TurnCompleted,
+                RawCodexMessage.Notification(
                     "turn/completed",
                     json.parseToJsonElement(
                         """
@@ -191,13 +198,13 @@ class CodexProtocolTest {
                  "startedAt":10,"completedAt":12,"durationMs":2345}}
             """
                     ),
-                )
+                ),
             )
 
-        assertEquals(10_000, started.turn.startedAtMs)
-        assertEquals(10_000, completed.turn.startedAtMs)
-        assertEquals(12_000, completed.turn.completedAtMs)
-        assertEquals(2_345, completed.turn.durationMs)
+        assertEquals(10_000, codexTurn(started.paramsObject.getValue("turn")).startedAtMs)
+        assertEquals(10_000, codexTurn(completed.paramsObject.getValue("turn")).startedAtMs)
+        assertEquals(12_000, codexTurn(completed.paramsObject.getValue("turn")).completedAtMs)
+        assertEquals(2_345, codexTurn(completed.paramsObject.getValue("turn")).durationMs)
     }
 
     @Test
@@ -221,7 +228,7 @@ class CodexProtocolTest {
     @Test
     fun reasoning_summary_text_delta_is_a_known_live_event() {
         val event =
-            codexThreadEvent(
+            RawCodexMessage.Notification(
                 "item/reasoning/summaryTextDelta",
                 json.parseToJsonElement(
                     """
@@ -229,18 +236,19 @@ class CodexProtocolTest {
             """
                 ),
             )
-        val summary = assertIs<ThreadEvent.ReasoningSummaryDelta>(event)
+        val summary = assertEventKind(ConversationEventKind.ReasoningSummaryDelta, event)
         assertEquals("thread-1", summary.threadId)
         assertEquals("turn-1", summary.turnId)
-        assertEquals("item-1", summary.itemId)
-        assertEquals("summary", summary.delta)
+        assertEquals("item-1", summary.paramsObject.string("itemId"))
+        assertEquals("summary", summary.paramsObject.string("delta"))
     }
 
     @Test
     fun retrying_and_terminal_error_notifications_keep_the_complete_error_state() {
         val retrying =
-            assertIs<ThreadEvent.Error>(
-                codexThreadEvent(
+            assertEventKind(
+                ConversationEventKind.Error,
+                RawCodexMessage.Notification(
                     "error",
                     json.parseToJsonElement(
                         """
@@ -249,11 +257,12 @@ class CodexProtocolTest {
                   "codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}
             """
                     ),
-                )
+                ),
             )
         val terminal =
-            assertIs<ThreadEvent.Error>(
-                codexThreadEvent(
+            assertEventKind(
+                ConversationEventKind.Error,
+                RawCodexMessage.Notification(
                     "error",
                     json.parseToJsonElement(
                         """
@@ -261,27 +270,31 @@ class CodexProtocolTest {
                  "error":{"message":"context is full","codexErrorInfo":"contextWindowExceeded"}}
             """
                     ),
-                )
+                ),
             )
 
-        assertTrue(retrying.willRetry)
-        assertEquals("stream disconnected", retrying.error.message)
-        assertEquals("attempt 2 of 5", retrying.error.additionalDetails)
+        assertTrue(retrying.paramsObject.boolean("willRetry") == true)
+        assertEquals("stream disconnected", codexTurnError(retrying.paramsObject.childObject("error")!!).message)
+        assertEquals("attempt 2 of 5", codexTurnError(retrying.paramsObject.childObject("error")!!).additionalDetails)
         assertEquals(
             "429",
-            retrying.error.codexErrorInfo
+            codexTurnError(retrying.paramsObject.childObject("error")!!)
+                .codexErrorInfo
                 ?.jsonObject
                 ?.get("responseStreamDisconnected")
                 ?.jsonObject
                 ?.get("httpStatusCode")
                 ?.toString(),
         )
-        assertFalse(terminal.willRetry)
-        assertEquals("contextWindowExceeded", terminal.error.codexErrorInfo?.toString()?.trim('"'))
+        assertFalse(terminal.paramsObject.boolean("willRetry") == true)
+        assertEquals(
+            "contextWindowExceeded",
+            codexTurnError(terminal.paramsObject.childObject("error")!!).codexErrorInfo?.toString()?.trim('"'),
+        )
     }
 
     @Test
-    fun every_conversation_server_request_becomes_a_typed_pending_request_event() {
+    fun every_conversation_server_request_retains_its_pending_request_fields() {
         val methods =
             listOf(
                 "item/commandExecution/requestApproval",
@@ -299,43 +312,48 @@ class CodexProtocolTest {
                     method = method,
                     params = json.parseToJsonElement("""{"threadId":"thread-1","turnId":"turn-1","reason":"needed"}"""),
                 )
-            val event = assertIs<ThreadEvent.RequestStarted>(codexThreadEvent(message))
-            assertEquals("request-$index", event.request.id)
-            assertEquals(method, event.request.method)
-            assertEquals("needed", event.request.params["reason"]?.toString()?.trim('"'))
+            val event = assertEventKind(ConversationEventKind.RequestStarted, message)
+            assertEquals("request-$index", event.serverRequest().id)
+            assertEquals(method, event.serverRequest().method)
+            assertEquals("needed", event.serverRequest().params["reason"]?.toString()?.trim('"'))
         }
     }
 
     @Test
     fun failed_turn_completion_keeps_the_nested_error() {
         val event =
-            assertIs<ThreadEvent.TurnCompleted>(
-                codexThreadEvent(
+            assertEventKind(
+                ConversationEventKind.TurnCompleted,
+                RawCodexMessage.Notification(
                     "turn/completed",
                     json.parseToJsonElement(
                         """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
                     "error":{"message":"context full","codexErrorInfo":"contextWindowExceeded"}}}"""
                     ),
-                )
+                ),
             )
 
-        assertEquals(TurnStatus.Failed, event.turn.status)
-        assertEquals("context full", event.turn.error?.message)
-        assertEquals("contextWindowExceeded", event.turn.error?.codexErrorInfo?.toString()?.trim('"'))
+        assertEquals(TurnStatus.Failed, codexTurn(event.paramsObject.getValue("turn")).status)
+        assertEquals("context full", codexTurn(event.paramsObject.getValue("turn")).error?.message)
+        assertEquals(
+            "contextWindowExceeded",
+            codexTurn(event.paramsObject.getValue("turn")).error?.codexErrorInfo?.toString()?.trim('"'),
+        )
     }
 
     @Test
     fun thread_status_and_every_auto_approval_review_state_are_typed() {
         val status =
-            assertIs<ThreadEvent.ThreadStatusChanged>(
-                codexThreadEvent(
+            assertEventKind(
+                ConversationEventKind.ThreadStatusChanged,
+                RawCodexMessage.Notification(
                     "thread/status/changed",
                     json.parseToJsonElement(
                         """{"threadId":"thread-1","status":{"type":"active","activeFlags":["waitingOnApproval"]}}"""
                     ),
-                )
+                ),
             )
-        assertEquals(ThreadStatus.Active(listOf("waitingOnApproval")), status.status)
+        assertEquals(ThreadStatus.Active(listOf("waitingOnApproval")), codexThreadStatus(status.paramsObject["status"]))
 
         listOf("inProgress", "approved", "denied", "timedOut", "aborted").forEach { reviewStatus ->
             val method =
@@ -345,18 +363,24 @@ class CodexProtocolTest {
                     "item/autoApprovalReview/completed"
                 }
             val review =
-                assertIs<ThreadEvent.GuardianReviewChanged>(
-                    codexThreadEvent(
+                assertEventKind(
+                    ConversationEventKind.GuardianReviewChanged,
+                    RawCodexMessage.Notification(
                         method,
                         json.parseToJsonElement(
                             """{"threadId":"thread-1","turnId":"turn-1","reviewId":"review-1",
                         "review":{"status":"$reviewStatus","rationale":"checked"},
                         "action":{"type":"command","command":"git status"}}"""
                         ),
-                    )
+                    ),
                 )
-            assertEquals("review-1", review.reviewId)
-            assertEquals(reviewStatus, review.status)
+            assertEquals("review-1", review.paramsObject.string("reviewId"))
+            assertEquals(reviewStatus, review.paramsObject.childObject("review")?.string("status"))
         }
+    }
+
+    private fun <T : RawCodexMessage> assertEventKind(kind: ConversationEventKind, event: T): T {
+        assertEquals(kind, event.kind)
+        return event
     }
 }

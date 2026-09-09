@@ -1,5 +1,6 @@
 package dev.remoteagent.mobile
 
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -37,22 +38,24 @@ data class HostWorkspaceReview(
     val diff: String,
 )
 
-internal suspend fun MobileController.listFiles(path: String): GatewayResult<HostFileList> =
+internal suspend fun AtomicRef<MobileApp>.listFiles(path: String): GatewayResult<HostFileList> =
     workspaceProjection(AgentCommand.ListFiles(path))
 
-internal suspend fun MobileController.readFile(path: String): GatewayResult<HostFileDocument> =
+internal suspend fun AtomicRef<MobileApp>.readFile(path: String): GatewayResult<HostFileDocument> =
     workspaceProjection(AgentCommand.ReadFile(path))
 
-internal suspend fun MobileController.writeFile(
+internal suspend fun AtomicRef<MobileApp>.writeFile(
     path: String,
     revision: String,
     text: String,
 ): GatewayResult<HostFileDocument> = workspaceProjection(AgentCommand.WriteFile(path, revision, text))
 
-internal suspend fun MobileController.reviewWorkspace(cwd: String): GatewayResult<HostWorkspaceReview> =
+internal suspend fun AtomicRef<MobileApp>.reviewWorkspace(cwd: String): GatewayResult<HostWorkspaceReview> =
     workspaceProjection(AgentCommand.ReviewWorkspace(cwd))
 
-private suspend inline fun <reified T> MobileController.workspaceProjection(command: AgentCommand): GatewayResult<T> {
+private suspend inline fun <reified T> AtomicRef<MobileApp>.workspaceProjection(
+    command: AgentCommand
+): GatewayResult<T> {
     val profile = state.selectedProfile ?: return GatewayResult.Failure("接続先が選択されていません")
     return when (val result = requestAgent(profile.id, command)) {
         is GatewayResult.Failure -> result

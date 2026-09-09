@@ -8,6 +8,8 @@
 
 # Mobile debugging order
 
+Support only the latest stable iOS and Android major versions: currently iOS 26 and Android 17 (API 37). Keep deployment targets and Android SDK settings aligned; remove obsolete compatibility branches when advancing the minimum.
+
 When debugging mobile behavior, especially task loading, use this escalation order:
 
 1. Start with a deterministic headless unit, integration, and full-stack loop. Reproduce the user's symptom with an exact assertion that can fail red (for example, the expected task is present in the loaded project/task list); do not rely on logs alone.

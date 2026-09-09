@@ -172,6 +172,7 @@ private data class PersistedAppState(
     val selectedProfileId: String? = null,
     val profileViews: Map<String, PersistedProfileViewState> = emptyMap(),
     val cache: PersistedMobileCache = PersistedMobileCache(),
+    val turnChoices: Map<String, CodexTurnOptions> = emptyMap(),
 )
 
 @Serializable
@@ -222,6 +223,7 @@ private fun AppState.toPersisted(): PersistedAppState =
                 )
             },
         cache = cache.toPersisted(),
+        turnChoices = turnChoices,
     )
 
 private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppState {
@@ -270,6 +272,7 @@ private fun PersistedAppState.toAppState(cacheLimits: MobileCacheLimits): AppSta
             },
         showingPairing = false,
         pairingError = null,
+        turnChoices = turnChoices,
     )
 }
 

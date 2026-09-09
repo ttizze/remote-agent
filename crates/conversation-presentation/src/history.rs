@@ -185,6 +185,25 @@ fn refresh_items(previous: &mut Value, fresh: &mut Value) {
     }
 }
 
+fn retain_requests(previous: &mut Value, fresh: &mut Value) {
+    if array(&previous["pendingRequests"]).is_empty() {
+        return;
+    }
+    // Reads contain persisted history, not the live request-resolution stream.
+    let mut requests = take_array(&mut previous["pendingRequests"]);
+    for request in take_array(&mut fresh["pendingRequests"]) {
+        if let Some(existing) = requests
+            .iter_mut()
+            .find(|value| value["id"] == request["id"])
+        {
+            *existing = request;
+        } else {
+            requests.push(request);
+        }
+    }
+    fresh["pendingRequests"] = Value::Array(requests);
+}
+
 pub fn merge_refresh(mut previous: Value, mut fresh: Value) -> (Value, Result<(), String>) {
     if fresh["id"] != previous["id"] || !fresh["turns"].is_array() {
         return (previous, Err("更新された履歴が不正です".into()));
@@ -199,9 +218,15 @@ pub fn merge_refresh(mut previous: Value, mut fresh: Value) -> (Value, Result<()
         } else {
             None
         };
-    let Some(boundary) = boundary else {
+    if boundary.is_none()
+        && !array(&previous["turns"])
+            .iter()
+            .any(|turn| !array(&turn["pendingRequests"]).is_empty())
+    {
         return (fresh, Ok(()));
-    };
+    }
+    let retain_history = boundary.is_some();
+    let boundary = boundary.unwrap_or_default();
     let mut old = take_array(&mut previous["turns"]);
     let new = take_array(&mut fresh["turns"]);
     let mut turns = Vec::with_capacity(boundary + new.len());
@@ -214,11 +239,16 @@ pub fn merge_refresh(mut previous: Value, mut fresh: Value) -> (Value, Result<()
             .find(|(index, previous)| !consumed[*index] && previous["id"] == turn["id"])
         {
             consumed[index] = true;
-            refresh_items(previous_turn, &mut turn);
+            if retain_history {
+                refresh_items(previous_turn, &mut turn);
+            }
+            retain_requests(previous_turn, &mut turn);
         }
         turns.push(turn);
     }
     fresh["turns"] = Value::Array(turns);
-    fresh["historyCursor"] = previous["historyCursor"].take();
+    if retain_history {
+        fresh["historyCursor"] = previous["historyCursor"].take();
+    }
     (fresh, Ok(()))
 }

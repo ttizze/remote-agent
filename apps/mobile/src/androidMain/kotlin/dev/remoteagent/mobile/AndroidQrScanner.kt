@@ -113,14 +113,14 @@ private fun bindCamera(
                     }
                 }
             runCatching {
-                    provider.unbindAll()
-                    provider.bindToLifecycle(
-                        activity,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) },
-                        analysis,
-                    )
-                }
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    activity,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) },
+                    analysis,
+                )
+            }
                 .onFailure { scanner.close() }
         },
         ContextCompat.getMainExecutor(activity),

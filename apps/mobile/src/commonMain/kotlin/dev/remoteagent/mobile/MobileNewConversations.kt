@@ -1,6 +1,10 @@
 package dev.remoteagent.mobile
 
-internal suspend fun MobileController.sendMessage(
+import kotlinx.atomicfu.AtomicRef
+import kotlinx.atomicfu.getAndUpdate
+import kotlinx.atomicfu.update
+
+internal suspend fun AtomicRef<MobileApp>.sendMessage(
     profile: HostProfile,
     text: String,
     attachments: List<CodexAttachment> = emptyList(),
@@ -19,7 +23,7 @@ internal suspend fun MobileController.sendMessage(
     }
 }
 
-private suspend fun MobileController.startConversation(
+private suspend fun AtomicRef<MobileApp>.startConversation(
     profile: HostProfile,
     cwd: String,
     text: String,
@@ -27,9 +31,23 @@ private suspend fun MobileController.startConversation(
     options: CodexTurnOptions,
 ): MessageSendResult {
     val generation = connectedGeneration(profile.id)
-    if (generation == null || !startingConversations.add(profile.id)) return MessageSendResult(false, null)
+    if (
+        generation == null ||
+            profile.id in
+                getAndUpdate {
+                    if (profile.id in it.startingConversations) it
+                    else it.copy(startingConversations = it.startingConversations + profile.id)
+                }
+                    .startingConversations
+    )
+        return MessageSendResult(false, null)
     return try {
-        when (val result = gateway.codex.startThread(profile, cwd, options)) {
+        when (
+            val result =
+                value.effects.gateway
+                    .command(profile, AgentCommand.StartThread(cwd, options.model))
+                    .mapGateway(::codexThreadFromResponse)
+        ) {
             is GatewayResult.Failure -> {
                 dispatchIfCurrent(profile.id, generation) { AppAction.ThreadStartFailed(profile.id, result.message) }
                 MessageSendResult(false, null)
@@ -55,6 +73,6 @@ private suspend fun MobileController.startConversation(
             }
         }
     } finally {
-        startingConversations.remove(profile.id)
+        update { it.copy(startingConversations = it.startingConversations - profile.id) }
     }
 }

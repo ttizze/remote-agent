@@ -9,17 +9,6 @@ struct ThreadsScreen: View {
     @State private var worktreeHost: WorktreeSettingsHost?
 
     var body: some View {
-        if #available(iOS 26.0, *) {
-            taskList.toolbar {
-                DefaultToolbarItem(kind: .search, placement: .bottomBar)
-                ToolbarSpacer(.flexible, placement: .bottomBar)
-            }
-        } else {
-            taskList
-        }
-    }
-
-    @ViewBuilder private var taskList: some View {
         let knownProjects = Set(state.projects.map(\.id))
         let groupedThreads = Dictionary(grouping: visibleThreads) { thread in
             thread.projectId.flatMap { knownProjects.contains($0) ? $0 : nil }
@@ -166,6 +155,8 @@ struct ThreadsScreen: View {
         .navigationTitle("リモート")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            DefaultToolbarItem(kind: .search, placement: .bottomBar)
+            ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
                     Text("リモート").font(.headline)

@@ -61,6 +61,7 @@ data class AppState(
     val cache: MobileCache = MobileCache(),
     val showingPairing: Boolean = false,
     val pairingError: String? = null,
+    val turnChoices: Map<String, CodexTurnOptions> = emptyMap(),
 ) {
     val selectedProfile: HostProfile?
         get() = profiles.firstOrNull { it.id == selectedProfileId }
@@ -95,6 +96,8 @@ sealed interface AppAction {
     data class PairingFailed(val message: String) : Profile
 
     data class ProfileSelected(val hostIdentity: String) : Profile
+
+    data class TurnOptionsChanged(val hostIdentity: String, val options: CodexTurnOptions) : Profile
 
     data class AddressesDiscovered(val hostIdentity: String, val addresses: List<String>) : Profile
 
@@ -151,7 +154,7 @@ sealed interface AppAction {
 
     data class InterruptFinished(val hostIdentity: String) : Turn
 
-    data class HostEventReceived(val hostIdentity: String, val event: ThreadEvent) : Turn
+    data class HostEventReceived(val hostIdentity: String, val event: RawCodexMessage) : Turn
 
     data class Disconnected(val hostIdentity: String) : Connection
 }

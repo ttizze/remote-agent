@@ -159,12 +159,14 @@ class MobileStateCodecTest {
                 cache = cache,
                 showingPairing = true,
                 pairingError = "transient pairing error",
+                turnChoices = mapOf(profile.id to CodexTurnOptions("chosen-model", "high")),
             )
 
         val restored = success(MobileStateCodec.decode(MobileStateCodec.encode(state)))
 
         assertEquals(state.profiles, restored.profiles)
         assertEquals(state.selectedProfileId, restored.selectedProfileId)
+        assertEquals(state.turnChoices, restored.turnChoices)
         assertEquals(
             ProfileViewState(
                 connection = ConnectionPhase.Disconnected,

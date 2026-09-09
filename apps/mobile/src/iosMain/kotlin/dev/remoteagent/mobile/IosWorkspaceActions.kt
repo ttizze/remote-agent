@@ -1,16 +1,13 @@
 package dev.remoteagent.mobile
 
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 
 class IosWorkspaceActions
-internal constructor(
-    private val controller: MobileController,
-    private val scope: CoroutineScope,
-    private val dependencies: IosMobileDependencies,
-) {
+internal constructor(private val controller: AtomicRef<MobileApp>, private val scope: CoroutineScope) {
     fun listFiles(path: String, completion: (HostFileList?, String?) -> Unit) {
         scope.launch { complete(controller.listFiles(path), completion) }
     }
@@ -56,7 +53,10 @@ internal constructor(
                 }
         scope.launch {
             try {
-                completeJson(dependencies.gateway.transfer(profile, Json.parseToJsonElement(paramsJson)), completion)
+                completeJson(
+                    controller.value.effects.gateway.transfer(profile, Json.parseToJsonElement(paramsJson)),
+                    completion,
+                )
             } catch (failure: IllegalArgumentException) {
                 completion(null, failure.message ?: "転送に失敗しました")
             }

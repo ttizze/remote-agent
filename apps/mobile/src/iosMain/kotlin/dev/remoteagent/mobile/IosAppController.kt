@@ -14,20 +14,18 @@ import kotlinx.coroutines.launch
  * as immutable view snapshots.
  */
 class IosAppController {
-    private val dependencies = IosMobileDependencies()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val controller =
-        MobileController(dependencies.gateway, dependencies.repository, scope, deferHistoryItemDetails = true)
-    private val viewProjector = IosViewStateProjector()
+    private val controller = mobileApp(IosHostGateway(), IosMobileRepository(), scope, deferHistoryItemDetails = true)
+    private var projection = projectIosView(controller.state)
     private var observation: HostEventSubscription? = null
     private var connectionObservation: HostEventSubscription? = null
     private var rendering: Job? = null
 
     val hosts = IosHostActions(controller, scope)
     val navigation = IosNavigationActions(controller, scope)
-    val accounts = IosAccountActions(controller, scope)
-    val conversation = IosConversationActions(controller, scope, dependencies)
-    val workspace = IosWorkspaceActions(controller, scope, dependencies)
+    val settings = IosSettingsActions(controller, scope)
+    val conversation = IosConversationActions(controller, scope)
+    val workspace = IosWorkspaceActions(controller, scope)
 
     init {
         IosLifecycleBridge.onRestoreAfterForeground = { controller.restoreConnection(scope) }
@@ -44,11 +42,14 @@ class IosAppController {
         connectionObservation = controller.maintainConnection(scope)
     }
 
-    fun currentState(): IosAppViewState = viewProjector.project(controller.state)
+    fun currentState(): IosAppViewState {
+        projection = projectIosView(controller.state, projection)
+        return projection.app
+    }
 
     fun currentThread(): IosThreadView? {
-        viewProjector.project(controller.state)
-        return viewProjector.thread
+        projection = projectIosView(controller.state, projection)
+        return projection.thread
     }
 
     fun observe(observer: (IosAppViewState, IosThreadView?) -> Unit) {
@@ -62,8 +63,9 @@ class IosAppController {
             for (first in updates) {
                 // Reconcile every event in common state; project only the latest frame.
                 delay(VIEW_FRAME_INTERVAL_MS)
-                val app = viewProjector.project(updates.tryReceive().getOrNull() ?: first)
-                val thread = viewProjector.thread
+                projection = projectIosView(updates.tryReceive().getOrNull() ?: first, projection)
+                val app = projection.app
+                val thread = projection.thread
                 if (app !== previousApp || thread !== previousThread) {
                     previousApp = app
                     previousThread = thread
@@ -93,3 +95,17 @@ class IosAppController {
 }
 
 private const val VIEW_FRAME_INTERVAL_MS = 16L
+
+/** Called by the Swift application lifecycle observer. */
+object IosLifecycleBridge {
+    /** Installed by the one live iOS application controller. */
+    internal var onRestoreAfterForeground: (() -> Unit)? = null
+    internal var onPersistBeforeBackground: ((() -> Unit) -> Unit)? = null
+
+    fun restoreAfterForeground() = onRestoreAfterForeground?.invoke()
+
+    fun didEnterBackground(completion: () -> Unit) {
+        val persist = onPersistBeforeBackground
+        if (persist == null) completion() else persist(completion)
+    }
+}

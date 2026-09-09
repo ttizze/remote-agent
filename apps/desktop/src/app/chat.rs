@@ -2,6 +2,8 @@ use super::*;
 #[path = "dictation.rs"]
 mod dictation;
 mod view;
+use agent_client::operations::RequestAnswer;
+use conversation_presentation::{models::supported_model_settings, requests::request_presentation};
 use dictation::{Dictation, DictationEvent, Phase};
 
 // Main and Side reuse stable watch keys. Reopening a view must still issue a
@@ -1348,45 +1350,21 @@ impl ConversationView {
         );
         self.session.host.rpc.agent_async(
             move |client| async move {
-                use conversation_presentation::state::SendPlan;
-                let result = match plan {
-                    SendPlan::Steer { turn_id } => client
-                        .steer_turn(&id, &turn_id, &submission.input, &submission.id)
-                        .await
-                        .map(|()| Some(turn_id)),
-                    SendPlan::Queue => client
-                        .queue_turn(&id, &submission.input, &submission.id)
-                        .await
-                        .map(|_| None),
-                    SendPlan::Start { cwd, resume } => {
-                        let resumed = if resume {
-                            client.resume_thread(&id, Some(&cwd)).await
-                        } else {
-                            Ok(())
-                        };
-                        match resumed {
-                            Err(error) => Err(error),
-                            Ok(()) => client
-                                .start_turn(
-                                    &id,
-                                    &submission.input,
-                                    &submission.id,
-                                    agent_client::operations::TurnOptions {
-                                        model: (!submission.model.is_empty())
-                                            .then_some(submission.model.as_str()),
-                                        effort: (!submission.effort.is_empty())
-                                            .then_some(submission.effort.as_str()),
-                                        service_tier_for_turn: Some(&submission.service_tier),
-                                    },
-                                )
-                                .await
-                                .map(Some),
-                        }
-                    }
-                    SendPlan::Reject { message } => Err(
-                        agent_client::operations::AgentError::InvalidResponse(message.into()),
-                    ),
-                };
+                let result = client
+                    .send_turn(
+                        &id,
+                        plan,
+                        &submission.input,
+                        &submission.id,
+                        agent_client::operations::TurnOptions {
+                            model: (!submission.model.is_empty())
+                                .then_some(submission.model.as_str()),
+                            effort: (!submission.effort.is_empty())
+                                .then_some(submission.effort.as_str()),
+                            service_tier_for_turn: Some(&submission.service_tier),
+                        },
+                    )
+                    .await;
                 Ok((id, submission, result))
             },
             done,
@@ -1546,15 +1524,13 @@ impl ConversationView {
             if self.requests.contains_key(key) {
                 continue;
             }
-            let questions = array(&request["params"]["questions"])
-                .iter()
+            let questions = request_presentation(text(request, "method"), &request["params"])
+                .questions
+                .into_iter()
                 .map(|q| Question {
-                    id: text(q, "id").into(),
-                    prompt: text(q, "question").into(),
-                    options: array(&q["options"])
-                        .iter()
-                        .map(|o| text(o, "label").into())
-                        .collect(),
+                    id: q.id.into(),
+                    prompt: q.prompt.into(),
+                    options: q.options.into_iter().map(str::to_owned).collect(),
                     input: cx.new(|cx| InputState::new(window, cx).placeholder("回答を入力")),
                 })
                 .collect();
@@ -1573,61 +1549,34 @@ impl ConversationView {
         }
     }
 
-    fn respond(&mut self, id: Value, result: Value) {
-        let client = self.session.host.rpc.clone();
-        let key = id.clone();
-        self.work(
-            true,
-            move || client.respond(id, result).map(|_| Value::Null),
-            move |s, _, _, _| {
-                if let Some(request) = s.requests.get_mut(&key) {
-                    request.sent = true;
+    fn respond(&mut self, id: Value, answer: RequestAnswer<'static>) {
+        let Some(request) = self
+            .session
+            .conversation
+            .requests
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+        else {
+            return;
+        };
+        let done = self.complete(true, move |s, result, _, _| match result {
+            Ok(()) => {
+                if let Some(input) = s.requests.get_mut(&id) {
+                    input.sent = true;
                 }
-            },
+            }
+            Err(error) => s.error = error,
+        });
+        self.session.host.rpc.agent_async(
+            move |client| async move { client.respond(&request, answer).await },
+            done,
         );
     }
 
     pub(super) fn gallery_open(&self) -> bool {
         self.image_gallery.is_some()
     }
-}
-
-fn supported_model_settings<'a>(
-    model: Option<&'a Value>,
-    effort: &str,
-    tier: &str,
-) -> (&'a str, &'a str, usize) {
-    let Some(model) = model else {
-        return ("", "default", 0);
-    };
-    let efforts = array(&model["supportedReasoningEfforts"]);
-    let index = efforts
-        .iter()
-        .position(|e| e["reasoningEffort"] == effort)
-        .or_else(|| {
-            efforts
-                .iter()
-                .position(|e| e["reasoningEffort"] == model["defaultReasoningEffort"])
-        })
-        .unwrap_or(0);
-    let tiers = array(&model["serviceTiers"]);
-    let supported_tier = |id: &str| {
-        if id == "default" {
-            Some("default")
-        } else {
-            tiers.iter().find(|t| t["id"] == id).map(|t| text(t, "id"))
-        }
-    };
-    (
-        efforts
-            .get(index)
-            .map(|e| text(e, "reasoningEffort"))
-            .unwrap_or_default(),
-        supported_tier(tier)
-            .or_else(|| supported_tier(text(model, "defaultServiceTier")))
-            .unwrap_or("default"),
-        index,
-    )
 }
 
 fn fenced(text: &str, language: &str) -> String {
@@ -1720,68 +1669,6 @@ fn reconcile_outgoing(outgoing: &mut Vec<OutgoingMessage>, key: &str, thread: &V
         index += 1;
         keep
     });
-}
-
-#[cfg(test)]
-mod model_settings_tests {
-    use super::supported_model_settings;
-    use serde_json::json;
-
-    #[test]
-    fn refreshed_catalog_preserves_supported_choices_and_tracks_reordered_efforts() {
-        let mut model = json!({
-            "defaultReasoningEffort":"medium", "defaultServiceTier":"priority",
-            "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"max"}],
-            "serviceTiers":[{"id":"priority"}]
-        });
-        assert_eq!(
-            supported_model_settings(Some(&model), "max", "default"),
-            ("max", "default", 1)
-        );
-        model["supportedReasoningEfforts"]
-            .as_array_mut()
-            .unwrap()
-            .reverse();
-        assert_eq!(
-            supported_model_settings(Some(&model), "max", "priority"),
-            ("max", "priority", 0)
-        );
-    }
-
-    #[test]
-    fn changed_model_or_removed_options_use_supported_defaults() {
-        let mut model = json!({
-            "defaultReasoningEffort":"low", "defaultServiceTier":"priority",
-            "supportedReasoningEfforts":[{"reasoningEffort":"low"}],
-            "serviceTiers":[{"id":"priority"}]
-        });
-        assert_eq!(
-            supported_model_settings(Some(&model), "", ""),
-            ("low", "priority", 0)
-        );
-        model["serviceTiers"] = json!([]);
-        assert_eq!(
-            supported_model_settings(Some(&model), "max", "priority"),
-            ("low", "default", 0)
-        );
-        model["defaultReasoningEffort"] = json!("max");
-        assert_eq!(
-            supported_model_settings(Some(&model), "", ""),
-            ("low", "default", 0)
-        );
-    }
-
-    #[test]
-    fn no_model_or_no_options_clears_effort_and_fast() {
-        assert_eq!(
-            supported_model_settings(None, "max", "priority"),
-            ("", "default", 0)
-        );
-        assert_eq!(
-            supported_model_settings(Some(&json!({})), "max", "priority"),
-            ("", "default", 0)
-        );
-    }
 }
 
 #[cfg(test)]

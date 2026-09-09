@@ -56,26 +56,6 @@ internal val iosJson = Json {
     classDiscriminator = "type"
 }
 
-/** iOS composition root: common UI owns no platform default implementation. */
-internal class IosMobileDependencies {
-    val repository = IosMobileRepository()
-    val gateway = IosHostGateway()
-}
-
-/** Called by the Swift application lifecycle observer. */
-object IosLifecycleBridge {
-    /** Installed by the one live iOS application controller. */
-    internal var onRestoreAfterForeground: (() -> Unit)? = null
-    internal var onPersistBeforeBackground: ((() -> Unit) -> Unit)? = null
-
-    fun restoreAfterForeground() = onRestoreAfterForeground?.invoke()
-
-    fun didEnterBackground(completion: () -> Unit) {
-        val persist = onPersistBeforeBackground
-        if (persist == null) completion() else persist(completion)
-    }
-}
-
 /** Keychain owns opaque Rust PKCS#8 bytes, never a Swift CryptoKit key. */
 @OptIn(ExperimentalForeignApi::class)
 internal object IosCredentialStore {
@@ -216,12 +196,29 @@ private fun NSData.toByteArray(): ByteArray =
 @OptIn(ExperimentalForeignApi::class)
 internal class IosMobileRepository : MobileRepository {
     private val path = "${NSHomeDirectory()}/Library/Application Support/Bex/mobile-state.json"
-    private var state = loadState()
 
-    override fun load(): AppState = state
+    override fun load(): AppState {
+        val state = loadState()
+        val defaults = platform.Foundation.NSUserDefaults.standardUserDefaults
+        val models = defaults.dictionaryForKey("bex.models.v1").orEmpty()
+        val efforts = defaults.dictionaryForKey("bex.efforts.v1").orEmpty()
+        if (models.isEmpty() && efforts.isEmpty()) return state
+        val choices = buildMap {
+            for (key in models.keys + efforts.keys) {
+                if (key is String)
+                    put(
+                        key,
+                        CodexTurnOptions(
+                            (models[key] as? String)?.takeIf(String::isNotEmpty),
+                            (efforts[key] as? String)?.takeIf(String::isNotEmpty),
+                        ),
+                    )
+            }
+        }
+        return state.copy(turnChoices = choices + state.turnChoices)
+    }
 
     override fun save(state: AppState) {
-        this.state = state
         NSFileManager.defaultManager.createDirectoryAtPath(
             "${NSHomeDirectory()}/Library/Application Support/Bex",
             true,
@@ -230,6 +227,8 @@ internal class IosMobileRepository : MobileRepository {
         )
         val bytes = MobileStateCodec.encode(state)
         check(bytes.toNSData().writeToFile(path, atomically = true))
+        platform.Foundation.NSUserDefaults.standardUserDefaults.removeObjectForKey("bex.models.v1")
+        platform.Foundation.NSUserDefaults.standardUserDefaults.removeObjectForKey("bex.efforts.v1")
     }
 
     private fun loadState(): AppState =

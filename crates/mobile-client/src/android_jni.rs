@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jni::{
     JNIEnv,
     objects::{JByteArray, JClass, JString},
-    sys::{JNI_FALSE, JNI_TRUE, jboolean, jint, jlong, jstring},
+    sys::{jint, jlong, jstring},
 };
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use zeroize::Zeroizing;
@@ -33,15 +33,6 @@ fn string(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, String> {
         .to_str()
         .map(str::to_owned)
         .map_err(|error| error.to_string())
-}
-
-fn borrowed_handle(handle: jlong) -> Result<&'static ffi::Handle, String> {
-    if handle == 0 {
-        return Err("null mobile client handle".to_owned());
-    }
-    // SAFETY: Kotlin receives the pointer solely from connect and must not
-    // use it after close; methods borrow it only for this native call.
-    Ok(unsafe { &*(handle as *mut ffi::Handle) })
 }
 
 #[unsafe(no_mangle)]
@@ -84,92 +75,12 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_connect(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_request(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-    method: JString<'_>,
-    params_json: JString<'_>,
-) -> jstring {
-    let result = (|| {
-        let method = string(&mut env, method)?;
-        let params = string(&mut env, params_json)?;
-        ffi::request_json(borrowed_handle(handle)?, method, params)
-    })();
-    match result {
-        Ok(response) => java_string(&mut env, response),
-        Err(error) => {
-            exception(&mut env, error);
-            ptr::null_mut()
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_respondResult(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-    request_id_json: JString<'_>,
-    result_json: JString<'_>,
-) -> jboolean {
-    match (
-        borrowed_handle(handle),
-        string(&mut env, request_id_json),
-        string(&mut env, result_json),
-    ) {
-        (Ok(handle), Ok(request_id), Ok(result)) => {
-            match ffi::respond_result_json(handle, &request_id, &result) {
-                Ok(()) => JNI_TRUE,
-                Err(error) => {
-                    exception(&mut env, error);
-                    JNI_FALSE
-                }
-            }
-        }
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-            exception(&mut env, error);
-            JNI_FALSE
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_respondError(
-    mut env: JNIEnv<'_>,
-    _class: JClass<'_>,
-    handle: jlong,
-    request_id_json: JString<'_>,
-    error_json: JString<'_>,
-) -> jboolean {
-    match (
-        borrowed_handle(handle),
-        string(&mut env, request_id_json),
-        string(&mut env, error_json),
-    ) {
-        (Ok(handle), Ok(request_id), Ok(error_json)) => {
-            match ffi::respond_error_json(handle, &request_id, &error_json) {
-                Ok(()) => JNI_TRUE,
-                Err(error) => {
-                    exception(&mut env, error);
-                    JNI_FALSE
-                }
-            }
-        }
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-            exception(&mut env, error);
-            JNI_FALSE
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_nextEvent(
     mut env: JNIEnv<'_>,
     _class: JClass<'_>,
     handle: jlong,
 ) -> jstring {
-    match borrowed_handle(handle).and_then(ffi::next_event_json) {
+    match ffi::borrow_handle(handle as u64).and_then(|handle| ffi::next_event_json(&handle)) {
         Ok(Some(notification)) => java_string(&mut env, notification),
         Ok(None) => ptr::null_mut(),
         Err(error) => {
@@ -185,10 +96,7 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_close(
     _class: JClass<'_>,
     handle: jlong,
 ) {
-    if handle != 0 {
-        // SAFETY: Kotlin calls close exactly once for the returned handle.
-        ffi::close_handle(handle as *mut ffi::Handle);
-    }
+    ffi::close_handle(handle as u64);
 }
 
 #[unsafe(no_mangle)]
@@ -200,7 +108,8 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_transfer(
 ) -> jstring {
     let result = (|| {
         let params = string(&mut env, params_json)?;
-        ffi::transfer_json(borrowed_handle(handle)?, &params)
+        let handle = ffi::borrow_handle(handle as u64)?;
+        ffi::transfer_json(&handle, &params)
     })();
     match result {
         Ok(response) => java_string(&mut env, response),
@@ -270,7 +179,8 @@ pub extern "system" fn Java_dev_remoteagent_mobile_NativeHostTransport_agentComm
 ) -> jstring {
     let result = (|| {
         let command = string(&mut env, command_json)?;
-        ffi::agent_command_json(borrowed_handle(handle)?, &command)
+        let handle = ffi::borrow_handle(handle as u64)?;
+        ffi::agent_command_json(&handle, &command)
     })();
     match result {
         Ok(response) => java_string(&mut env, response),

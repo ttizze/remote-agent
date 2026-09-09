@@ -102,7 +102,7 @@ data class ThreadSnapshot(
     val submittedMessages: List<SubmittedMessage> = emptyList(),
 )
 
-@Serializable data class ThreadReadResult(val thread: ThreadSnapshot, val bufferedEvents: List<ThreadEvent>)
+data class ThreadReadResult(val thread: ThreadSnapshot, val bufferedEvents: List<RawCodexMessage>)
 
 data class MessageSendResult(val accepted: Boolean, val threadId: String?)
 
@@ -180,7 +180,7 @@ sealed interface CodexItem {
 }
 
 // Ordinals are the stable C/JNI codes documented in mobile_client.h.
-internal enum class ConversationEventKind {
+enum class ConversationEventKind {
     Unknown,
     TurnStarted,
     TurnCompleted,
@@ -196,132 +196,6 @@ internal enum class ConversationEventKind {
     RequestResolved,
     ThreadStatusChanged,
     GuardianReviewChanged,
-}
-
-@Serializable
-sealed interface ThreadEvent {
-    val threadId: String
-    val turnId: String
-
-    @Serializable
-    @SerialName("turnStarted")
-    data class TurnStarted(override val threadId: String, val turn: CodexTurn) : ThreadEvent {
-        override val turnId: String
-            get() = turn.id
-    }
-
-    @Serializable
-    @SerialName("turnCompleted")
-    data class TurnCompleted(override val threadId: String, val turn: CodexTurn) : ThreadEvent {
-        override val turnId: String
-            get() = turn.id
-    }
-
-    @Serializable
-    @SerialName("itemStarted")
-    data class ItemStarted(override val threadId: String, override val turnId: String, val item: CodexItem) :
-        ThreadEvent
-
-    @Serializable
-    @SerialName("agentMessageDelta")
-    data class AgentMessageDelta(
-        override val threadId: String,
-        override val turnId: String,
-        val itemId: String,
-        val delta: String,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("reasoningDelta")
-    data class ReasoningDelta(
-        override val threadId: String,
-        override val turnId: String,
-        val itemId: String,
-        val delta: String,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("reasoningSummaryDelta")
-    data class ReasoningSummaryDelta(
-        override val threadId: String,
-        override val turnId: String,
-        val itemId: String,
-        val delta: String,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("commandOutputDelta")
-    data class CommandOutputDelta(
-        override val threadId: String,
-        override val turnId: String,
-        val itemId: String,
-        val delta: String,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("fileChangeOutputDelta")
-    data class FileChangeOutputDelta(
-        override val threadId: String,
-        override val turnId: String,
-        val itemId: String,
-        val delta: String,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("error")
-    data class Error(
-        override val threadId: String,
-        override val turnId: String,
-        val error: CodexTurnError,
-        val willRetry: Boolean,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("requestStarted")
-    data class RequestStarted(
-        override val threadId: String,
-        override val turnId: String,
-        val request: CodexServerRequest,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("requestResolved")
-    data class RequestResolved(override val threadId: String, override val turnId: String = "", val requestId: String) :
-        ThreadEvent
-
-    @Serializable
-    @SerialName("threadStatusChanged")
-    data class ThreadStatusChanged(
-        override val threadId: String,
-        override val turnId: String = "",
-        val status: ThreadStatus,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("guardianReviewChanged")
-    data class GuardianReviewChanged(
-        override val threadId: String,
-        override val turnId: String,
-        val reviewId: String,
-        val status: String,
-        val raw: JsonObject,
-    ) : ThreadEvent
-
-    @Serializable
-    @SerialName("itemCompleted")
-    data class ItemCompleted(override val threadId: String, override val turnId: String, val item: CodexItem) :
-        ThreadEvent
-
-    /** A notification that this mobile build does not understand yet. */
-    @Serializable
-    @SerialName("unknown")
-    data class Unknown(
-        override val threadId: String,
-        override val turnId: String,
-        val method: String,
-        val raw: JsonObject,
-        val extensions: JsonObject = JsonObject(emptyMap()),
-    ) : ThreadEvent
 }
 
 internal fun ThreadSnapshot.upsertTurn(turn: CodexTurn): ThreadSnapshot =

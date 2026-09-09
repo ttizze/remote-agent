@@ -1,9 +1,11 @@
 package dev.remoteagent.mobile
 
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
-class IosHostActions internal constructor(private val controller: MobileController, private val scope: CoroutineScope) {
+class IosHostActions
+internal constructor(private val controller: AtomicRef<MobileApp>, private val scope: CoroutineScope) {
     fun openPairing() = controller.dispatch(AppAction.PairingOpened)
 
     fun dismissPairing() = controller.dispatch(AppAction.PairingDismissed)

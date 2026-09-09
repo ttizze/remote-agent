@@ -123,6 +123,23 @@ fn route(state: &Path, method: &Method, path: &str) -> Result<(u16, Vec<u8>)> {
     }
     let root = state.parent().ok_or("fixture state has no parent")?;
     match path {
+        "/dictation/no-account" => {
+            // Retain the isolated auth helper before logging out the primary.
+            rpc(state, "local", "host/account/list", json!({}))?;
+            rpc(state, "local", "account/logout", json!({}))?;
+        }
+        "/dictation/restore-account" => {
+            let accounts = rpc(state, "local", "host/account/list", json!({}))?;
+            let id = accounts["selectedId"]
+                .as_str()
+                .ok_or("No fixture account to restore")?;
+            rpc(
+                state,
+                "local",
+                "host/account/select",
+                json!({"accountId":id}),
+            )?;
+        }
         "/worktree-conversation" => worktree_conversation(root)?,
         "/long-conversation" => write_json(
             root.join("list-fixture.json"),

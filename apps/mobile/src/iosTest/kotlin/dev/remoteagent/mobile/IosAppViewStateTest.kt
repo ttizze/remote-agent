@@ -31,7 +31,7 @@ class IosAppViewStateTest {
                 TurnStatus.Completed,
                 images + CodexItem.AgentMessage("answer", "Done", AgentMessagePhase.FinalAnswer),
             )
-        val output = IosViewStateProjector().conversation(state(listOf(turn)))!!.turns.flatMap { it.responses }
+        val output = projectIosView(state(listOf(turn))).thread!!.turns.flatMap { it.responses }
         assertEquals(listOf("image-0", "image-1", "answer"), output.map { it.id })
         assertEquals(listOf("/fixture/generated image.png"), output[0].imageSources)
         assertEquals(listOf("data:image/png;base64,cG5n"), output[1].imageSources)
@@ -40,7 +40,7 @@ class IosAppViewStateTest {
 
     @Test
     fun loading_deferred_details_invalidates_the_cached_item() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val command =
             CodexItem.CommandExecution("command", "pwd", output = "/fixture", status = CommandExecutionStatus.Completed)
         val turn =
@@ -50,9 +50,8 @@ class IosAppViewStateTest {
                 listOf(command),
                 raw = buildJsonObject { put("deferredItemIds", JsonArray(listOf(JsonPrimitive(command.id)))) },
             )
-        val before = projector.conversation(state(listOf(turn)))!!.turns.single().activityItems.single()
-        val loaded =
-            projector.conversation(state(listOf(turn.copy(raw = null))))!!.turns.single().activityItems.single()
+        val before = project(state(listOf(turn))).thread!!.turns.single().activityItems.single()
+        val loaded = project(state(listOf(turn.copy(raw = null)))).thread!!.turns.single().activityItems.single()
         assertEquals(true, before.isDeferred)
         assertEquals(false, loaded.isDeferred)
         assertNotSame(before, loaded)
@@ -61,13 +60,13 @@ class IosAppViewStateTest {
 
     @Test
     fun changing_one_item_reuses_other_items_in_the_same_turn() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val history = CodexItem.AgentMessage("history", "unchanged")
         val answer = CodexItem.AgentMessage("answer", "before")
         val turn = CodexTurn("live", TurnStatus.InProgress, listOf(history, answer))
-        val first = projector.conversation(state(listOf(turn)))!!.turns.single().responses
+        val first = project(state(listOf(turn))).thread!!.turns.single().responses
         val changed = turn.copy(items = listOf(history, answer.copy(text = "after!")))
-        val next = projector.conversation(state(listOf(changed)))!!.turns.single().responses
+        val next = project(state(listOf(changed))).thread!!.turns.single().responses
         assertSame(first.first(), next.first())
         assertNotSame(first.last(), next.last())
         assertEquals("before", first.last().expandedBody())
@@ -76,28 +75,28 @@ class IosAppViewStateTest {
 
     @Test
     fun item_reuse_preserves_repeated_ids_and_releases_removed_items() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val first = CodexItem.AgentMessage("duplicate", "first")
         val second = CodexItem.AgentMessage("duplicate", "second")
         val turn = CodexTurn("live", TurnStatus.InProgress, listOf(first, second))
-        val initial = projector.conversation(state(listOf(turn)))!!.turns.single().responses
+        val initial = project(state(listOf(turn))).thread!!.turns.single().responses
         assertEquals(listOf("first", "second"), initial.map { it.expandedBody() })
         val changed = turn.copy(items = listOf(first, second.copy(text = "latest")))
-        val next = projector.conversation(state(listOf(changed)))!!.turns.single().responses
+        val next = project(state(listOf(changed))).thread!!.turns.single().responses
         assertEquals(listOf("first", "latest"), next.map { it.expandedBody() })
-        projector.conversation(state(listOf(turn.copy(items = emptyList()))))
-        val restored = projector.conversation(state(listOf(turn)))!!.turns.single().responses
+        project(state(listOf(turn.copy(items = emptyList())))).thread
+        val restored = project(state(listOf(turn))).thread!!.turns.single().responses
         assertNotSame(initial.first(), restored.first())
         assertNotSame(initial.last(), restored.last())
     }
 
     @Test
     fun streaming_body_does_not_invalidate_navigation_or_title_lists() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val turn = CodexTurn("live", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("answer", "before")))
         val initial = state(listOf(turn))
-        val navigation = projector.project(initial)
-        val original = projector.thread!!
+        val navigation = project(initial).app
+        val original = project(initial).thread!!
         val profile = initial.cache.profile("host")
         val snapshot = profile.snapshots.getValue("conversation")
         val updated =
@@ -124,11 +123,11 @@ class IosAppViewStateTest {
                         )
                     )
             )
-        assertSame(navigation, projector.project(updated))
-        assertNotSame(original, projector.thread)
-        assertEquals("after!", projector.thread!!.turns.single().responses.single().expandedBody())
-        assertNotSame(navigation, projector.project(updated.copy(pairingError = "Pairing failed")))
-        assertEquals("conversation", projector.project(updated).selectedThreadId)
+        assertSame(navigation, project(updated).app)
+        assertNotSame(original, project(updated).thread)
+        assertEquals("after!", project(updated).thread!!.turns.single().responses.single().expandedBody())
+        assertNotSame(navigation, project(updated.copy(pairingError = "Pairing failed")).app)
+        assertEquals("conversation", project(updated).app.selectedThreadId)
     }
 
     @Test
@@ -164,19 +163,19 @@ class IosAppViewStateTest {
                         )
                     ),
             )
-        val projector = IosViewStateProjector()
-        assertEquals("/workspace/chat", projector.project(state).workingDirectory)
-        assertEquals("/workspace/project", projector.project(state).threads.single().workingDirectory)
+        val project = projector()
+        assertEquals("/workspace/chat", project(state).app.workingDirectory)
+        assertEquals("/workspace/project", project(state).app.threads.single().workingDirectory)
         val movedSnapshot =
             ThreadSnapshot(summary = summary.copy(workingDirectory = WorkingDirectory("/workspace/worktree")))
         val movedCache = state.cache.profile(host.id).copy(snapshots = mapOf(summary.id to movedSnapshot))
         val moved = state.copy(cache = MobileCache(mapOf(host.id to movedCache)))
-        assertEquals("/workspace/worktree", projector.project(moved).workingDirectory)
+        assertEquals("/workspace/worktree", project(moved).app.workingDirectory)
         val unlisted =
             moved.copy(
                 cache = MobileCache(mapOf(host.id to moved.cache.profile(host.id).copy(threadList = emptyList())))
             )
-        assertEquals("/workspace/worktree", projector.project(unlisted).workingDirectory)
+        assertEquals("/workspace/worktree", project(unlisted).app.workingDirectory)
         val newChat =
             state.copy(
                 profileViews =
@@ -184,71 +183,70 @@ class IosAppViewStateTest {
                         host.id to state.selectedView.copy(selectedThreadId = null, newThreadCwd = "/workspace/other")
                     )
             )
-        assertEquals("/workspace/other", projector.project(newChat).workingDirectory)
+        assertEquals("/workspace/other", project(newChat).app.workingDirectory)
     }
 
     @Test
     fun streaming_reuses_unchanged_history_and_updates_equal_length_replacements() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val history = CodexTurn("old", TurnStatus.Completed, listOf(CodexItem.AgentMessage("old-answer", "history")))
         val live = CodexTurn("live", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("answer", "before")))
-        val first = projector.conversation(state(listOf(history, live)))!!
+        val first = project(state(listOf(history, live))).thread!!
         val changed = live.copy(items = listOf(CodexItem.AgentMessage("answer", "after!")))
-        val next = projector.conversation(state(listOf(history, changed)))!!
+        val next = project(state(listOf(history, changed))).thread!!
         assertSame(first.turns.first(), next.turns.first())
         assertEquals("after!", next.turns.last().responses.single().expandedBody())
         assertEquals("before", first.turns.last().responses.single().expandedBody())
-        val completed = projector.conversation(state(listOf(history, changed.copy(status = TurnStatus.Completed))))!!
+        val completed = project(state(listOf(history, changed.copy(status = TurnStatus.Completed)))).thread!!
         assertEquals(false, completed.turns.last().isInProgress)
     }
 
     @Test
     fun initial_projection_keeps_every_turn_when_ids_repeat() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val first = CodexTurn("", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer-1", "first")))
         val second = CodexTurn("", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer-2", "second")))
 
-        val view = projector.conversation(state(listOf(first, second)))!!
+        val view = project(state(listOf(first, second))).thread!!
 
         assertEquals(listOf("first", "second"), view.turns.flatMap { turn -> turn.responses.map { it.expandedBody() } })
     }
 
     @Test
     fun accepted_inputs_invalidate_their_turn_until_the_native_echo_arrives() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val turn = CodexTurn("live", TurnStatus.InProgress, listOf(CodexItem.AgentMessage("answer", "reply")))
-        projector.project(state(listOf(turn)))
+        project(state(listOf(turn))).app
         val pending = SubmittedMessage("client", "additional", "live", "answer")
-        val accepted = projector.conversation(state(listOf(turn), listOf(pending)))!!
+        val accepted = project(state(listOf(turn), listOf(pending))).thread!!
         assertEquals(listOf("additional"), accepted.turns.flatMap { it.userMessages }.map { it.expandedBody() })
         val echoed = turn.copy(items = turn.items + CodexItem.UserMessage("native", "additional", "client"))
-        val reconciled = projector.conversation(state(listOf(echoed)))!!
+        val reconciled = project(state(listOf(echoed))).thread!!
         assertEquals(listOf("client"), reconciled.turns.flatMap { it.userMessages }.map { it.id })
-        val queued =
-            projector.conversation(state(listOf(echoed), listOf(pending.copy(clientId = "queue", turnId = null))))!!
+        val queued = project(state(listOf(echoed), listOf(pending.copy(clientId = "queue", turnId = null)))).thread!!
         assertEquals(listOf("queue"), queued.queuedMessages.map { it.id })
     }
 
     @Test
     fun navigation_and_history_eviction_release_previous_projections() {
-        val projector = IosViewStateProjector()
+        val project = projector()
         val turn = CodexTurn("old", TurnStatus.Completed, listOf(CodexItem.AgentMessage("answer", "history")))
         val initial = state(listOf(turn))
-        val first = projector.conversation(initial)!!
-        assertSame(first, projector.conversation(initial.copy(pairingError = "notice")))
-        projector.project(state(emptyList()))
-        val restored = projector.conversation(initial)!!
+        val first = project(initial).thread!!
+        assertSame(first, project(initial.copy(pairingError = "notice")).thread)
+        project(state(emptyList())).app
+        val restored = project(initial).thread!!
         assertNotSame(first.turns.single(), restored.turns.single())
-        val otherHost = projector.conversation(state(listOf(turn), hostId = "other-host"))!!
+        val otherHost = project(state(listOf(turn), hostId = "other-host")).thread!!
         assertNotSame(restored.turns.single(), otherHost.turns.single())
         val list = initial.copy(profileViews = mapOf("host" to ProfileViewState()))
-        assertNull(projector.conversation(list))
-        assertNotSame(first.turns.single(), projector.conversation(initial)!!.turns.single())
+        assertNull(project(list).thread)
+        assertNotSame(first.turns.single(), project(initial).thread!!.turns.single())
     }
 
-    private fun IosViewStateProjector.conversation(state: AppState): IosThreadView? {
-        project(state)
-        return thread
+    private fun projector(): (AppState) -> IosViewProjection {
+        var previous: IosViewProjection? = null
+        return { state -> projectIosView(state, previous).also { previous = it } }
     }
 
     private fun state(

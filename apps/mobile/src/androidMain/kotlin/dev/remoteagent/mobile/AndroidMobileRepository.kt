@@ -8,16 +8,15 @@ import java.io.File
 class AndroidMobileRepository(context: Context) : MobileRepository {
     private val file = AtomicFile(File(context.filesDir, "mobile-state.v1.json"))
 
-    override fun load(): AppState =
-        runCatching {
-                val bytes = file.openRead().use { it.readBytes() }
-                when (val result = MobileStateCodec.decode(bytes)) {
-                    is MobileStateDecodeResult.Success -> result.value
-                    is MobileStateDecodeResult.Failure ->
-                        AppState().also { if (result.reason == MobileStateDecodeReason.UnsupportedVersion) save(it) }
-                }
-            }
-            .getOrElse { AppState() }
+    override fun load(): AppState = runCatching {
+        val bytes = file.openRead().use { it.readBytes() }
+        when (val result = MobileStateCodec.decode(bytes)) {
+            is MobileStateDecodeResult.Success -> result.value
+            is MobileStateDecodeResult.Failure ->
+                AppState().also { if (result.reason == MobileStateDecodeReason.UnsupportedVersion) save(it) }
+        }
+    }
+        .getOrElse { AppState() }
 
     override fun save(state: AppState) {
         try {

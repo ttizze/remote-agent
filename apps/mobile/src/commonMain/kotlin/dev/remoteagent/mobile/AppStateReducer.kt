@@ -2,6 +2,11 @@ package dev.remoteagent.mobile
 
 internal fun reduceProfile(state: AppState, action: AppAction.Profile): AppState =
     when (action) {
+        is AppAction.TurnOptionsChanged ->
+            state.updateProfile(action.hostIdentity) {
+                state.copy(turnChoices = state.turnChoices + (action.hostIdentity to action.options))
+            }
+
         AppAction.PairingOpened -> state.copy(showingPairing = true, pairingError = null)
 
         AppAction.PairingDismissed ->
@@ -288,13 +293,16 @@ private fun reduceHostEvent(
         val cache = applyLiveEvent(state.cache, action.hostIdentity, action.event, cacheLimits)
         val updated = if (cache === state.cache) state else state.copy(cache = cache)
         val event = action.event
-        if (event !is ThreadEvent.TurnStarted && event !is ThreadEvent.TurnCompleted) updated
+        if (event.kind != ConversationEventKind.TurnStarted && event.kind != ConversationEventKind.TurnCompleted)
+            updated
         else
             updated.updateViewIfConnected(action.hostIdentity) { view ->
                 when {
-                    event is ThreadEvent.TurnStarted ->
+                    event.kind == ConversationEventKind.TurnStarted ->
                         view.copy(unreadCompletedThreadIds = view.unreadCompletedThreadIds - event.threadId)
-                    event is ThreadEvent.TurnCompleted && event.turn.status == TurnStatus.Completed -> {
+                    event.kind == ConversationEventKind.TurnCompleted &&
+                        codexTurnStatus(event.paramsObject.childObject("turn")?.string("status")) ==
+                            TurnStatus.Completed -> {
                         val isViewingThread =
                             state.selectedProfileId == action.hostIdentity &&
                                 !state.showingPairing &&

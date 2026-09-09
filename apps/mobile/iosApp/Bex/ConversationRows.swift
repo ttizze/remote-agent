@@ -31,14 +31,6 @@ struct ThreadRequestRow: View {
     @State private var error: String?
     @State private var resolved = false
 
-    private var params: [String: Any] {
-        jsonObject(request.paramsJson)
-    }
-
-    private var questions: [[String: Any]] {
-        params["questions"] as? [[String: Any]] ?? []
-    }
-
     var body: some View {
         if !resolved {
             VStack(alignment: .leading, spacing: 10) {
@@ -48,40 +40,26 @@ struct ThreadRequestRow: View {
                 DisclosureGroup("詳細") {
                     Text(request.paramsJson).font(.caption.monospaced()).textSelection(.enabled)
                 }
-                if request.method == "item/tool/requestUserInput" {
-                    ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
-                        questionView(question)
+                if request.form == "questions" {
+                    let questions = request.questions
+                    ForEach(questions.indices, id: \.self) { index in
+                        questionView(questions[index])
                     }
                     Button("回答を送信") {
-                        var result: [String: Any] = [:]
-                        for question in questions {
-                            if let id = question["id"] as? String {
-                                result[id] = ["answers": [answers[id] ?? ""]]
-                            }
-                        }
-                        submit(["answers": result])
-                    }.disabled(questions.contains { (answers[$0["id"] as? String ?? ""] ?? "").isEmpty })
-                } else if request.method == "item/permissions/requestApproval" {
-                    HStack {
-                        Button("このターンで許可") { submit(["permissions": params["permissions"] ?? [:], "scope": "turn"]) }
-                        Button("拒否") { submit(["permissions": [:], "scope": "turn"]) }
+                        submit(RequestAnswerAnswers(answers: answers))
                     }
-                } else if request.method == "item/commandExecution/requestApproval" || request
-                    .method == "item/fileChange/requestApproval" {
+                } else if request.form == "permissions" {
                     HStack {
-                        Button("承認") { submit(["decision": "accept"]) }.accessibilityIdentifier("request.accept")
-                        Button("拒否") { submit(["decision": "decline"]) }
+                        Button("このターンで許可") { submit(RequestAnswerPermissions(allow: true)) }
+                        Button("拒否") { submit(RequestAnswerPermissions(allow: false)) }
                     }
+                } else if request.form == "decision" {
+                    VStack(alignment: .leading, spacing: 8) { decisionButtons }
                 } else {
                     Text("応答 JSON").font(.caption)
                     TextEditor(text: $rawResponse).font(.body.monospaced()).frame(minHeight: 100)
                     Button("応答を送信") {
-                        guard let data = rawResponse.data(using: .utf8),
-                              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                        else {
-                            error = "JSON オブジェクトを入力してください"; return
-                        }
-                        submit(value)
+                        submit(RequestAnswerRaw(json: rawResponse))
                     }
                 }
                 if busy {
@@ -99,27 +77,33 @@ struct ThreadRequestRow: View {
         }
     }
 
-    @ViewBuilder private func questionView(_ question: [String: Any]) -> some View {
-        let id = question["id"] as? String ?? ""
-        let binding = Binding<String>(get: { answers[id] ?? "" }, set: { answers[id] = $0 })
-        Text(question["question"] as? String ?? "回答")
-        if let options = question["options"] as? [[String: Any]] {
-            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
-                Button(option["label"] as? String ?? "") { answers[id] = option["label"] as? String }
-                    .buttonStyle(.bordered)
-            }
+    private var decisionButtons: some View {
+        let decisions = request.decisions
+        return ForEach(decisions.indices, id: \.self) { index in
+            Button(decisions[index]) { submit(RequestAnswerDecision(index: Int32(index))) }
+                .accessibilityIdentifier(index == 0 ? "request.accept" : "request.decision.\(index)")
         }
-        if question["isSecret"] as? Bool == true {
+    }
+
+    @ViewBuilder private func questionView(_ question: RequestQuestion) -> some View {
+        let id = question.id
+        let options = question.options
+        let binding = Binding<String>(get: { answers[id] ?? "" }, set: { answers[id] = $0 })
+        Text(question.prompt)
+        ForEach(options.indices, id: \.self) { index in
+            Button(options[index]) { answers[id] = options[index] }.buttonStyle(.bordered)
+        }
+        if question.secret {
             SecureField("回答", text: binding)
         } else {
             TextField("回答", text: binding).textFieldStyle(.roundedBorder).accessibilityIdentifier("request.answer")
         }
     }
 
-    private func submit(_ result: [String: Any]) {
+    private func submit(_ answer: RequestAnswer) {
         busy = true
         error = nil
-        model.respond(request, result: result) { message in
+        model.respond(request, answer: answer) { message in
             busy = false; error = message; resolved = message == nil
         }
     }

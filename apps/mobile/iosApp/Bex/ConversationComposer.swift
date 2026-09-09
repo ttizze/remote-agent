@@ -168,11 +168,7 @@ extension ThreadScreen {
 
     @ViewBuilder var messageField: some View {
         let binding = Binding(get: { model.draft }, set: { model.draft = $0 })
-        if #available(iOS 16.0, *) {
-            TextField(state.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: binding, axis: .vertical).lineLimit(1 ... 6)
-        } else {
-            TextField(state.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: binding)
-        }
+        TextField(state.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: binding, axis: .vertical).lineLimit(1 ... 6)
     }
 
     func refreshReview() {

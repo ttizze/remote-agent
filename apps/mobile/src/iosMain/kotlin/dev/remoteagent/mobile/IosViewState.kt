@@ -82,12 +82,13 @@ data class IosTurnErrorView(
 
 data class IosTurnRequestView(
     val id: String,
-    val requestIdJson: String,
-    val method: String,
+    val requestJson: String,
     val paramsJson: String,
-    val kind: String,
+    val form: String,
     val title: String,
     val body: String,
+    val questions: List<RequestQuestion>,
+    val decisions: List<String>,
 )
 
 data class IosThreadView(
@@ -124,106 +125,82 @@ data class IosAppViewState(
     val interruptingTurnId: String?,
 )
 
-/** One projector per controller. Retain only the currently selected conversation. */
-internal class IosViewStateProjector {
-    private var hostId: String? = null
-    private var snapshot: ThreadSnapshot? = null
-    var thread: IosThreadView? = null
-        private set
+/** One immutable projection value per UI owner; unchanged turns and items retain identity. */
+internal data class IosViewProjection(
+    val source: AppState,
+    val snapshot: ThreadSnapshot?,
+    val thread: IosThreadView?,
+    val turns: List<ProjectedTurn>,
+    val app: IosAppViewState,
+)
 
-    private var turns = emptyList<ProjectedTurn>()
-    private var appSource: AppState? = null
-    private var app: IosAppViewState? = null
-
-    fun project(state: AppState): IosAppViewState {
-        val selected =
-            state.selectedProfile?.let { host ->
-                state.selectedView.selectedThreadId?.let { state.cache.snapshot(host.id, it) }
-            }
-        if (hostId != state.selectedProfileId || snapshot?.summary?.id != selected?.summary?.id) {
-            snapshot = null
-            thread = null
-            turns = emptyList()
+internal fun projectIosView(state: AppState, previous: IosViewProjection? = null): IosViewProjection {
+    if (previous?.source === state) return previous
+    val selected =
+        state.selectedProfile?.let { host ->
+            state.selectedView.selectedThreadId?.let { state.cache.snapshot(host.id, it) }
         }
-        hostId = state.selectedProfileId
-        if (selected !== snapshot) {
-            thread = selected?.let(::projectThread)
-            if (selected == null) turns = emptyList()
-            snapshot = selected
+    val sameThread =
+        previous?.source?.selectedProfileId == state.selectedProfileId &&
+            previous?.snapshot?.summary?.id == selected?.summary?.id
+    val unchanged = sameThread && previous?.snapshot === selected
+    val turns =
+        if (unchanged) previous?.turns.orEmpty()
+        else selected?.let { projectTurns(it, if (sameThread) previous?.turns.orEmpty() else emptyList()) }.orEmpty()
+    val thread = if (unchanged) previous?.thread else selected?.projectThread(turns)
+    val view = state.selectedView
+    val directory = view.newThreadCwd ?: selected?.summary?.workingDirectory?.path ?: view.workingDirectoryPath
+    val app = state.projectApp(previous, directory)
+    return IosViewProjection(state, selected, thread, turns, app)
+}
+
+private fun ThreadSnapshot.projectThread(turns: List<ProjectedTurn>): IosThreadView =
+    IosThreadView(
+        id = summary.id,
+        title = summary.name ?: summary.preview.ifBlank { "タスク" },
+        turns = turns.flatMap { it.views },
+        queuedMessages =
+            submittedMessages
+                .filter { it.turnId == null }
+                .map { IosItemView(CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources)) },
+        hasOlderTurns = olderTurnsCursor != null,
+    )
+
+private fun AppState.projectApp(previous: IosViewProjection?, directory: String): IosAppViewState =
+    previous
+        ?.takeIf {
+            sameNavigationAs(it.source) && sameProfileListsAs(it.source) && directory == it.app.workingDirectory
         }
-        val view = state.selectedView
-        val directory = view.newThreadCwd ?: selected?.summary?.workingDirectory?.path ?: view.workingDirectoryPath
-        val previousApp = reusableApp(state, directory)
-        appSource = state
-        // Body/raw-message changes must not rebuild or publish navigation and title lists.
-        if (previousApp != null) return previousApp
-        val updated = state.toIosViewState()
-        val published = app?.takeIf { it == updated } ?: updated
-        app = published
-        return published
-    }
+        ?.app ?: toIosViewState().let { updated -> previous?.app?.takeIf { it == updated } ?: updated }
 
-    private fun reusableApp(state: AppState, directory: String): IosAppViewState? {
-        val previous = appSource
-        val published = app
-        if (previous == null || published == null) return null
-        return if (
-            state.sameNavigationAs(previous) &&
-                state.sameProfileListsAs(previous) &&
-                directory == published.workingDirectory
-        )
-            published
-        else null
-    }
+internal data class ProjectedTurn(
+    val source: CodexTurn,
+    val submissions: List<SubmittedMessage>,
+    val views: List<IosTurnView>,
+    val items: Map<String, IosItemView>,
+)
 
-    private fun projectThread(source: ThreadSnapshot): IosThreadView {
-        val pending = source.submittedMessages.groupBy { it.turnId }
-        val updated =
-            source.turns.mapIndexed { index, turn ->
-                val submissions = pending[turn.id].orEmpty()
-                val previous = turns.getOrNull(index)?.takeIf { it.source.id == turn.id }
-                // Immutable turns keep their identity through unrelated live updates.
-                // Accepted inputs are a separate input until their native echo arrives.
-                if (previous != null && previous.source === turn && previous.submissions == submissions) previous
-                else {
-                    val items = previous?.items ?: mutableMapOf()
-                    if (previous?.shouldPruneItems(turn, submissions) == true) {
-                        val retained = turn.items.mapTo(mutableSetOf()) { it.id }
-                        submissions.mapTo(retained) { it.clientId }
-                        items.keys.retainAll(retained)
-                    }
-                    val views =
-                        turn.toIosTurnViews(submissions) { item, deferred ->
-                            val cached = items[item.id]
-                            if (cached != null && cached.source === item && cached.isDeferred == deferred) cached
-                            else IosItemView(item, deferred).also { items[item.id] = it }
-                        }
-                    ProjectedTurn(turn, submissions, views, items)
+private fun projectTurns(source: ThreadSnapshot, previousTurns: List<ProjectedTurn>): List<ProjectedTurn> {
+    val pending = source.submittedMessages.groupBy { it.turnId }
+    return source.turns.mapIndexed { index, turn ->
+        val submissions = pending[turn.id].orEmpty()
+        val previous = previousTurns.getOrNull(index)?.takeIf { it.source.id == turn.id }
+        if (previous != null && previous.source === turn && previous.submissions == submissions) previous
+        else {
+            // Build only the current membership. Old projections remain immutable,
+            // removed items are released, and unchanged item bodies are never copied.
+            val items = mutableMapOf<String, IosItemView>()
+            val views =
+                turn.toIosTurnViews(submissions) { item, deferred ->
+                    val cached = previous?.items?.get(item.id)
+                    val view =
+                        cached?.takeIf { it.source === item && it.isDeferred == deferred }
+                            ?: IosItemView(item, deferred)
+                    items[item.id] = view
+                    view
                 }
-            }
-        turns = updated
-        return IosThreadView(
-            id = source.summary.id,
-            title = source.summary.name ?: source.summary.preview.ifBlank { "タスク" },
-            turns = updated.flatMap { it.views },
-            queuedMessages =
-                pending[null].orEmpty().map {
-                    IosItemView(CodexItem.UserMessage(it.clientId, it.text, it.clientId, it.imageSources))
-                },
-            hasOlderTurns = source.olderTurnsCursor != null,
-        )
-    }
-
-    private class ProjectedTurn(
-        val source: CodexTurn,
-        val submissions: List<SubmittedMessage>,
-        val views: List<IosTurnView>,
-        val items: MutableMap<String, IosItemView>,
-    ) {
-        fun shouldPruneItems(turn: CodexTurn, pending: List<SubmittedMessage>): Boolean =
-            submissions != pending ||
-                source.items.size != turn.items.size ||
-                turn.items.indices.any { source.items[it].id != turn.items[it].id }
+            ProjectedTurn(turn, submissions, views, items)
+        }
     }
 }
 
@@ -327,12 +304,19 @@ private inline fun CodexTurn.toIosTurnViews(
                         .let { raw ->
                             IosTurnRequestView(
                                 request.id,
-                                raw.wireId.toString(),
-                                raw.method,
+                                kotlinx.serialization.json
+                                    .buildJsonObject {
+                                        put("id", raw.wireId)
+                                        put("method", kotlinx.serialization.json.JsonPrimitive(raw.method))
+                                        put("params", raw.params)
+                                    }
+                                    .toString(),
                                 raw.params.toString(),
-                                request.kind,
+                                request.form,
                                 request.title,
                                 request.body,
+                                request.questions,
+                                request.decisions,
                             )
                         }
                 },
@@ -352,13 +336,12 @@ private fun CodexItem.iosImageSources(): List<String> =
         else -> emptyList()
     }
 
-private fun AppState.sameNavigationAs(previous: AppState): Boolean =
-    profiles === previous.profiles && selectedProfileId == previous.selectedProfileId && sameSelectionAs(previous)
-
-private fun AppState.sameSelectionAs(previous: AppState): Boolean =
-    showingPairing == previous.showingPairing &&
+private fun AppState.sameNavigationAs(previous: AppState): Boolean {
+    if (profiles !== previous.profiles || selectedProfileId != previous.selectedProfileId) return false
+    return showingPairing == previous.showingPairing &&
         pairingError == previous.pairingError &&
         selectedView == previous.selectedView
+}
 
 private fun AppState.sameProfileListsAs(previous: AppState): Boolean {
     val profile = selectedProfileId?.let { cache.profile(it) }

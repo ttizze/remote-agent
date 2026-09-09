@@ -14,7 +14,11 @@ final class BexAppViewModel: ObservableObject {
     @Published var transferring = false
     @Published var sending = false
     @Published private(set) var transcribing = false
-    let modelSettings: CodexModelSettings
+    @Published private(set) var settings: AgentSettingsState
+    private var settingsObservation: HostEventSubscription?
+    var settingsActions: IosSettingsActions {
+        controller.settings
+    }
 
     @Published private var drafts = UserDefaults.standard
         .dictionary(forKey: "bex.drafts.v4") as? [String: String] ?? [:]
@@ -49,10 +53,12 @@ final class BexAppViewModel: ObservableObject {
     private let controller = IosAppController()
 
     init() {
-        modelSettings = CodexModelSettings(actions: controller.conversation, accounts: controller.accounts)
+        settings = controller.settings.currentState()
         state = controller.currentState()
         conversation = BexConversationModel(thread: controller.currentThread())
-        modelSettings.update(host: state.selectedProfileId, connected: state.isConnected)
+        settingsObservation = controller.settings.observeSettings { [weak self] state in
+            self?.settings = state
+        }
         controller.observe { [weak self] state, thread in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -62,12 +68,12 @@ final class BexAppViewModel: ObservableObject {
                 if self.conversation.thread !== thread {
                     self.conversation.thread = thread
                 }
-                self.modelSettings.update(host: state.selectedProfileId, connected: state.isConnected)
             }
         }
     }
 
     deinit {
+        settingsObservation?.cancel()
         controller.close()
     }
 
@@ -152,7 +158,7 @@ extension BexAppViewModel {
         controller.conversation.sendTurn(
             text: text,
             attachments: submission.files.map { CodexAttachment(path: $0.path, name: $0.name, isImage: $0.isImage) },
-            options: modelSettings.turnOptions
+            options: settings.options
         ) { [weak self] accepted, threadId in
             guard let self else { return }
             sending = false
@@ -265,14 +271,8 @@ extension BexAppViewModel {
         }
     }
 
-    func respond(_ request: IosTurnRequestView, result: [String: Any], completion: @escaping (String?) -> Void) {
-        do {
-            try controller.conversation.respond(
-                requestIdJson: request.requestIdJson,
-                responseJson: jsonString(result),
-                completion: completion
-            )
-        } catch { completion(error.localizedDescription) }
+    func respond(_ request: IosTurnRequestView, answer: RequestAnswer, completion: @escaping (String?) -> Void) {
+        controller.conversation.respond(requestJson: request.requestJson, answer: answer, completion: completion)
     }
 
     func forkThread(

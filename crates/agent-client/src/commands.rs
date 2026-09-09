@@ -1,5 +1,7 @@
 //! Native intent boundary. These are client operations, not Host RPC methods.
-use crate::operations::{AgentClient, AgentError, Attachment, TurnOptions, message_input};
+use crate::operations::{
+    AgentClient, AgentError, Attachment, RequestAnswer, TurnOptions, message_input,
+};
 use host_protocol::api;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, path::Path};
@@ -22,6 +24,15 @@ pub struct TurnInput<'a> {
     rename_all_fields = "camelCase"
 )]
 pub enum Command<'a> {
+    Transcribe {
+        #[serde(borrow)]
+        audio: Cow<'a, str>,
+    },
+    Respond {
+        request: serde_json::Value,
+        #[serde(borrow)]
+        answer: RequestAnswer<'a>,
+    },
     Models,
     SessionImages {
         #[serde(borrow)]
@@ -67,30 +78,15 @@ pub enum Command<'a> {
         cwd: Cow<'a, str>,
         model: Option<Cow<'a, str>>,
     },
-    StartTurn {
+    SendTurn {
         #[serde(borrow)]
         thread_id: Cow<'a, str>,
-        #[serde(borrow)]
-        cwd: Cow<'a, str>,
+        snapshot: serde_json::Value,
+        listed: serde_json::Value,
         #[serde(borrow)]
         input: TurnInput<'a>,
-        resume: bool,
         model: Option<Cow<'a, str>>,
         effort: Option<Cow<'a, str>>,
-    },
-    SteerTurn {
-        #[serde(borrow)]
-        thread_id: Cow<'a, str>,
-        #[serde(borrow)]
-        turn_id: Cow<'a, str>,
-        #[serde(borrow)]
-        input: TurnInput<'a>,
-    },
-    QueueTurn {
-        #[serde(borrow)]
-        thread_id: Cow<'a, str>,
-        #[serde(borrow)]
-        input: TurnInput<'a>,
     },
     InterruptTurn {
         #[serde(borrow)]
@@ -151,6 +147,8 @@ impl AgentClient {
         let command: Command<'_> = serde_json::from_str(command)
             .map_err(|error| AgentError::InvalidResponse(error.to_string()))?;
         match command {
+            Command::Transcribe { audio } => encode(self.transcribe(&audio).await),
+            Command::Respond { request, answer } => encode(self.respond(&request, answer).await),
             Command::SessionImages { thread_id } => encode(self.session_images(&thread_id).await),
             Command::WatchThread {
                 thread_id,
@@ -193,49 +191,24 @@ impl AgentClient {
             Command::StartThread { cwd, model } => {
                 encode(self.start_thread(&cwd, model.as_deref()).await)
             }
-            Command::StartTurn {
+            Command::SendTurn {
                 thread_id,
-                cwd,
+                snapshot,
+                listed,
                 input,
-                resume,
                 model,
                 effort,
-            } => {
-                if resume {
-                    self.resume_thread(&thread_id, Some(&cwd)).await?;
-                }
-                encode(
-                    self.start_turn(
-                        &thread_id,
-                        &message_input(&input.text, input.attachments),
-                        &input.client_user_message_id,
-                        TurnOptions {
-                            model: model.as_deref(),
-                            effort: effort.as_deref(),
-                            service_tier_for_turn: None,
-                        },
-                    )
-                    .await,
-                )
-            }
-            Command::SteerTurn {
-                thread_id,
-                turn_id,
-                input,
             } => encode(
-                self.steer_turn(
+                self.send_turn(
                     &thread_id,
-                    &turn_id,
+                    conversation_presentation::state::plan_send(&snapshot, &listed),
                     &message_input(&input.text, input.attachments),
                     &input.client_user_message_id,
-                )
-                .await,
-            ),
-            Command::QueueTurn { thread_id, input } => encode(
-                self.queue_turn(
-                    &thread_id,
-                    &message_input(&input.text, input.attachments),
-                    &input.client_user_message_id,
+                    TurnOptions {
+                        model: model.as_deref(),
+                        effort: effort.as_deref(),
+                        service_tier_for_turn: None,
+                    },
                 )
                 .await,
             ),

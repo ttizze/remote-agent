@@ -2,16 +2,22 @@
 
 ## Unreleased
 
-- Centralize Mac/mobile agent operations and pure conversation, history, lifecycle, and submission decisions in Rust. Keep Kotlin mobile coordination and native UI adapters thin; preserve unknown payload metadata without copying conversation bodies through the native bridge. Exercise both adapters with 72 shared fixture cases.
+- Centralize Mac/mobile agent operations and pure conversation, history, lifecycle, and submission decisions in Rust. Keep Kotlin mobile coordination and native UI adapters thin; preserve unknown payload metadata without copying conversation bodies through the native bridge. Exercise both adapters with 87 shared fixture cases, retaining the original 72.
 - Share the asynchronous JSONL RPC engine and preserve snapshot-before-notification delivery. Move Host title/history projection into its own owner while retaining session routing and authorization in the RPC service.
 - Keep Mac main and Side Chat as independent native views sharing one RPC per Host and one ordered reply/event queue. Give each view an independent history watch; a closed or recreated Side cannot cancel Main. Share Host catalogue, management, and draft resources without mutable Host/draft services. Remove the stale catalogue input from desktop submission decisions.
-- Remove redundant desktop completion/management layers, the mobile account flag bridge, and intermediate history-selection types. Keep account operations in Rust, mobile UI lifecycle in Kotlin, and history bodies moved through pure reconciliation.
+- Remove `CommonCodexClient`, `CodexGateway`, raw native RPC response APIs, and Swift agent-settings policy now that both clients use the shared Rust operations.
+- Remove mutable mobile controllers, session coordinators, and projection caches in favor of state values and transition/effect functions. Drop the 15-variant event hierarchy; keep one raw notification representation. Share Android/iOS polling and move native handle retirement into Rust, preserving calls already in flight while rejecting retired IDs.
+- Separate Host request-alias transitions from outbound queue ownership. Avoid copying pending request bodies during replay and parsing ordinary notifications a second time. Remove redundant desktop completion/management layers, the mobile account flag bridge, and intermediate history-selection types.
+- Require iOS 26 and Android 17 (API 37), following a latest-stable-major-only policy. Align Android minimum/target/compile SDKs and Nix SDK tooling, use AGP 9.3.2 with a separate APK module, request local-network access, and remove obsolete Swift availability branches.
+- Connect Android approval, permission, question, and generic response controls to the shared Rust request operations. Preserve secret-input masking and request details; keep response-validation errors in the editor instead of leaving a stale conversation error after correction.
+- Retain unresolved requests across full and paged history refreshes until a resolution event removes them, preserving their original payloads in mobile storage.
+- Isolate the iOS recording test's signed-out account state and restore it afterward, keeping account-switching fixtures independent.
 
 - Share one Mac draft writer between main and Side Chat, preserving their separate files and pending saves when either view closes.
 
 - Restore workspace Rust quality checks: format Mac and Host code, disambiguate the NUL separator in workspace-review fixtures, and simplify the hidden Side Chat recording-cancellation condition without changing its behavior.
 
-- Remove unused Rust JSON-value response wrappers from the mobile client; C and JNI responses continue through the raw JSON path. Replace custom Codex schema and executable-test temporary-directory management with `tempfile`, preserving owner-only schema permissions and automatic cleanup; remove the obsolete schema-random error and direct `ring` dependency from `codex-app-server`.
+- Remove unused Rust JSON-value response wrappers from the mobile client; C and JNI now use typed shared agent commands. Replace custom Codex schema and executable-test temporary-directory management with `tempfile`, preserving owner-only schema permissions and automatic cleanup; remove the obsolete schema-random error and direct `ring` dependency from `codex-app-server`.
 
 - Add iPhone Codex account and model selection with device-code login, Host-side credential refresh, and persisted account selection. Keep one shared App Server and conversation history across accounts; retain original Codex credentials and store added credentials through Codex's Keychain support. Keep history accessible if saved authentication needs renewal, and report generation errors until account selection succeeds.
 - Add a branch action beneath completed iPhone answers. Fork through the selected native turn into a new conversation, open its inherited history, and preserve later turns in the original conversation.

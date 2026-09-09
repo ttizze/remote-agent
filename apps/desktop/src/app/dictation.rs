@@ -26,7 +26,7 @@ pub(super) struct Dictation {
 pub(in crate::app) enum DictationEvent {
     Recording,
     Audio(Result<String, String>),
-    Transcript(Result<Value, String>),
+    Transcript(Result<String, String>),
 }
 
 impl ConversationView {
@@ -156,9 +156,8 @@ impl ConversationView {
                 state.control = None;
                 let tx = self.tx.clone();
                 let view = self.id;
-                state.rpc.request_async(
-                    "host/dictation/transcribe",
-                    json!({"audio": audio}),
+                state.rpc.agent_async(
+                    move |client| async move { client.transcribe(&audio).await },
                     move |result| {
                         let _ = tx.send_blocking(super::super::Event::Chat(
                             view,
@@ -171,16 +170,8 @@ impl ConversationView {
                 self.dictation = None;
                 self.error = error;
             }
-            DictationEvent::Transcript(Ok(mut value)) => {
+            DictationEvent::Transcript(Ok(transcript)) => {
                 let state = self.dictation.take().unwrap();
-                let Value::String(transcript) = value["text"].take() else {
-                    self.error = "音声を認識できませんでした。もう一度録音してください。".into();
-                    return;
-                };
-                if transcript.trim().is_empty() {
-                    self.error = "音声を認識できませんでした。もう一度録音してください。".into();
-                    return;
-                }
                 let current = state.key == self.draft_key();
                 if current
                     && state.send

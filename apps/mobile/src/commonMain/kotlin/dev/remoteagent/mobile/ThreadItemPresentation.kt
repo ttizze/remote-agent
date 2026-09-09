@@ -41,11 +41,10 @@ internal fun CodexItem.expandedThreadItemBody(): String =
         is CodexItem.UserMessage -> text
         is CodexItem.AgentMessage -> text
         is CodexItem.Reasoning -> summary
-        is CodexItem.CommandExecution ->
-            buildString {
-                    cwd?.takeIf(String::isNotBlank)?.let { append("cwd: ").append(it).append('\n') }
-                    append(output)
-                }
+        is CodexItem.CommandExecution -> buildString {
+                cwd?.takeIf(String::isNotBlank)?.let { append("cwd: ").append(it).append('\n') }
+                append(output)
+            }
                 .trim()
         is CodexItem.FileChange ->
             changes.joinToString("\n\n") { change -> "${change.kind.name}: ${change.path}\n${change.diff}".trim() }

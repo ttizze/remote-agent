@@ -8,7 +8,7 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::routing::{SessionId, SessionRouter};
+use super::routing::{self, SessionId, SessionQueues};
 
 /// Independently watched conversations on each authenticated connection. Native
 /// turn/item events cover work owned by our Codex process; another process's
@@ -47,9 +47,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rollout.jsonl");
         fs::write(&path, "initial\n").unwrap();
-        let router = SessionRouter::new();
-        let mut owner = router.open_session(16);
-        let mut other = router.open_session(16);
+        let router = routing::session_queues();
+        let mut owner = routing::open_session(&router, 16);
+        let mut other = routing::open_session(&router, 16);
         let watches = ThreadWatches::default();
         watches
             .request(
@@ -79,8 +79,8 @@ mod tests {
             directory.path().join("main.jsonl"),
             directory.path().join("side.jsonl"),
         ];
-        let router = SessionRouter::new();
-        let mut session = router.open_session(16);
+        let router = routing::session_queues();
+        let mut session = routing::open_session(&router, 16);
         let watches = ThreadWatches::default();
         for (key, path) in paths.iter().enumerate() {
             fs::write(path, "initial\n").unwrap();
@@ -169,8 +169,8 @@ mod tests {
         let second = directory.path().join("second.jsonl");
         fs::write(&first, "first\n").unwrap();
         fs::write(&second, "second\n").unwrap();
-        let router = SessionRouter::new();
-        let mut session = router.open_session(16);
+        let router = routing::session_queues();
+        let mut session = routing::open_session(&router, 16);
         let watches = ThreadWatches::default();
         let register =
             |revision, path| json!({"watchKey":1,"watchId":revision,"threadId":"open","path":path});
@@ -265,15 +265,13 @@ impl ThreadWatches {
     pub(super) async fn request(
         &self,
         session: SessionId,
-        router: SessionRouter,
+        router: Arc<Mutex<SessionQueues>>,
         method: String,
         params: Value,
     ) -> Result<Value, String> {
         let watches = self.clone();
         tokio::task::spawn_blocking(move || {
-            router
-                .ensure_session(session)
-                .map_err(|error| error.to_string())?;
+            routing::ensure_session(&router, session).map_err(|error| error.to_string())?;
             if method == "host/thread/unwatch" {
                 let params: UnwatchParams =
                     serde_json::from_value(params).map_err(|error| error.to_string())?;
@@ -292,7 +290,7 @@ impl ThreadWatches {
     fn watch(
         &self,
         session: SessionId,
-        router: SessionRouter,
+        router: Arc<Mutex<SessionQueues>>,
         params: WatchParams,
     ) -> Result<(), String> {
         if params.watch_id == 0 || params.thread_id.is_empty() || !params.path.is_absolute() {
@@ -338,13 +336,13 @@ impl ThreadWatches {
                 Err(_) => json!({"method":"host/thread/watchFailed","params":{"watchKey":watch_key,"watchId":watch_id,"threadId":params.thread_id}}),
                 _ => return,
             };
-            let _ = event_router.send_line(session, message.to_string());
+            let _ = routing::send_line(&event_router, session, message.to_string());
         }).map_err(|error| error.to_string())?;
         watcher
             .watch(&parent, RecursiveMode::NonRecursive)
             .map_err(|error| error.to_string())?;
 
-        if router.ensure_session(session).is_err() {
+        if routing::ensure_session(&router, session).is_err() {
             self.clear_session(session);
             return Err("conversation connection closed".into());
         }

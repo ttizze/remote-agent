@@ -13,10 +13,10 @@ data class CodexTurnInput(
     val clientUserMessageId: String,
 )
 
-/** The only effect boundary used by common mobile presentation code. */
-interface HostGateway : RawCodexGateway {
-    val codex: CodexGateway
+@Serializable data class CodexTurnOptions(val model: String? = null, val effort: String? = null)
 
+/** The only effect boundary used by common mobile presentation code. */
+interface HostGateway {
     suspend fun agentCommand(profile: HostProfile, command: AgentCommand): GatewayResult<String>
 
     suspend fun pair(payload: PairingQrPayload): GatewayResult<HostProfile>
@@ -28,54 +28,6 @@ interface HostGateway : RawCodexGateway {
     suspend fun disconnect(profile: HostProfile): GatewayResult<Unit>
 
     suspend fun transfer(profile: HostProfile, params: JsonElement): GatewayResult<JsonElement>
-}
-
-/** Typed conversation operations; platform transports expose one common client. */
-interface CodexGateway {
-    suspend fun listThreads(
-        profile: HostProfile,
-        query: ThreadListQuery = ThreadListQuery(),
-    ): GatewayResult<ThreadListPage>
-
-    suspend fun readThread(profile: HostProfile, threadId: String): GatewayResult<ThreadReadResult>
-
-    suspend fun startThread(
-        profile: HostProfile,
-        cwd: String,
-        options: CodexTurnOptions = CodexTurnOptions(),
-    ): GatewayResult<ThreadSnapshot>
-
-    suspend fun startTurn(
-        profile: HostProfile,
-        threadId: String,
-        cwd: String,
-        input: CodexTurnInput,
-        resume: Boolean,
-        options: CodexTurnOptions = CodexTurnOptions(),
-    ): GatewayResult<String>
-
-    suspend fun steerTurn(
-        profile: HostProfile,
-        threadId: String,
-        turnId: String,
-        input: CodexTurnInput,
-    ): GatewayResult<Unit>
-
-    suspend fun queueTurn(profile: HostProfile, threadId: String, input: CodexTurnInput): GatewayResult<String>
-
-    suspend fun interrupt(profile: HostProfile, threadId: String, turnId: String): GatewayResult<Unit>
-}
-
-/**
- * Lossless Codex boundary. New Codex methods can be used without adding a HostGateway method, and server-originated
- * requests can be answered by the feature that owns them.
- */
-interface RawCodexGateway {
-    suspend fun rawRequest(
-        profile: HostProfile,
-        method: String,
-        params: JsonElement = emptyJsonObject(),
-    ): GatewayResult<JsonElement>
 
     /** Reports terminal transport failure without weakening the lossless message callback. */
     fun subscribeRaw(
@@ -83,10 +35,6 @@ interface RawCodexGateway {
         onMessage: (RawCodexMessage) -> Unit,
         onClosed: (String) -> Unit,
     ): HostEventSubscription
-
-    suspend fun respondResult(profile: HostProfile, requestId: JsonElement, result: JsonElement): GatewayResult<Unit>
-
-    suspend fun respondError(profile: HostProfile, requestId: JsonElement, error: JsonElement): GatewayResult<Unit>
 }
 
 fun interface HostEventSubscription {

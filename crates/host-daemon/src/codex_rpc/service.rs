@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use codex_app_server::{CodexAppServer, Error as AppServerError};
 use host_protocol::api;
@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json, value::RawValue};
 use tokio::sync::broadcast;
 
 use super::routing::{
-    CodexSession, ResponseDisposition, ResponseRoute, RouteError, SessionId, SessionRouter,
+    self, CodexSession, ResponseDisposition, ResponseRoute, RouteError, SessionId, SessionQueues,
 };
 use crate::{
     DesktopProjectStore, HOST_PROJECT_LIST_METHOD, HOST_THREAD_LIST_METHOD,
@@ -50,7 +50,7 @@ struct ServiceInner {
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     app_server: Arc<CodexAppServer>,
     history: ThreadHistory,
-    router: SessionRouter,
+    router: Arc<Mutex<SessionQueues>>,
     event_pump_started: OnceLock<()>,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
@@ -65,7 +65,7 @@ impl CodexRpcService {
                 history: ThreadHistory::new(app_server.clone(), desktop_projects.clone()),
                 app_server,
                 worktrees: crate::worktrees::Worktrees::new(desktop_projects.path()),
-                router: SessionRouter::new(),
+                router: routing::session_queues(),
                 event_pump_started: OnceLock::new(),
                 files: crate::workspace_files::WorkspaceFiles::default(),
                 thread_watches: super::thread_watch::ThreadWatches::default(),
@@ -87,13 +87,13 @@ impl CodexRpcService {
 
     pub fn open_session(&self, capacity: usize) -> CodexSession {
         self.start_event_pump();
-        self.inner.router.open_session(capacity)
+        routing::open_session(&self.inner.router, capacity)
     }
 
     pub fn close_session(&self, session: SessionId) {
         self.inner.thread_watches.clear_session(session);
         self.inner.files.clear_session(session);
-        self.inner.router.close_session(session);
+        routing::close_session(&self.inner.router, session);
     }
 
     /// Begin consuming Codex-originated lines before the first phone connects.
@@ -128,14 +128,12 @@ impl CodexRpcService {
                 .as_ref()
                 .and_then(|accounts| accounts.restoration_error())
             {
-                return self
-                    .inner
-                    .router
-                    .send_line(
-                        session,
-                        error_response(&line, "account_unavailable", error)?,
-                    )
-                    .map_err(Into::into);
+                return routing::send_line(
+                    &self.inner.router,
+                    session,
+                    error_response(&line, "account_unavailable", error)?,
+                )
+                .map_err(Into::into);
             }
         }
 
@@ -271,10 +269,7 @@ impl CodexRpcService {
             },
         };
 
-        self.inner
-            .router
-            .send_line(session, response)
-            .map_err(Into::into)
+        routing::send_line(&self.inner.router, session, response).map_err(Into::into)
     }
 
     pub async fn dispatch_notification(
@@ -318,7 +313,8 @@ impl CodexRpcService {
         let Some(id) = message.raw_id() else {
             return Ok(ResponseDisposition::Unknown);
         };
-        let ResponseRoute::Forward(upstream_id) = self.inner.router.resolve_response(session, id)
+        let ResponseRoute::Forward(upstream_id) =
+            routing::resolve_response(&self.inner.router, session, id)
         else {
             return Ok(ResponseDisposition::Unknown);
         };
@@ -337,10 +333,7 @@ impl CodexRpcService {
     }
 
     fn ensure_session(&self, session: SessionId) -> Result<(), DispatchError> {
-        self.inner
-            .router
-            .ensure_session(session)
-            .map_err(Into::into)
+        routing::ensure_session(&self.inner.router, session).map_err(Into::into)
     }
 
     fn start_event_pump(&self) {
@@ -393,13 +386,13 @@ impl CodexRpcService {
                                 let _ = inner.app_server.send_raw(&line).await;
                             });
                         } else {
-                            router.handle_server_line(&line);
+                            routing::handle_server_line(&router, &line);
                         }
                     }
                     Err(broadcast::error::RecvError::Closed)
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         thread_watches.clear_all();
-                        router.close_all();
+                        routing::close_all(&router);
                         return;
                     }
                 }

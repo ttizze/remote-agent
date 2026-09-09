@@ -14,11 +14,13 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
-class HostSessionCoordinatorTest {
+class HostSessionsTest {
     @Test
     fun generations_replace_subscriptions_and_cancel_after_unlocking() {
-        val coordinator = HostSessionCoordinator()
+        val coordinator = hostSessions()
         val first = coordinator.beginConnection("host-1")
         var cancelled = false
         var wasCurrentWhenCancelled = true
@@ -45,7 +47,7 @@ class HostSessionCoordinatorTest {
 
     @Test
     fun stale_subscription_install_is_rejected_and_cancelled() {
-        val coordinator = HostSessionCoordinator()
+        val coordinator = hostSessions()
         val first = coordinator.beginConnection("host-1")
         val second = coordinator.beginConnection("host-1")
         var cancelled = false
@@ -58,13 +60,27 @@ class HostSessionCoordinatorTest {
 
     @Test
     fun read_barriers_are_isolated_by_thread_and_stale_tokens_cannot_finish() {
-        val coordinator = HostSessionCoordinator()
+        val coordinator = hostSessions()
         val generation = coordinator.beginConnection("host-1")
         val first = assertNotNull(coordinator.beginRead("host-1", "thread-1", generation))
         val second = assertNotNull(coordinator.beginRead("host-1", "thread-2", generation))
 
-        val firstEvent = ThreadEvent.TurnStarted("thread-1", CodexTurn("turn-1", TurnStatus.InProgress))
-        val secondEvent = ThreadEvent.TurnStarted("thread-2", CodexTurn("turn-2", TurnStatus.InProgress))
+        val firstEvent =
+            RawCodexMessage.Notification(
+                "turn/started",
+                buildJsonObject {
+                    put("threadId", JsonPrimitive("thread-1"))
+                    put("turn", (CodexTurn("turn-1", TurnStatus.InProgress)).fixtureJson())
+                },
+            )
+        val secondEvent =
+            RawCodexMessage.Notification(
+                "turn/started",
+                buildJsonObject {
+                    put("threadId", JsonPrimitive("thread-2"))
+                    put("turn", (CodexTurn("turn-2", TurnStatus.InProgress)).fixtureJson())
+                },
+            )
         assertEquals(HostReadBufferResult.Buffered, coordinator.bufferEvent(first, firstEvent))
         assertEquals(HostReadBufferResult.NotBuffered, coordinator.bufferEvent(first, secondEvent))
         assertEquals(HostReadBufferResult.Buffered, coordinator.bufferEvent(second, secondEvent))
@@ -82,10 +98,19 @@ class HostSessionCoordinatorTest {
 
     @Test
     fun read_barrier_overflow_returns_retry_signal_for_bytes_and_event_count() {
-        val byteLimited = HostSessionCoordinator(MobileCacheLimits(maxApproximateBytes = 64))
+        val byteLimited = hostSessions(MobileCacheLimits(maxApproximateBytes = 64))
         val generation = byteLimited.beginConnection("host-1")
         val token = assertNotNull(byteLimited.beginRead("host-1", "thread-1", generation))
-        val large = ThreadEvent.AgentMessageDelta("thread-1", "turn-1", "item-1", "x".repeat(256))
+        val large =
+            RawCodexMessage.Notification(
+                "item/agentMessage/delta",
+                buildJsonObject {
+                    put("threadId", JsonPrimitive("thread-1"))
+                    put("turnId", JsonPrimitive("turn-1"))
+                    put("itemId", JsonPrimitive("item-1"))
+                    put("delta", JsonPrimitive("x".repeat(256)))
+                },
+            )
 
         assertEquals(HostReadBufferResult.Overflowed, byteLimited.bufferEvent(token, large))
         assertTrue(byteLimited.bufferEvent(token, large).retryRequired)
@@ -93,7 +118,7 @@ class HostSessionCoordinatorTest {
         assertTrue(byteCompletion.retryRequired)
         assertTrue(byteCompletion.events.isEmpty())
 
-        val countLimited = HostSessionCoordinator()
+        val countLimited = hostSessions()
         val countGeneration = countLimited.beginConnection("host-1")
         val countToken = assertNotNull(countLimited.beginRead("host-1", "thread-1", countGeneration))
         repeat(256) {
@@ -101,18 +126,31 @@ class HostSessionCoordinatorTest {
                 HostReadBufferResult.Buffered,
                 countLimited.bufferEvent(
                     countToken,
-                    ThreadEvent.TurnStarted("thread-1", CodexTurn("turn-$it", TurnStatus.InProgress)),
+                    RawCodexMessage.Notification(
+                        "turn/started",
+                        buildJsonObject {
+                            put("threadId", JsonPrimitive("thread-1"))
+                            put("turn", (CodexTurn("turn-$it", TurnStatus.InProgress)).fixtureJson())
+                        },
+                    ),
                 ),
             )
         }
-        val overflow = ThreadEvent.TurnStarted("thread-1", CodexTurn("turn-256", TurnStatus.InProgress))
+        val overflow =
+            RawCodexMessage.Notification(
+                "turn/started",
+                buildJsonObject {
+                    put("threadId", JsonPrimitive("thread-1"))
+                    put("turn", (CodexTurn("turn-256", TurnStatus.InProgress)).fixtureJson())
+                },
+            )
         assertEquals(HostReadBufferResult.Overflowed, countLimited.bufferEvent(countToken, overflow))
         assertTrue(assertNotNull(countLimited.finishRead(countToken)).retryRequired)
     }
 
     @Test
     fun read_completion_is_rejected_after_generation_changes() {
-        val coordinator = HostSessionCoordinator()
+        val coordinator = hostSessions()
         val firstGeneration = coordinator.beginConnection("host-1")
         val token = assertNotNull(coordinator.beginRead("host-1", "thread-1", firstGeneration))
         coordinator.beginConnection("host-1")
@@ -123,7 +161,7 @@ class HostSessionCoordinatorTest {
 
     @Test
     fun connection_blocks_complete_for_each_host() {
-        val coordinator = HostSessionCoordinator()
+        val coordinator = hostSessions()
 
         var firstResult = 0
         var secondResult = 0
@@ -137,7 +175,7 @@ class HostSessionCoordinatorTest {
 
     @Test
     fun same_host_lifecycle_waits_while_another_host_progresses() = runBlocking {
-        val coordinator = HostSessionCoordinator()
+        val coordinator = hostSessions()
         val releaseFirstHost = CompletableDeferred<Unit>()
         val sameHostEntered = CompletableDeferred<Unit>()
         val otherHostEntered = CompletableDeferred<Unit>()

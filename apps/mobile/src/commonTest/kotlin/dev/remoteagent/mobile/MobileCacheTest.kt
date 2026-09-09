@@ -2,7 +2,6 @@ package dev.remoteagent.mobile
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
@@ -10,147 +9,6 @@ import kotlinx.serialization.json.jsonObject
 
 class MobileCacheTest {
     private val limits = MobileCacheLimits(maxThreads = 2, maxTurnsPerThread = 2, maxApproximateBytes = 1_024)
-
-    @Test
-    fun refresh_matches_duplicate_turn_occurrences_and_keeps_fetched_details() {
-        fun snapshot(turns: String) =
-            codexThreadFromResponse(
-                Json.parseToJsonElement("""{"thread":{"id":"thread","historyCursor":null,"turns":[$turns]}}""")
-            )
-        val previous =
-            snapshot(
-                """
-            {"id":"prefix","items":[]},
-            {"id":"repeat","status":"inProgress","items":[{"id":"command","type":"commandExecution","aggregatedOutput":"first-full"}]},
-            {"id":"repeat","status":"inProgress","items":[{"id":"command","type":"commandExecution","aggregatedOutput":"second-full"}]}
-        """
-            )
-        val fresh =
-            snapshot(
-                """
-            {"id":"repeat","status":"completed","deferredItemIds":["command"],"items":[{"id":"command","type":"commandExecution"}]},
-            {"id":"repeat","status":"completed","deferredItemIds":["command"],"items":[{"id":"command","type":"commandExecution"}]}
-        """
-            )
-        val merged = mergeHistoryRefresh(previous, fresh)
-        assertEquals(listOf("prefix", "repeat", "repeat"), merged.turns.map { it.id })
-        assertEquals(
-            listOf("first-full", "second-full"),
-            merged.turns.drop(1).map { (it.items.single() as CodexItem.CommandExecution).output },
-        )
-        assertTrue(merged.turns.drop(1).all { it.status == TurnStatus.Completed })
-        assertTrue(merged.turns.drop(1).all { it.raw?.get("deferredItemIds").toString() == "[]" })
-        val olderSummary =
-            snapshot(
-                """{"id":"repeat","deferredItemIds":["command"],
-                "items":[{"id":"command","type":"commandExecution"}],"itemsHasMore":false}"""
-            )
-        val prepended = mergeOlderHistory(merged, olderSummary, "repeat", null)
-        assertEquals("first-full", (prepended.turns[1].items.single() as CodexItem.CommandExecution).output)
-        assertEquals("[]", prepended.turns[1].raw?.get("deferredItemIds").toString())
-    }
-
-    @Test
-    fun summary_only_refresh_keeps_items_but_full_unpaged_read_is_authoritative() {
-        fun snapshot(raw: String) = codexThreadFromResponse(Json.parseToJsonElement(raw))
-        val previous =
-            snapshot(
-                """{"thread":{"id":"thread","historyCursor":"older","turns":[
-            {"id":"prefix","items":[]},
-            {"id":"turn","status":"inProgress","items":[{"id":"answer","type":"agentMessage","text":"complete"}],"itemsHasMore":false}
-        ]}}"""
-            )
-        val fresh =
-            snapshot(
-                """{"thread":{"id":"thread","historyCursor":"fresh","turns":[
-            {"id":"turn","status":"completed","items":[],"itemsHasMore":true}
-        ]}}"""
-            )
-        val merged = mergeHistoryRefresh(previous, fresh)
-        assertEquals("complete", (merged.turns.last().items.single() as CodexItem.AgentMessage).text)
-        assertEquals(TurnStatus.Completed, merged.turns.last().status)
-        assertEquals("older", merged.olderTurnsCursor)
-        assertFalse(merged.turns.last().hasOlderItems)
-        val authoritative = fresh.copy(raw = null)
-        assertEquals(authoritative, mergeHistoryRefresh(previous, authoritative))
-    }
-
-    @Test
-    fun an_unhydrated_turn_is_loadable_without_a_cursor_and_retains_its_status() {
-        val current =
-            codexThreadFromResponse(
-                Json.parseToJsonElement(
-                    """{"thread":{"id":"thread-1","turns":[
-            {"id":"turn","status":"interrupted","items":[],"itemsHasMore":true,"itemsNextCursor":null}
-        ]}}"""
-                )
-            )
-        assertTrue(current.turns.single().hasOlderItems)
-        assertEquals(null, current.turns.single().olderItemsCursor)
-        val page =
-            codexThreadFromResponse(
-                Json.parseToJsonElement(
-                    """
-                {
-                  "thread": {
-                    "id": "thread-1",
-                    "turns": [
-                      {
-                        "id": "turn",
-                        "items": [
-                          {
-                            "id": "reply",
-                            "type": "agentMessage",
-                            "text": "older reply"
-                          }
-                        ],
-                        "itemsHasMore": false,
-                        "itemsNextCursor": null
-                      }
-                    ]
-                  }
-                }
-            """
-                )
-            )
-        val loaded = mergeOlderHistory(current, page, "turn", null).turns.single()
-        assertEquals(TurnStatus.Interrupted, loaded.status)
-        assertEquals(listOf("reply"), loaded.items.map { it.id })
-        assertFalse(loaded.hasOlderItems)
-    }
-
-    @Test
-    fun older_items_preserve_live_values_and_tail_refresh_keeps_the_loaded_prefix() {
-        fun page(items: String, cursor: String) =
-            codexThreadFromResponse(
-                Json.parseToJsonElement(
-                    """
-            {"thread":{"id":"thread-1","historyCursor":"turn-cursor","turns":[
-                {"id":"turn","status":"inProgress","itemsNextCursor":$cursor,"items":[$items]}
-            ]}}
-        """
-                )
-            )
-        val current = page("""{"id":"b","type":"agentMessage","text":"live"}""", "\"items-cursor\"")
-        val older =
-            page(
-                """{"id":"a","type":"userMessage","content":[{"type":"text","text":"question"}]},
-                {"id":"b","type":"agentMessage","text":"stale"}""",
-                "null",
-            )
-        val merged = mergeOlderHistory(current, older, "turn", "items-cursor")
-        assertEquals(listOf("a", "b"), merged.turns.single().items.map { it.id })
-        assertEquals("live", (merged.turns.single().items.last() as CodexItem.AgentMessage).text)
-        assertEquals(null, merged.turns.single().olderItemsCursor)
-        val initial = reconcileThreadRead(MobileCache(), "host", ThreadReadResult(merged, emptyList()), limits)
-        val fresh = page("""{"id":"b","type":"agentMessage","text":"finished"}""", "\"items-cursor\"")
-        val refreshed =
-            reconcileThreadRead(initial, "host", ThreadReadResult(fresh, emptyList()), limits)
-                .snapshot("host", "thread-1")!!
-        assertEquals(listOf("a", "b"), refreshed.turns.single().items.map { it.id })
-        assertEquals("finished", (refreshed.turns.single().items.last() as CodexItem.AgentMessage).text)
-        assertEquals(null, refreshed.turns.single().olderItemsCursor)
-    }
 
     @Test
     fun older_turn_pages_deduplicate_and_replace_the_older_cursor() {
@@ -178,9 +36,19 @@ class MobileCacheTest {
                 thread = snapshot,
                 bufferedEvents =
                     listOf(
-                        ThreadEvent.AgentMessageDelta("thread-1", "turn-1", "item-1", " new"),
-                        ThreadEvent.ItemCompleted("thread-1", "turn-1", CodexItem.AgentMessage("item-2", "second")),
-                        ThreadEvent.TurnCompleted("thread-1", CodexTurn("turn-1", TurnStatus.Completed)),
+                        notification(
+                            "item/agentMessage/delta",
+                            """{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":" new"}""",
+                        ),
+                        notification(
+                            "item/completed",
+                            """{"threadId":"thread-1","turnId":"turn-1","item":{"id":"item-2",
+                                "type":"agentMessage","text":"second"}}""",
+                        ),
+                        notification(
+                            "turn/completed",
+                            """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}""",
+                        ),
                     ),
             )
 
@@ -194,7 +62,12 @@ class MobileCacheTest {
 
     @Test
     fun live_item_events_are_ignored_until_their_snapshot_and_turn_are_known() {
-        val event = ThreadEvent.ItemStarted("thread-1", "turn-1", CodexItem.UserMessage("item-1", "hello"))
+        val event =
+            notification(
+                "item/started",
+                """{"threadId":"thread-1","turnId":"turn-1","item":{"id":"item-1",
+                    "type":"userMessage","content":[{"type":"text","text":"hello"}]}}""",
+            )
         val noSnapshot = applyLiveEvent(MobileCache(), "host-1", event, limits)
         val snapshot = ThreadSnapshot(summary("thread-1"), emptyList())
         val noTurn =
@@ -221,7 +94,15 @@ class MobileCacheTest {
         // in-memory thread has no persisted list entry until its first turn.
         cache = reconcileThreadList(cache, "host-1", listOf(summary("other")), limits)
         cache =
-            applyLiveEvent(cache, "host-1", ThreadEvent.AgentMessageDelta("open", "turn", "reply", " second"), limits)
+            applyLiveEvent(
+                cache,
+                "host-1",
+                notification(
+                    "item/agentMessage/delta",
+                    """{"threadId":"open","turnId":"turn","itemId":"reply","delta":" second"}""",
+                ),
+                limits,
+            )
         val body = assertNotNull(cache.snapshot("host-1", "open"))
         assertEquals("First second", (body.turns.single().items.single() as CodexItem.AgentMessage).text)
         assertEquals(listOf("other"), cache.profile("host-1").threadList.map { it.id })
@@ -339,7 +220,12 @@ class MobileCacheTest {
                 "host-1",
                 ThreadReadResult(
                     snapshot,
-                    listOf(ThreadEvent.TurnStarted("thread-2", CodexTurn("turn-2", TurnStatus.InProgress))),
+                    listOf(
+                        notification(
+                            "turn/started",
+                            """{"threadId":"thread-2","turn":{"id":"turn-2","status":"inProgress"}}""",
+                        )
+                    ),
                 ),
                 limits,
             )
@@ -356,15 +242,10 @@ class MobileCacheTest {
             applyLiveEvent(
                 cache,
                 "host-1",
-                ThreadEvent.TurnCompleted(
-                    threadId = "thread-1",
-                    CodexTurn(
-                        id = "turn-1",
-                        status = TurnStatus.Completed,
-                        startedAtMs = 1_000,
-                        completedAtMs = 6_000,
-                        durationMs = 5_000,
-                    ),
+                notification(
+                    "turn/completed",
+                    """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","startedAt":1,
+                        "completedAt":6,"durationMs":5000}}""",
                 ),
                 limits,
             )
@@ -372,7 +253,10 @@ class MobileCacheTest {
             applyLiveEvent(
                 cache,
                 "host-1",
-                ThreadEvent.TurnStarted("thread-1", CodexTurn("turn-1", TurnStatus.InProgress, startedAtMs = 1_000)),
+                notification(
+                    "turn/started",
+                    """{"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress","startedAt":1}}""",
+                ),
                 limits,
             )
 
@@ -384,29 +268,56 @@ class MobileCacheTest {
     }
 
     @Test
-    fun pending_server_requests_are_added_and_resolved_idempotently() {
-        val snapshot = ThreadSnapshot(summary("thread-1"), listOf(CodexTurn("turn-1", TurnStatus.InProgress)))
-        var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
-        val request =
-            CodexServerRequest(
-                id = "request-1",
-                method = "item/tool/requestUserInput",
-                params =
-                    Json.parseToJsonElement(
-                            """{"threadId":"thread-1","turnId":"turn-1","questions":[{"question":"Which?"}]}"""
-                        )
-                        .jsonObject,
-            )
+    fun pending_server_requests_survive_reads_and_resolve_idempotently() {
+        for (raw in listOf(null, Json.parseToJsonElement("""{"historyCursor":null}""").jsonObject)) {
+            val snapshot = ThreadSnapshot(summary("thread-1"), listOf(CodexTurn("turn-1", TurnStatus.InProgress)), raw)
+            var cache = reconcileThreadRead(MobileCache(), "host-1", ThreadReadResult(snapshot, emptyList()), limits)
+            val request =
+                CodexServerRequest(
+                    id = "request-1",
+                    method = "item/tool/requestUserInput",
+                    params =
+                        Json.parseToJsonElement(
+                                """{"threadId":"thread-1","turnId":"turn-1","questions":[{"question":"Which?"}]}"""
+                            )
+                            .jsonObject,
+                )
 
-        cache = applyLiveEvent(cache, "host-1", ThreadEvent.RequestStarted("thread-1", "turn-1", request), limits)
-        cache = applyLiveEvent(cache, "host-1", ThreadEvent.RequestStarted("thread-1", "turn-1", request), limits)
-        assertEquals(listOf(request), cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests)
+            cache =
+                applyLiveEvent(
+                    cache,
+                    "host-1",
+                    RawCodexMessage.ServerRequest(request.wireId, request.method, request.params),
+                    limits,
+                )
+            cache =
+                applyLiveEvent(
+                    cache,
+                    "host-1",
+                    RawCodexMessage.ServerRequest(request.wireId, request.method, request.params),
+                    limits,
+                )
+            assertEquals(listOf(request), cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests)
 
-        cache =
-            applyLiveEvent(cache, "host-1", ThreadEvent.RequestResolved("thread-1", requestId = "request-1"), limits)
-        cache =
-            applyLiveEvent(cache, "host-1", ThreadEvent.RequestResolved("thread-1", requestId = "request-1"), limits)
-        assertTrue(cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests.isEmpty())
+            cache = reconcileThreadRead(cache, "host-1", ThreadReadResult(snapshot, emptyList()), limits)
+            assertEquals(listOf(request), cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests)
+
+            cache =
+                applyLiveEvent(
+                    cache,
+                    "host-1",
+                    notification("serverRequest/resolved", """{"threadId":"thread-1","requestId":"request-1"}"""),
+                    limits,
+                )
+            cache =
+                applyLiveEvent(
+                    cache,
+                    "host-1",
+                    notification("serverRequest/resolved", """{"threadId":"thread-1","requestId":"request-1"}"""),
+                    limits,
+                )
+            assertTrue(cache.snapshot("host-1", "thread-1")!!.turns.single().pendingRequests.isEmpty())
+        }
     }
 
     @Test
@@ -423,7 +334,11 @@ class MobileCacheTest {
             applyLiveEvent(
                 cache,
                 "host-1",
-                ThreadEvent.TurnCompleted("thread-1", CodexTurn("turn-1", TurnStatus.Failed, error = error)),
+                notification(
+                    "turn/completed",
+                    """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
+                        "error":{"message":"context full","codexErrorInfo":"contextWindowExceeded"}}}""",
+                ),
                 limits,
             )
 
@@ -443,7 +358,10 @@ class MobileCacheTest {
             applyLiveEvent(
                 cache,
                 "host-1",
-                ThreadEvent.TurnCompleted("thread-1", CodexTurn("turn-1", TurnStatus.Completed)),
+                notification(
+                    "turn/completed",
+                    """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}""",
+                ),
                 limits,
             )
 
@@ -459,11 +377,10 @@ class MobileCacheTest {
             applyLiveEvent(
                 cache,
                 "host-1",
-                ThreadEvent.Error(
-                    threadId = "thread-1",
-                    turnId = "turn-1",
-                    error = CodexTurnError(message = "disconnected", willRetry = true),
-                    willRetry = true,
+                notification(
+                    "error",
+                    """{"threadId":"thread-1","turnId":"turn-1","error":{"message":"disconnected",
+                        "willRetry":true},"willRetry":true}""",
                 ),
                 limits,
             )
@@ -485,16 +402,27 @@ class MobileCacheTest {
                 limits,
             )
         val active = ThreadStatus.Active(listOf("waitingOnApproval"))
-        cache = applyLiveEvent(cache, "host-1", ThreadEvent.ThreadStatusChanged("thread-1", status = active), limits)
-        assertEquals(active, cache.profile("host-1").threadList.single().status)
-        assertEquals(active, cache.snapshot("host-1", "thread-1")!!.summary.status)
-
-        val raw = Json.parseToJsonElement("""{"review":{"status":"denied","rationale":"too risky"}}""").jsonObject
         cache =
             applyLiveEvent(
                 cache,
                 "host-1",
-                ThreadEvent.GuardianReviewChanged("thread-1", "turn-1", "review-1", "denied", raw),
+                notification(
+                    "thread/status/changed",
+                    """{"threadId":"thread-1","status":{"type":"active","activeFlags":["waitingOnApproval"]}}""",
+                ),
+                limits,
+            )
+        assertEquals(active, cache.profile("host-1").threadList.single().status)
+        assertEquals(active, cache.snapshot("host-1", "thread-1")!!.summary.status)
+
+        cache =
+            applyLiveEvent(
+                cache,
+                "host-1",
+                notification(
+                    "item/autoApprovalReview/completed",
+                    """{"threadId":"thread-1","turnId":"turn-1","reviewId":"review-1","review":{"status":"denied"}}""",
+                ),
                 limits,
             )
         assertEquals(
@@ -506,7 +434,11 @@ class MobileCacheTest {
             applyLiveEvent(
                 cache,
                 "host-1",
-                ThreadEvent.GuardianReviewChanged("thread-1", "turn-1", "review-1", "approved", raw),
+                notification(
+                    "item/autoApprovalReview/completed",
+                    """{"threadId":"thread-1","turnId":"turn-1","reviewId":"review-1",
+                        "review":{"status":"approved"}}""",
+                ),
                 limits,
             )
         assertTrue(cache.snapshot("host-1", "thread-1")!!.turns.single().items.isEmpty())

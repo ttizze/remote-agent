@@ -8,11 +8,9 @@ use host_protocol::{RpcMessageKind, classify_message, rewrite_top_level_id};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-/// An identifier allocated by the daemon for one authenticated mobile
-/// session. It is never put on the wire.
+/// An authenticated session ID, never put on the wire.
 pub type SessionId = u64;
 
-/// The result of submitting a response to a Codex-originated request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseDisposition {
     Accepted,
@@ -37,14 +35,13 @@ pub(crate) enum RouteError {
 pub struct CodexSession {
     id: SessionId,
     receiver: mpsc::Receiver<String>,
-    state: Weak<Mutex<State>>,
+    queues: Weak<Mutex<SessionQueues>>,
 }
 
 impl CodexSession {
     pub fn id(&self) -> SessionId {
         self.id
     }
-
     pub async fn recv(&mut self) -> Option<String> {
         self.receiver.recv().await
     }
@@ -61,349 +58,296 @@ impl fmt::Debug for CodexSession {
 
 impl Drop for CodexSession {
     fn drop(&mut self) {
-        close_session_state(&self.state, self.id);
+        if let Some(queues) = self.queues.upgrade() {
+            close_session(&queues, self.id);
+        }
     }
 }
 
-/// Owns bounded session queues and aliases used for Codex server requests.
-#[derive(Clone)]
-pub(crate) struct SessionRouter {
-    state: Arc<Mutex<State>>,
-}
-
-struct State {
+/// I/O ownership only. Alias decisions below operate on an exclusively borrowed value.
+pub(crate) struct SessionQueues {
     next_session_id: SessionId,
-    next_proxy_id: u64,
-    sessions: HashMap<SessionId, mpsc::Sender<String>>,
-    pending: HashMap<String, PendingServerRequest>,
-    proxy_to_upstream: HashMap<ProxyKey, String>,
+    outbound: HashMap<SessionId, mpsc::Sender<String>>,
+    routes: RequestRoutes,
 }
 
-struct PendingServerRequest {
+pub(crate) fn session_queues() -> Arc<Mutex<SessionQueues>> {
+    Arc::new(Mutex::new(SessionQueues {
+        next_session_id: 1,
+        outbound: HashMap::new(),
+        routes: RequestRoutes {
+            next_proxy_id: 1,
+            pending: HashMap::new(),
+            proxies: HashMap::new(),
+        },
+    }))
+}
+
+pub(crate) fn open_session(queues: &Arc<Mutex<SessionQueues>>, capacity: usize) -> CodexSession {
+    assert!(capacity > 0, "a Codex session queue must have capacity");
+    let (sender, receiver) = mpsc::channel(capacity);
+    let mut state = lock_queues(queues);
+    let id = loop {
+        let id = state.next_session_id;
+        state.next_session_id = id.checked_add(1).unwrap_or(1);
+        if !state.outbound.contains_key(&id) {
+            break id;
+        }
+    };
+    state.outbound.insert(id, sender);
+    let SessionQueues {
+        outbound, routes, ..
+    } = &mut *state;
+    // The iterator rewrites each retained request directly; no copy of all
+    // pending bodies or a temporary replay vector is needed.
+    if routes
+        .replay(id)
+        .try_for_each(|line| outbound[&id].try_send(line))
+        .is_err()
+    {
+        remove_session(&mut state, id);
+    }
+    CodexSession {
+        id,
+        receiver,
+        queues: Arc::downgrade(queues),
+    }
+}
+
+pub(crate) fn close_session(queues: &Mutex<SessionQueues>, session: SessionId) {
+    remove_session(&mut lock_queues(queues), session);
+}
+
+pub(crate) fn close_all(queues: &Mutex<SessionQueues>) {
+    let mut state = lock_queues(queues);
+    state.outbound.clear();
+    state.routes.proxies.clear();
+    for request in state.routes.pending.values_mut() {
+        request.proxies.clear();
+    }
+}
+
+pub(crate) fn ensure_session(
+    queues: &Mutex<SessionQueues>,
+    session: SessionId,
+) -> Result<(), RouteError> {
+    if lock_queues(queues).outbound.contains_key(&session) {
+        Ok(())
+    } else {
+        Err(RouteError::UnknownSession(session))
+    }
+}
+
+pub(crate) fn send_line(
+    queues: &Mutex<SessionQueues>,
+    session: SessionId,
+    line: String,
+) -> Result<(), RouteError> {
+    send_line_locked(&mut lock_queues(queues), session, line)
+}
+
+fn send_line_locked(
+    state: &mut SessionQueues,
+    session: SessionId,
+    line: String,
+) -> Result<(), RouteError> {
+    match state
+        .outbound
+        .get(&session)
+        .ok_or(RouteError::UnknownSession(session))?
+        .try_send(line)
+    {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            remove_session(state, session);
+            Err(RouteError::QueueFull { session })
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            remove_session(state, session);
+            Err(RouteError::UnknownSession(session))
+        }
+    }
+}
+
+pub(crate) fn handle_server_line(queues: &Mutex<SessionQueues>, line: &str) {
+    let Ok(message) = classify_message(line) else {
+        return;
+    };
+    let mut state = lock_queues(queues);
+    match message.kind() {
+        RpcMessageKind::Notification => {
+            // Ordinary streamed deltas do not need a second JSON parse.
+            if message.method() == Some("serverRequest/resolved") {
+                if let Some((mut notification, proxies)) = state.routes.resolve_notification(line) {
+                    for (session, proxy_id) in proxies {
+                        if !state.outbound.contains_key(&session) {
+                            continue;
+                        }
+                        if let Some(line) = resolved_line(&mut notification, &proxy_id) {
+                            let _ = send_line_locked(&mut state, session, line);
+                        } else {
+                            remove_session(&mut state, session);
+                        }
+                    }
+                    return;
+                }
+            }
+            let SessionQueues {
+                outbound, routes, ..
+            } = &mut *state;
+            outbound.retain(|session, sender| {
+                if sender.try_send(line.to_owned()).is_ok() {
+                    true
+                } else {
+                    routes.remove_session(*session);
+                    false
+                }
+            });
+        }
+        RpcMessageKind::Request => {
+            let upstream = message.raw_id().unwrap_or_default();
+            let SessionQueues {
+                outbound, routes, ..
+            } = &mut *state;
+            if routes.pending.contains_key(upstream) {
+                return;
+            }
+            routes.pending.insert(
+                upstream.to_owned(),
+                PendingRequest {
+                    response_claimed: false,
+                    line: line.to_owned(),
+                    proxies: HashMap::new(),
+                },
+            );
+            outbound.retain(|session, sender| {
+                if routes
+                    .alias_request(upstream, *session)
+                    .is_some_and(|line| sender.try_send(line).is_ok())
+                {
+                    true
+                } else {
+                    routes.remove_session(*session);
+                    false
+                }
+            });
+        }
+        RpcMessageKind::Response => {}
+    }
+}
+
+pub(crate) fn resolve_response(
+    queues: &Mutex<SessionQueues>,
+    session: SessionId,
+    id: &str,
+) -> ResponseRoute {
+    lock_queues(queues).routes.claim_response(session, id)
+}
+
+fn lock_queues(queues: &Mutex<SessionQueues>) -> std::sync::MutexGuard<'_, SessionQueues> {
+    queues
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn remove_session(state: &mut SessionQueues, session: SessionId) {
+    state.outbound.remove(&session);
+    state.routes.remove_session(session);
+}
+
+/// Functional routing state: no channels, locks, callbacks, clocks or shared ownership.
+struct RequestRoutes {
+    next_proxy_id: u64,
+    pending: HashMap<String, PendingRequest>,
+    // Proxy IDs are globally unique; the owner is checked before accepting a response.
+    proxies: HashMap<String, (SessionId, String)>,
+}
+
+struct PendingRequest {
     response_claimed: bool,
     line: String,
     proxies: HashMap<SessionId, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProxyKey {
-    session: SessionId,
-    id: String,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            next_session_id: 1,
-            next_proxy_id: 1,
-            sessions: HashMap::new(),
-            pending: HashMap::new(),
-            proxy_to_upstream: HashMap::new(),
-        }
-    }
-}
-
-impl SessionRouter {
-    pub(crate) fn new() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(State::default())),
-        }
-    }
-
-    pub(crate) fn open_session(&self, capacity: usize) -> CodexSession {
-        assert!(capacity > 0, "a Codex session queue must have capacity");
-        let (sender, receiver) = mpsc::channel(capacity);
-        let mut state = lock_state(&self.state);
-        let id = allocate_session_id(&mut state);
-        state.sessions.insert(id, sender.clone());
-
-        // A request that was sent while no phone was connected remains
-        // pending. Replay it to this new session with a fresh proxy id.
-        let pending = state
-            .pending
-            .iter()
-            .filter(|(_, request)| !request.response_claimed)
-            .map(|(upstream_id, request)| (upstream_id.clone(), request.line.clone()))
-            .collect::<Vec<_>>();
-        for (upstream_id, line) in pending {
-            let proxy_id = allocate_proxy_id(&mut state);
-            let Ok(proxy_line) = rewrite_top_level_id(&line, &proxy_id) else {
-                continue;
-            };
-            if sender.try_send(proxy_line).is_err() {
-                remove_session_locked(&mut state, id);
-                break;
-            }
-            if let Some(request) = state.pending.get_mut(&upstream_id) {
-                request.proxies.insert(id, proxy_id.clone());
-            }
-            state.proxy_to_upstream.insert(
-                ProxyKey {
-                    session: id,
-                    id: proxy_id,
-                },
-                upstream_id,
-            );
-        }
-
-        CodexSession {
-            id,
-            receiver,
-            state: Arc::downgrade(&self.state),
-        }
-    }
-
-    pub(crate) fn close_session(&self, session: SessionId) {
-        remove_session_locked(&mut lock_state(&self.state), session);
-    }
-
-    /// Close phones but retain unresolved Codex requests for later replay.
-    pub(crate) fn close_all(&self) {
-        let mut state = lock_state(&self.state);
-        state.sessions.clear();
-        state.proxy_to_upstream.clear();
-        for pending in state.pending.values_mut() {
-            pending.proxies.clear();
-        }
-    }
-
-    pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), RouteError> {
-        if lock_state(&self.state).sessions.contains_key(&session) {
-            Ok(())
-        } else {
-            Err(RouteError::UnknownSession(session))
-        }
-    }
-
-    pub(crate) fn send_line(&self, session: SessionId, line: String) -> Result<(), RouteError> {
-        let mut state = lock_state(&self.state);
-        let sender = state
-            .sessions
-            .get(&session)
-            .cloned()
-            .ok_or(RouteError::UnknownSession(session))?;
-        match sender.try_send(line) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                remove_session_locked(&mut state, session);
-                Err(RouteError::QueueFull { session })
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                remove_session_locked(&mut state, session);
-                Err(RouteError::UnknownSession(session))
-            }
-        }
-    }
-
-    /// Fan out a raw Codex notification or server request. Notifications are
-    /// sent unchanged; server requests get one unique id per phone.
-    pub(crate) fn handle_server_line(&self, line: &str) {
-        let Ok(message) = classify_message(line) else {
-            return;
-        };
-        let mut state = lock_state(&self.state);
-        match message.kind() {
-            RpcMessageKind::Notification => {
-                let resolved = resolved_server_request_id(line).is_some_and(|upstream_id| {
-                    fanout_resolved_request_locked(&mut state, &upstream_id, line)
-                });
-                if !resolved {
-                    broadcast_line_locked(&mut state, line);
-                }
-            }
-            RpcMessageKind::Request => {
-                fanout_request_locked(&mut state, message.raw_id().unwrap_or_default(), line)
-            }
-            RpcMessageKind::Response => {
-                // Responses are consumed by CodexAppServer's own peer and are
-                // not expected on its event broadcast.
-            }
-        }
-    }
-
-    /// First valid response wins. Retain aliases until Codex resolves the request
-    /// so every device receives its own proxy id, but stop accepting/replaying it.
-    pub(crate) fn resolve_response(&self, session: SessionId, id: &str) -> ResponseRoute {
-        let mut state = lock_state(&self.state);
-        let Some(upstream_id) = state.proxy_to_upstream.remove(&ProxyKey {
-            session,
-            id: id.to_owned(),
-        }) else {
+impl RequestRoutes {
+    fn claim_response(&mut self, session: SessionId, id: &str) -> ResponseRoute {
+        if !self
+            .proxies
+            .get(id)
+            .is_some_and(|(owner, _)| *owner == session)
+        {
             return ResponseRoute::Unknown;
-        };
-        let State {
-            pending,
-            proxy_to_upstream,
-            ..
-        } = &mut *state;
-        let Some(request) = pending.get_mut(&upstream_id) else {
+        }
+        let (_, upstream) = self.proxies.remove(id).unwrap();
+        let Some(request) = self.pending.get_mut(&upstream) else {
             return ResponseRoute::Unknown;
         };
         request.response_claimed = true;
-        for (alias_session, proxy_id) in &request.proxies {
-            proxy_to_upstream.remove(&ProxyKey {
-                session: *alias_session,
-                id: proxy_id.clone(),
-            });
+        for alias in request.proxies.values() {
+            self.proxies.remove(alias);
         }
-        ResponseRoute::Forward(upstream_id)
+        ResponseRoute::Forward(upstream)
     }
-}
 
-fn fanout_request_locked(state: &mut State, upstream_id: &str, line: &str) {
-    if state.pending.contains_key(upstream_id) {
-        return;
+    fn alias_request(&mut self, upstream: &str, session: SessionId) -> Option<String> {
+        let proxy = next_proxy_id(&mut self.next_proxy_id, &self.proxies);
+        let request = self.pending.get_mut(upstream)?;
+        let line = rewrite_top_level_id(&request.line, &proxy).ok()?;
+        request.proxies.insert(session, proxy.clone());
+        self.proxies.insert(proxy, (session, upstream.to_owned()));
+        Some(line)
     }
-    let mut pending = PendingServerRequest {
-        response_claimed: false,
-        line: line.to_owned(),
-        proxies: HashMap::new(),
-    };
-    let sessions = state.sessions.keys().copied().collect::<Vec<_>>();
-    let mut failed = Vec::new();
-    for session in sessions {
-        let proxy_id = allocate_proxy_id(state);
-        let Ok(proxy_line) = rewrite_top_level_id(line, &proxy_id) else {
-            failed.push(session);
-            continue;
-        };
-        let Some(sender) = state.sessions.get(&session).cloned() else {
-            failed.push(session);
-            continue;
-        };
-        if sender.try_send(proxy_line).is_err() {
-            failed.push(session);
-            continue;
+
+    fn replay(&mut self, session: SessionId) -> impl Iterator<Item = String> + '_ {
+        let Self {
+            pending,
+            next_proxy_id: next,
+            proxies,
+        } = self;
+        pending.iter_mut().filter_map(move |(upstream, request)| {
+            if request.response_claimed {
+                return None;
+            }
+            let proxy = next_proxy_id(next, proxies);
+            let line = rewrite_top_level_id(&request.line, &proxy).ok()?;
+            request.proxies.insert(session, proxy.clone());
+            proxies.insert(proxy, (session, upstream.clone()));
+            Some(line)
+        })
+    }
+
+    fn resolve_notification(&mut self, line: &str) -> Option<(Value, HashMap<SessionId, String>)> {
+        let notification: Value = serde_json::from_str(line).ok()?;
+        let upstream = serde_json::to_string(notification.get("params")?.get("requestId")?).ok()?;
+        let request = self.pending.remove(&upstream)?;
+        for proxy in request.proxies.values() {
+            self.proxies.remove(proxy);
         }
-        pending.proxies.insert(session, proxy_id.clone());
-        state.proxy_to_upstream.insert(
-            ProxyKey {
-                session,
-                id: proxy_id,
-            },
-            upstream_id.to_owned(),
-        );
+        Some((notification, request.proxies))
     }
-    for session in failed {
-        remove_session_locked(state, session);
-    }
-    state.pending.insert(upstream_id.to_owned(), pending);
-}
 
-fn broadcast_line_locked(state: &mut State, line: &str) {
-    let mut failed = Vec::new();
-    for (&session, sender) in &state.sessions {
-        if sender.try_send(line.to_owned()).is_err() {
-            failed.push(session);
+    fn remove_session(&mut self, session: SessionId) {
+        for request in self.pending.values_mut() {
+            request.proxies.remove(&session);
         }
-    }
-    for session in failed {
-        remove_session_locked(state, session);
+        self.proxies.retain(|_, (owner, _)| *owner != session);
     }
 }
 
-fn resolved_server_request_id(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(line).ok()?;
-    if value.get("method")?.as_str()? != "serverRequest/resolved" {
-        return None;
-    }
-    serde_json::to_string(value.get("params")?.get("requestId")?).ok()
+fn resolved_line(notification: &mut Value, proxy: &str) -> Option<String> {
+    *notification.get_mut("params")?.get_mut("requestId")? = serde_json::from_str(proxy).ok()?;
+    serde_json::to_string(notification).ok()
 }
 
-/// Codex identifies a resolved request with its upstream id. Each phone only
-/// knows its session-local proxy id, so fan out one correlated notification
-/// per session and retire the replayable pending request atomically.
-fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &str) -> bool {
-    let Some(pending) = state.pending.remove(upstream_id) else {
-        return false;
-    };
-    let Ok(mut notification) = serde_json::from_str::<Value>(line) else {
-        state.pending.insert(upstream_id.to_owned(), pending);
-        return false;
-    };
-    let mut failed = Vec::new();
-    for (session, proxy_id) in pending.proxies {
-        state.proxy_to_upstream.remove(&ProxyKey {
-            session,
-            id: proxy_id.clone(),
-        });
-        let Some(sender) = state.sessions.get(&session) else {
-            continue;
-        };
-        let Ok(proxy_value) = serde_json::from_str::<Value>(&proxy_id) else {
-            failed.push(session);
-            continue;
-        };
-        let Some(request_id) = notification
-            .get_mut("params")
-            .and_then(Value::as_object_mut)
-            .and_then(|params| params.get_mut("requestId"))
-        else {
-            failed.push(session);
-            continue;
-        };
-        *request_id = proxy_value;
-        let Ok(proxy_line) = serde_json::to_string(&notification) else {
-            failed.push(session);
-            continue;
-        };
-        if sender.try_send(proxy_line).is_err() {
-            failed.push(session);
-        }
-    }
-    for session in failed {
-        remove_session_locked(state, session);
-    }
-    true
-}
-
-fn allocate_session_id(state: &mut State) -> SessionId {
+fn next_proxy_id(next: &mut u64, proxies: &HashMap<String, (SessionId, String)>) -> String {
     loop {
-        let id = state.next_session_id;
-        state.next_session_id = state.next_session_id.checked_add(1).unwrap_or(1);
-        if !state.sessions.contains_key(&id) {
-            return id;
-        }
-    }
-}
-
-/// Return a JSON value, not a bare string, because it is inserted into the
-/// top-level JSON-RPC id field.
-fn allocate_proxy_id(state: &mut State) -> String {
-    loop {
-        let id = state.next_proxy_id;
-        state.next_proxy_id = state.next_proxy_id.checked_add(1).unwrap_or(1);
+        let id = *next;
+        *next = id.checked_add(1).unwrap_or(1);
         let candidate = format!(r#""host-proxy-{id}""#);
-        if !state
-            .proxy_to_upstream
-            .keys()
-            .any(|key| key.id == candidate)
-        {
+        if !proxies.contains_key(&candidate) {
             return candidate;
         }
     }
-}
-
-fn lock_state(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
-    state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn close_session_state(state: &Weak<Mutex<State>>, session: SessionId) {
-    if let Some(state) = state.upgrade() {
-        remove_session_locked(&mut lock_state(&state), session);
-    }
-}
-
-fn remove_session_locked(state: &mut State, session: SessionId) {
-    state.sessions.remove(&session);
-    for pending in state.pending.values_mut() {
-        pending.proxies.remove(&session);
-    }
-    state
-        .proxy_to_upstream
-        .retain(|key, _| key.session != session);
 }
 
 #[cfg(test)]
@@ -413,11 +357,11 @@ mod tests {
 
     #[tokio::test]
     async fn server_requests_get_unique_ids_and_first_response_wins() {
-        let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        let mut second = router.open_session(4);
+        let router = session_queues();
+        let mut first = open_session(&router, 4);
+        let mut second = open_session(&router, 4);
         let line = r#"{"id":"codex-1","method":"item/request","params":{"future":{"id":7}},"unknown":{"keep":true}}"#;
-        router.handle_server_line(line);
+        handle_server_line(&router, line);
 
         let first_line = first.recv().await.unwrap();
         let second_line = second.recv().await.unwrap();
@@ -432,32 +376,37 @@ mod tests {
         let first_id = first_message.raw_id().unwrap().to_owned();
         let second_id = second_message.raw_id().unwrap().to_owned();
         assert_eq!(
-            router.resolve_response(1, &first_id),
+            resolve_response(&router, second.id(), &first_id),
+            ResponseRoute::Unknown
+        );
+        assert_eq!(
+            resolve_response(&router, 1, &first_id),
             ResponseRoute::Forward(r#""codex-1""#.to_owned())
         );
         assert_eq!(
-            router.resolve_response(2, &second_id),
+            resolve_response(&router, 2, &second_id),
             ResponseRoute::Unknown
         );
     }
 
     #[tokio::test]
     async fn notifications_are_forwarded_byte_for_byte() {
-        let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        let mut second = router.open_session(4);
+        let router = session_queues();
+        let mut first = open_session(&router, 4);
+        let mut second = open_session(&router, 4);
         let line = r#" {"method":"future/event","params":{"unknown":[1,{"id":2}]} } "#;
-        router.handle_server_line(line);
+        handle_server_line(&router, line);
         assert_eq!(first.recv().await.unwrap(), line);
         assert_eq!(second.recv().await.unwrap(), line);
     }
 
     #[tokio::test]
     async fn resolved_requests_use_each_phone_proxy_id_and_are_not_replayed() {
-        let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        let mut second = router.open_session(4);
-        router.handle_server_line(
+        let router = session_queues();
+        let mut first = open_session(&router, 4);
+        let mut second = open_session(&router, 4);
+        handle_server_line(
+            &router,
             r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}"#,
         );
         let first_request = first.recv().await.unwrap();
@@ -474,20 +423,21 @@ mod tests {
             .to_owned();
 
         assert_eq!(
-            router.resolve_response(first.id(), &first_id),
+            resolve_response(&router, first.id(), &first_id),
             ResponseRoute::Forward(r#""codex-1""#.to_owned())
         );
         assert_eq!(
-            router.resolve_response(second.id(), &second_id),
+            resolve_response(&router, second.id(), &second_id),
             ResponseRoute::Unknown
         );
-        let mut after_answer = router.open_session(4);
+        let mut after_answer = open_session(&router, 4);
         assert!(
             after_answer.receiver.try_recv().is_err(),
             "an answered request must not be replayed while Codex resolves it"
         );
 
-        router.handle_server_line(
+        handle_server_line(
+            &router,
             r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#,
         );
 
@@ -502,11 +452,11 @@ mod tests {
             serde_json::from_str::<Value>(&second_id).unwrap(),
         );
         assert_eq!(
-            router.resolve_response(1, &first_id),
+            resolve_response(&router, 1, &first_id),
             ResponseRoute::Unknown
         );
 
-        let mut later = router.open_session(4);
+        let mut later = open_session(&router, 4);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), later.recv())
                 .await
@@ -516,13 +466,13 @@ mod tests {
 
     #[tokio::test]
     async fn unresolved_requests_are_replayed_to_later_sessions() {
-        let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        router.handle_server_line(r#"{"id":1,"method":"request","params":{}}"#);
+        let router = session_queues();
+        let mut first = open_session(&router, 4);
+        handle_server_line(&router, r#"{"id":1,"method":"request","params":{}}"#);
         let _ = first.recv().await.unwrap();
         drop(first);
 
-        let mut later = router.open_session(4);
+        let mut later = open_session(&router, 4);
         let replay = later.recv().await.unwrap();
         let replay_message = classify_message(&replay).unwrap();
         assert_eq!(replay_message.method(), Some("request"));

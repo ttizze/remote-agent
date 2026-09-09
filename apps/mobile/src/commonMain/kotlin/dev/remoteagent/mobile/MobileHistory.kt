@@ -22,11 +22,13 @@ internal val CodexTurn.hasOlderItems: Boolean
 private val historyFields =
     setOf("historyCursor", "itemsNextCursor", "itemsHasMore", "deferredItemIds", "openingUserMessage")
 
-private fun reference(source: String, turn: Int, item: Int? = null): JsonObject = buildJsonObject {
-    put("source", source)
-    put("turn", turn)
-    item?.let { put("item", it) }
-}
+private fun reference(source: String, turn: Int, item: Int? = null, request: Int? = null): JsonObject =
+    buildJsonObject {
+        put("source", source)
+        put("turn", turn)
+        item?.let { put("item", it) }
+        request?.let { put("request", it) }
+    }
 
 private fun ThreadSnapshot.historyMetadata(source: String): JsonObject = buildJsonObject {
     put("id", summary.id)
@@ -38,6 +40,19 @@ private fun ThreadSnapshot.historyMetadata(source: String): JsonObject = buildJs
                 buildJsonObject {
                     put("id", turn.id)
                     put("reference", reference(source, turnIndex))
+                    if (turn.pendingRequests.isNotEmpty()) {
+                        put(
+                            "pendingRequests",
+                            JsonArray(
+                                turn.pendingRequests.mapIndexed { index, request ->
+                                    buildJsonObject {
+                                        put("id", request.id)
+                                        put("reference", reference(source, turnIndex, request = index))
+                                    }
+                                }
+                            ),
+                        )
+                    }
                     turn.raw?.forEach { (key, value) ->
                         if (key in historyFields)
                             put(
@@ -85,12 +100,12 @@ private fun reconcileHistory(
         Json.parseToJsonElement(
                 nativeConversationPresentation(
                     buildJsonObject {
-                            put("operation", operation)
-                            put("previous", previous.historyMetadata("previous"))
-                            put("incoming", incoming.historyMetadata("incoming"))
-                            put("turnId", turnId)
-                            put("cursor", cursor)
-                        }
+                        put("operation", operation)
+                        put("previous", previous.historyMetadata("previous"))
+                        put("incoming", incoming.historyMetadata("incoming"))
+                        put("turnId", turnId)
+                        put("cursor", cursor)
+                    }
                         .toString()
                 )
             )
@@ -116,6 +131,11 @@ private fun reconcileHistory(
                 val original = turn(projected.getValue("reference").jsonObject)
                 original.copy(
                     raw = metadata(original.raw, projected),
+                    pendingRequests =
+                        projected["pendingRequests"]?.jsonArray.orEmpty().map { request ->
+                            val token = request.jsonObject.getValue("reference").jsonObject
+                            turn(token).pendingRequests[token.getValue("request").jsonPrimitive.int]
+                        },
                     items =
                         projected.getValue("items").jsonArray.map { item ->
                             val token = item.jsonObject.getValue("reference").jsonObject

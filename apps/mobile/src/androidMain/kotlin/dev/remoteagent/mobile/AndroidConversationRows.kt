@@ -6,12 +6,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.MutableState
@@ -19,12 +16,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.atomicfu.AtomicRef
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 internal fun LazyListScope.threadHeader(
     state: AppState,
-    controller: MobileController,
+    controller: AtomicRef<MobileApp>,
     scope: CoroutineScope,
     onOlderHistory: (String?) -> Unit,
 ) {
@@ -125,51 +125,40 @@ internal fun LazyListScope.turnActivity(
 
 internal fun LazyListScope.turnConclusion(
     turn: ThreadTurnPresentation,
-    view: ProfileViewState,
-    onStop: (String) -> Unit,
+    state: AppState,
+    controller: AtomicRef<MobileApp>,
+    scope: CoroutineScope,
 ) {
+    val profile = requireNotNull(state.selectedProfile)
+    val view = state.selectedView
+    val threadId = requireNotNull(view.selectedThreadId)
     if (turn.isLastSegment && turn.status == TurnStatus.InProgress) {
         item(key = "${turn.id}:stop") {
-            Button(onClick = { onStop(turn.turnId) }, enabled = view.interruptingTurnId != turn.turnId) {
+            Button(
+                onClick = { scope.launch { controller.interrupt(profile, threadId, turn.turnId) } },
+                enabled = view.interruptingTurnId != turn.turnId,
+            ) {
                 Text(if (view.interruptingTurnId == turn.turnId) "停止中…" else "停止")
             }
         }
     }
     items(turn.pendingRequests, key = { request -> "${turn.id}:request:${request.id}" }) { request ->
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(request.title, style = MaterialTheme.typography.labelLarge)
-                Text(request.body)
+        val raw =
+            requireNotNull(state.cache.snapshot(profile.id, threadId))
+                .turns
+                .first { it.id == turn.turnId }
+                .pendingRequests
+                .first { it.id == request.id }
+        ThreadRequestCard(request, raw.params) { answer ->
+            val message = buildJsonObject {
+                put("id", raw.wireId)
+                put("method", raw.method)
+                put("params", raw.params)
             }
+            controller.respond(profile, message, answer)
         }
     }
-    turn.error?.let { error ->
-        item(key = "${turn.id}:error") {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (error.isReconnecting) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        }
-                        Text(
-                            error.title,
-                            style = MaterialTheme.typography.labelLarge,
-                            color =
-                                if (error.isReconnecting) {
-                                    MaterialTheme.colorScheme.onSurface
-                                } else {
-                                    MaterialTheme.colorScheme.error
-                                },
-                        )
-                    }
-                    Text(error.message)
-                    error.details?.takeIf(String::isNotBlank)?.let { details ->
-                        Text(details, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-        }
-    }
+    turn.error?.let { error -> item(key = "${turn.id}:error") { ThreadErrorCard(error) } }
     items(turn.responses, key = { item -> "${turn.id}:response:${item.id}" }) { item ->
         ThreadMessageCard(item = item, isUser = false)
     }

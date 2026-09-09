@@ -3,7 +3,7 @@
 /.gradle/
 /.idea/
 **/build/
-apps/mobile/src/androidMain/jniLibs/
+apps/android/src/main/jniLibs/
 *.xcuserstate
 xcuserdata/
 .DS_Store

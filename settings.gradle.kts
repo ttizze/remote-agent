@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "remote-agent"
 include(":apps:mobile")
+include(":apps:android")

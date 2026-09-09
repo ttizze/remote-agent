@@ -14,13 +14,7 @@ object NativeHostTransport {
 
     external fun agentCommand(handle: Long, commandJson: String): String
 
-    external fun request(handle: Long, method: String, paramsJson: String): String
-
     external fun nextEvent(handle: Long): String?
-
-    external fun respondResult(handle: Long, requestIdJson: String, resultJson: String): Boolean
-
-    external fun respondError(handle: Long, requestIdJson: String, errorJson: String): Boolean
 
     external fun close(handle: Long)
 }
