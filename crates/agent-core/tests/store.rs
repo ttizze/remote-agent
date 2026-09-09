@@ -1241,3 +1241,144 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
     let _writer = server.await.unwrap();
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn close_ends_subscriptions_while_store_is_retained() {
+    let (store, _reader, _writer) = setup(Snapshot::default());
+    wait_for(&store, |snapshot| snapshot.connected).await;
+    let mut updates = store.subscribe();
+    store.close().await.unwrap();
+    assert!(!store.snapshot().connected);
+    updates.borrow_and_update();
+    let result = tokio::time::timeout(Duration::from_millis(100), updates.changed()).await;
+    assert!(
+        matches!(result, Ok(Err(_))),
+        "closed Store must end subscriptions"
+    );
+}
+
+#[tokio::test]
+async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation() {
+    use agent_core::client::{SubmissionTarget, submission_target};
+    use agent_core::state::{Activity, Navigation, PendingSubmission};
+    let draft = Arc::new(Draft {
+        text: "typed".into(),
+        ..Default::default()
+    });
+    let mut saved = snapshot();
+    saved.connected = true;
+    saved.navigation = Arc::new(Navigation {
+        thread_id: Some("thread".into()),
+        draft_key: "thread".into(),
+        watch_id: Some(1),
+        watch_thread_id: Some("thread".into()),
+        ..Default::default()
+    });
+    saved.activity = Arc::new(Activity {
+        active: BTreeMap::from([("thread".into(), true)]),
+        ..Default::default()
+    });
+    saved.drafts = Arc::new(BTreeMap::from([("thread".into(), draft.clone())]));
+    saved.pending_submissions = Arc::new(BTreeMap::from([(
+        "unsent".into(),
+        Arc::new(PendingSubmission {
+            draft_key: "thread".into(),
+            draft,
+            turn_id: None,
+            after_item_id: None,
+            accepted: false,
+            recovery_text: Some("spoken".into()),
+            clear_draft: None,
+        }),
+    )]));
+    saved.requests = Arc::new(BTreeMap::from([("1".into(), Arc::new(serde_json::from_value(json!({
+        "id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread"}
+    })).unwrap()))]));
+    let bytes = serde_json::to_vec(&saved).unwrap();
+    let (store, _reader, _writer) = setup(serde_json::from_slice(&bytes).unwrap());
+    wait_for(&store, |snapshot| snapshot.connected).await;
+    let current = store.snapshot();
+    assert!(current.requests.is_empty());
+    assert!(current.activity.active.is_empty());
+    assert!(current.navigation.watch_id.is_none());
+    assert!(current.pending_submissions.is_empty());
+    assert_eq!(current.drafts["thread"].text, "typed\nspoken");
+    assert!(matches!(
+        submission_target(Some(&current.conversations["thread"]), None, None).unwrap(),
+        SubmissionTarget::Start { .. }
+    ));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn close_keeps_the_last_enqueued_draft_and_removes_unaccepted_send() {
+    let (store, mut reader, _writer) = setup(snapshot());
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: "thread".into(),
+            text: "unsent".into(),
+        })
+        .await
+        .unwrap();
+    drop(store.dispatch(Intent::Submit {
+        thread_id: Some("thread".into()),
+        client_user_message_id: "unsent".into(),
+    }));
+    read(&mut reader).await;
+    assert!(!store.snapshot().pending_submissions.is_empty());
+    drop(store.dispatch(Intent::SetDraftText {
+        thread_id: "thread".into(),
+        text: "newest edit".into(),
+    }));
+    store.close().await.unwrap();
+    let current = store.snapshot();
+    assert!(current.pending_submissions.is_empty());
+    assert_eq!(current.drafts["thread"].text, "newest edit");
+}
+
+#[tokio::test]
+async fn stores_share_an_endpoint_without_closing_each_others_transport() {
+    use agent_core::transport::{Endpoint, Identity, Relays, Trust};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let trust = Trust {
+            allowed: [client.node_id()].into(),
+            ..Default::default()
+        };
+        let ticket = host.ticket();
+        let mut stores = Vec::new();
+        let mut sessions = Vec::new();
+        for _ in 0..2 {
+            let (store, incoming) = tokio::join!(
+                Store::connect(&client, &ticket, Snapshot::default(), None),
+                host.accept()
+            );
+            stores.push(store.unwrap());
+            sessions.push(incoming.unwrap().unwrap().authorize(&trust).unwrap());
+        }
+        stores[0].close().await.unwrap();
+        // A new session proves the shared endpoint survived closing the first view.
+        let (third, incoming) = tokio::join!(
+            Store::connect(&client, &ticket, Snapshot::default(), None),
+            host.accept()
+        );
+        let third = third.unwrap();
+        let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+        assert!(stores[1].snapshot().connected);
+        stores[1].close().await.unwrap();
+        third.close().await.unwrap();
+        for session in sessions {
+            session.close();
+        }
+        incoming.close();
+        client.close().await;
+        host.close().await;
+    })
+    .await
+    .unwrap();
+}

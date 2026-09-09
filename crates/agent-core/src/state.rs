@@ -52,11 +52,14 @@ pub struct Navigation {
     pub cwd: String,
     pub draft_key: String,
     pub generation: u64,
+    #[serde(skip)]
     pub watch_id: Option<u64>,
+    #[serde(skip)]
     pub watch_thread_id: Option<String>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Activity {
+    #[serde(skip)]
     pub active: BTreeMap<String, bool>,
     pub unread: BTreeSet<String>,
 }
@@ -108,6 +111,7 @@ pub struct Snapshot {
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
     pub threads: Option<Arc<ThreadList>>,
     pub models: Arc<Vec<Model>>,
+    #[serde(skip)]
     pub requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
     #[serde(default)]
@@ -126,7 +130,9 @@ pub struct Snapshot {
     pub list_query: Arc<ListQuery>,
     #[serde(default)]
     pub list_request: u64,
+    #[serde(skip)]
     pub connected: bool,
+    #[serde(skip)]
     pub error: Option<String>,
 }
 #[derive(Debug)]
@@ -1049,10 +1055,12 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         }
         Event::Notification { method, params } => return notification(previous, &method, params),
         Event::Connected => {
+            reset_session(&mut next);
             next.connected = true;
             next.error = None;
         }
         Event::Disconnected(reason) => {
+            reset_session(&mut next);
             next.connected = false;
             for terminal in Arc::make_mut(&mut next.terminals).values_mut() {
                 if matches!(
@@ -1067,6 +1075,79 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Event::Failed(error) => next.error = Some(error),
     }
     (next, Vec::new())
+}
+
+/// Cached history and drafts survive; IDs and activity belong to one connection.
+/// Pending submissions are persisted only to recover dictation after a crash.
+fn reset_session(snapshot: &mut Snapshot) {
+    if !snapshot.requests.is_empty() {
+        snapshot.requests = Arc::default();
+    }
+    if !snapshot.activity.active.is_empty() {
+        Arc::make_mut(&mut snapshot.activity).active.clear();
+    }
+    let navigation = Arc::make_mut(&mut snapshot.navigation);
+    navigation.watch_id = None;
+    navigation.watch_thread_id = None;
+    navigation.generation += 1;
+    if !snapshot.pending_submissions.is_empty() {
+        for pending in snapshot.pending_submissions.values() {
+            if !pending.accepted
+                && let Some(text) = &pending.recovery_text
+            {
+                let draft = Arc::make_mut(
+                    Arc::make_mut(&mut snapshot.drafts)
+                        .entry(pending.draft_key.clone())
+                        .or_default(),
+                );
+                append_transcript(&mut draft.text, text);
+            }
+        }
+        snapshot.pending_submissions = Arc::default();
+    }
+    if snapshot
+        .conversations
+        .values()
+        .any(|thread| has_session_status(thread))
+    {
+        for thread in Arc::make_mut(&mut snapshot.conversations).values_mut() {
+            if has_session_status(thread) {
+                clear_session_status(Arc::make_mut(thread));
+            }
+        }
+    }
+    if let Some(list) = &mut snapshot.threads
+        && list.data.iter().any(has_session_status)
+    {
+        for thread in &mut Arc::make_mut(list).data {
+            clear_session_status(thread);
+        }
+    }
+}
+fn has_session_status(thread: &Thread) -> bool {
+    thread
+        .status
+        .as_ref()
+        .is_some_and(|status| status.kind == "active")
+        || thread
+            .turns
+            .iter()
+            .flatten()
+            .any(|turn| turn.status.as_deref() == Some("inProgress"))
+}
+fn clear_session_status(thread: &mut Thread) {
+    if thread
+        .status
+        .as_ref()
+        .is_some_and(|status| status.kind == "active")
+    {
+        thread.status = None;
+    }
+    for turn in thread.turns.iter_mut().flatten() {
+        if turn.status.as_deref() == Some("inProgress") {
+            Arc::make_mut(turn).status = None;
+        }
+    }
 }
 
 fn supported_settings<'a>(

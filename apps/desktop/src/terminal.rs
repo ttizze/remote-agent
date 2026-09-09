@@ -1,4 +1,4 @@
-use crate::{Runtime, platform};
+use crate::Runtime;
 use agent_core::{
     client::TerminalSize,
     state::{Intent, Snapshot, TerminalPhase},
@@ -53,17 +53,19 @@ pub(crate) struct Terminal {
 }
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if let Some(store) = self.store.take() {
-            self.runtime.closing.spawn_on(
-                async move {
-                    let _ = store.close().await;
-                },
-                &self.runtime.handle,
-            );
-        }
+        self.close();
     }
 }
 impl Terminal {
+    fn close(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let store = self.store.take()?;
+        Some(self.runtime.closing.spawn_on(
+            async move {
+                let _ = store.close().await;
+            },
+            &self.runtime.handle,
+        ))
+    }
     pub(crate) fn new(
         remote: &str,
         cwd: String,
@@ -91,8 +93,12 @@ impl Terminal {
         let runtime = cx.global::<Runtime>().clone();
         let remote = (!remote.is_empty()).then(|| remote.to_owned());
         let updates = events.clone();
+        let connections = runtime.connections.clone();
         runtime.handle.spawn(async move {
-            match platform::connect(remote.as_deref(), Snapshot::default()).await {
+            match connections
+                .connect(remote.as_deref(), Snapshot::default())
+                .await
+            {
                 Ok(store) => {
                     let mut snapshots = store.subscribe();
                     if updates
@@ -118,6 +124,13 @@ impl Terminal {
             }
         });
         Ok(cx.new(|cx: &mut Context<Self>| {
+            cx.on_app_quit(|view, _| {
+                if let Some(close) = view.close() {
+                    let _ = view.runtime.handle.block_on(close);
+                }
+                async {}
+            })
+            .detach();
             cx.spawn_in(window, async move |view, cx| {
                 while let Ok(event) = incoming.recv().await {
                     if view
