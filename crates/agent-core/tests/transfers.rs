@@ -1,6 +1,6 @@
 use agent_core::{
     transfers::{download_file, upload_file},
-    transport::{Endpoint, Identity, Relays, Trust, authorize},
+    transport::{Endpoint, Identity, Relays, Trust},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use host_protocol::{JsonlReader, JsonlWriter};
@@ -30,12 +30,13 @@ async fn upload_and_download_use_distinct_iroh_streams_and_preserve_content() {
     let digest = URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &content));
     let token = URL_SAFE_NO_PAD.encode([42u8; 32]);
     let server = async {
-        let session = host.accept().await.unwrap();
-        assert!(
-            authorize(&trust, session.node_id(), None, 0)
-                .unwrap()
-                .is_none()
-        );
+        let session = host
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .authorize(&trust)
+            .unwrap();
         let control = session.accept_stream().await.unwrap();
         let (read, write) = tokio::io::split(control);
         let mut reader = JsonlReader::new(read);

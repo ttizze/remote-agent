@@ -146,3 +146,69 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     let restored: Snapshot = serde_json::from_slice(&serde_json::to_vec(&next).unwrap()).unwrap();
     assert_eq!(restored, next);
 }
+
+#[test]
+fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
+    for changes in [
+        json!([false]),
+        json!([7]),
+        json!(["text"]),
+        json!([[]]),
+        json!([null]),
+        json!({}),
+        json!(null),
+    ] {
+        let previous = initial(
+            serde_json::from_value(json!({
+                "id":"thread", "turns":[{"id":"turn", "items":[{
+                    "id":"file", "type":"fileChange", "changes":changes
+                }]}]
+            }))
+            .unwrap(),
+        );
+        let (next, effects) = reduce(
+            &previous,
+            Event::Notification {
+                method: "item/fileChange/outputDelta".into(),
+                params: json!({"threadId":"thread","turnId":"turn","itemId":"file","delta":"tail"}),
+            },
+        );
+        assert_eq!(
+            next.error.as_deref(),
+            Some("invalid file change delta target")
+        );
+        assert!(effects.is_empty());
+        assert!(Arc::ptr_eq(&previous.conversations, &next.conversations));
+    }
+    for changes in [json!([]), json!([{}]), json!([{"diff":"prefix"}])] {
+        let expected = if changes[0]["diff"].is_string() {
+            "prefixtail"
+        } else {
+            "tail"
+        };
+        let previous = initial(
+            serde_json::from_value(json!({
+                "id":"thread", "turns":[{"id":"turn", "items":[{
+                    "id":"file", "type":"fileChange", "changes":changes
+                }]}]
+            }))
+            .unwrap(),
+        );
+        let (next, _) = reduce(
+            &previous,
+            Event::Notification {
+                method: "item/fileChange/outputDelta".into(),
+                params: json!({"threadId":"thread","turnId":"turn","itemId":"file","delta":"tail"}),
+            },
+        );
+        assert_eq!(next.error, None);
+        assert_eq!(
+            next.conversations["thread"].turns.as_ref().unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap()[0]
+                .extra["changes"][0]["diff"],
+            expected
+        );
+    }
+}

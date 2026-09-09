@@ -1,4 +1,4 @@
-use agent_core::transport::{Endpoint, Identity, Relays, Trust, authorize};
+use agent_core::transport::{Endpoint, Identity, Relays, Trust};
 use host_protocol::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, time::Duration};
@@ -18,12 +18,13 @@ async fn exercise(command: &[&str], expected: Value) {
     let ticket = endpoint.ticket().to_string();
     let mode = command[0];
     let server = async {
-        let session = endpoint.accept().await.unwrap();
-        assert!(
-            authorize(&trust, session.node_id(), None, 0)
-                .unwrap()
-                .is_none()
-        );
+        let session = endpoint
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .authorize(&trust)
+            .unwrap();
         let stream = session.accept_stream().await.unwrap();
         let (read, write) = tokio::io::split(stream);
         let mut reader = JsonlReader::new(read);

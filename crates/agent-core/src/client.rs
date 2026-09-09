@@ -793,7 +793,8 @@ impl Client {
                 .map(|path| (path, false))
                 .or_else(|| {
                     item.result
-                        .as_deref()
+                        .as_ref()
+                        .and_then(Value::as_str)
                         .filter(|data| !data.trim().is_empty())
                         .map(|data| (data, true))
                 });

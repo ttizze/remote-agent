@@ -1,0 +1,163 @@
+{
+  "history": {
+    "thread": {
+      "createdAt": 1,
+      "cwd": "/fixture/workspace",
+      "id": "fixture-thread-1",
+      "model": null,
+      "name": "Simulator conversation",
+      "preview": "",
+      "projectId": "workspace",
+      "status": {
+        "type": "idle"
+      },
+      "turns": [
+        {
+          "completedAt": 4,
+          "durationMs": 3000,
+          "id": "fixture-turn-1-1",
+          "items": [
+            {
+              "content": [
+                {
+                  "text": "[items]",
+                  "type": "text"
+                }
+              ],
+              "id": "fixture-user-1-1",
+              "text": "[items]",
+              "type": "userMessage"
+            },
+            {
+              "id": "fixture-commentary-1-1",
+              "phase": "commentary",
+              "text": "シミュレータで確認しています…",
+              "type": "agentMessage"
+            },
+            {
+              "id": "fixture-reasoning-1-1",
+              "summary": [
+                "確認中"
+              ],
+              "type": "reasoning"
+            },
+            {
+              "aggregatedOutput": "passed",
+              "command": "./gradlew test",
+              "cwd": "/fixture/workspace",
+              "exitCode": 0,
+              "id": "fixture-command-1-1",
+              "status": "completed",
+              "type": "commandExecution"
+            },
+            {
+              "id": "fixture-plan-1-1",
+              "text": "確認計画",
+              "type": "plan"
+            },
+            {
+              "id": "fixture-mcp-1-1",
+              "result": {
+                "content": [
+                  {
+                    "text": "Fixture lookup result",
+                    "type": "text"
+                  }
+                ]
+              },
+              "server": "fixture",
+              "status": "completed",
+              "tool": "lookup",
+              "type": "mcpToolCall"
+            },
+            {
+              "id": "fixture-dynamic-1-1",
+              "status": "inProgress",
+              "tool": "fixture",
+              "type": "dynamicToolCall"
+            },
+            {
+              "id": "fixture-collab-1-1",
+              "status": "inProgress",
+              "tool": "spawn_agent",
+              "type": "collabAgentToolCall"
+            },
+            {
+              "id": "fixture-subagent-1-1",
+              "status": "running",
+              "type": "subAgentActivity"
+            },
+            {
+              "id": "fixture-web-1-1",
+              "query": "Codex",
+              "type": "webSearch"
+            },
+            {
+              "id": "fixture-image-1-1",
+              "path": "/tmp/fixture.png",
+              "type": "imageView"
+            },
+            {
+              "id": "fixture-sleep-1-1",
+              "type": "sleep"
+            },
+            {
+              "id": "fixture-review-in-1-1",
+              "type": "enteredReviewMode"
+            },
+            {
+              "id": "fixture-review-out-1-1",
+              "type": "exitedReviewMode"
+            },
+            {
+              "id": "fixture-compaction-1-1",
+              "type": "contextCompaction"
+            },
+            {
+              "id": "fixture-final-1-1",
+              "phase": "final_answer",
+              "text": "シミュレータで完了しました。",
+              "type": "agentMessage"
+            }
+          ],
+          "startedAt": 1,
+          "status": "completed"
+        }
+      ],
+      "updatedAt": 1
+    }
+  },
+  "list": {
+    "data": [
+      {
+        "createdAt": 1,
+        "cwd": "/fixture/workspace",
+        "id": "fixture-thread-1",
+        "name": "Simulator conversation",
+        "projectId": "workspace",
+        "status": {
+          "type": "idle"
+        },
+        "updatedAt": 1
+      }
+    ],
+    "hasMoreChats": false,
+    "hasMoreProjects": false,
+    "moreProjectIds": [],
+    "projects": [
+      {
+        "createdAt": 0,
+        "id": "workspace",
+        "name": "Workspace",
+        "position": 0,
+        "roots": [
+          {
+            "path": "/fixture/workspace"
+          }
+        ],
+        "source": "codexDesktop",
+        "updatedAt": 0
+      }
+    ]
+  }
+}
