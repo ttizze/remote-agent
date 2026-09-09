@@ -52,22 +52,23 @@ struct ThreadScreen: View {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
+                let rows = conversationRows(thread)
+                let latestRowId = rows.last?.id
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(conversationRows(thread)) { row in
+                            ForEach(rows) { row in
                                 conversationRow(row)
                                     .frame(maxWidth: .infinity, alignment: .leading)
+                                    .id(row.id)
                             }
-                            Color.clear.frame(height: 1)
-                                .id("conversation-latest")
-                                .background(GeometryReader { geometry in
-                                    Color.clear.preference(key: LatestMessageBottomPreferenceKey.self,
-                                                           value: geometry.frame(in: .named("thread-scroll")).maxY)
-                                })
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: LatestMessageBottomPreferenceKey.self,
+                                                   value: geometry.frame(in: .named("thread-scroll")).maxY)
+                        })
                     }
                     .accessibilityIdentifier("task.detail")
                     .accessibilityValue(threadAccessibilityValue(thread))
@@ -84,8 +85,8 @@ struct ThreadScreen: View {
                     })
                     .onPreferenceChange(LatestMessageBottomPreferenceKey.self) { bottom in
                         isNearLatest = bottom > 0 && bottom <= scrollViewportHeight + 80
-                        if isFollowingLatest, bottom > scrollViewportHeight + 1 {
-                            proxy.scrollTo("conversation-latest", anchor: .bottom)
+                        if isFollowingLatest, bottom > scrollViewportHeight + 1, let latestRowId {
+                            proxy.scrollTo(latestRowId, anchor: .bottom)
                         }
                     }
                     .overlay(alignment: .bottom) {
@@ -93,7 +94,9 @@ struct ThreadScreen: View {
                             Button {
                                 isFollowingLatest = true
                                 scrollingToOlder = false
-                                withAnimation { proxy.scrollTo("conversation-latest", anchor: .bottom) }
+                                if let latestRowId {
+                                    withAnimation { proxy.scrollTo(latestRowId, anchor: .bottom) }
+                                }
                             } label: {
                                 Image(systemName: "arrow.down").font(.title3.weight(.medium))
                             }
@@ -120,8 +123,13 @@ struct ThreadScreen: View {
                     }
                     .onPreferenceChange(ScrollViewportPreferenceKey.self) { height in
                         scrollViewportHeight = height
-                        if isFollowingLatest {
-                            proxy.scrollTo("conversation-latest", anchor: .bottom)
+                        if isFollowingLatest, let latestRowId {
+                            proxy.scrollTo(latestRowId, anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: latestRowId) { id in
+                        if isFollowingLatest, let id {
+                            proxy.scrollTo(id, anchor: .bottom)
                         }
                     }
                     .onChange(of: thread.id) { _ in
@@ -131,7 +139,9 @@ struct ThreadScreen: View {
                         expandedItemIds.removeAll()
                         activityExpansionOverrides.removeAll()
                         isFollowingLatest = true
-                        proxy.scrollTo("conversation-latest", anchor: .bottom)
+                        if let latestRowId {
+                            proxy.scrollTo(latestRowId, anchor: .bottom)
+                        }
                     }
                 }
             } else if state.isNewThread {
