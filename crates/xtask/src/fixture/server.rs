@@ -1,5 +1,6 @@
 use super::{Config, accounts, history, scenario};
 use crate::Result;
+use agent_core::peer::{EventDelivery, RpcPeer};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -7,14 +8,12 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{BufWriter, Write},
+    io::Write,
     path::PathBuf,
     rc::Rc,
+    sync::Arc,
 };
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    sync::oneshot,
-};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 pub(super) type SharedThread = Rc<RefCell<Thread>>;
@@ -54,20 +53,23 @@ struct Control {
     delayed: bool,
 }
 
+enum Output {
+    Message(String),
+    Barrier(oneshot::Sender<()>),
+}
+
 pub(super) struct Context {
     pub home: PathBuf,
     pub config: Config,
-    output: RefCell<BufWriter<std::io::Stdout>>,
-    pub pending: RefCell<HashMap<String, oneshot::Sender<Value>>>,
+    output: mpsc::UnboundedSender<Output>,
+    peer: Arc<RpcPeer>,
     controls: RefCell<HashMap<String, Control>>,
 }
 
 impl Context {
     fn write(&self, value: &impl Serialize) -> Result<()> {
-        let mut output = self.output.borrow_mut();
-        serde_json::to_writer(&mut *output, value)?;
-        output.write_all(b"\n")?;
-        output.flush()?;
+        self.output
+            .send(Output::Message(serde_json::to_string(value)?))?;
         Ok(())
     }
 
@@ -93,8 +95,22 @@ impl Context {
         self.write(&Notification { method, params })
     }
 
-    pub fn request(&self, id: &str, method: &str, params: &Value) -> Result<()> {
-        self.write(&json!({"id":id,"method":method,"params":params}))
+    pub fn request<'a>(
+        &'a self,
+        method: &str,
+        params: &Value,
+    ) -> Result<(
+        u64,
+        impl std::future::Future<Output = Result<Value>> + use<'a>,
+    )> {
+        let (id, reply) = self.peer.request_identified(method, params)?;
+        let (flushed, ready) = oneshot::channel();
+        self.output.send(Output::Barrier(flushed))?;
+        Ok((id, async move {
+            ready.await?;
+            let mut response: Value = serde_json::from_str(&reply.await?)?;
+            Ok(response["result"].take())
+        }))
     }
 
     pub fn item_event(
@@ -187,23 +203,37 @@ impl Context {
 
 pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
     tokio::task::LocalSet::new().run_until(async move {
-        let context = Rc::new(Context { home, config, output: RefCell::new(BufWriter::new(std::io::stdout())),
-            pending: RefCell::new(HashMap::new()), controls: RefCell::new(HashMap::new()) });
+        let peer = Arc::new(RpcPeer::open(host_protocol::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
+            std::time::Duration::from_secs(120), 1024, EventDelivery::Unified)?);
+        let mut lines = peer.subscribe();
+        let (output, mut outbound) = mpsc::unbounded_channel();
+        let writer_peer = peer.clone();
+        let mut writer = tokio::spawn(async move {
+            while let Some(output) = outbound.recv().await {
+                match output {
+                    Output::Message(line) => writer_peer.send_raw(line).await?,
+                    Output::Barrier(ready) => { let _ = ready.send(()); }
+                }
+            }
+            Ok::<_, agent_core::peer::PeerError>(())
+        });
+        let context = Rc::new(Context { home, config, output, peer: peer.clone(), controls: RefCell::new(HashMap::new()) });
+        let result = async {
         let mut accounts = accounts::Accounts::load(&context.home)?;
         let mut threads = IndexMap::<String, SharedThread>::new();
         let mut saved_threads = None;
         let mut list_contents = None;
         let mut next_thread = 0;
-        let mut lines = BufReader::new(tokio::io::stdin()).lines();
-        while let Some(line) = lines.next_line().await? {
-            let mut message: Value = serde_json::from_str(&line)?;
-            if message.get("method").is_none() {
-                if let Some(id) = message["id"].as_str()
-                    && let Some(sender) = context.pending.borrow_mut().remove(id) {
-                        let _ = sender.send(message["result"].take());
+        loop {
+            let line = tokio::select! {
+                result = &mut writer => { result??; break; }
+                line = lines.recv() => match line {
+                    Ok(line) => line,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(error) => return Err(error.into()),
                 }
-                continue;
-            }
+            };
+            let mut message: Value = serde_json::from_str(&line)?;
             let mut owned_params = message["params"].take();
             let Some(id) = message.get("id") else { continue };
             let method = message["method"].as_str().unwrap_or("");
@@ -427,8 +457,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                 _ => context.error(id, -32601, "method not found")?,
             }
         }
-        for control in context.controls.borrow().values() { control.stop.cancel(); }
         Ok(())
+        }.await;
+        for control in context.controls.borrow().values() { control.stop.cancel(); }
+        peer.close();
+        writer.abort();
+        result
     }).await
 }
 

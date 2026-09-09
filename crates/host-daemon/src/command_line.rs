@@ -1,6 +1,5 @@
+use clap::{Parser, builder::NonEmptyStringValueParser};
 use std::path::PathBuf;
-
-const DEFAULT_CODEX: &str = "codex";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartupConfig {
@@ -10,223 +9,116 @@ pub(crate) struct StartupConfig {
     pub(crate) state_dir: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+#[command(
+    name = "host-daemon",
+    no_binary_name = true,
+    about = "Owner-only host.sock and outbound encrypted relay sessions"
+)]
+struct Arguments {
+    #[arg(
+        long,
+        help = "Read relayUrl, relayToken and runnerId as JSON from stdin and store in macOS Keychain"
+    )]
+    configure: bool,
+    #[arg(long, requires_all = ["relay_token", "runner_id"], value_parser = NonEmptyStringValueParser::new())]
+    relay_url: Option<String>,
+    #[arg(long, requires_all = ["relay_url", "runner_id"], value_parser = NonEmptyStringValueParser::new())]
+    relay_token: Option<String>,
+    #[arg(long, requires_all = ["relay_url", "relay_token"], value_parser = NonEmptyStringValueParser::new())]
+    runner_id: Option<String>,
+    #[arg(long, value_name = "PATH", default_value = "codex", value_parser = NonEmptyStringValueParser::new())]
+    codex: String,
+    #[arg(long, value_name = "PATH", help = "State directory (default ~/.bex)", value_parser = NonEmptyStringValueParser::new())]
+    state_dir: Option<String>,
+}
 impl StartupConfig {
     pub(crate) fn parse_from(
         arguments: impl IntoIterator<Item = String>,
-    ) -> Result<Self, ConfigError> {
-        let mut configure = None;
-        let mut relay_url = None;
-        let mut relay_token = None;
-        let mut runner_id = None;
-        let mut codex = None;
-        let mut state_dir = None;
-        let mut arguments = arguments.into_iter();
-
-        while let Some(argument) = arguments.next() {
-            match argument.as_str() {
-                "--help" | "-h" => return Err(ConfigError::Help),
-                "--configure" => set_once(&mut configure, "--configure", true)?,
-                "--relay-url" => set_once(
-                    &mut relay_url,
-                    "--relay-url",
-                    next_non_empty_value(&mut arguments, "--relay-url")?,
-                )?,
-                "--relay-token" => set_once(
-                    &mut relay_token,
-                    "--relay-token",
-                    next_non_empty_value(&mut arguments, "--relay-token")?,
-                )?,
-                "--runner-id" => set_once(
-                    &mut runner_id,
-                    "--runner-id",
-                    next_non_empty_value(&mut arguments, "--runner-id")?,
-                )?,
-                "--state-dir" => set_once(
-                    &mut state_dir,
-                    "--state-dir",
-                    next_non_empty_value(&mut arguments, "--state-dir")?,
-                )?,
-                "--codex" => set_once(
-                    &mut codex,
-                    "--codex",
-                    next_non_empty_value(&mut arguments, "--codex")?,
-                )?,
-                _ => return Err(ConfigError::UnknownArgument(argument)),
-            }
-        }
-
-        let relay = if relay_url.is_none() && relay_token.is_none() && runner_id.is_none() {
-            None
-        } else {
-            Some(host_protocol::RelayEndpoint {
-                relay_url: relay_url.ok_or(ConfigError::MissingRelayUrl)?,
-                relay_token: relay_token.ok_or(ConfigError::MissingRelayToken)?,
-                runner_id: runner_id.ok_or(ConfigError::MissingRunnerId)?,
-            })
-        };
+    ) -> Result<Self, clap::Error> {
+        let args = Arguments::try_parse_from(arguments)?;
+        let relay = args
+            .relay_url
+            .map(|relay_url| host_protocol::RelayEndpoint {
+                relay_url,
+                relay_token: args.relay_token.expect("clap requires relay token"),
+                runner_id: args.runner_id.expect("clap requires runner id"),
+            });
         Ok(Self {
             relay,
-            configure: configure.unwrap_or(false),
-            state_dir: state_dir.map(PathBuf::from),
-            codex: codex
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_CODEX)),
+            configure: args.configure,
+            codex: args.codex.into(),
+            state_dir: args.state_dir.map(PathBuf::from),
         })
     }
 }
-
-fn next_non_empty_value(
-    arguments: &mut impl Iterator<Item = String>,
-    option: &'static str,
-) -> Result<String, ConfigError> {
-    let value = arguments.next().ok_or(ConfigError::MissingValue(option))?;
-    if value.is_empty() {
-        return Err(ConfigError::EmptyValue(option));
-    }
-    Ok(value)
-}
-
-fn set_once<T>(slot: &mut Option<T>, option: &'static str, value: T) -> Result<(), ConfigError> {
-    if slot.replace(value).is_some() {
-        return Err(ConfigError::DuplicateOption(option));
-    }
-    Ok(())
-}
-
-pub(crate) fn usage() -> &'static str {
-    "Usage: host-daemon [--codex <PATH>] [--state-dir <PATH>] [--configure]\nOptional one-time configuration: --relay-url <URL> --relay-token <TOKEN> --runner-id <ID>\n\n--configure reads relayUrl, relayToken and runnerId as JSON from stdin and stores them in macOS Keychain. Normal startup restores that configuration.\nThe Host Daemon exposes owner-only host.sock in --state-dir (default ~/.bex) and connects outbound to the Phoenix relay as runner <ID>. --codex defaults to codex on PATH."
-}
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub(crate) enum ConfigError {
-    #[error("help requested")]
-    Help,
-    #[error("--relay-url is required")]
-    MissingRelayUrl,
-    #[error("--relay-token is required")]
-    MissingRelayToken,
-    #[error("--runner-id is required")]
-    MissingRunnerId,
-    #[error("{0} requires a value")]
-    MissingValue(&'static str),
-    #[error("{0} must not be empty")]
-    EmptyValue(&'static str),
-    #[error("{0} may be supplied only once")]
-    DuplicateOption(&'static str),
-    #[error("unknown argument {0}")]
-    UnknownArgument(String),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn parse(arguments: &[&str]) -> Result<StartupConfig, ConfigError> {
-        StartupConfig::parse_from(arguments.iter().map(|argument| (*argument).to_owned()))
+    use clap::error::ErrorKind;
+    fn parse(args: &[&str]) -> Result<StartupConfig, clap::Error> {
+        StartupConfig::parse_from(args.iter().map(|value| (*value).into()))
     }
-
     #[test]
-    fn parses_required_relay_configuration_with_deterministic_codex_default() {
+    fn preserves_relay_configuration_and_path_options() {
+        let config = parse(&[
+            "--relay-url",
+            "wss://relay.example.test/socket/websocket",
+            "--relay-token",
+            "token",
+            "--runner-id",
+            "host",
+            "--configure",
+            "--codex",
+            "/opt/bin/codex",
+            "--state-dir",
+            "/tmp/isolated host",
+        ])
+        .unwrap();
         assert_eq!(
-            parse(&[
-                "--relay-url",
-                "wss://relay.example.test/socket/websocket",
-                "--relay-token",
-                "secret",
-                "--runner-id",
-                "runner-1",
-            ])
-            .unwrap(),
-            StartupConfig {
-                relay: Some(host_protocol::RelayEndpoint {
-                    relay_url: "wss://relay.example.test/socket/websocket".to_owned(),
-                    relay_token: "secret".to_owned(),
-                    runner_id: "runner-1".to_owned()
-                }),
-                configure: false,
-                codex: PathBuf::from(DEFAULT_CODEX),
-                state_dir: None,
+            config.relay.unwrap(),
+            host_protocol::RelayEndpoint {
+                relay_url: "wss://relay.example.test/socket/websocket".into(),
+                relay_token: "token".into(),
+                runner_id: "host".into()
             }
         );
-    }
-
-    #[test]
-    fn parses_the_explicit_codex_override() {
-        assert_eq!(
-            parse(&[
-                "--relay-url",
-                "ws://127.0.0.1:4000/socket/websocket",
-                "--relay-token",
-                "relay-token",
-                "--runner-id",
-                "host-a",
-                "--codex",
-                "/opt/bin/codex",
-            ])
-            .unwrap()
-            .codex,
-            PathBuf::from("/opt/bin/codex")
-        );
-    }
-
-    #[test]
-    fn rejects_missing_duplicate_empty_and_ssh_arguments() {
+        assert!(config.configure);
+        assert_eq!(config.codex, PathBuf::from("/opt/bin/codex"));
+        assert_eq!(config.state_dir, Some(PathBuf::from("/tmp/isolated host")));
         assert!(parse(&[]).unwrap().relay.is_none());
-        assert_eq!(
-            parse(&["--relay-url", "ws://relay"]),
-            Err(ConfigError::MissingRelayToken)
-        );
-        assert_eq!(
-            parse(&["--relay-url", "ws://relay", "--relay-token", "token",]),
-            Err(ConfigError::MissingRunnerId)
-        );
-        assert_eq!(
-            parse(&["--relay-url"]),
-            Err(ConfigError::MissingValue("--relay-url"))
-        );
-        assert_eq!(
-            parse(&["--relay-url", ""]),
-            Err(ConfigError::EmptyValue("--relay-url"))
-        );
-        assert_eq!(
-            parse(&["--relay-url", "ws://relay", "--relay-url", "ws://other",]),
-            Err(ConfigError::DuplicateOption("--relay-url"))
-        );
-        assert_eq!(
-            parse(&[
-                "--relay-url",
-                "ws://relay",
-                "--relay-token",
-                "token",
-                "--runner-id",
-                "runner",
-                "--listen",
-                "127.0.0.1:49152",
-            ]),
-            Err(ConfigError::UnknownArgument("--listen".to_owned()))
-        );
-        assert_eq!(
-            parse(&[
-                "--relay-url",
-                "ws://relay",
-                "--relay-token",
-                "token",
-                "--runner-id",
-                "runner",
-                "--settings",
-                "state.json",
-            ]),
-            Err(ConfigError::UnknownArgument("--settings".to_owned()))
-        );
+        assert_eq!(parse(&[]).unwrap().codex, PathBuf::from("codex"));
     }
-
     #[test]
-    fn usage_describes_only_outbound_relay_options() {
-        let help = usage();
-        assert!(help.contains("--relay-url <URL>"));
-        assert!(help.contains("--relay-token <TOKEN>"));
-        assert!(help.contains("--runner-id <ID>"));
-        assert!(!help.contains("--listen"));
-        assert!(!help.contains("--pair-address"));
+    fn rejects_incomplete_duplicate_empty_and_unknown_options() {
+        for option in [
+            "--relay-url",
+            "--relay-token",
+            "--runner-id",
+            "--codex",
+            "--state-dir",
+        ] {
+            assert!(parse(&[option]).is_err());
+            assert!(parse(&[option, ""]).is_err());
+            assert!(parse(&[option, "a", option, "b"]).is_err());
+        }
+        for args in [
+            vec!["--relay-url", "ws://relay"],
+            vec!["--relay-url", "ws://relay", "--relay-token", "token"],
+        ] {
+            assert_eq!(
+                parse(&args).unwrap_err().kind(),
+                ErrorKind::MissingRequiredArgument
+            );
+        }
+        assert_eq!(
+            parse(&["--configure", "--configure"]).unwrap_err().kind(),
+            ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse(&["--listen", "127.0.0.1:49152"]).unwrap_err().kind(),
+            ErrorKind::UnknownArgument
+        );
+        assert_eq!(parse(&["--help"]).unwrap_err().exit_code(), 0);
     }
 }

@@ -1,184 +1,149 @@
-use serde_json::{Value, json};
+//! Reconnecting stream adapters. Framing and request correlation live in peer.
+use agent_core::peer::{EventDelivery, PeerError, PeerEvent, RpcPeer, request_line};
+use serde_json::Value;
 use std::{
-    collections::HashMap,
-    io::{BufRead, BufReader, Write},
-    net::Shutdown,
-    os::unix::net::UnixStream,
     path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Mutex, OnceLock, mpsc},
     time::Duration,
 };
+use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 
 type Reply = Result<Value, String>;
-type Completion = Box<dyn FnOnce(Reply) + Send>;
 struct Connection {
-    stream: Option<UnixStream>,
-    ready: bool,
-    pending: HashMap<u64, Completion>,
-}
-struct Inner {
-    connection: Mutex<Connection>,
-    next: AtomicU64,
-    stopped: AtomicBool,
+    peer: Mutex<Option<Arc<RpcPeer>>>,
+    stop: CancellationToken,
 }
 #[derive(Clone)]
-pub(crate) struct Rpc(Arc<Inner>);
-pub(crate) enum Event {
+pub struct Rpc(Arc<Connection>);
+pub enum Event {
     Connected(bool, String),
     Message(Value),
 }
+
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("client runtime")
+    })
+}
 impl Rpc {
-    pub(crate) fn connect(
-        path: PathBuf,
-        target: Value,
-        events: impl Fn(Event) + Send + 'static,
-    ) -> Self {
-        let inner = Arc::new(Inner {
-            connection: Mutex::new(Connection {
-                stream: None,
-                ready: false,
-                pending: HashMap::new(),
-            }),
-            next: AtomicU64::new(1),
-            stopped: AtomicBool::new(false),
+    pub fn connect(path: PathBuf, target: Value, events: impl Fn(Event) + Send + 'static) -> Self {
+        let target = serde_json::to_string(&target).expect("local target serializes");
+        let state = Arc::new(Connection {
+            peer: Mutex::new(None),
+            stop: CancellationToken::new(),
         });
-        let worker = inner.clone();
-        std::thread::spawn(move || {
-            while !worker.stopped.load(Ordering::Relaxed) {
-                let result = (|| -> Result<(), String> {
-                    let mut stream = UnixStream::connect(&path).map_err(|e| e.to_string())?;
-                    stream
-                        .set_write_timeout(Some(Duration::from_secs(30)))
+        let worker = state.clone();
+        let events = Arc::new(Mutex::new(events));
+        runtime().spawn(async move {
+            while !worker.stop.is_cancelled() {
+                let connect = async {
+                    let stream = tokio::net::UnixStream::connect(&path)
+                        .await
                         .map_err(|e| e.to_string())?;
-                    worker.connection.lock().unwrap().stream =
-                        Some(stream.try_clone().map_err(|e| e.to_string())?);
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(30)))
+                    let (reader, mut writer) = stream.into_split();
+                    writer
+                        .write_all(target.as_bytes())
+                        .await
                         .map_err(|e| e.to_string())?;
-                    writeln!(stream, "{target}").map_err(|e| e.to_string())?;
-                    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-                    let mut line = Vec::new();
-                    loop {
-                        line.clear();
-                        // Bound each frame before allocating an untrusted payload in full.
-                        let mut limited = (&mut reader).take(256 * 1024 * 1024 + 1);
-                        use std::io::Read;
-                        let count = limited
-                            .read_until(b'\n', &mut line)
-                            .map_err(|e| e.to_string())?;
-                        if count == 0 {
-                            return Err("Host との接続が切れました".into());
-                        }
-                        if count > 256 * 1024 * 1024 {
-                            return Err("受信サイズが上限を超えました".into());
-                        }
-                        let mut message: Value =
-                            serde_json::from_slice(&line).map_err(|_| "Host の応答が不正です")?;
-                        if message["ready"] == true {
-                            worker.connection.lock().unwrap().ready = true;
-                            stream.set_read_timeout(None).map_err(|e| e.to_string())?;
-                            events(Event::Connected(true, String::new()));
-                        } else if message.get("method").is_none() && message.get("id").is_some() {
-                            if let Some(sender) = message["id"].as_u64().and_then(|id| {
-                                worker.connection.lock().unwrap().pending.remove(&id)
-                            }) {
-                                let result = if message.get("error").is_some() {
-                                    Err(message["error"]["message"]
-                                        .as_str()
-                                        .unwrap_or("Host request failed")
-                                        .into())
-                                } else {
-                                    Ok(message["result"].take())
-                                };
-                                sender(result);
-                            }
-                        } else {
-                            events(Event::Message(message));
-                        }
-                        if worker.stopped.load(Ordering::Relaxed) {
-                            return Ok(());
-                        }
+                    writer.write_all(b"\n").await.map_err(|e| e.to_string())?;
+                    let mut reader = host_protocol::JsonlReader::new(reader);
+                    let ready = reader
+                        .read_line()
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .ok_or("Host closed during connection")?;
+                    #[derive(serde::Deserialize)]
+                    struct Ready {
+                        ready: bool,
                     }
-                })();
-                let reason = result.err().unwrap_or_else(|| "接続を閉じました".into());
-                {
-                    let mut connection = worker.connection.lock().unwrap();
-                    connection.stream = None;
-                    connection.ready = false;
-                    let pending = std::mem::take(&mut connection.pending);
-                    drop(connection);
-                    for (_, reply) in pending {
-                        reply(Err(reason.clone()));
+                    if !serde_json::from_str::<Ready>(&ready)
+                        .map_err(|e| e.to_string())?
+                        .ready
+                    {
+                        return Err("Host is not ready".into());
                     }
-                }
-                events(Event::Connected(false, reason));
-                for _ in 0..10 {
-                    if worker.stopped.load(Ordering::Relaxed) {
-                        return;
+                    Ok((reader, writer))
+                };
+                let result = tokio::select! {
+                    _ = worker.stop.cancelled() => break,
+                    result = tokio::time::timeout(Duration::from_secs(30), connect) => result.unwrap_or_else(|_| Err("Host connection timed out".into()))
+                };
+                let reason = match result {
+                    Err(error) => error,
+                    Ok((reader, writer)) => {
+                        let (closed, mut closing) = tokio::sync::mpsc::unbounded_channel();
+                        let observer = events.clone();
+                        // Prevent events racing ahead of Connected and of the installed request handle.
+                        let peer = {
+                            let observer_guard = events.lock().unwrap();
+                            let peer = RpcPeer::open(reader, writer, Duration::from_secs(30), 8, EventDelivery::Callback(Arc::new(move |event| {
+                                match event {
+                                    PeerEvent::Message(line) => {
+                                        let event = serde_json::from_str(&line).map_err(|e| e.to_string());
+                                        match event {
+                                            Ok(event) => (observer.lock().unwrap())(Event::Message(event)),
+                                            Err(error) => { let _ = closed.send(error); }
+                                        }
+                                    }
+                                    PeerEvent::Closed(reason) => { let _ = closed.send(reason); }
+                                }
+                            }))).expect("positive framing limit");
+                            let peer = Arc::new(peer);
+                            *worker.peer.lock().unwrap() = Some(peer.clone());
+                            observer_guard(Event::Connected(true, String::new()));
+                            peer
+                        };
+                        let reason = tokio::select! {
+                            _ = worker.stop.cancelled() => "接続を閉じました".into(),
+                            reason = closing.recv() => reason.unwrap_or_else(|| "Host との接続が切れました".into())
+                        };
+                        worker.peer.lock().unwrap().take();
+                        peer.close();
+                        reason
                     }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
+                };
+                (events.lock().unwrap())(Event::Connected(false, reason));
+                tokio::select! { _ = worker.stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
             }
         });
-        Self(inner)
+        Self(state)
     }
-    /// Completion executes on the reader before its next notification. The UI queue therefore
-    /// preserves wire order when a snapshot reply is immediately followed by streaming deltas.
-    pub(crate) fn request_async(
+    pub fn request_async(
         &self,
         method: &str,
         params: Value,
         done: impl FnOnce(Reply) + Send + 'static,
     ) {
-        let client = self.clone();
-        let method = method.to_owned();
-        std::thread::spawn(move || {
-            let id = client.0.next.fetch_add(1, Ordering::Relaxed);
-            let (cancel_tx, cancel_rx) = mpsc::channel();
-            let completion: Completion = Box::new(move |reply| {
-                done(reply);
-                let _ = cancel_tx.send(());
-            });
-            {
-                let mut connection = client.0.connection.lock().unwrap();
-                let result = if !connection.ready {
-                    Err("Host に接続していません".into())
-                } else if let Some(stream) = connection.stream.as_mut() {
-                    writeln!(
-                        stream,
-                        "{}",
-                        json!({"id":id,"method":method,"params":params})
-                    )
-                    .map_err(|e| e.to_string())
-                } else {
-                    Err("Host に接続していません".into())
-                };
-                if let Err(error) = result {
-                    drop(connection);
-                    completion(Err(error));
-                    return;
-                }
-                connection.pending.insert(id, completion);
+        let line = match request_line(method, &params) {
+            Ok(line) => line,
+            Err(error) => {
+                done(Err(error.to_string()));
+                return;
             }
-            let timeout = if method == "host/transfer" { 150 } else { 30 };
-            if cancel_rx
-                .recv_timeout(Duration::from_secs(timeout))
-                .is_err()
-            {
-                let completion = client.0.connection.lock().unwrap().pending.remove(&id);
-                if let Some(done) = completion {
-                    done(Err(format!(
-                        "{method}: 応答を確認できません。状態を更新してください。"
-                    )));
-                }
-            }
+        };
+        let peer = self.0.peer.lock().unwrap().as_ref().cloned();
+        let Some(peer) = peer else {
+            done(Err("Host に接続していません".into()));
+            return;
+        };
+        let timeout = Duration::from_secs(if method == "host/transfer" { 150 } else { 30 });
+        runtime().spawn(async move {
+            peer.request_callback(&line, timeout, move |result| {
+                done(
+                    result
+                        .and_then(|line| agent_core::peer::response_value(&line))
+                        .map_err(error_message),
+                );
+            })
+            .await;
         });
     }
-    pub(crate) fn request(&self, method: &str, params: Value) -> Reply {
+    pub fn request(&self, method: &str, params: Value) -> Reply {
         let (tx, rx) = mpsc::channel();
         self.request_async(method, params, move |result| {
             let _ = tx.send(result);
@@ -186,29 +151,48 @@ impl Rpc {
         rx.recv()
             .unwrap_or_else(|_| Err("Host との接続が切れました".into()))
     }
-    pub(crate) fn respond(&self, id: Value, result: Value) -> Result<(), String> {
-        let mut connection = self.0.connection.lock().unwrap();
-        if !connection.ready {
-            return Err("Host に接続していません".into());
-        }
-        let stream = connection
-            .stream
-            .as_mut()
+    pub fn respond(&self, id: Value, result: Value) -> Result<(), String> {
+        let peer = self
+            .0
+            .peer
+            .lock()
+            .unwrap()
+            .clone()
             .ok_or("Host に接続していません")?;
-        writeln!(stream, "{}", json!({"id":id,"result":result})).map_err(|e| e.to_string())
+        let line = serde_json::to_string(&serde_json::json!({"id":id,"result":result}))
+            .map_err(|e| e.to_string())?;
+        let (tx, rx) = mpsc::channel();
+        runtime().spawn(async move {
+            let _ = tx.send(peer.send_raw(line).await.map_err(error_message));
+        });
+        rx.recv()
+            .unwrap_or_else(|_| Err("Host との接続が切れました".into()))
     }
-    pub(crate) fn close(&self) {
-        self.0.stopped.store(true, Ordering::Relaxed);
-        if let Some(stream) = self.0.connection.lock().unwrap().stream.as_ref() {
-            let _ = stream.shutdown(Shutdown::Both);
+    pub fn close(&self) {
+        self.0.stop.cancel();
+        if let Some(active) = self.0.peer.lock().unwrap().take() {
+            active.close();
         }
     }
 }
-
+fn error_message(error: PeerError) -> String {
+    match error {
+        PeerError::Remote { error } => serde_json::from_str::<Value>(&error)
+            .ok()
+            .and_then(|v| v["message"].as_str().map(str::to_owned))
+            .unwrap_or(error),
+        error => error.to_string(),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::os::unix::net::UnixListener;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::Shutdown,
+    };
     #[test]
     fn reconnect_fails_pending_work_without_replaying_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -310,10 +294,10 @@ mod tests {
             "turn"
         );
         assert!(
-            matches!(rx.recv_timeout(Duration::from_secs(4)).unwrap(),Event::Message(v) if v["method"]=="turn/started")
+            matches!(rx.recv_timeout(Duration::from_secs(4)).unwrap(),Event::Message(v) if v["method"] == "turn/started")
         );
         assert!(
-            matches!(rx.recv_timeout(Duration::from_secs(4)).unwrap(),Event::Message(v) if v["id"]=="approval")
+            matches!(rx.recv_timeout(Duration::from_secs(4)).unwrap(),Event::Message(v) if v["id"] == "approval")
         );
         client
             .respond(json!("approval"), json!({"decision":"decline"}))

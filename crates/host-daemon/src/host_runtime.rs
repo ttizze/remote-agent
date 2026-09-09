@@ -242,7 +242,7 @@ impl HostRuntime {
             LocalHeader::Manager => self.serve_manager(stream, shutdown).await,
             LocalHeader::Remote { profile_id } => {
                 let (config, key) = self.remotes.connection(&profile_id).await?;
-                mobile_client::forward_rpc(config, &key, stream, shutdown)
+                mobile_client::client::forward_rpc(config, &key, stream, shutdown)
                     .await
                     .map_err(|error| error.to_string())
             }

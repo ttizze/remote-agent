@@ -15,7 +15,7 @@ use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
-use crate::{MobileClient, MobileClientConfig, MobileClientError, Notification, ServerRequest};
+use crate::client::{MobileClient, MobileClientConfig, MobileClientError};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,8 +83,8 @@ pub struct Handle {
     // request can pause until the mobile answers a server request.
     runtime: tokio::runtime::Runtime,
     client: MobileClient,
-    notifications: Mutex<broadcast::Receiver<Notification>>,
-    server_requests: Mutex<broadcast::Receiver<ServerRequest>>,
+    notifications: Mutex<broadcast::Receiver<String>>,
+    server_requests: Mutex<broadcast::Receiver<String>>,
 }
 
 fn set_error(out: *mut *mut c_char, error: impl ToString) {

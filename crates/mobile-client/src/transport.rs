@@ -9,7 +9,7 @@ use russh::{
     keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate},
 };
 
-use crate::{MobileClientConfig, MobileClientError};
+use crate::client::{MobileClientConfig, MobileClientError};
 
 pub(crate) struct Connection {
     pub(crate) ssh: client::Handle<PinnedHostKeyHandler>,

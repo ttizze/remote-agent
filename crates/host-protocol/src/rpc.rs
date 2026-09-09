@@ -28,7 +28,7 @@ pub struct RpcMessage<'a> {
 impl<'a> RpcMessage<'a> {
     pub fn parse(line: &'a str) -> Result<Self, RpcMessageError> {
         let object = parse_object(line)?;
-        classify_object(line, object)
+        classify_object(line, &object)
     }
 
     pub const fn kind(&self) -> RpcMessageKind {
@@ -67,7 +67,7 @@ fn parse_object<'a, T: serde::Deserialize<'a>>(
 
 fn classify_object<'a>(
     line: &'a str,
-    object: BTreeMap<String, &'a RawValue>,
+    object: &BTreeMap<String, &'a RawValue>,
 ) -> Result<RpcMessage<'a>, RpcMessageError> {
     let has_id = object.contains_key("id");
     let has_method = object.contains_key("method");
@@ -140,76 +140,24 @@ pub enum RpcMessageError {
     MissingIdForRewrite,
 }
 
-/// Replaces only the top-level JSON-RPC id.
-///
-/// replacement_id must itself be one JSON value, such as 42 or
-/// "proxy-7". Every other source byte, including whitespace, key order,
-/// nested values, and unknown extensions, is preserved exactly.
+/// Replaces the top-level JSON-RPC id while retaining every other raw value.
+/// Outer whitespace and key order are normalized; duplicate ids collapse to one.
 pub fn rewrite_top_level_id(line: &str, replacement_id: &str) -> Result<String, RpcMessageError> {
-    let message = RpcMessage::parse(line)?;
-    if message.raw_id.is_none() {
+    let mut fields: BTreeMap<String, &RawValue> = parse_object(line)?;
+    classify_object(line, &fields)?;
+    if fields.remove("id").is_none() {
         return Err(RpcMessageError::MissingIdForRewrite);
     }
-
-    let _: &RawValue = serde_json::from_str(replacement_id)?;
-    let spans = top_level_member_value_spans(line, "id")?;
-    if spans.is_empty() {
-        return Err(RpcMessageError::MissingIdForRewrite);
+    #[derive(serde::Serialize)]
+    struct Rewritten<'a> {
+        id: &'a RawValue,
+        #[serde(flatten)]
+        fields: BTreeMap<String, &'a RawValue>,
     }
-
-    // Replace every duplicate top-level id with the same value. JSON objects
-    // should not contain duplicate members, but doing this avoids leaving an
-    // ambiguous old id for parsers that choose the first rather than the last.
-    let replaced_bytes = spans.iter().map(|(start, end)| end - start).sum::<usize>();
-    let mut rewritten =
-        String::with_capacity(line.len() - replaced_bytes + replacement_id.len() * spans.len());
-    let mut copied_until = 0;
-    for (start, end) in spans {
-        rewritten.push_str(&line[copied_until..start]);
-        rewritten.push_str(replacement_id);
-        copied_until = end;
-    }
-    rewritten.push_str(&line[copied_until..]);
-    Ok(rewritten)
-}
-
-/// Collects every matching top-level value, including duplicate and escaped keys.
-/// Borrowed raw values give source offsets without a second JSON scanner.
-fn top_level_member_value_spans(
-    line: &str,
-    wanted: &str,
-) -> Result<Vec<(usize, usize)>, serde_json::Error> {
-    use serde::de::{Deserializer as _, MapAccess, Visitor};
-
-    struct ValueSpans<'a> {
-        source: &'a str,
-        wanted: &'a str,
-    }
-
-    impl<'de> Visitor<'de> for ValueSpans<'_> {
-        type Value = Vec<(usize, usize)>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a JSON object")
-        }
-
-        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
-            let mut spans = Vec::new();
-            while let Some((key, value)) = map.next_entry::<String, &'de RawValue>()? {
-                if key == self.wanted {
-                    // from_str borrows RawValue directly from this source slice.
-                    let start = value.get().as_ptr() as usize - self.source.as_ptr() as usize;
-                    spans.push((start, start + value.get().len()));
-                }
-            }
-            Ok(spans)
-        }
-    }
-
-    serde_json::Deserializer::from_str(line).deserialize_map(ValueSpans {
-        source: line,
-        wanted,
-    })
+    Ok(serde_json::to_string(&Rewritten {
+        id: serde_json::from_str(replacement_id)?,
+        fields,
+    })?)
 }
 
 /// Returns the top-level object as raw values for code that needs to inspect
@@ -303,7 +251,7 @@ mod tests {
         assert_eq!(rewritten_value["unknown"], original_value["unknown"]);
         assert_eq!(
             rewritten,
-            r#"{  "id" : "proxy-7" , "method":"turn/start","params":{"text":"x","nested":{"id":1}},"unknown":{"keep":[1,{"value":true}]}}"#
+            r#"{"id":"proxy-7","method":"turn/start","params":{"text":"x","nested":{"id":1}},"unknown":{"keep":[1,{"value":true}]}}"#
         );
     }
 
@@ -312,13 +260,13 @@ mod tests {
         let original = r#"{"\u0069d": 1, "method":"turn/start", "nested":{"id":2}, "id":"last"}"#;
         assert_eq!(
             rewrite_top_level_id(original, r#""proxy""#).unwrap(),
-            r#"{"\u0069d": "proxy", "method":"turn/start", "nested":{"id":2}, "id":"proxy"}"#
+            r#"{"id":"proxy","method":"turn/start","nested":{"id":2}}"#
         );
         let original = r#" {"先頭":"値\\\"}]", "id" : [1,{"id":2}], "method":"x", "params":[{"text":"[{}]"}], "\u0069d": {"nested":true} } "#;
-        assert_eq!(
-            rewrite_top_level_id(original, "null").unwrap(),
-            r#" {"先頭":"値\\\"}]", "id" : null, "method":"x", "params":[{"text":"[{}]"}], "\u0069d": null } "#,
-        );
+        let rewritten = rewrite_top_level_id(original, "null").unwrap();
+        let mut expected: Value = serde_json::from_str(original).unwrap();
+        expected["id"] = Value::Null;
+        assert_eq!(serde_json::from_str::<Value>(&rewritten).unwrap(), expected);
         assert!(rewrite_top_level_id(original, "1 2").is_err());
     }
 

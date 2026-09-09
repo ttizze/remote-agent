@@ -14,7 +14,7 @@ use host_daemon::{
     CodexRpcService, DesktopProjectStore, DeviceAuthenticationState, EncryptedGateway, HostIdentity,
 };
 use host_protocol::{Ed25519PublicKey, PairingToken, RelayEndpoint};
-use mobile_client::{MobileClient, MobileClientConfig, MobileClientError};
+use mobile_client::client::{MobileClient, MobileClientConfig, MobileClientError};
 use ring::{
     rand::SystemRandom,
     signature::{Ed25519KeyPair, KeyPair},

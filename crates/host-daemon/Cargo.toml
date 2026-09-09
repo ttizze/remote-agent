@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mobile-client = { path = "../mobile-client" }
+clap = { version = "4.5", features = ["derive"] }
 base64.workspace = true
 codex-app-server = { path = "../codex-app-server" }
 host-protocol = { path = "../host-protocol" }
@@ -27,7 +29,6 @@ tokio-util.workspace = true
 zeroize.workspace = true
 tempfile = "3"
 libc = "0.2"
-mobile-client = { path = "../mobile-client" }
 notify = "8.2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]

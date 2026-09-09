@@ -50,7 +50,12 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
     let (mut additions, mut deletions) = {
         let mut counts: HashMap<_, _> = files
             .iter_mut()
-            .map(|file| (file.path.as_bytes(), (&mut file.additions, &mut file.deletions)))
+            .map(|file| {
+                (
+                    file.path.as_bytes(),
+                    (&mut file.additions, &mut file.deletions),
+                )
+            })
             .collect();
         parse_numstat(&numstat.stdout, |path, added, deleted| {
             if let Some((additions, deletions)) = counts.get_mut(path) {
@@ -83,10 +88,11 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
         }
         let output = String::from_utf8_lossy(&output.stdout);
         let patch_start = output.find("diff --git ").unwrap_or(output.len());
-        let (added, deleted) = parse_numstat(output[..patch_start].as_bytes(), |_, added, deleted| {
-            file.additions = added;
-            file.deletions = deleted;
-        });
+        let (added, deleted) =
+            parse_numstat(output[..patch_start].as_bytes(), |_, added, deleted| {
+                file.additions = added;
+                file.deletions = deleted;
+            });
         additions += added;
         deletions += deleted;
         diff.push_str(&output[patch_start..]);
@@ -175,11 +181,15 @@ fn parse_numstat(
         };
         let added = count(fields.next());
         let deleted = count(fields.next());
-        let Some(mut path) = fields.next() else { continue };
+        let Some(mut path) = fields.next() else {
+            continue;
+        };
         if path.is_empty() {
             // With -z, renames contain separate source and destination records.
             entries.next();
-            let Some(destination) = entries.next() else { break };
+            let Some(destination) = entries.next() else {
+                break;
+            };
             path = destination;
         }
         additions += added.unwrap_or(0);
@@ -204,7 +214,10 @@ mod tests {
         assert!(review.diff.starts_with("diff --git "));
         assert!(review.diff.contains("+first\n+second\n"));
         assert_eq!(review.files[0].status, "untracked");
-        assert_eq!((review.files[0].additions, review.files[0].deletions), (Some(2), Some(0)));
+        assert_eq!(
+            (review.files[0].additions, review.files[0].deletions),
+            (Some(2), Some(0))
+        );
     }
 
     #[test]
@@ -245,7 +258,10 @@ mod tests {
     #[test]
     fn sums_text_changes_and_ignores_binary_counts() {
         assert_eq!(
-            parse_numstat(b"10\t2\ta.rs\0-\t-\timage.png\03\t0\tb.rs\0", |_, _, _| {}),
+            parse_numstat(
+                b"10\t2\ta.rs\0-\t-\timage.png\x003\t0\tb.rs\0",
+                |_, _, _| {}
+            ),
             (13, 2)
         );
     }
@@ -259,10 +275,27 @@ mod tests {
         std::fs::write(cwd.join("gone\tfile\n.txt"), "one\ntwo\n").unwrap();
         std::fs::write(cwd.join("binary.dat"), b"before\0").unwrap();
         run_git(cwd, &["add", "."]).unwrap();
-        run_git(cwd, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
-            "-c", "commit.gpgsign=false", "commit", "-m", "initial"]).unwrap();
+        run_git(
+            cwd,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
         run_git(cwd, &["mv", "old.txt", "new\tname\n.txt"]).unwrap();
-        std::fs::write(cwd.join("new\tname\n.txt"), "first\nsecond\nthird\nfourth\n").unwrap();
+        std::fs::write(
+            cwd.join("new\tname\n.txt"),
+            "first\nsecond\nthird\nfourth\n",
+        )
+        .unwrap();
         std::fs::remove_file(cwd.join("gone\tfile\n.txt")).unwrap();
         std::fs::write(cwd.join("binary.dat"), b"after\0").unwrap();
         let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
@@ -275,8 +308,12 @@ mod tests {
         assert_eq!(counts("gone\tfile\n.txt"), (Some(0), Some(2)));
         assert_eq!(counts("binary.dat"), (None, None));
         let json = serde_json::to_value(&review).unwrap();
-        let renamed = json["files"].as_array().unwrap().iter()
-            .find(|file| file["path"] == "new\tname\n.txt").unwrap();
+        let renamed = json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == "new\tname\n.txt")
+            .unwrap();
         assert_eq!(renamed["additions"], 1);
         assert_eq!(renamed["deletions"], 0);
     }

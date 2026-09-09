@@ -120,9 +120,6 @@ pub(super) async fn run(
         "retry" => context.notify("error", &json!({"threadId":thread_id,"turnId":turn_id,"willRetry":true,
             "error":{"message":"stream disconnected","additionalDetails":"attempt 2 of 5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":429}}}}))?,
         "request" | "approval" => {
-            let request_id = format!("fixture-request-{suffix}");
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            context.pending.borrow_mut().insert(request_id.clone(), sender);
             let mut params = json!({"threadId":thread_id,"turnId":turn_id,"itemId":format!("fixture-command-{suffix}")});
             let method = if scenario == "request" {
                 params["questions"] = json!([{"id":"continue","header":"継続","question":"このまま続けますか？",
@@ -134,12 +131,11 @@ pub(super) async fn run(
                 params["reason"] = "結合テストの承認確認".into();
                 "item/commandExecution/requestApproval"
             };
-            context.request(&request_id, method, &params)?;
+            let (request_id, reply) = context.request(method, &params)?;
             let response = tokio::select! {
                 _ = stop.cancelled() => Value::Null,
-                result = receiver => result.unwrap_or(Value::Null),
+                result = reply => result.unwrap_or(Value::Null),
             };
-            context.pending.borrow_mut().remove(&request_id);
             context.notify("serverRequest/resolved", &json!({"threadId":thread_id,"requestId":request_id}))?;
             if stop.is_cancelled() || (scenario == "approval" && !matches!(response["decision"].as_str(), Some("accept" | "acceptForSession"))) {
                 return context.finish(&thread, &turn, "interrupted", None);

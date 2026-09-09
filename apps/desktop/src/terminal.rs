@@ -1,8 +1,5 @@
-use crate::{
-    conversation::text,
-    platform,
-    rpc::{self, Rpc},
-};
+use crate::rpc::{self, Rpc};
+use crate::{conversation::text, platform};
 use base64::Engine;
 use gpui_kit::{
     component::{h_flex, v_flex},
