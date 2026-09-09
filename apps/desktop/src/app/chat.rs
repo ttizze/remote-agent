@@ -4,22 +4,13 @@ mod dictation;
 mod view;
 use agent_client::operations::RequestAnswer;
 use conversation_presentation::{models::supported_model_settings, requests::request_presentation};
-use dictation::{Dictation, DictationEvent, Phase};
+pub(super) use dictation::DictationEvent;
+use dictation::{Dictation, Phase};
 
 // Main and Side reuse stable watch keys. Reopening a view must still issue a
 // newer revision than its late registration/cancellation on the shared socket.
 static NEXT_LOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-type Apply =
-    Box<dyn FnOnce(&mut ConversationView, &mut Window, &mut Context<ConversationView>) + Send>;
-pub(super) enum Event {
-    Dictation(uuid::Uuid, DictationEvent),
-    Done {
-        epoch: u64,
-        apply: Apply,
-        busy: bool,
-    },
-}
 pub(super) enum Intent {
     Selected,
     Review,
@@ -121,7 +112,7 @@ pub(super) struct ConversationSession {
 }
 pub(super) struct ConversationView {
     pub(super) session: ConversationSession,
-    id: EntityId,
+    owner: WeakEntity<ConversationView>,
     tx: async_channel::Sender<super::Event>,
     manager: Rpc,
     manager_session: Entity<Management>,
@@ -251,7 +242,7 @@ impl ConversationView {
                 item_details: HashMap::new(),
                 detail_request: 0,
             },
-            id: cx.entity_id(),
+            owner: cx.entity().downgrade(),
             tx,
             manager,
             manager_session,
@@ -305,16 +296,20 @@ impl ConversationView {
         }
         let tx = self.tx.clone();
         let epoch = self.session.epoch;
-        let id = self.id;
+        let owner = self.owner.clone();
         move |result| {
-            let _ = tx.send_blocking(super::Event::Chat(
-                id,
-                Event::Done {
-                    epoch,
-                    busy,
-                    apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
-                },
-            ));
+            let _ = tx.send_blocking(super::Event::Done(Box::new(move |_, w, cx| {
+                let _ = owner.update(cx, |s, cx| {
+                    if epoch != s.session.epoch {
+                        return;
+                    }
+                    if busy {
+                        s.busy = s.busy.saturating_sub(1);
+                    }
+                    apply(s, result, w, cx);
+                    cx.notify();
+                });
+            })));
         }
     }
 
@@ -383,21 +378,6 @@ impl ConversationView {
         .to_owned();
         self.composer
             .update(cx, |state, cx| state.set_value(value, window, cx));
-    }
-
-    pub(super) fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
-        match event {
-            Event::Dictation(id, event) => self.dictation_event(id, event, window, cx),
-            Event::Done { epoch, apply, busy } => {
-                if epoch == self.session.epoch {
-                    if busy {
-                        self.busy = self.busy.saturating_sub(1);
-                    }
-                    apply(self, window, cx);
-                }
-            }
-        }
-        cx.notify();
     }
 
     pub(super) fn accepts(&self, host: EntityId, event: &rpc::Event) -> bool {

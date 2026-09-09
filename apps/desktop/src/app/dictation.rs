@@ -52,7 +52,7 @@ impl ConversationView {
             let stdout = child.stdout.take().unwrap();
             let id = uuid::Uuid::new_v4();
             let tx = self.tx.clone();
-            let view = self.id;
+            let view = self.owner.clone();
             std::thread::spawn(move || {
                 let result = (|| -> Result<String, String> {
                     for line in BufReader::new(stdout).lines() {
@@ -62,9 +62,10 @@ impl ConversationView {
                             return Err(error.into());
                         }
                         if value["recording"] == true {
-                            tx.send_blocking(super::super::Event::Chat(
-                                view,
-                                Event::Dictation(id, DictationEvent::Recording),
+                            tx.send_blocking(super::super::Event::Dictation(
+                                view.clone(),
+                                id,
+                                DictationEvent::Recording,
                             ))
                             .map_err(|_| "録音を中止しました。")?;
                         } else if value["complete"] == true {
@@ -81,9 +82,10 @@ impl ConversationView {
                 let _ = child.kill();
                 let _ = child.wait();
                 drop(directory);
-                let _ = tx.send_blocking(super::super::Event::Chat(
+                let _ = tx.send_blocking(super::super::Event::Dictation(
                     view,
-                    Event::Dictation(id, DictationEvent::Audio(result)),
+                    id,
+                    DictationEvent::Audio(result),
                 ));
             });
             Ok::<_, std::io::Error>(Dictation {
@@ -140,7 +142,7 @@ impl ConversationView {
         }
     }
 
-    pub(super) fn dictation_event(
+    pub(in crate::app) fn dictation_event(
         &mut self,
         id: uuid::Uuid,
         event: DictationEvent,
@@ -155,13 +157,14 @@ impl ConversationView {
             DictationEvent::Audio(Ok(audio)) => {
                 state.control = None;
                 let tx = self.tx.clone();
-                let view = self.id;
+                let view = self.owner.clone();
                 state.rpc.agent_async(
                     move |client| async move { client.transcribe(&audio).await },
                     move |result| {
-                        let _ = tx.send_blocking(super::super::Event::Chat(
+                        let _ = tx.send_blocking(super::super::Event::Dictation(
                             view,
-                            Event::Dictation(id, DictationEvent::Transcript(result)),
+                            id,
+                            DictationEvent::Transcript(result),
                         ));
                     },
                 );

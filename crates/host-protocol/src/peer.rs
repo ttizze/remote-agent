@@ -574,4 +574,207 @@ mod tests {
             Err(RpcPeerError::RequestIdExhausted)
         ));
     }
+
+    #[tokio::test]
+    async fn correlates_responses_and_restores_original_raw_ids() {
+        timeout(Duration::from_secs(2), async {
+            let (peer, mut lines, mut server_writer) = pair(128, |_| {});
+            let first = {
+                let peer = peer.clone();
+                tokio::spawn(async move {
+                    peer.request_raw(
+                        r#"{"id":"mobile-a","method":"first","params":{"nested":{"id":1}},"future":{"keep":true}}"#, Duration::from_secs(1)
+                    )
+                    .await
+                })
+            };
+            let second = {
+                let peer = peer.clone();
+                tokio::spawn(async move {
+                    peer.request_raw(r#"{"id":42,"method":"second","params":{"unknown":[1,2,3]}}"#, Duration::from_secs(1))
+                        .await
+                })
+            };
+
+            let request_a: Value = serde_json::from_str(&lines.read_line().await.unwrap().unwrap()).unwrap();
+            let request_b: Value = serde_json::from_str(&lines.read_line().await.unwrap().unwrap()).unwrap();
+            let id_a = request_a["id"].as_u64().unwrap();
+            let id_b = request_b["id"].as_u64().unwrap();
+            assert_ne!(id_a, id_b);
+            assert_eq!(request_a["params"]["nested"]["id"], 1);
+            assert_eq!(request_a["future"]["keep"], true);
+            assert_eq!(request_b["params"]["unknown"], json!([1, 2, 3]));
+
+            server_writer
+                .write_line(
+                    &format!(
+                        "{{\"id\":{id_b},\"result\":{{\"method\":\"second\",\"futureResult\":{{\"id\":99}}}},\"unknown\":[true]}}"
+                    )
+                    ,
+                )
+                .await
+                .unwrap();
+            server_writer
+                .write_line(
+                    &format!(
+                        "{{\"id\":{id_a},\"error\":{{\"code\":-1,\"message\":\"nope\",\"futureError\":{{\"id\":7}}}},\"extension\":{{\"keep\":true}}}}"
+                    )
+                    ,
+                )
+                .await
+                .unwrap();
+
+            let first: Value = serde_json::from_str(&first.await.unwrap().unwrap()).unwrap();
+            let second: Value = serde_json::from_str(&second.await.unwrap().unwrap()).unwrap();
+            assert_eq!(first["id"], "mobile-a");
+            assert_eq!(first["error"]["futureError"]["id"], 7);
+            assert_eq!(first["extension"]["keep"], true);
+            assert_eq!(second["id"], 42);
+            assert_eq!(second["result"]["futureResult"]["id"], 99);
+            assert_eq!(second["unknown"], json!([true]));
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn publishes_raw_notifications_and_server_requests() {
+        timeout(Duration::from_secs(2), async {
+            let queue = RpcEventQueue::new(128);
+            let mut events = queue.subscribe();
+            let (_peer, _reader, mut server_writer) = pair(128, move |event| queue.deliver(event));
+            let notification = r#" {"method":"item/started","params":{"future":{"id":1}}} "#;
+            let request =
+                r#"{"id":"approval-1","method":"item/approval","params":{"opaque":[1,2]}}"#;
+            server_writer.write_line(notification).await.unwrap();
+            server_writer.write_line(request).await.unwrap();
+
+            assert_eq!(events.recv().await.unwrap(), notification);
+            assert_eq!(events.recv().await.unwrap(), request);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_validated_notification_and_response_without_rewriting() {
+        timeout(Duration::from_secs(2), async {
+            let (peer, mut lines, _server_writer) = pair(128, |_| {});
+            let notification = r#" {"method":"event","params":{"future":true}} "#;
+            let response = r#"{"id":"approval","result":{"future":[1,2]}}"#;
+            peer.send_raw(notification).await.unwrap();
+            peer.send_raw(response).await.unwrap();
+            assert_eq!(lines.read_line().await.unwrap().unwrap(), notification);
+            assert_eq!(lines.read_line().await.unwrap().unwrap(), response);
+            assert!(
+                peer.send_raw(r#"{"id":1,"method":"not-a-response"}"#)
+                    .await
+                    .is_err()
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ignores_unknown_and_late_responses() {
+        timeout(Duration::from_secs(2), async {
+            let (peer, mut lines, mut server_writer) = pair(128, |_| {});
+            let request = {
+                let peer = peer.clone();
+                tokio::spawn(async move {
+                    peer.request_raw(
+                        r#"{"id":"caller","method":"wait","params":{}}"#,
+                        Duration::from_secs(1),
+                    )
+                    .await
+                })
+            };
+            let sent: Value =
+                serde_json::from_str(&lines.read_line().await.unwrap().unwrap()).unwrap();
+            let id = sent["id"].as_u64().unwrap();
+            server_writer
+                .write_line("{\"id\":999,\"result\":{\"late\":true}}")
+                .await
+                .unwrap();
+            server_writer
+                .write_line(&format!("{{\"id\":{id},\"result\":{{\"ok\":true}}}}"))
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_str(&request.await.unwrap().unwrap()).unwrap();
+            assert_eq!(response["id"], "caller");
+            assert_eq!(response["result"]["ok"], true);
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn timeout_removes_pending_request() {
+        timeout(Duration::from_secs(2), async {
+            let (peer, mut lines, _server_writer) = pair(128, |_| {});
+            let error = peer
+                .request_raw(
+                    r#"{"id":"timeout","method":"blocked","params":{}}"#,
+                    Duration::from_millis(10),
+                )
+                .await
+                .unwrap_err();
+            let _ = lines.read_line().await.unwrap().unwrap();
+            assert!(
+                matches!(error, RpcPeerError::RequestTimeout { method } if method == "blocked")
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_removes_pending_request_and_late_response_is_ignored() {
+        timeout(Duration::from_secs(2), async {
+            let (peer, mut lines, mut server_writer) = pair(128, |_| {});
+            let cancelled = {
+                let peer = peer.clone();
+                tokio::spawn(async move {
+                    peer.request_raw(
+                        r#"{"id":"cancelled","method":"cancel","params":{}}"#,
+                        Duration::from_secs(1),
+                    )
+                    .await
+                })
+            };
+            let sent: Value =
+                serde_json::from_str(&lines.read_line().await.unwrap().unwrap()).unwrap();
+            let cancelled_id = sent["id"].as_u64().unwrap();
+            cancelled.abort();
+            let _ = cancelled.await;
+
+            server_writer
+                .write_line(&format!(
+                    "{{\"id\":{cancelled_id},\"result\":{{\"late\":true}}}}"
+                ))
+                .await
+                .unwrap();
+            let next = {
+                let peer = peer.clone();
+                tokio::spawn(async move {
+                    peer.request_raw(
+                        r#"{"id":"next","method":"next","params":{}}"#,
+                        Duration::from_secs(1),
+                    )
+                    .await
+                })
+            };
+            let sent: Value =
+                serde_json::from_str(&lines.read_line().await.unwrap().unwrap()).unwrap();
+            let next_id = sent["id"].as_u64().unwrap();
+            server_writer
+                .write_line(&format!("{{\"id\":{next_id},\"result\":{{\"ok\":true}}}}"))
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_str(&next.await.unwrap().unwrap()).unwrap();
+            assert_eq!(response["id"], "next");
+            assert_eq!(response["result"]["ok"], true);
+        })
+        .await
+        .unwrap();
+    }
 }

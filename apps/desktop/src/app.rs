@@ -36,15 +36,15 @@ use std::{
 
 type Apply = Box<dyn FnOnce(&mut Desktop, &mut Window, &mut Context<Desktop>) + Send>;
 enum Event {
-    Done {
-        epoch: u64,
-        apply: Apply,
-        busy: bool,
-    },
+    Done(Apply),
     ManagerConnected(bool),
     RefreshManager,
     Rpc(EntityId, rpc::Event),
-    Chat(EntityId, chat::Event),
+    Dictation(
+        WeakEntity<ConversationView>,
+        uuid::Uuid,
+        chat::DictationEvent,
+    ),
     Catalogue(EntityId, host::CatalogueInput),
     DraftError(drafts::SaveError),
 }
@@ -367,11 +367,15 @@ impl Desktop {
         let tx = self.tx.clone();
         let epoch = self.epoch;
         move |result| {
-            let _ = tx.send_blocking(Event::Done {
-                epoch,
-                busy,
-                apply: Box::new(move |s, w, cx| apply(s, result, w, cx)),
-            });
+            let _ = tx.send_blocking(Event::Done(Box::new(move |s, w, cx| {
+                if epoch != s.epoch {
+                    return;
+                }
+                if busy {
+                    s.busy = s.busy.saturating_sub(1);
+                }
+                apply(s, result, w, cx);
+            })));
         }
     }
 
@@ -768,15 +772,7 @@ impl Desktop {
 
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            Event::Done { epoch, apply, busy } => {
-                if epoch != self.epoch {
-                    return;
-                }
-                if busy {
-                    self.busy = self.busy.saturating_sub(1);
-                }
-                apply(self, window, cx);
-            }
+            Event::Done(apply) => apply(self, window, cx),
             Event::DraftError(error) => {
                 self.drafts.update(cx, |_, cx| cx.emit(error));
             }
@@ -800,13 +796,11 @@ impl Desktop {
                 self.refresh_manager(cx);
             }
             Event::RefreshManager => self.refresh_manager(cx),
-            Event::Chat(id, event) => {
-                if let Some(view) = [&self.chat, self.side_chat.as_ref().unwrap_or(&self.chat)]
-                    .into_iter()
-                    .find(|view| view.entity_id() == id)
-                {
-                    view.update(cx, |view, cx| view.event(event, window, cx));
-                }
+            Event::Dictation(view, id, event) => {
+                let _ = view.update(cx, |view, cx| {
+                    view.dictation_event(id, event, window, cx);
+                    cx.notify();
+                });
             }
             Event::Rpc(id, event) => self.receive_rpc(id, event, window, cx),
             Event::Catalogue(id, input) => {
