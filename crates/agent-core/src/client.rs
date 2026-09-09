@@ -16,6 +16,15 @@ pub trait Operation: Serialize {
     }
 }
 
+#[derive(Serialize)]
+pub struct Pair {
+    pub invitation: uuid::Uuid,
+}
+impl Operation for Pair {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/pair";
+}
+
 pub struct Client {
     peer: Arc<RpcPeer>,
 }
@@ -793,7 +802,8 @@ impl Client {
                 .map(|path| (path, false))
                 .or_else(|| {
                     item.result
-                        .as_deref()
+                        .as_ref()
+                        .and_then(Value::as_str)
                         .filter(|data| !data.trim().is_empty())
                         .map(|data| (data, true))
                 });

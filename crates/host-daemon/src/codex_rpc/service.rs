@@ -1,5 +1,10 @@
 use std::sync::{Arc, OnceLock};
 
+use crate::desktop_projects::ThreadPage;
+use agent_core::{
+    models::{Item, Thread, ThreadResponse, Turn},
+    peer::PeerEvent,
+};
 use codex_app_server::{CodexAppServer, Error as AppServerError};
 use host_protocol::{RpcMessageKind, classify_message, raw_object, rewrite_top_level_id};
 use serde_json::{Map, Value, json, value::RawValue};
@@ -12,6 +17,20 @@ use crate::{
     DesktopProjectStore, HOST_PROJECT_LIST_METHOD, HOST_THREAD_LIST_METHOD,
     HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
 };
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativePage<T> {
+    data: Vec<T>,
+    next_cursor: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeItem {
+    item: Arc<Item>,
+    turn_id: Option<String>,
+}
 
 const MOBILE_THREAD_PAGE_SIZE: usize = 5;
 
@@ -337,14 +356,14 @@ impl CodexRpcService {
             }
         };
         let mut projects = Vec::new();
-        let mut project_cursor = Value::Null;
+        let mut project_cursor = None;
         loop {
             let mut page = snapshot
                 .project_list(&json!({"limit":512,"cursor":project_cursor}))
                 .map_err(|_| DispatchError::InvalidMessage("invalid project cursor".into()))?;
-            projects.append(page["data"].as_array_mut().unwrap());
-            project_cursor = page["nextCursor"].take();
-            if project_cursor.is_null() {
+            projects.append(&mut page.data);
+            project_cursor = page.next_cursor;
+            if project_cursor.is_none() {
                 break;
             }
         }
@@ -380,15 +399,17 @@ impl CodexRpcService {
                 return serde_json::to_string(&object)
                     .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
             }
-            let mut result = snapshot.enrich_threads(response["result"].take());
-            let Some(data) = result["data"].as_array_mut() else {
-                return error_response(line, "invalid_thread_list", "thread list data is missing");
+            let result: ThreadPage = match serde_json::from_value(response["result"].take()) {
+                Ok(result) => result,
+                Err(error) => return response_with_error(line, "invalid_thread_list", &error),
             };
-            for thread in data.drain(..) {
+            for mut thread in result.data {
+                snapshot.enrich_thread(&mut thread);
                 titles.push(thread);
             }
-            let next_cursor = result["nextCursor"]
-                .as_str()
+            let next_cursor = result
+                .next_cursor
+                .as_deref()
                 .filter(|cursor| !cursor.is_empty());
             if titles.complete() || next_cursor.is_none() {
                 break;
@@ -450,18 +471,33 @@ impl CodexRpcService {
             // Error responses and future response shapes remain untouched.
             return Ok(response);
         };
-        let mut result: Value = serde_json::from_str(raw_result.get())
+        if upstream_method == "thread/list" {
+            let mut page: ThreadPage = serde_json::from_str(raw_result.get())
+                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
+            if let Err(error) = self
+                .inner
+                .desktop_projects
+                .enrich_threads(&mut page.data)
+                .await
+            {
+                return response_with_error(line, "desktop_project_state_unavailable", &error);
+            }
+            object.insert("result".into(), raw_value(page)?);
+            return serde_json::to_string(&object)
+                .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
+        }
+        let mut result: ThreadResponse = serde_json::from_str(raw_result.get())
             .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
         if hydrate {
             // Paginated threads expose history through the paging API. Metadata
             // stays available while the owning process has not flushed a rollout.
-            let paginated = result["thread"]["historyMode"] == "paginated";
+            let paginated = result.thread.extra.get("historyMode") == Some(&json!("paginated"));
             let mut history_request = raw_object(&upstream_line)
                 .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
             if paginated {
                 history_request.insert("method".into(), raw_value(json!("thread/turns/list"))?);
                 history_request.insert("params".into(), raw_value(json!({
-                    "threadId":result["thread"]["id"], "limit":if paginate { MOBILE_THREAD_PAGE_SIZE } else { 10 },
+                    "threadId":result.thread.id, "limit":if paginate { MOBILE_THREAD_PAGE_SIZE } else { 10 },
                     "sortDirection":"desc", "itemsView":if paginate { "notLoaded" } else { "full" }
                 }))?);
             } else {
@@ -480,38 +516,36 @@ impl CodexRpcService {
             let Some(history) = history_object.remove("result") else {
                 return Ok(response);
             };
-            let mut history: Value = serde_json::from_str(history.get())
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
             if paginated {
+                let mut history: NativePage<Arc<Turn>> = serde_json::from_str(history.get())
+                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
                 if paginate
                     && let Err(error) = self
-                        .hydrate_turn_page(&mut history, &result["thread"]["id"])
+                        .hydrate_turn_page(&mut history, result.thread.id.as_deref().unwrap_or(""))
                         .await
                 {
                     return response_with_error(line, "invalid_thread_history", &error);
                 }
-                if let Err(message) = apply_native_turn_page(&mut result, history) {
-                    return error_response(line, "invalid_thread_history", message);
-                }
+                apply_native_turn_page(&mut result, history);
             } else {
-                result = history;
+                result = serde_json::from_str(history.get())
+                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
                 if !paginate
-                    && let Some(turns) = result
-                        .pointer_mut("/thread/turns")
-                        .and_then(Value::as_array_mut)
+                    && let Some(turns) = &mut result.thread.turns
                     && turns.len() > 10
                 {
                     turns.drain(..turns.len() - 10);
                 }
             }
         }
-        let result = match self.inner.desktop_projects.enrich_threads(result).await {
-            Ok(result) => result,
-            Err(error) => {
-                return response_with_error(line, "desktop_project_state_unavailable", &error);
-            }
-        };
-        let mut result = result;
+        if let Err(error) = self
+            .inner
+            .desktop_projects
+            .enrich_threads(std::slice::from_mut(&mut result.thread))
+            .await
+        {
+            return response_with_error(line, "desktop_project_state_unavailable", &error);
+        }
         if retain_recent_turns && defer_details {
             defer_large_item_details(&mut result);
         }
@@ -522,7 +556,11 @@ impl CodexRpcService {
 
     // Keep App Server cursors opaque. Both initial hydration and older pages
     // use the desktop five-turn / 500-item initial window, in pages of 100.
-    async fn history_request(&self, method: &str, params: Value) -> Result<Value, String> {
+    async fn history_request<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<NativePage<T>, String> {
         let request = json!({"id":0,"method":method,"params":params});
         let response = self
             .inner
@@ -530,61 +568,63 @@ impl CodexRpcService {
             .request_raw(&request.to_string())
             .await
             .map_err(|error| error.to_string())?;
-        let mut response: Value = serde_json::from_str(&response).map_err(|e| e.to_string())?;
+        let mut response = raw_object(&response).map_err(|error| error.to_string())?;
         if let Some(error) = response.get("error") {
-            return Err(error.to_string());
+            return Err(error.get().to_owned());
         }
-        response
-            .get_mut("result")
-            .map(Value::take)
-            .ok_or_else(|| "history result is missing".into())
+        let result = response
+            .remove("result")
+            .ok_or("history result is missing")?;
+        serde_json::from_str(result.get()).map_err(|error| error.to_string())
     }
 
-    async fn hydrate_turn_page(&self, page: &mut Value, thread_id: &Value) -> Result<(), String> {
-        let turns = page["data"]
-            .as_array_mut()
-            .ok_or("turn page data is missing")?;
-        if turns.len() > MOBILE_THREAD_PAGE_SIZE {
+    async fn hydrate_turn_page(
+        &self,
+        page: &mut NativePage<Arc<Turn>>,
+        thread_id: &str,
+    ) -> Result<(), String> {
+        if page.data.len() > MOBILE_THREAD_PAGE_SIZE {
             return Err("turn page exceeds requested size".into());
         }
         let mut budget = MOBILE_THREAD_PAGE_SIZE * 100;
-        for turn in turns {
-            let mut values = Vec::with_capacity(budget);
-            let mut cursor = Value::Null;
+        for turn in &mut page.data {
+            let turn = Arc::make_mut(turn);
+            let mut values = Vec::new();
+            let mut cursor = None;
             let mut has_more = true;
             let mut cursors = std::collections::HashSet::new();
             let mut ids = std::collections::HashSet::new();
             while has_more && budget > 0 {
-                let mut page = self
-                    .history_request(
+                let page = self
+                    .history_request::<NativeItem>(
                         "thread/items/list",
                         json!({
-                            "threadId":thread_id,"turnId":turn["id"],"cursor":cursor,
+                            "threadId":thread_id,"turnId":turn.id,"cursor":cursor,
                             "limit":budget.min(100),"sortDirection":"desc"
                         }),
                     )
                     .await?;
-                for item in take_history_items(&mut page)? {
-                    if ids.insert(item["id"].as_str().unwrap().to_owned()) {
+                cursor = page.next_cursor;
+                for item in take_history_items(page.data)? {
+                    if ids.insert(item.id.clone()) {
                         budget = budget
                             .checked_sub(1)
                             .ok_or("item page exceeds requested budget")?;
                         values.push(item);
                     }
                 }
-                cursor = page["nextCursor"].take();
-                has_more = !cursor.is_null();
-                if let Some(cursor) = cursor.as_str() {
-                    if !cursors.insert(cursor.to_owned()) {
-                        return Err("history cursor repeated".into());
-                    }
+                has_more = cursor.is_some();
+                if let Some(cursor) = &cursor
+                    && !cursors.insert(cursor.clone())
+                {
+                    return Err("history cursor repeated".into());
                 }
             }
             values.reverse();
-            turn["items"] = Value::Array(values);
-            turn["itemsNextCursor"] = cursor;
-            turn["itemsHasMore"] = json!(has_more);
-            turn["itemsView"] = json!(if has_more { "summary" } else { "full" });
+            turn.items = Some(values);
+            turn.items_next_cursor = Some(cursor);
+            turn.items_has_more = Some(has_more);
+            turn.items_view = Some(if has_more { "summary" } else { "full" }.into());
             self.preserve_opening_question(turn, thread_id).await?;
         }
         Ok(())
@@ -592,29 +632,28 @@ impl CodexRpcService {
 
     async fn preserve_opening_question(
         &self,
-        turn: &mut Value,
-        thread_id: &Value,
+        turn: &mut Turn,
+        thread_id: &str,
     ) -> Result<(), String> {
-        let values = turn["items"].as_array().ok_or("turn items are missing")?;
-        if turn["itemsHasMore"] != true || values.is_empty() {
+        let values = turn.items.as_deref().ok_or("turn items are missing")?;
+        if turn.items_has_more != Some(true) || values.is_empty() {
             return Ok(());
         }
-        let mut opening = self
-            .history_request(
+        let opening = self
+            .history_request::<NativeItem>(
                 "thread/items/list",
                 json!({
-                    "threadId":thread_id,"turnId":turn["id"],"limit":2,"sortDirection":"asc"
+                    "threadId":thread_id,"turnId":turn.id,"limit":2,"sortDirection":"asc"
                 }),
             )
             .await?;
-        if let Some(item) = take_history_items(&mut opening)?
+        if let Some(item) = take_history_items(opening.data)?
             .into_iter()
-            .find(|item| item["type"] != "contextCompaction")
-            .filter(|item| item["type"] == "userMessage")
+            .find(|item| item.kind.as_deref() != Some("contextCompaction"))
+            .filter(|item| item.kind.as_deref() == Some("userMessage"))
+            && !values.iter().any(|value| value.id == item.id)
         {
-            if !values.iter().any(|value| value["id"] == item["id"]) {
-                turn["openingUserMessage"] = item;
-            }
+            turn.opening_user_message = Some(item);
         }
         Ok(())
     }
@@ -645,36 +684,52 @@ impl CodexRpcService {
             upstream["itemsView"] = json!("notLoaded");
             "thread/turns/list"
         };
-        let mut page = match self.history_request(method, upstream).await {
-            Ok(page) => page,
-            Err(error) => return response_with_error(line, "codex_unavailable", &error),
+        let mut result = ThreadResponse {
+            thread: Thread {
+                id: Some(thread_id.into()),
+                ..Default::default()
+            },
+            model: None,
+            extra: Default::default(),
         };
-        if cursor.is_some() && page["nextCursor"].as_str() == cursor {
-            return error_response(line, "invalid_thread_history", "history cursor repeated");
-        }
-        let mut result = json!({"thread":{"id":thread_id}});
         if items {
-            let mut values = match take_history_items(&mut page) {
+            let page = match self.history_request::<NativeItem>(method, upstream).await {
+                Ok(page) => page,
+                Err(error) => return response_with_error(line, "codex_unavailable", &error),
+            };
+            if cursor.is_some() && page.next_cursor.as_deref() == cursor {
+                return error_response(line, "invalid_thread_history", "history cursor repeated");
+            }
+            let mut values = match take_history_items(page.data) {
                 Ok(values) => values,
                 Err(error) => return response_with_error(line, "invalid_thread_history", &error),
             };
             values.reverse();
-            result["thread"]["turns"] = json!([{"id":params["turnId"],"items":values,
-                "itemsHasMore":!page["nextCursor"].is_null(),"itemsNextCursor":page["nextCursor"].take()}]);
+            let mut turn = Turn {
+                id: params["turnId"].as_str().unwrap().into(),
+                items: Some(values),
+                items_has_more: Some(page.next_cursor.is_some()),
+                items_next_cursor: Some(page.next_cursor),
+                ..Default::default()
+            };
             if cursor.is_none()
-                && let Err(error) = self
-                    .preserve_opening_question(&mut result["thread"]["turns"][0], &json!(thread_id))
-                    .await
+                && let Err(error) = self.preserve_opening_question(&mut turn, thread_id).await
             {
                 return response_with_error(line, "invalid_thread_history", &error);
             }
+            result.thread.turns = Some(vec![Arc::new(turn)]);
         } else {
-            if let Err(error) = self.hydrate_turn_page(&mut page, &json!(thread_id)).await {
+            let mut page = match self.history_request::<Arc<Turn>>(method, upstream).await {
+                Ok(page) => page,
+                Err(error) => return response_with_error(line, "codex_unavailable", &error),
+            };
+            if cursor.is_some() && page.next_cursor.as_deref() == cursor {
+                return error_response(line, "invalid_thread_history", "history cursor repeated");
+            }
+            if let Err(error) = self.hydrate_turn_page(&mut page, thread_id).await {
                 return response_with_error(line, "invalid_thread_history", &error);
             }
-            if let Err(error) = apply_native_turn_page(&mut result, page) {
-                return error_response(line, "invalid_thread_history", error);
-            }
+            apply_native_turn_page(&mut result, page);
         }
         if params["deferItemDetails"] == true {
             defer_large_item_details(&mut result);
@@ -718,31 +773,33 @@ impl CodexRpcService {
                 Ok(response) => response,
                 Err(error) => return response_with_error(line, "codex_unavailable", &error),
             };
-            let mut response: Value = serde_json::from_str(&response)
+            let mut response = raw_object(&response)
                 .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            if let Some(error) = response.get_mut("error") {
+            if let Some(error) = response.remove("error") {
                 let mut object = response_object(line)?;
-                object.insert("error".to_owned(), raw_value(error.take())?);
+                object.insert("error".into(), error);
                 return serde_json::to_string(&object)
                     .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
             }
-            let Some(entries) = response
-                .pointer_mut("/result/data")
-                .and_then(Value::as_array_mut)
-            else {
+            let Some(raw) = response.remove("result") else {
                 return error_response(line, "invalid_thread_history", "item page data is missing");
             };
-            if let Some(entry) = entries
-                .iter_mut()
-                .find(|entry| entry["turnId"] == turn_id && entry["item"]["id"] == item_id)
+            let page: NativePage<NativeItem> = match serde_json::from_str(raw.get()) {
+                Ok(page) => page,
+                Err(error) => return response_with_error(line, "invalid_thread_history", &error),
+            };
+            if let Some(entry) = page
+                .data
+                .into_iter()
+                .find(|entry| entry.turn_id.as_deref() == Some(turn_id) && entry.item.id == item_id)
             {
-                return response_with_result(line, json!({"item":entry["item"].take()}));
+                #[derive(serde::Serialize)]
+                struct ItemResponse {
+                    item: Arc<Item>,
+                }
+                return response_with_result(line, ItemResponse { item: entry.item });
             }
-            let Some(cursor) = response
-                .pointer("/result/nextCursor")
-                .and_then(Value::as_str)
-                .filter(|cursor| !cursor.is_empty())
-            else {
+            let Some(cursor) = page.next_cursor.filter(|cursor| !cursor.is_empty()) else {
                 return error_response(
                     line,
                     "item_not_found",
@@ -770,7 +827,8 @@ impl CodexRpcService {
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
-                    Ok(line) => {
+                    Ok(PeerEvent::Message(message)) => {
+                        let line = message.value;
                         let request = classify_message(&line).ok();
                         if request.as_ref().is_some_and(|request| {
                             request.kind() == RpcMessageKind::Request
@@ -809,7 +867,9 @@ impl CodexRpcService {
                             router.handle_server_line(&line);
                         }
                     }
-                    Err(broadcast::error::RecvError::Closed)
+                    Ok(PeerEvent::Response { .. }) => {}
+                    Ok(PeerEvent::Closed(_))
+                    | Err(broadcast::error::RecvError::Closed)
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
                         thread_watches.clear_all();
                         router.close_all();
@@ -842,7 +902,10 @@ fn replace_method(line: &str, method: &str) -> Result<String, DispatchError> {
     serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()))
 }
 
-fn response_with_result(line: &str, result: Value) -> Result<String, DispatchError> {
+fn response_with_result(
+    line: &str,
+    result: impl serde::Serialize,
+) -> Result<String, DispatchError> {
     let mut object = response_object(line)?;
     object.insert("result".to_owned(), raw_value(result)?);
     serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()))
@@ -877,48 +940,36 @@ fn response_object(
     Ok(object)
 }
 
-fn raw_value(value: Value) -> Result<Box<RawValue>, DispatchError> {
+fn raw_value(value: impl serde::Serialize) -> Result<Box<RawValue>, DispatchError> {
     serde_json::value::to_raw_value(&value)
         .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
 }
 
-fn apply_native_turn_page(result: &mut Value, mut page: Value) -> Result<(), &'static str> {
-    let Some(turns) = page["data"].as_array_mut() else {
-        return Err("turn page data is missing");
-    };
-    turns.reverse();
-    result["thread"]["turns"] = Value::Array(std::mem::take(turns));
-    result["thread"]["historyCursor"] = page["nextCursor"]
-        .as_str()
-        .filter(|cursor| !cursor.is_empty())
-        .map(|cursor| json!(cursor))
-        .unwrap_or(Value::Null);
-    Ok(())
+fn apply_native_turn_page(result: &mut ThreadResponse, mut page: NativePage<Arc<Turn>>) {
+    page.data.reverse();
+    result.thread.turns = Some(page.data);
+    result.thread.history_cursor = Some(page.next_cursor.filter(|cursor| !cursor.is_empty()));
 }
 
-fn take_history_items(page: &mut Value) -> Result<Vec<Value>, String> {
-    let entries = page["data"]
-        .as_array_mut()
-        .ok_or("item page data is missing")?;
+fn take_history_items(entries: Vec<NativeItem>) -> Result<Vec<Arc<Item>>, String> {
     if entries.len() > 100 {
         return Err("item page exceeds requested size".into());
     }
-    for entry in entries.iter_mut() {
-        let item = entry
-            .get_mut("item")
-            .ok_or("history item is missing")?
-            .take();
-        if item["id"].as_str().is_none_or(str::is_empty) {
-            return Err("history item ID is missing".into());
-        }
-        *entry = item;
-    }
-    Ok(std::mem::take(entries))
+    entries
+        .into_iter()
+        .map(|entry| {
+            if entry.item.id.is_empty() {
+                Err("history item ID is missing".into())
+            } else {
+                Ok(entry.item)
+            }
+        })
+        .collect()
 }
 
 // Count JSON bytes without materializing another copy of large tool output.
 // The writer stops as soon as the inline budget is exceeded.
-fn fits_inline(value: &Value) -> bool {
+fn fits_inline(value: &impl serde::Serialize) -> bool {
     struct Budget(usize);
     impl std::io::Write for Budget {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -935,61 +986,75 @@ fn fits_inline(value: &Value) -> bool {
     serde_json::to_writer(Budget(4096), value).is_ok()
 }
 
-fn defer_large_item_details(result: &mut Value) {
-    let Some(turns) = result
-        .pointer_mut("/thread/turns")
-        .and_then(Value::as_array_mut)
-    else {
+fn defer_large_item_details(result: &mut ThreadResponse) {
+    let Some(turns) = &mut result.thread.turns else {
         return;
     };
     for turn in turns {
-        let Some(items) = turn.get_mut("items").and_then(Value::as_array_mut) else {
+        let turn = Arc::make_mut(turn);
+        let Some(items) = &mut turn.items else {
             continue;
         };
         let mut deferred = Vec::new();
         for item in items {
-            // Visible responses must remain complete, including image bytes and paths.
-            // Only expandable activities defer their details.
+            // Visible responses keep complete text, image bytes and paths.
             if matches!(
-                item["type"].as_str(),
+                item.kind.as_deref(),
                 Some("userMessage" | "agentMessage" | "imageGeneration")
             ) || fits_inline(item)
+                || item.id.is_empty()
             {
                 continue;
             }
-            let Some(id) = item["id"].as_str().filter(|id| !id.is_empty()) else {
-                continue;
-            };
-            deferred.push(Value::String(id.to_owned()));
-            let Some(object) = item.as_object_mut() else {
-                continue;
-            };
-            // File names/kinds and command/status keep the existing activity titles.
-            if let Some(changes) = object.get_mut("changes").and_then(Value::as_array_mut) {
+            let item = Arc::make_mut(item);
+            deferred.push(item.id.clone());
+            for text in [
+                &mut item.text,
+                &mut item.status,
+                &mut item.command,
+                &mut item.aggregated_output,
+                &mut item.saved_path,
+                &mut item.client_id,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                truncate_detail(text);
+            }
+            if let Some(result) = &mut item.result
+                && !retain_detail(result)
+            {
+                item.result = None;
+            }
+            if let Some(changes) = item.extra.get_mut("changes").and_then(Value::as_array_mut) {
                 for change in changes {
                     if let Some(change) = change.as_object_mut() {
                         change.remove("diff");
                     }
                 }
             }
-            object.retain(|key, value| {
-                if key == "changes" || key == "id" || key == "type" {
-                    return true;
-                }
-                if let Value::String(text) = value {
-                    let mut end = text.len().min(256);
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    text.truncate(end);
-                }
-                !value.is_array() && !value.is_object()
-            });
+            item.extra
+                .retain(|key, value| key == "changes" || retain_detail(value));
         }
         if !deferred.is_empty() {
-            turn["deferredItemIds"] = Value::Array(deferred);
+            turn.deferred_item_ids = Some(deferred);
         }
     }
+}
+
+fn truncate_detail(text: &mut String) {
+    let mut end = text.len().min(256);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
+fn retain_detail(value: &mut Value) -> bool {
+    if let Value::String(text) = value {
+        truncate_detail(text);
+    }
+    !value.is_array() && !value.is_object()
 }
 
 #[cfg(test)]
@@ -1011,7 +1076,7 @@ mod tests {
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
-        let mut result = json!({"thread":{"turns":[{"id":"turn","items":[
+        let result = json!({"thread":{"turns":[{"id":"turn","items":[
             {"id":"user","type":"userMessage","content":[{"type":"text","text":text}]},
             {"id":"agent","type":"agentMessage","text":text},
             {"id":"command","type":"commandExecution","command":"日本語".repeat(1000),"status":"completed","aggregatedOutput":text},
@@ -1019,7 +1084,9 @@ mod tests {
             {"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}},
             {"id":"small","type":"reasoning","summary":["short"]}
         ]}]}});
-        defer_large_item_details(&mut result);
+        let mut typed = serde_json::from_value(result).unwrap();
+        defer_large_item_details(&mut typed);
+        let result = serde_json::to_value(typed).unwrap();
         let turn = &result["thread"]["turns"][0];
         let items = &turn["items"];
         assert_eq!(items[0]["content"][0]["text"], text);
@@ -1040,20 +1107,25 @@ mod tests {
     fn generated_image_output_is_not_truncated_as_an_activity_detail() {
         let image = json!({"id":"image","type":"imageGeneration","status":"completed",
             "result":"A".repeat(8192),"savedPath":format!("/{} image.png", "directory/".repeat(40))});
-        let mut result = json!({"thread":{"turns":[{"items":[image]}]}});
-        defer_large_item_details(&mut result);
+        let result = json!({"thread":{"turns":[{"id":"turn","items":[image]}]}});
+        let mut typed = serde_json::from_value(result).unwrap();
+        defer_large_item_details(&mut typed);
+        let result = serde_json::to_value(typed).unwrap();
         assert_eq!(result["thread"]["turns"][0]["items"][0], image);
         assert!(result["thread"]["turns"][0]["deferredItemIds"].is_null());
     }
 
     #[test]
     fn history_page_preserves_the_opaque_cursor_and_chronological_order() {
-        let mut result = json!({"thread":{}});
+        let mut result = serde_json::from_value(json!({"thread":{}})).unwrap();
         apply_native_turn_page(
             &mut result,
-            json!({"data":[{"id":"new"},{"id":"old"}],"nextCursor":"opaque:token"}),
-        )
-        .unwrap();
+            serde_json::from_value(
+                json!({"data":[{"id":"new"},{"id":"old"}],"nextCursor":"opaque:token"}),
+            )
+            .unwrap(),
+        );
+        let result = serde_json::to_value(result).unwrap();
         assert_eq!(result["thread"]["turns"][0]["id"], "old");
         assert_eq!(result["thread"]["historyCursor"], "opaque:token");
     }

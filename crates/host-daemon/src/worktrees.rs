@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::HashMap,
     fs,
@@ -87,10 +86,7 @@ impl Worktrees {
             fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
             // Resolve aliases such as /tmp before checking copy destination ancestors.
             let parent = parent.canonicalize().map_err(|e| e.to_string())?;
-            let destination = tempfile::Builder::new()
-                .prefix("session-")
-                .permissions(fs::Permissions::from_mode(0o700))
-                .tempdir_in(&parent)
+            let destination = crate::platform::worktree_directory(&parent)
                 .map_err(|e| e.to_string())?
                 .keep();
             let branch = format!("bex/{}", destination.file_name().unwrap().to_string_lossy());
@@ -173,13 +169,14 @@ fn read(path: &Path) -> Result<State, String> {
 fn save(path: &Path, state: &State) -> Result<(), String> {
     let parent = path.parent().ok_or("settings have no parent directory")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    serde_json::to_writer(&mut file, state).map_err(|e| e.to_string())?;
-    file.write_all(b"\n").map_err(|e| e.to_string())?;
-    file.as_file().sync_all().map_err(|e| e.to_string())?;
-    file.persist(path).map_err(|e| e.error.to_string())?;
-    fs::File::open(parent)
-        .and_then(|dir| dir.sync_all())
+    atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
+        .write_with_options(
+            |file| {
+                serde_json::to_writer(&mut *file, state).map_err(std::io::Error::other)?;
+                file.write_all(b"\n")
+            },
+            crate::platform::private_file_options(),
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -214,10 +211,10 @@ fn copy(source: &Path, target: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
     if let Some(parent) = target.parent() {
         for ancestor in parent.ancestors() {
-            if let Ok(meta) = fs::symlink_metadata(ancestor) {
-                if meta.file_type().is_symlink() {
-                    return Err("copy destination contains a symbolic link".into());
-                }
+            if let Ok(meta) = fs::symlink_metadata(ancestor)
+                && meta.file_type().is_symlink()
+            {
+                return Err("copy destination contains a symbolic link".into());
             }
         }
     }

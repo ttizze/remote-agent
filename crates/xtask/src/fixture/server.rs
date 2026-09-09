@@ -1,6 +1,6 @@
 use super::{Config, accounts, history, scenario};
 use crate::Result;
-use agent_core::peer::{EventDelivery, RpcPeer};
+use agent_core::peer::{PeerEvent, RpcPeer, request_line};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -103,12 +103,15 @@ impl Context {
         u64,
         impl std::future::Future<Output = Result<Value>> + use<'a>,
     )> {
-        let (id, reply) = self.peer.request_identified(method, params)?;
+        let reply = self.peer.request_raw(&request_line(method, params)?);
+        let id = reply
+            .wire_id()
+            .ok_or("fixture request preparation failed")?;
         let (flushed, ready) = oneshot::channel();
         self.output.send(Output::Barrier(flushed))?;
         Ok((id, async move {
             ready.await?;
-            let mut response: Value = serde_json::from_str(&reply.await?)?;
+            let mut response: Value = serde_json::from_str(&reply.await?.value)?;
             Ok(response["result"].take())
         }))
     }
@@ -204,7 +207,7 @@ impl Context {
 pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
     tokio::task::LocalSet::new().run_until(async move {
         let peer = Arc::new(RpcPeer::open(host_protocol::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
-            std::time::Duration::from_secs(120), 1024, EventDelivery::Unified)?);
+            std::time::Duration::from_secs(120), 1024)?);
         let mut lines = peer.subscribe();
         let (output, mut outbound) = mpsc::unbounded_channel();
         let writer_peer = peer.clone();
@@ -228,7 +231,9 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             let line = tokio::select! {
                 result = &mut writer => { result??; break; }
                 line = lines.recv() => match line {
-                    Ok(line) => line,
+                    Ok(PeerEvent::Message(message)) => message.value,
+                    Ok(PeerEvent::Response { .. }) => continue,
+                    Ok(PeerEvent::Closed(_)) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(error) => return Err(error.into()),
                 }
@@ -460,9 +465,9 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
         Ok(())
         }.await;
         for control in context.controls.borrow().values() { control.stop.cancel(); }
-        peer.close();
+        let closed = peer.close().await;
         writer.abort();
-        result
+        result.and(closed.map_err(Into::into))
     }).await
 }
 

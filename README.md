@@ -2,7 +2,7 @@
 
 Bex controls a long-lived Codex App Server through a separate Rust Host daemon. The current migration makes `agent-core` the state owner for the headless CLI, GPUI, SwiftUI and Compose clients. See [ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md).
 
-This stage implements the shared core and `agent-cli`. The daemon and native UIs still use their previous interfaces and are replaced in the following stages. Their builds are temporarily broken by the peer API cutover. The descriptions and setup instructions below the core section document those existing applications; they do not claim the daemon or UI migration is complete.
+The core, headless CLI and daemon now use iroh and the same JSONL peer. Native UIs still use their previous interfaces and are replaced in the following stages; their builds remain temporarily broken. The existing UI behavior below records the functionality to preserve during those cutovers.
 
 ## Core and headless client
 
@@ -19,9 +19,9 @@ nix develop . --command cargo test -p agent-core -p agent-cli
 nix develop . --command cargo clippy -p agent-core -p agent-cli --all-targets -- -D warnings
 ```
 
-The tests execute all 87 expanded behavior-corpus cases and launch the actual CLI against isolated iroh fixture servers for listing, sending and numeric/string approval IDs. They also cover ordered Store publication, concurrent approval handling, unchanged draft preservation and ticket authorization. These checks do not verify the legacy UIs, production daemon, mobile devices or other operating systems.
+The tests execute all 87 expanded behavior-corpus cases and launch the actual CLI against isolated iroh fixture servers for listing, sending and numeric/string approval IDs. They also cover ordered Store publication, concurrent approval handling, unchanged draft preservation and ticket authorization. The daemon integration suite exercises real isolated iroh endpoints, pairing, concurrent approvals, binary transfers, title pagination, large history and worktree creation. These checks do not verify native UIs, production Keychain access, physical devices or other operating systems.
 
-The CLI accepts either `--stdio <fixture-executable>` with repeatable `--stdio-arg`, or `--ticket <endpoint-ticket> --identity-file <existing-32-byte-client-key>` for an already paired iroh Host. `--no-relay` disables relays and public address lookup for isolated fixtures. It prints JSON results to stdout and errors to stderr. Supported commands:
+The CLI accepts either `--stdio <fixture-executable>` with repeatable `--stdio-arg`, or `--ticket <endpoint-ticket> --identity-file <existing-32-byte-client-key>` for an already paired iroh Host. A new client can supply `--invitation <invitation-UUID>` with its ticket to pair before its first operation. `--no-relay` disables relays and public address lookup for isolated fixtures. It prints JSON results to stdout and errors to stderr. Supported commands:
 
 ```sh
 agent-cli <connection-options> list
@@ -66,27 +66,21 @@ The Mac sidebar omits Files, Changes, and Settings navigation rows. Above the co
 
 Terminal runs a PTY on the selected Host through Codex’s experimental `process/*` APIs. Its standard xterm.js renderer runs in the macOS WebView; Node is only a Nix-provided build tool for fetching locked assets. Closing the panel keeps the shell alive; creating a new terminal, switching Hosts or closing the app ends that shell. Side Chat has an independent conversation and composer, with drafts in `desktop-side-drafts.json`. Browser uses the local Mac’s WebView, including when a remote Host is selected, and receives no Host/terminal IPC bridge. Files and changes use the selected Host’s existing revision-aware editor and Git diff services.
 
-For the Fly.io deployment configuration and rollout procedure, see
-[Phoenix relay on Fly.io](docs/fly-relay.md). Its initial topology is one Tokyo
-Machine; multiple-region Host routing is not implemented yet.
+## Host setup
 
-## Local setup
-
-Requirements: Apple Silicon Mac, Xcode, Nix with flakes, and an installed, signed-in Codex. The daemon prefers Codex bundled with ChatGPT Desktop, then `codex` on PATH. `BEX_CODEX` selects an explicit executable for the Mac app. Public hosting, signup, billing and TestFlight distribution are outside this local setup.
-
-Start the relay in a terminal:
+The daemon requires an installed Codex App Server and Git. It prefers Codex bundled with ChatGPT Desktop on macOS, then `codex` on PATH. An explicit `--codex` path is authoritative. Build and launch it through Nix:
 
 ```sh
-nix develop .
-cd apps/server
-mix deps.get
-# Enter your local relay token, then press Return.
-read -r -s REMOTE_AGENT_RELAY_TOKEN
-export REMOTE_AGENT_RELAY_TOKEN
-PHX_SERVER=true PHX_BIND_IP=0.0.0.0 PORT=4000 mix run --no-halt
+nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
 ```
 
-Use a private random token shared only with your Hosts. Binding `0.0.0.0` makes the relay reachable on the local network. For an iPhone or another Mac, use this Mac's LAN address in the relay URL; `127.0.0.1` only works on the same computer or its Simulator. The relay token controls relay access; pairing separately authorizes filesystem and Codex access.
+`--state-dir` overrides the platform application data directory; `--codex-home` selects a separate Codex store. A process lock prevents two daemons from using the same state. Host and local-client private keys, invitations, paired NodeIds and registered remote Hosts are stored as one record through `keyring`. The public `host.ticket` file contains the current endpoint address. Unix state directories are owner-only; Windows directories inherit their parent DACL, with the default under the user's local application data directory.
+
+All clients connect directly through iroh. Management RPCs (`host/status`, `host/invite`, `host/revoke`, `host/listRemotes`, `host/pairRemote`, `host/removeRemote`) require the local client's NodeId. Invitations expire after five minutes and can be consumed once; persistence succeeds before authorization is published. Revocation closes active sessions. Remote registration pairs the local client's identity so the UI can connect directly to the remote Host.
+
+Public iroh relays are the default. `--relay-url` supplies a custom list; `--no-relay` restricts isolated fixtures to direct local addresses. SSH, the custom Phoenix relay, and their repository deployment scripts are removed. This source change does not decommission previously deployed Fly infrastructure.
+
+## Existing Mac setup (pending UI cutover)
 
 Build and open the Mac app from the repository root:
 
@@ -99,9 +93,7 @@ Mac builds require a stable signing certificate. Both build commands use the sam
 
 When switching an existing installation from ad-hoc signing, choose **Always Allow / 常に許可** for the Host's existing Keychain entries once. Later builds signed with the same certificate identity and `app.bex.host` identifier retain that authorization. This does not grant other applications access or bypass a locked Keychain. Changing the signing identity or resetting permissions requires authorization again. See [Apple's designated-requirement explanation](https://developer.apple.com/library/archive/technotes/tn2206/_index.html).
 
-In **接続・ペアリング**, enter `ws://<relay-Mac-LAN-address>:4000/socket/websocket`, the relay token and a unique runner ID for this Host. The settings are saved to Keychain. The app starts the Host daemon and restores it on later launches. Closing the UI leaves its daemon and active Codex work running.
-
-Choose **iPhone・Mac を招待** to create an invitation. Scan its QR code or paste its invitation in the iPhone app; on another Mac paste it under **別の Mac に接続**. Invitations expire and can be used once. Remove a paired device from the owning Mac to close its current sessions and reject future connections.
+The old UI's relay settings and invitation screen are not compatible with this daemon. The next migration replaces them with Store and iroh connections.
 
 ## Working with Codex
 
@@ -148,7 +140,7 @@ open apps/mobile/iosApp/Bex.xcodeproj
 
 Select the Bex scheme and an iPhone Simulator. Physical-device signing and installation are separate from this Simulator workflow. Before a physical-device Release archive, rebuild the device framework from the same checkout with `nix develop . --command ./gradlew :apps:mobile:linkReleaseFrameworkIosArm64`. Xcode links this prebuilt framework; building the Simulator framework or archiving Swift alone does not update the device's shared Kotlin code.
 
-The isolated end-to-end runner builds the app, starts a real Phoenix relay and encrypted Host with a deterministic Codex fixture, creates a fresh Simulator for the run, exercises mobile UI flows and checks the xcresult for failures and skips:
+The fixture runner now starts an isolated iroh Host with a deterministic Codex process. The existing Simulator tests require the mobile UI cutover before they can use that Host; their runner still rejects failures and skipped tests:
 
 ```sh
 nix develop . --command cargo xtask ios-e2e
@@ -158,10 +150,10 @@ Development commands, the Codex subprocess fixture, and the pairing HTTP fixture
 
 `ios-e2e` runs the existing 36-test selection by default. Append Simulator test method names to run a specific selection. Each run builds the app once and owns one fresh Host, loopback pairing server, and Simulator shared by the selected tests, matching the former shell runner. The runner removes these fixtures and its Xcode build products on completion or interruption. Results and their JSON summaries remain under `target/qa`; `BEX_RELAY_RESULT_BUNDLE` selects an explicit result bundle path. A nonzero Xcode exit, failed or skipped test, or unexpected pass count fails the command.
 
-The headless relay command runs the real Phoenix transport tests and the encrypted Host/Codex integration tests:
+The headless command runs the real daemon over isolated iroh sessions:
 
 ```sh
-nix develop . --command cargo xtask relay-e2e
+nix develop . --command cargo xtask iroh-e2e
 ```
 
 Other verification commands:
@@ -182,27 +174,25 @@ Manual checks remain available:
 
 ```sh
 nix develop . --command cargo xtask quality
-nix develop . --command cargo xtask quality rust # or elixir, kotlin, swift
+nix develop . --command cargo xtask quality rust # or kotlin, swift
 ```
 
-The command checks every selected language and returns a failure if any check fails. It does not rewrite files. Run `mix deps.get --check-locked` inside `apps/server` in the Nix shell before the first Elixir check. The background worker installs dependencies from the committed lockfile and reuses local Cargo/Mix caches. Each check has a one-hour timeout.
+The command checks every selected language and returns a failure if any check fails. It does not rewrite files. The background worker reuses Cargo caches and checks the committed worktree. Each check has a one-hour timeout.
 
 | Language | Configuration and policy |
 | --- | --- |
 | Rust | `cargo fmt --all --check` and Clippy over all workspace targets, with warnings denied. Keep Clippy's default lint groups; do not enable `restriction` or `pedantic` wholesale. The toolchain is pinned by `flake.lock`. |
-| Elixir | `.formatter.exs`, `.credo.exs`, and `mix quality`: formatter, compiler warnings, strict Credo defaults, and Dialyxir defaults, including unknown-function checks. Dev/test dependencies are pinned by `mix.lock`; PLTs stay in ignored build directories. |
 | Kotlin | ktfmt Gradle plugin 0.26.0 with Kotlin style and 120-column wrapping, plus detekt 1.23.8 with `buildUponDefaultConfig`, validated `detekt.yml`, and all `src` source sets, including tests and Native. Apply the official Compose naming/default-parameter adjustments. This stable release runs source analysis; its Kotlin 2.0 compiler does not establish Kotlin 2.3 type-resolution coverage. Kotlin compilation and tests remain separate checks. |
 | Swift | Nix-pinned SwiftLint and SwiftFormat, `.swiftlint.yml` and `.swiftformat`, Swift 6.3 formatting syntax with Swift 5 language mode matching Xcode, four-space indentation, LF, 120-column wrapping, and inline commas. Lint handwritten iOS/macOS sources and UI fixtures; build products and dependencies are outside the included roots. |
 
-Default thresholds remain enabled. There are no baselines or blanket failure suppression. New tool versions and individual rule exceptions require review. Formatting can be applied with `cargo fmt --all`, `mix format`, `./gradlew :apps:mobile:ktfmtFormat`, and `swiftformat apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/desktop/macos` in the Nix shell.
+Default thresholds remain enabled. There are no baselines or blanket failure suppression. New tool versions and individual rule exceptions require review. Formatting can be applied with `cargo fmt --all`, `./gradlew :apps:mobile:ktfmtFormat`, and `swiftformat apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/desktop/macos` in the Nix shell.
 
-Configuration references: [Clippy lint groups](https://doc.rust-lang.org/stable/clippy/lints.html), [Credo configuration](https://credo.hexdocs.pm/config_file.html), [Dialyxir defaults](https://dialyxir.hexdocs.pm/readme.html), [detekt configuration](https://detekt.dev/docs/1.23.8/gettingstarted/gradle/), [Compose adjustments](https://detekt.dev/docs/1.23.8/introduction/compose/), [SwiftLint](https://github.com/realm/SwiftLint), [SwiftFormat](https://github.com/nicklockwood/SwiftFormat).
+Configuration references: [Clippy lint groups](https://doc.rust-lang.org/stable/clippy/lints.html), [detekt configuration](https://detekt.dev/docs/1.23.8/gettingstarted/gradle/), [Compose adjustments](https://detekt.dev/docs/1.23.8/introduction/compose/), [SwiftLint](https://github.com/realm/SwiftLint), [SwiftFormat](https://github.com/nicklockwood/SwiftFormat).
 
 ```sh
 nix develop . --command cargo test --workspace
 nix develop . --command cargo test --package bex-desktop
 nix develop . --command ./gradlew :apps:mobile:iosSimulatorArm64Test
-nix develop . --command sh -c 'cd apps/server && mix test'
 ```
 
 Simulator evidence does not verify physical camera, physical-device networking or distribution. See [implementation evidence](docs/IMPLEMENTATION_PLAN.md).

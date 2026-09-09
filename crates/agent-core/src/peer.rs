@@ -6,10 +6,13 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -65,6 +68,27 @@ struct PreparedRequest {
     method: String,
     id: u64,
     line: String,
+}
+pin_project_lite::pin_project! {
+    /// A raw request's assigned wire ID is available before its first poll.
+    /// Routers use it for notifications that refer to an outstanding request.
+    pub struct Request<F> {
+        wire_id: Option<u64>,
+        #[pin]
+        response: F,
+    }
+}
+impl<F> Request<F> {
+    /// `None` means preparation failed; awaiting the request returns that error.
+    pub fn wire_id(&self) -> Option<u64> {
+        self.wire_id
+    }
+}
+impl<F: Future> Future for Request<F> {
+    type Output = F::Output;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.project().response.poll(cx)
+    }
 }
 struct Outbound {
     line: String,
@@ -179,8 +203,15 @@ impl RpcPeer {
     }
 
     /// Returns the original response line with only the caller-owned top-level ID restored.
-    pub async fn request_raw(&self, line: &str) -> Result<Reply<String>, PeerError> {
-        self.exchange(self.prepare(line)?).await
+    pub fn request_raw<'a>(
+        &'a self,
+        line: &str,
+    ) -> Request<impl Future<Output = Result<Reply<String>, PeerError>> + Send + use<'a>> {
+        let prepared = self.prepare(line);
+        Request {
+            wire_id: prepared.as_ref().ok().map(|request| request.id),
+            response: async move { self.exchange(prepared?).await },
+        }
     }
     fn prepare(&self, line: &str) -> Result<PreparedRequest, PeerError> {
         let message = classify_message(line).map_err(invalid)?;

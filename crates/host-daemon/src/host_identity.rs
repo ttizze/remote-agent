@@ -1,65 +1,92 @@
-use host_protocol::Ed25519PublicKey;
-use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
-use russh::keys::{Algorithm, PrivateKey};
-use zeroize::Zeroizing;
+use agent_core::transport::{Identity, NodeId, Trust};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, sync::Arc};
+use zeroize::{Zeroize, Zeroizing};
 
-/// One long-lived Host key. Cloning its SSH representation is necessary only
-/// when constructing the one server configuration shared by all connections.
-pub struct HostIdentity {
-    key: PrivateKey,
-    public: Ed25519PublicKey,
+use crate::remote_hosts::RemoteHostProfile;
+
+/// One atomic secure record; fixtures inject isolated storage at this boundary.
+pub trait CredentialStore: Send + Sync {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
+    fn save(&self, bytes: &[u8]) -> Result<(), String>;
 }
 
-impl HostIdentity {
-    pub fn public_key(&self) -> Ed25519PublicKey {
-        self.public
+pub struct KeyringStore(keyring::Entry);
+impl KeyringStore {
+    pub fn new(account: &str) -> Result<Self, String> {
+        keyring::Entry::new("app.bex.host", account)
+            .map(Self)
+            .map_err(|error| error.to_string())
     }
-    pub fn server_key(&self) -> PrivateKey {
-        self.key.clone()
-    }
-
-    /// In-memory construction also permits isolated fixture identities without
-    /// reading or changing the developer's real Keychain.
-    pub fn from_pkcs8(bytes: &[u8]) -> Result<Self, HostIdentityError> {
-        let key = russh::keys::pkcs8::decode_pkcs8(bytes, None)
-            .map_err(|_| HostIdentityError::InvalidKey)?;
-        if key.algorithm() != Algorithm::Ed25519 {
-            return Err(HostIdentityError::InvalidKey);
+}
+impl CredentialStore for KeyringStore {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+        match self.0.get_secret() {
+            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(error.to_string()),
         }
-        let public = key
-            .public_key()
-            .key_data()
-            .ed25519()
-            .ok_or(HostIdentityError::InvalidKey)?;
-        let public = Ed25519PublicKey::from_bytes(*public.as_ref());
-        Ok(Self { key, public })
     }
+    fn save(&self, bytes: &[u8]) -> Result<(), String> {
+        self.0.set_secret(bytes).map_err(|error| error.to_string())
+    }
+}
 
-    #[cfg(target_os = "macos")]
-    pub fn load_or_create(service: &str, account: &str) -> Result<Self, HostIdentityError> {
-        use security_framework::passwords::{get_generic_password, set_generic_password};
-        use security_framework_sys::base::errSecItemNotFound;
-        match get_generic_password(service, account) {
-            Ok(bytes) => Self::from_pkcs8(&Zeroizing::new(bytes)),
-            Err(error) if error.code() == errSecItemNotFound => {
-                let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
-                    .map_err(|_| HostIdentityError::Random)?;
-                let identity = Self::from_pkcs8(document.as_ref())?;
-                set_generic_password(service, account, document.as_ref())
-                    .map_err(|error| HostIdentityError::Keychain(error.code()))?;
-                Ok(identity)
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Record {
+    pub host_key: [u8; 32],
+    pub local_key: [u8; 32],
+    pub trust: Trust,
+    pub remotes: BTreeMap<NodeId, RemoteHostProfile>,
+}
+impl Drop for Record {
+    fn drop(&mut self) {
+        self.host_key.zeroize();
+        self.local_key.zeroize();
+    }
+}
+
+pub struct HostCredentials {
+    store: Arc<dyn CredentialStore>,
+    pub(crate) record: tokio::sync::Mutex<Record>,
+}
+impl HostCredentials {
+    pub fn load(store: Arc<dyn CredentialStore>) -> Result<Self, String> {
+        let record = match store.load()? {
+            Some(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|_| "saved Host credentials are invalid")?
             }
-            Err(error) => Err(HostIdentityError::Keychain(error.code())),
-        }
+            None => {
+                let local = Identity::generate();
+                let mut trust = Trust::default();
+                trust.allowed.insert(local.node_id());
+                let record = Record {
+                    host_key: Identity::generate().to_bytes(),
+                    local_key: local.to_bytes(),
+                    trust,
+                    remotes: BTreeMap::new(),
+                };
+                store.save(&Zeroizing::new(
+                    serde_json::to_vec(&record).map_err(|error| error.to_string())?,
+                ))?;
+                record
+            }
+        };
+        Ok(Self {
+            store,
+            record: tokio::sync::Mutex::new(record),
+        })
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum HostIdentityError {
-    #[error("stored Host identity is not a valid Ed25519 PKCS#8 key")]
-    InvalidKey,
-    #[error("secure random generation failed")]
-    Random,
-    #[error("macOS Keychain operation failed with status {0}")]
-    Keychain(i32),
+    pub async fn host_identity(&self) -> Identity {
+        Identity::from_bytes(self.record.lock().await.host_key)
+    }
+    pub async fn local_identity(&self) -> Identity {
+        Identity::from_bytes(self.record.lock().await.local_key)
+    }
+    /// Persist before publishing. Failed writes leave the live allowlist unchanged.
+    pub(crate) fn persist(&self, record: &Record) -> Result<(), String> {
+        self.store.save(&Zeroizing::new(
+            serde_json::to_vec(record).map_err(|error| error.to_string())?,
+        ))
+    }
 }

@@ -1,9 +1,10 @@
 mod executable;
+mod platform;
 mod schema;
 
 use std::{collections::HashSet, env, io, path::PathBuf, process::Stdio, time::Duration};
 
-use agent_core::peer::{EventDelivery, PeerError, RpcPeer};
+use agent_core::peer::{PeerError, PeerEvent, RpcPeer};
 use host_protocol::{RpcMessageKind, classify_message, raw_object};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -68,8 +69,6 @@ pub enum Error {
     ExecutableNotFound(PathBuf),
     #[error("failed to create private schema directory: {0}")]
     CreateSchemaDirectory(#[source] io::Error),
-    #[error("secure random generation failed while creating schema directory")]
-    SchemaRandom,
     #[error("failed to run Codex schema generator: {0}")]
     SchemaGenerator(#[source] io::Error),
     #[error("Codex schema generator exited unsuccessfully: {0}")]
@@ -162,12 +161,12 @@ impl CodexAppServer {
             stdin,
             config.request_timeout,
             1024,
-            EventDelivery::Unified,
         )?;
         let initialize_response = parse_initialize_response(
             &peer
                 .request_raw(&initialize_request(&config.client))
-                .await?,
+                .await?
+                .value,
         )?;
         peer.send_raw(r#"{"method":"initialized","params":{}}"#)
             .await?;
@@ -188,10 +187,8 @@ impl CodexAppServer {
         self.supported_methods.iter().map(String::as_str)
     }
 
-    /// Receives raw Codex-originated notification and request lines. The
-    /// trailing JSONL delimiter is removed by the reader, but the JSON text
-    /// itself is otherwise unchanged.
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+    /// Ordered Codex messages, response markers, and connection termination.
+    pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
         self.peer.subscribe()
     }
 
@@ -203,7 +200,7 @@ impl CodexAppServer {
         if let Some(method) = message.method() {
             ensure_public_method(method)?;
         }
-        self.peer.request_raw(line).await.map_err(Into::into)
+        Ok(self.peer.request_raw(line).await?.value)
     }
 
     /// Sends a raw Codex notification or response exactly as supplied after
@@ -332,7 +329,10 @@ impl From<PeerError> for Error {
             PeerError::RequestIdExhausted => {
                 Self::InvalidMessage("request ID space exhausted".into())
             }
-            PeerError::Remote { error } => Self::InvalidMessage(error),
+            PeerError::Remote { error, .. } => Self::InvalidMessage(error),
+            PeerError::InvalidResponse { method, reason, .. } => {
+                Self::UnexpectedResponse { method, reason }
+            }
         }
     }
 }

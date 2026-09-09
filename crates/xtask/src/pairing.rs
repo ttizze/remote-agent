@@ -4,9 +4,8 @@ use crate::Result;
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::Write,
     net::Ipv4Addr,
-    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -35,11 +34,14 @@ impl PairingServer {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
             while !stopped.load(Ordering::Acquire) {
                 let Some(request) = server.recv_timeout(Duration::from_millis(100))? else {
                     continue;
                 };
-                let result = route(&state, request.method(), request.url());
+                let result = route(&state, &runtime, request.method(), request.url());
                 let (status, body) = match result {
                     Ok(response) => response,
                     Err(_) => (503, b"Isolated Host is unavailable".to_vec()),
@@ -79,43 +81,43 @@ impl Drop for PairingServer {
     }
 }
 
-fn rpc(state: &Path, target: &str, method: &str, params: Value) -> Result<Value> {
-    let connection = UnixStream::connect(state.join("host.sock"))?;
-    connection.set_read_timeout(Some(Duration::from_secs(10)))?;
-    connection.set_write_timeout(Some(Duration::from_secs(10)))?;
-    let mut stream = BufReader::new(connection);
-    serde_json::to_writer(stream.get_mut(), &json!({"target":target}))?;
-    stream.get_mut().write_all(b"\n")?;
-    let mut line = String::new();
-    stream.read_line(&mut line)?;
-    if serde_json::from_str::<Value>(&line)? != json!({"ready":true}) {
-        return Err("Host IPC did not become ready".into());
-    }
-    serde_json::to_writer(
-        stream.get_mut(),
-        &json!({"id":1,"method":method,"params":params}),
-    )?;
-    stream.get_mut().write_all(b"\n")?;
-    loop {
-        line.clear();
-        if stream.read_line(&mut line)? == 0 {
-            return Err("Host closed fixture IPC".into());
-        }
-        let mut response: Value = serde_json::from_str(&line)?;
-        if response["id"] == 1 {
-            return response
-                .as_object_mut()
-                .and_then(|response| response.remove("result"))
-                .ok_or_else(|| "Host fixture request failed".into());
-        }
-    }
+fn rpc(
+    state: &Path,
+    runtime: &tokio::runtime::Runtime,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    use agent_core::transport::{Endpoint, Identity, Relays, Ticket};
+    let secret = zeroize::Zeroizing::new(fs::read(state.join("local.key"))?);
+    let secret: [u8; 32] = secret
+        .as_slice()
+        .try_into()
+        .map_err(|_| "invalid fixture identity")?;
+    let ticket: Ticket = fs::read_to_string(state.join("host.ticket"))?.parse()?;
+    runtime.block_on(async {
+        let endpoint = Endpoint::bind(Identity::from_bytes(secret), Relays::Disabled).await?;
+        let session = endpoint.connect(&ticket).await?;
+        let peer = session.open_peer(Duration::from_secs(10), 8).await?;
+        let response = peer.request::<_, Value>(method, &params).await;
+        let closed = peer.close().await;
+        session.close();
+        endpoint.close().await;
+        let response = response?;
+        closed?;
+        Ok(response.value)
+    })
 }
 
-fn route(state: &Path, method: &Method, path: &str) -> Result<(u16, Vec<u8>)> {
+fn route(
+    state: &Path,
+    runtime: &tokio::runtime::Runtime,
+    method: &Method,
+    path: &str,
+) -> Result<(u16, Vec<u8>)> {
     if method == &Method::Get && path == "/pairing" {
         return Ok((
             200,
-            serde_json::to_vec(&rpc(state, "manager", "host/invite", json!({}))?)?,
+            serde_json::to_vec(&rpc(state, runtime, "host/invite", json!({}))?)?,
         ));
     }
     if method != &Method::Post {
@@ -150,7 +152,7 @@ fn route(state: &Path, method: &Method, path: &str) -> Result<(u16, Vec<u8>)> {
         "/background-task" => {
             let response = rpc(
                 state,
-                "local",
+                runtime,
                 "host/thread/start",
                 json!({"cwd":root.join("project")}),
             )?;

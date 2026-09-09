@@ -25,6 +25,9 @@ struct Args {
     /// Existing 32-byte client identity secret. Never printed.
     #[arg(long, requires = "ticket")]
     identity_file: Option<PathBuf>,
+    /// One-use invitation for first pairing with this Host.
+    #[arg(long, requires = "ticket")]
+    invitation: Option<uuid::Uuid>,
     /// Disable relays and public address lookup for isolated local fixtures.
     #[arg(long, requires = "ticket")]
     no_relay: bool,
@@ -104,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ticket: Ticket = args.ticket.expect("connection required").parse()?;
         let session = endpoint.connect(&ticket).await?;
         endpoint_to_close = Some(endpoint);
-        Store::connect(session, Snapshot::default()).await?
+        Store::connect(session, Snapshot::default(), args.invitation).await?
     };
     match args.command {
         Command::List {

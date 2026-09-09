@@ -48,8 +48,6 @@
               cargo-ndk
               lefthook
               flyctl
-              beamPackages.elixir
-              beamPackages.elixir-ls
               kotlin-language-server
               nodejs_22
               androidSdk

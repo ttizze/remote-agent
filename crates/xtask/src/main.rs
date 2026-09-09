@@ -7,7 +7,7 @@ mod quality_background;
 use std::process::ExitCode;
 use xtask::{Result, repository_root};
 
-const USAGE: &str = "Usage: cargo xtask <command>\n\nCommands:\n  build-host-macos       Build and verify the signed Host executable\n  build-desktop-macos    Build and verify target/Bex.app\n  ios-e2e [TEST ...]     Run isolated Simulator E2E tests (all by default)\n  relay-e2e             Run the real Phoenix transport and encrypted Host tests\n  relay-secrets         Emit Fly secrets using REMOTE_AGENT_RELAY_TOKEN\n  quality [LANGUAGE]    Check rust, elixir, kotlin, swift (all by default)\n  quality-worker       Drain the post-commit quality queue\n  quality-status [--wait] Report quality for HEAD and worktree cleanliness\n";
+const USAGE: &str = "Usage: cargo xtask <command>\n\nCommands:\n  build-host-macos       Build and verify the signed Host executable\n  build-desktop-macos    Build and verify target/Bex.app\n  ios-e2e [TEST ...]     Run isolated Simulator E2E tests (all by default)\n  iroh-e2e              Run isolated iroh Host integration tests\n  quality [LANGUAGE]    Check rust, kotlin, swift (all by default)\n  quality-worker       Drain the post-commit quality queue\n  quality-status [--wait] Report quality for HEAD and worktree cleanliness\n";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -43,45 +43,19 @@ async fn execute(arguments: &[String]) -> Result<()> {
         ("build-host-macos", []) => macos::build_host().await,
         ("build-desktop-macos", []) => macos::build_desktop().await,
         ("ios-e2e", tests) => ios::run(tests).await,
-        ("relay-secrets", []) => relay_secrets(),
         ("quality", []) => quality::run(None).await,
         ("quality", [language]) => quality::run(Some(language)).await,
-        ("relay-e2e", []) => {
+        ("iroh-e2e", []) => {
             command::run(command::cargo().args([
                 "test",
                 "--locked",
                 "--package",
-                "relay-transport",
-                "--package",
                 "xtask",
+                "--test",
+                "iroh_host",
             ]))
             .await
         }
         _ => Err(USAGE.into()),
     }
-}
-
-fn relay_secrets() -> Result<()> {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    use ring::rand::SecureRandom;
-    use std::io::Write;
-    use zeroize::Zeroizing;
-
-    let token = Zeroizing::new(std::env::var("REMOTE_AGENT_RELAY_TOKEN")?);
-    if token.is_empty() || token.len() > 512 || token.contains(['\r', '\n']) {
-        return Err("Invalid relay token".into());
-    }
-    let mut secret = Zeroizing::new([0u8; 64]);
-    ring::rand::SystemRandom::new()
-        .fill(secret.as_mut())
-        .map_err(|_| "Could not generate a secret key")?;
-    let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(secret.as_ref()));
-    let mut output = std::io::stdout().lock();
-    writeln!(
-        output,
-        "REMOTE_AGENT_RELAY_TOKEN={}\nSECRET_KEY_BASE={}",
-        token.as_str(),
-        encoded.as_str()
-    )?;
-    Ok(())
 }

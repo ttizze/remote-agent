@@ -72,10 +72,15 @@ impl Store {
     pub async fn connect(
         session: crate::transport::Session,
         snapshot: Snapshot,
+        invitation: Option<uuid::Uuid>,
     ) -> Result<Self, crate::transport::TransportError> {
         let peer = session
             .open_peer(std::time::Duration::from_secs(30), 64)
             .await?;
+        if let Some(invitation) = invitation {
+            peer.request::<_, <Pair as Operation>::Output>(Pair::METHOD, &Pair { invitation })
+                .await?;
+        }
         let mut store = Self::new(peer, snapshot);
         store.session = Some(session);
         Ok(store)

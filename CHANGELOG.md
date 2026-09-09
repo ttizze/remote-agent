@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- Add a fresh typed `agent-core` client, immutable Snapshot/reducer/Store, and headless `agent-cli` against the expanded 87-case corpus. Replace peer delivery modes and request variants with one ordered event stream and typed/raw requests. Add iroh endpoints, native tickets, expiring one-use authorization data and acknowledged stream shutdown. Verify the actual CLI over isolated iroh sessions for listing, sending and numeric/string approvals. Native UI and daemon callers are intentionally replaced in subsequent migration stages.
+- Move the daemon and fixture servers to authenticated iroh sessions and the common peer. Persist Host/local identities, single-use invitations and NodeId authorization atomically through keyring; restrict management to the local identity and disconnect revoked clients. Use typed core models for project lists and history, preserve per-client approval IDs, and transfer blobs on session-bound streams. Remove the SSH/Phoenix server and mobile transport crates. Add `cargo xtask iroh-e2e`; preserve worktrees, files, accounts, dictation and installed-Codex schema adaptation.
 
-- Consolidate desktop, mobile, App Server and fixture JSONL request correlation in `agent-core`. Keep local-socket adapters in desktop and SSH/Phoenix adapters in mobile-client, outside the shared core. Share generic-stream file transfers, use clap for daemon arguments, and normalize outer JSON object formatting when rewriting RPC IDs while preserving nested raw values.
+- Add a fresh typed `agent-core` client, immutable Snapshot/reducer/Store, and headless `agent-cli` against the expanded 87-case corpus. Replace peer delivery modes and request variants with one ordered event stream and typed/raw requests. Add iroh endpoints, native tickets, expiring one-use authorization data and acknowledged stream shutdown. Verify the actual CLI over isolated iroh sessions for listing, sending and numeric/string approvals. Native UI callers are intentionally replaced in subsequent migration stages.
+
+- Consolidate desktop, mobile, App Server and fixture JSONL request correlation in `agent-core`. Share generic-stream file transfers, use clap for daemon arguments, and normalize outer JSON object formatting when rewriting RPC IDs while preserving nested raw values.
 
 - Refresh the iPhone composer's file and line counts during active commands, tools, and file edits instead of waiting for the turn to finish. Coalesce activity notifications and discard canceled review responses. Verify live worktree edits on iOS Simulator while the turn remains running.
 

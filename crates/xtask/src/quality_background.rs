@@ -172,35 +172,21 @@ async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
     )
     .await?;
     let result = tokio::time::timeout(Duration::from_secs(3600), async {
-        let mut result = Ok(());
-        for (cwd, args) in [
-            (
-                checkout.join("apps/server"),
-                ["mix", "deps.get", "--check-locked"],
-            ),
-            (checkout.clone(), ["cargo", "xtask", "quality"]),
-        ] {
-            let check = command::run(
-                Command::new("nix")
-                    .arg("develop")
-                    .arg(&checkout)
-                    .arg("--command")
-                    .args(args)
-                    .current_dir(cwd)
-                    .env_remove("CARGO")
-                    .env_remove("RUSTC")
-                    .env_remove("RUSTDOC")
-                    .env("CARGO_TARGET_DIR", state.join("cargo-target"))
-                    .env("MIX_DEPS_PATH", state.join("mix-deps"))
-                    .env("MIX_BUILD_PATH", state.join("mix-build"))
-                    .stdin(std::process::Stdio::null())
-                    .stdout(file.try_clone()?)
-                    .stderr(file.try_clone()?),
-            )
-            .await;
-            result = result.and(check);
-        }
-        result
+        command::run(
+            Command::new("nix")
+                .arg("develop")
+                .arg(&checkout)
+                .args(["--command", "cargo", "xtask", "quality"])
+                .current_dir(&checkout)
+                .env_remove("CARGO")
+                .env_remove("RUSTC")
+                .env_remove("RUSTDOC")
+                .env("CARGO_TARGET_DIR", state.join("cargo-target"))
+                .stdin(std::process::Stdio::null())
+                .stdout(file.try_clone()?)
+                .stderr(file.try_clone()?),
+        )
+        .await
     })
     .await;
     let cleanup = command::run(

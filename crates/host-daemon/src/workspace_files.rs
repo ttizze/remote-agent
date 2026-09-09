@@ -2,12 +2,12 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+use agent_core::models::{FileContent, FileEntry, FileList};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
     digest::{self, Context, SHA256},
@@ -86,15 +86,26 @@ impl WorkspaceFiles {
                         break;
                     }
                     let metadata = entry.metadata().map_err(io_error)?;
-                    entries.push(json!({"name":entry.file_name().to_string_lossy(),"path":entry.path(),"directory":metadata.is_dir(),"size":metadata.len()}));
+                    entries.push(FileEntry {
+                        name: entry.file_name().to_string_lossy().into_owned(),
+                        path: entry
+                            .path()
+                            .to_str()
+                            .ok_or("file path is not UTF-8")?
+                            .into(),
+                        directory: metadata.is_dir(),
+                        size: metadata.len(),
+                        extra: Default::default(),
+                    });
                 }
-                entries.sort_by(|a, b| {
-                    b["directory"]
-                        .as_bool()
-                        .cmp(&a["directory"].as_bool())
-                        .then(a["name"].as_str().cmp(&b["name"].as_str()))
-                });
-                Ok(json!({"path":path,"entries":entries,"truncated":truncated}))
+                entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.name.cmp(&b.name)));
+                serde_json::to_value(FileList {
+                    path: path.to_str().ok_or("directory path is not UTF-8")?.into(),
+                    entries,
+                    truncated,
+                    extra: Default::default(),
+                })
+                .map_err(io_error)
             }
             "host/file/read" => {
                 #[derive(Deserialize)]
@@ -135,29 +146,27 @@ impl WorkspaceFiles {
                 if text.len() as u64 + if bom { 3 } else { 0 } > EDIT_LIMIT {
                     return Err("file exceeds editor size limit".into());
                 }
-                let parent = path.parent().ok_or("file has no parent directory")?;
-                let mut output = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
-                let permissions = fs::metadata(&path).map_err(io_error)?.permissions();
-                output
-                    .as_file()
-                    .set_permissions(permissions)
-                    .map_err(io_error)?;
-                if bom {
-                    output.write_all(&[0xef, 0xbb, 0xbf]).map_err(io_error)?;
-                }
-                output.write_all(text.as_bytes()).map_err(io_error)?;
-                output.as_file().sync_all().map_err(io_error)?;
-                // Codex and other editors don't share our mutex. Recheck the
-                // external file immediately before atomic replacement.
-                if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision {
-                    return Err("revision_conflict: file changed while saving".into());
-                }
-                output
-                    .persist(&path)
-                    .map_err(|error| io_error(error.error))?;
-                File::open(parent)
-                    .and_then(|file| file.sync_all())
-                    .map_err(io_error)?;
+                atomicwrites::AtomicFile::new(&path, atomicwrites::AllowOverwrite)
+                    .write_with_options(
+                        |output| -> Result<(), String> {
+                            output
+                                .set_permissions(
+                                    fs::metadata(&path).map_err(io_error)?.permissions(),
+                                )
+                                .map_err(io_error)?;
+                            if bom {
+                                output.write_all(&[0xef, 0xbb, 0xbf]).map_err(io_error)?;
+                            }
+                            output.write_all(text.as_bytes()).map_err(io_error)?;
+                            // Other editors don't share our mutex; recheck before replacement.
+                            if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision {
+                                return Err("revision_conflict: file changed while saving".into());
+                            }
+                            Ok(())
+                        },
+                        crate::platform::private_file_options(),
+                    )
+                    .map_err(|error| error.to_string())?;
                 read_editable(&path)
             }
             "host/blob/upload" => {
@@ -275,10 +284,6 @@ impl WorkspaceFiles {
                     file_name,
                 } => {
                     let output = tempfile::NamedTempFile::new_in(&directory).map_err(io_error)?;
-                    output
-                        .as_file()
-                        .set_permissions(fs::Permissions::from_mode(0o600))
-                        .map_err(io_error)?;
                     let async_file = output.reopen().map_err(io_error)?;
                     let mut writer = tokio::fs::File::from_std(async_file);
                     let mut digest = Context::new(&SHA256);
@@ -404,9 +409,16 @@ fn read_editable(path: &Path) -> Result<Value, String> {
     if text.contains('\0') {
         return Err("binary file; download it instead".into());
     }
-    Ok(
-        json!({"path":path,"revision":hash(&bytes),"text":text,"bom":bom,"lineEnding":line_ending(text),"size":bytes.len()}),
-    )
+    serde_json::to_value(FileContent {
+        path: path.to_str().ok_or("file path is not UTF-8")?.into(),
+        revision: hash(&bytes),
+        text: text.into(),
+        bom,
+        line_ending: line_ending(text).into(),
+        size: bytes.len() as u64,
+        extra: Default::default(),
+    })
+    .map_err(io_error)
 }
 fn line_ending(text: &str) -> &'static str {
     let crlf = text

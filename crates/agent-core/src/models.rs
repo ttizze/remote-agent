@@ -22,8 +22,12 @@ pub struct Thread {
         with = "serde_with::rust::double_option"
     )]
     pub history_cursor: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
+    pub project_id: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(flatten)]
@@ -98,7 +102,7 @@ pub struct Item {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<String>,
+    pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     #[serde(flatten)]
@@ -127,7 +131,13 @@ pub struct ThreadList {
 pub struct Project {
     pub id: String,
     pub name: String,
-    pub roots: Vec<String>,
+    pub roots: Vec<ProjectRoot>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectRoot {
+    pub path: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

@@ -1,8 +1,0 @@
-*
-!Dockerfile
-!mix.exs
-!mix.lock
-!config/
-!config/*.exs
-!lib/
-!lib/**

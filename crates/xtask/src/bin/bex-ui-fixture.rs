@@ -1,19 +1,16 @@
+use agent_core::transport::{Endpoint, Relays};
 use host_daemon::{
-    CodexRpcService, DesktopProjectStore, DeviceAuthenticationState, HostIdentity, HostRuntime,
-    LocalListener, RemoteCredentialStore, RemoteHosts,
+    CodexRpcService, CredentialStore, DesktopProjectStore, HostCredentials, HostRuntime,
 };
-use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
-#[path = "../../../../tests/relay-e2e/phoenix.rs"]
-mod phoenix;
 #[derive(Default)]
 struct Memory(Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>);
-impl RemoteCredentialStore for Memory {
+impl CredentialStore for Memory {
     fn load(&self) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
         Ok(self.0.lock().unwrap().clone())
     }
@@ -52,8 +49,22 @@ async fn main() {
         .status()
         .unwrap();
     let state = directory.join("state");
-    let listener = LocalListener::bind(&state).unwrap();
-    let (mut relay, endpoint) = phoenix::start().await;
+    std::fs::create_dir_all(&state).unwrap();
+    let credentials = Arc::new(HostCredentials::load(Arc::new(Memory::default())).unwrap());
+    let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
+        .await
+        .unwrap();
+    std::fs::write(state.join("host.ticket"), endpoint.ticket().to_string()).unwrap();
+    std::fs::write(
+        state.join("local.key"),
+        credentials.local_identity().await.to_bytes(),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        state.join("local.key"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
     let fixture = PathBuf::from(
         std::env::args_os()
             .nth(2)
@@ -87,20 +98,18 @@ async fn main() {
         .await
         .unwrap();
     service.start();
-    let key = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
     let runtime = Arc::new(
         HostRuntime::new(
             service,
-            HostIdentity::from_pkcs8(key.as_ref()).unwrap(),
-            DeviceAuthenticationState::load(state.join("devices.json")).unwrap(),
-            "検証 Mac".into(),
             endpoint,
-            RemoteHosts::load(Arc::new(Memory::default())).unwrap(),
+            credentials,
+            "検証 Host".into(),
+            Relays::Disabled,
         )
-        .unwrap(),
+        .await,
     );
     let stop = CancellationToken::new();
-    let running = tokio::spawn(runtime.run(listener, stop.clone()));
+    let running = tokio::spawn(runtime.run(stop.clone()));
     println!("UI fixture ready: {}", state.display());
     tokio::signal::ctrl_c().await.unwrap();
     stop.cancel();
@@ -111,6 +120,4 @@ async fn main() {
         .shutdown()
         .await
         .unwrap();
-    relay.kill().await.unwrap();
-    relay.wait().await.unwrap();
 }
