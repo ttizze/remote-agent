@@ -3,6 +3,7 @@ mod browser;
 mod diff;
 mod platform;
 mod terminal;
+use futures_util::FutureExt;
 use gpui_kit::{
     component::{Root, Theme, ThemeMode},
     *,
@@ -10,6 +11,7 @@ use gpui_kit::{
 #[derive(Clone)]
 pub(crate) struct Runtime {
     pub(crate) handle: tokio::runtime::Handle,
+    pub(crate) connections: std::sync::Arc<platform::Connections>,
     pub(crate) closing: tokio_util::task::TaskTracker,
 }
 impl Global for Runtime {}
@@ -47,7 +49,26 @@ fn main() {
         .with_assets(DesktopAssets)
         .with_http_client(std::sync::Arc::new(gpui_http::ReqwestClient::new()))
         .run(move |cx| {
-            cx.set_global(Runtime { handle, closing });
+            cx.set_global(Runtime {
+                handle,
+                closing,
+                connections: std::sync::Arc::new(platform::Connections::default()),
+            });
+            cx.on_app_quit(|cx| {
+                let runtime = cx.global::<Runtime>().clone();
+                async move {
+                    runtime.closing.close();
+                    let handle = runtime.handle.clone();
+                    let _ = handle
+                        .spawn(async move {
+                            runtime.closing.wait().await;
+                            runtime.connections.close().await;
+                        })
+                        .await;
+                }
+                .boxed_local()
+            })
+            .detach();
             gpui_kit::init(cx);
             cx.bind_keys([KeyBinding::new(
                 "ctrl-v",

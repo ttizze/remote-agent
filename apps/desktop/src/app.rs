@@ -172,6 +172,7 @@ pub(crate) struct Desktop {
     runtime: Runtime,
     updates: async_channel::Sender<Update>,
     persistence: Option<tokio::sync::watch::Sender<Arc<Snapshot>>>,
+    persistence_task: Option<tokio::task::JoinHandle<()>>,
     epoch: u64,
     connecting: bool,
     remote: Option<RemoteHost>,
@@ -229,21 +230,37 @@ pub(crate) struct Desktop {
 }
 impl Drop for Desktop {
     fn drop(&mut self) {
-        if let Some(store) = self.store.take() {
-            if let Some(persistence) = self.persistence.take() {
-                persistence.send_replace(store.snapshot());
-            }
-            self.runtime.closing.spawn_on(
-                async move {
-                    let _ = store.close().await;
-                },
-                &self.runtime.handle,
-            );
-        }
+        self.close();
     }
 }
 impl Desktop {
+    fn close(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let store = self.store.take()?;
+        let persistence = self.persistence.take();
+        let persistence_task = self.persistence_task.take();
+        Some(self.runtime.closing.spawn_on(
+            async move {
+                let _ = store.close().await;
+                if let Some(persistence) = persistence {
+                    persistence.send_replace(store.snapshot());
+                }
+                if let Some(task) = persistence_task {
+                    let _ = task.await;
+                }
+            },
+            &self.runtime.handle,
+        ))
+    }
     pub(crate) fn new(mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.on_app_quit(|view, _| {
+            // GPUI allows only 200 ms for asynchronous quit futures. Finish the
+            // tracked close and disk flush before returning from the callback.
+            if let Some(close) = view.close() {
+                let _ = view.runtime.handle.block_on(close);
+            }
+            async {}
+        })
+        .detach();
         let (remote, initial_cwd, side_chat_mode) = match mode {
             Mode::Main => (None, None, false),
             Mode::SideChat { remote, cwd } => (remote, Some(cwd), true),
@@ -416,6 +433,7 @@ impl Desktop {
             runtime: cx.global::<Runtime>().clone(),
             updates,
             persistence: None,
+            persistence_task: None,
             epoch: 0,
             connecting: false,
             remote,
@@ -486,6 +504,7 @@ impl Desktop {
         let remote = self.remote.clone();
         let side = self.side_chat_mode;
         let updates = self.updates.clone();
+        let connections = self.runtime.connections.clone();
         self.runtime.handle.spawn(async move {
             let result = async {
                 let host = if let Some(remote) = &remote {
@@ -510,11 +529,12 @@ impl Desktop {
                     }
                     Err(error) => return Err(error.to_string()),
                 };
-                let store = platform::connect(
-                    remote.as_ref().map(|remote| remote.ticket.as_str()),
-                    snapshot,
-                )
-                .await?;
+                let store = connections
+                    .connect(
+                        remote.as_ref().map(|remote| remote.ticket.as_str()),
+                        snapshot,
+                    )
+                    .await?;
                 Ok::<_, String>((Arc::new(store), path))
             }
             .await;
@@ -606,7 +626,7 @@ impl Desktop {
                             tokio::sync::watch::channel(self.snapshot.clone());
                         self.persistence = Some(send);
                         let updates = self.updates.clone();
-                        self.runtime.closing.spawn_on(
+                        self.persistence_task = Some(self.runtime.closing.spawn_on(
                             async move {
                                 while receive.changed().await.is_ok() {
                                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -627,7 +647,7 @@ impl Desktop {
                                 }
                             },
                             &self.runtime.handle,
-                        );
+                        ));
                         self.dispatch(Intent::ListThreads((*self.snapshot.list_query).clone()));
                         self.dispatch(Intent::LoadModels);
                         self.dispatch(Intent::ReadWorktreeSettings);
@@ -1209,17 +1229,7 @@ impl Desktop {
         }
         self.cancel_recording();
         self.dictation = None;
-        if let Some(store) = self.store.take() {
-            if let Some(persistence) = self.persistence.take() {
-                persistence.send_replace(store.snapshot());
-            }
-            self.runtime.closing.spawn_on(
-                async move {
-                    let _ = store.close().await;
-                },
-                &self.runtime.handle,
-            );
-        }
+        self.close();
         self.remote = remote;
         self.snapshot = Arc::default();
         self.composer_pending = None;

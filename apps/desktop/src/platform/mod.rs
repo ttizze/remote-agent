@@ -63,27 +63,53 @@ async fn local_identity(directory: &Path) -> Result<Identity, String> {
     .map_err(|error| error.to_string())?
 }
 
-/// Each view owns its endpoint and session through Store. The local identity is
-/// provisioned only by the daemon, using the same secure-record implementation.
-pub(crate) async fn connect(remote: Option<&str>, snapshot: Snapshot) -> Result<Store, String> {
-    let directory = state_dir()?;
-    if let Some(remote) = remote {
-        let identity = local_identity(&directory).await?;
-        let ticket: Ticket = remote
-            .parse()
-            .map_err(|error: agent_core::transport::TransportError| error.to_string())?;
-        let endpoint = Endpoint::bind(identity, Relays::Default)
+/// One identity and endpoint per app. Views own independent sessions.
+#[derive(Default)]
+pub(crate) struct Connections {
+    endpoint: tokio::sync::OnceCell<Endpoint>,
+    startup: tokio::sync::Mutex<()>,
+}
+impl Connections {
+    pub(crate) async fn connect(
+        &self,
+        remote: Option<&str>,
+        snapshot: Snapshot,
+    ) -> Result<Store, String> {
+        // Keep daemon provisioning and identity loading in the same critical section.
+        let startup = self.startup.lock().await;
+        let directory = state_dir()?;
+        let ticket = if let Some(remote) = remote {
+            remote
+                .parse::<Ticket>()
+                .map_err(|error| error.to_string())?
+        } else {
+            local_ticket(&directory).await?
+        };
+        let endpoint = self
+            .endpoint
+            .get_or_try_init(|| async {
+                Endpoint::bind(local_identity(&directory).await?, Relays::Default)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
+        drop(startup);
+        Store::connect(endpoint, &ticket, snapshot, None)
             .await
-            .map_err(|error| error.to_string())?;
-        return Store::connect(&endpoint, &ticket, snapshot, None)
-            .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| error.to_string())
     }
+    pub(crate) async fn close(&self) {
+        if let Some(endpoint) = self.endpoint.get() {
+            endpoint.close().await;
+        }
+    }
+}
 
+async fn local_ticket(directory: &Path) -> Result<Ticket, String> {
     let ticket_path = directory.join("host.ticket");
     // The daemon's file lock distinguishes a running instance from a stale
     // public ticket. Starting a view never re-provisions credentials.
-    host_daemon::platform::create_state_directory(&directory).map_err(|error| error.to_string())?;
+    host_daemon::platform::create_state_directory(directory).map_err(|error| error.to_string())?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -103,7 +129,7 @@ pub(crate) async fn connect(remote: Option<&str>, snapshot: Snapshot) -> Result<
         .and_then(|metadata| metadata.modified())
         .ok();
     let mut child = if start {
-        Some(start_host(&directory)?)
+        Some(start_host(directory)?)
     } else {
         None
     };
@@ -142,14 +168,7 @@ pub(crate) async fn connect(remote: Option<&str>, snapshot: Snapshot) -> Result<
             let _ = child.wait();
         });
     }
-    let ticket = ready?;
-    let identity = local_identity(&directory).await?;
-    let endpoint = Endpoint::bind(identity, Relays::Disabled)
-        .await
-        .map_err(|error| error.to_string())?;
-    Store::connect(&endpoint, &ticket, snapshot, None)
-        .await
-        .map_err(|error| error.to_string())
+    ready
 }
 
 fn start_host(directory: &Path) -> Result<std::process::Child, String> {
