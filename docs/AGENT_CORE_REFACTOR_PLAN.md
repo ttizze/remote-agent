@@ -2,16 +2,17 @@
 
 ## ステータス
 
-- 対象: Mac (GPUI)、iOS (SwiftUI)、Android (Compose)、host-daemon、mobile-client、relay-transport、Phoenix リレー(`apps/server`)、xtask
-- 目的: エージェント操作と会話状態の実装を Rust の 1 crate に一本化し、ミュータブルな状態の所在を各プロセス 1 箇所に限定する。自作している汎用処理を標準機能とライブラリに置き換える。通信層は iroh に載せ替え、SSH と自前リレーを廃止する
-- 成功条件: 各 PR が単独で行数マイナスまたはゼロであること。完了時点で Kotlin common、手書き FFI、desktop の `serde_json::Value` 操作、重複する JSON-RPC peer、SSH、Phoenix リレーが消えていること
-- ADR: 本計画は ADR 0001 の「Kotlin owns mobile reconciliation, cache and presentation state」と「embedded SSH runs inside that route」「Phoenix」を覆す。着手時に superseding ADR を追加する。ADR 0002(同時制御の許可)は変更しない
+- 前提: 未リリース。後方互換は考慮しない。「常に動く状態を保つ」より「理想の構造に到達する」を優先する
+- 対象プラットフォーム: デスクトップは macOS、Linux、Windows(GPUI)。モバイルは iOS(SwiftUI)と Android(Compose)。UI は 3 本で確定
+- 目的: エージェント操作と会話状態を Rust の 1 crate(`agent-core`)に一本化し、ミュータブルな状態の所在を各プロセス 1 箇所に限定する。通信は iroh に統一し、SSH、Phoenix リレー、unix socket を廃止する。自作している汎用処理を標準機能とライブラリに置き換える
+- 唯一の規律: `agent-core` のテストとヘッドレス CLI クライアントが常に通ること。UI が一時的に壊れることは許容する
+- ADR: ADR 0001 の「Kotlin owns mobile reconciliation」「embedded SSH」「Phoenix」「owner-only Unix socket」を覆す superseding ADR を追加する。「daemon は別プロセスで UI を閉じても Codex を止めない」「Codex のスキーマ適応(ADR 0004)」「同時制御の許可(ADR 0002)」は維持する
 
 ## 進捗
 
-- 完了: SSH 接続を `relay-transport::ssh` に、RPC とファイル転送を `agent-core::client` に移動。daemon と既存のネイティブ境界は新実装を参照し、ビルドが通っている
-- 方針変更: `relay-transport::ssh` はこれ以上磨かない。iroh 採用時に削除する。`agent-core::client` の peer は汎用ストリーム上に置き、transport と切り離す
-- 未着手: iroh の検証、モバイルの手書き FFI 置き換え
+- 完了: SSH 接続を `relay-transport::ssh` に、RPC とファイル転送を `agent-core::client` に移動。ビルドは通っている
+- 方針変更: `relay-transport::ssh` は以後触らず、iroh 採用時に削除する。`agent-core::client` の peer は汎用ストリーム上に置く
+- 未着手: iroh 検証、`Snapshot` / `Store`、UniFFI、Linux / Windows ビルド
 
 ## 現状
 
@@ -33,190 +34,173 @@
 
 - リクエスト組み立てと応答検証: desktop の `app.rs`、Kotlin の `CommonCodexClient.kt`、Swift の `CodexModelSettings.swift` の 3 箇所。
 - 会話状態の reducer: desktop の `conversation.rs`(Value ベース)と Kotlin の `ConversationTransitions.kt` + `AppStateReducer.kt`(型付き)の 2 実装。
-- JSON-RPC のリクエスト ID 対応付け: `codex-app-server/peer.rs`、`mobile-client/rpc.rs`、`desktop/rpc.rs`、`xtask/fixture/server.rs` の 4 実装、合計約 1,900 行。desktop 版だけ std スレッド + `Mutex` + 同期 `UnixStream` で、他は tokio。
+- JSON-RPC のリクエスト ID 対応付け: `codex-app-server/peer.rs`、`mobile-client/rpc.rs`、`desktop/rpc.rs`、`xtask/fixture/server.rs` の 4 実装、合計約 1,900 行。
+- クライアント経路: Mac UI は unix socket、スマホは relay + SSH で、daemon の `serve_local` が Local / Manager / Remote の 3 分岐を持つ。
 - イベント種別の判定: 6 ファイルに分散。
 - 永続化: Kotlin の `MobileStateCodec` のみが独自形式で保持。
 
 ### 根本原因
 
-1. Rust 側に型付きモデルがない。desktop は `["key"]` 参照が 503 箇所、`text(x, "key")` が 75 箇所あり、検証と変換を手書きしている。daemon の `codex_rpc/service.rs` も 103 箇所ある。
-2. KMP は UI を共有していない。iOS は SwiftUI、Android は Compose なので、Kotlin common は純粋な「状態と調整」層である。状態を Rust に置いた時点で存在理由がなくなる。
-3. 状態を変更できる場所が層ごとにある。desktop の `&mut Value` 操作、Kotlin の controller、Swift の `ObservableObject` がそれぞれ状態を持ち、互いの整合を都度取っている。
-4. 通信を SSH と Phoenix で組んだ時点で、リレー、鍵交換、ペアリング、多重化が全て自前になった。SSH 接続あたり RPC subsystem が 1 つという制約も、常にリレー経由になる遅延も、回線切替時の再接続競合もここから来ている。
+1. Rust 側に型付きモデルがない。desktop は `["key"]` 参照が 503 箇所、daemon の `codex_rpc/service.rs` も 103 箇所あり、検証と変換を手書きしている。
+2. KMP は UI を共有していない。Kotlin common は純粋な「状態と調整」層で、状態を Rust に置いた時点で存在理由がなくなる。
+3. 状態を変更できる場所が層ごとにある。desktop の `&mut Value`、Kotlin の controller、Swift の `ObservableObject` がそれぞれ状態を持つ。
+4. 通信を SSH と Phoenix で組んだ時点で、リレー、鍵交換、ペアリング、多重化が全て自前になった。ローカルとリモートで経路が違うため、daemon の受け口も 2 系統ある。
+5. macOS 固有コード(`security-framework`、`platform.rs` の osascript、`Dictation.swift`)が散在しており、Linux と Windows に持っていけない。
 
 ## 目指す形
 
+### 全体像
+
+```
+Codex app-server ──stdio JSON-RPC──▶ host-daemon ◀──iroh (JSONL JSON-RPC)──┬── desktop (GPUI, mac/linux/win)
+                                        │                                  ├── iOS (SwiftUI)
+                                        └── SessionRouter                  └── Android (Compose)
+                                                                            全クライアントが agent-core::Store を持つ
+```
+
+- プロトコルは全経路で JSON-RPC の JSONL 1 種類。Codex 上流、daemon、全クライアントで同じ peer を使う。
+- クライアント経路は iroh 1 種類。同じマシン上の desktop もループバックで iroh 接続し、daemon 起動時に共有する鍵で自動ペアリングする。unix socket と `LocalHeader` の 3 分岐は消える。管理 API(招待の発行、リモート Host の登録)はローカル端末の NodeId にだけ許可する。
+- 状態の正本はクライアント側の `agent-core::Store`。UI は `Arc<Snapshot>` を描き、`store.dispatch(intent)` を呼ぶだけ。
+
 ### agent-core crate
 
-Rust に `agent-core` を 1 つ作り、状態の正本にする。中身は次の 4 つ。
+1. **型付きモデル。** serde 構造体に `#[serde(flatten)] extra: Map<String, Value>` を付けて未知フィールドを保持する。応答検証はデシリアライズに置き換える。daemon も同じモデルを使う。
+2. **`agent-core::client`。** `AsyncRead + AsyncWrite` 上の JSONL peer、操作、ファイル転送。transport を知らない。操作は「メソッド名、params 型、result 型」の対応として定義する。
+3. **`agent-core::transport`。** iroh エンドポイントの生成、ペアリング ticket、NodeId allowlist、ストリームの開閉。ここだけが iroh を知る。
+4. **`Snapshot`。** 会話、スレッド一覧、モデル、保留リクエスト、ドラフトを持つ純粋なデータ型。`Clone + PartialEq + Serialize + Deserialize` を derive し、`&mut self` メソッドを持たない。永続化は `serde_json::to_vec(&snapshot)` で完結し、バージョン番号も移行コードも持たない。
+5. **`reduce(&Snapshot, Event) -> (Snapshot, Vec<Effect>)`。** 純粋関数で I/O をしない。テストはフィクスチャ corpus で行う。
+6. **`Store`。** `RwLock<Arc<Snapshot>>` を 1 つだけ持ち、`apply(event)` で reduce を呼んで差し替え、Effect を実行する。ソケット、タイマー、購読者はここに閉じ込める。agent-core で `&mut self` を持つ型は `Store` だけ。
+7. **ヘッドレス CLI クライアント(`agent-cli`)。** 接続、スレッド一覧、送信、承認応答ができるだけの最小クライアント。UI が壊れている期間の結合テストと、Linux / Windows での daemon 検証に使う。
 
-1. **型付きモデル。** serde 構造体に `#[serde(flatten)] extra: Map<String, Value>` を付けて未知フィールドを保持する。応答検証はデシリアライズに置き換え、手書きの Value 検査を消す。daemon もクライアントと同じプロトコルを話すので、同じモデルを使う。
-2. **`agent-core::client`。** JSONL peer と操作、ファイル転送。peer は `AsyncRead + AsyncWrite` を受ける tokio ベースの 1 実装のみで、transport を知らない。Codex app-server への stdio 上流、ローカルの unix socket、iroh ストリームの全てで同じ peer を使う。操作は「メソッド名、params 型、result 型」の対応として定義し、desktop、mobile、daemon、xtask の fixture サーバが同じ実装を使う。
-3. **会話ストア。** スナップショット、reducer、履歴マージ、保留リクエスト、ドラフト、永続化をここに置く。
-4. **公開面は 3 種類だけ。** 不変スナップショットの取得、intent の送信、イベントの購読。
-
-### 不変性の設計
-
-「ミュータブルをゼロにする」ではなく「ミュータブルな場所を各プロセスに 1 箇所だけにする」。データとリソースを同じ型に入れないことが原則である。
-
-agent-core は次の 3 つを分けて持つ。
-
-1. **`Snapshot`。** 会話、スレッド一覧、モデル、保留リクエスト、ドラフトを持つ純粋なデータ型。`Clone + PartialEq + Serialize + Deserialize` を derive し、`&mut self` メソッドを持たない。永続化は `serde_json::to_vec(&snapshot)` で完結する。
-2. **`reduce(&Snapshot, Event) -> (Snapshot, Vec<Effect>)`。** 純粋関数で I/O をしない。`Effect` は「このリクエストを送れ」「このスレッドを watch しろ」という値。テストはこの関数の入出力をフィクスチャで検証する。
-3. **`Store`。** `RwLock<Arc<Snapshot>>` を 1 つだけ持ち、`apply(event)` で reduce を呼んで差し替え、返ってきた Effect を実行する。ソケット、ハンドル表、タイマー、購読者はここに閉じ込める。agent-core で `&mut self` を持つ型は `Store` だけとする。
-
-性能上の注意: ストリーミングの delta は毎秒数十回来る。`Snapshot` は `Vec<Arc<Turn>>` のように turn と item を `Arc` で持ち、変わった経路だけ差し替える。足りなければ `Store` 内で delta を溜めて描画フレームごとに publish する。これは `Store` の内部実装であり、外から見た不変性は変わらない。
+性能上の注意: ストリーミングの delta は毎秒数十回来る。`Snapshot` は turn と item を `Arc` で持ち、変わった経路だけ差し替える。足りなければ `Store` 内で delta を溜めて描画フレームごとに publish する。
 
 ### 通信層: iroh
 
-SSH、Phoenix リレー、自前のデバイス認証を iroh に置き換える。iroh 1.0(2026 年 6 月)はワイヤープロトコルと Swift / Kotlin バインディングの安定性を保証しており、公開リレーで直近 30 日に 2 億以上のエンドポイントが作られている。
+iroh 1.0(2026 年 6 月)はワイヤープロトコルと Swift / Kotlin バインディングの安定性を保証している。
 
 | 今の実装 | 行数 | iroh での相当物 |
 |---|---|---|
-| `relay-transport` + Phoenix リレー(`apps/server`、Fly 運用) | 634 + Elixir 一式 | 内蔵リレー。当面は n0 の公開リレー、レート制限が問題になれば Fly の同じ場所に `iroh-relay` バイナリを置く。約 9 割の環境で直結に昇格する |
-| SSH ゲートウェイ + モバイル側 transport + `russh` | 412 | QUIC 接続に ALPN を付ける。shell や PTY を拒否するコードは不要 |
-| デバイス認証、Host identity、`auth.rs` | 504 | NodeId が Ed25519 公開鍵そのもの。Host はペア済み NodeId の allowlist を持つだけで、暗号化は QUIC の TLS 1.3 |
-| ペアリング QR、トークン | 約 400 | iroh の ticket(NodeAddr + リレー URL)に使い捨てトークンを添える |
+| `relay-transport` + Phoenix リレー | 634 + Elixir 一式 | 内蔵リレー |
+| SSH ゲートウェイ + モバイル transport + `russh` | 412 | QUIC 接続に ALPN |
+| デバイス認証、Host identity、`auth.rs` | 504 | NodeId の allowlist。暗号化は QUIC の TLS 1.3 |
+| ペアリング QR、トークン、プロトコルバージョン | 約 400 | iroh ticket + 使い捨てトークン。バージョン番号は持たない |
+| unix socket、`LocalHeader`、desktop `rpc.rs` | 約 600 | ループバックの iroh 接続 |
 
-期待される効果は、遅延(常にリレー経由から直結へ)、接続確立(3 段の handshake から QUIC の 1 RTT へ)、Wi-Fi と LTE の切替(再接続からパスマイグレーションへ)、多重化(SSH 接続あたり RPC 1 本から、ストリーム単位で無制限へ)の 4 点である。JSONL の RPC は帯域を使わないので、効くのは遅延と再接続の安定性である。
+ストリームの使い方は「セッション = 双方向ストリーム 1 本、その上に JSONL」で確定する。リクエストごとにストリームを開く方式は採らない。Codex 上流が JSON-RPC なので daemon は透過的な中継で済み、プロトコルが全経路で 1 つになる。
 
-**ストリームの使い方は 2 段階で進める。**
+**リレー。** 公開リレーは US 東西、EU、シンガポールの 4 か所で日本にはない。開発中は公開リレー、配布時は Fly 東京に `iroh-relay`(月 3〜4 ドル)を置き、クライアントのリレー一覧で先頭に指定する。約 9 割の環境で直結に昇格するので、リレー経由の転送量は小さい。
 
-1. **ストリーム = セッション。** ビューごとに 1 本の双方向ストリームを開き、その上に JSONL を流す。既存の peer をそのまま使い、プロトコルは変えない。transport だけの差し替えなので PR が小さく、失敗しても戻せる。
-2. **ストリーム = 呼び出し(後続)。** リクエストごとに双方向ストリームを開いて params を書き、result を読んで閉じる。リクエスト ID の対応付けが不要になり、通知は Host から client への片方向ストリーム 1 本、承認要求は Host が開く双方向ストリームになる。ローカル socket と Codex 上流には JSON-RPC が残るので、1 が安定してから判断する。
+**検証(2 日、着手前)。** Mac daemon と iPhone を iroh でつなぎ、次の 3 点を確認する。通らなければ iroh を見送り、末尾の「フォールバック」を採る。
 
-**識別子が変わるので全端末の再ペアリングが必ず発生する。** 利用者が少ないうちに 1 回で済ませる。
-
-**検証(2 日、peer 統合と並行)。** Mac daemon と iPhone を iroh でつなぐ最小の実験で次の 3 点を確認し、採否を決める。
-
-1. 自宅 Wi-Fi と LTE のそれぞれで直結に昇格するか、リレー止まりか。
+1. 自宅 Wi-Fi と LTE のそれぞれで直結に昇格するか。
 2. 接続確立にかかる時間。今の SSH handshake 込みの数秒との比較。
-3. Wi-Fi から LTE に切り替えたときに接続が維持されるか。
-
-通らなければ iroh を見送り、「フォールバック: daemon のリモート多重化」を実施する。
+3. Wi-Fi から LTE への切替で接続が維持されるか。
 
 ### UI 層
 
-UI 層は `Arc<Snapshot>` を受け取って描くだけにする。状態変更は必ず `store.dispatch(intent)` 経由とし、UI 層に setter や controller を作らない。
+UI 層は `Arc<Snapshot>` を受け取って描くだけにする。UI 層に setter や controller を作らない。
 
-- **SwiftUI。** `@Observable` なオブジェクトを 1 つだけ置き、`snapshot` を publish する。`CodexModelSettings` のような機能ごとの `ObservableObject` は消す。`[String: Any]` で JSON を受けている 23 箇所は UniFFI の型に置き換わる。
-- **Compose。** `State<Snapshot>` を 1 つ持ち、controller 類は作らない。
-- **GPUI。** Entity は仕組み上ミュータブルなので、View には `Arc<Snapshot>` とスクロール位置や入力中テキストなど UI 固有の状態だけを持たせる。`conversation.rs` の `append_text(&mut Value)` や `upsert(&mut turn)` は reduce に吸収する。
+- **GPUI(macOS、Linux、Windows)。** Entity は仕組み上ミュータブルなので、View には `Arc<Snapshot>` とスクロール位置や入力中テキストなど UI 固有の状態だけを持たせる。`app.rs`、`conversation.rs`、`rpc.rs` は捨て、`view.rs` は描画に専念させる。ビューごとに iroh ストリームを 1 本開く。接続の共有はしない。
+- **SwiftUI(iOS)。** `@Observable` なオブジェクトを 1 つだけ置き、`snapshot` を publish する。`[String: Any]` で JSON を受けている 23 箇所は UniFFI の型に置き換わる。
+- **Compose(Android)。** `State<Snapshot>` を 1 つ持つ。
+
+### プラットフォーム抽象
+
+desktop は `platform/{macos,linux,windows}.rs` 以外に `cfg(target_os)` を書かない。
+
+| 機能 | 今 | 置き換え |
+|---|---|---|
+| 秘密情報の保存 | `security-framework`(macOS Keychain) | `keyring` crate(Keychain、secret-service、Credential Manager) |
+| ファイル選択 | osascript | `rfd` |
+| 音声入力の録音 | `Dictation.swift` | OS ごとの薄い adapter。認識は daemon 側のまま |
+| daemon の状態ディレクトリ | macOS 前提のパス | `directories` crate |
 
 ### FFI
 
-UniFFI で生成する。C ヘッダ、JNI の `Java_...` 関数、Kotlin の `expect/actual`、JSON 文字列のコマンドは全て削除する。Rust の型定義から Swift と Kotlin のバインディングを生成し、async とコールバックもそこに載せる。iroh のモバイルバインディング(`iroh-ffi`)も UniFFI 製なので、ツールチェーンは 1 つで済む。
+UniFFI で生成する。C ヘッダ、JNI、Kotlin の `expect/actual`、JSON 文字列のコマンドは全て削除する。`iroh-ffi` も UniFFI 製なのでツールチェーンは 1 つで済む。
 
 ### Kotlin common の扱い
 
-削除する。Swift は UniFFI 経由で直接 Rust を呼び、Android は UniFFI の Kotlin バインディングを使う。Kotlin/Native の cinterop、XCFramework ビルド、`MobileStateCodec` の独自永続化形式が不要になる。ネイティブ側に残るのは描画とプラットフォーム API(カメラ、通知、ファイル、Keychain)だけである。
-
-### desktop
-
-「ビューごとに接続」のままにする。`ConversationView` の切り出しは行うが、複数ビューで接続を共有する配線は作らない。iroh ではビューごとにストリームを開くだけで済む。
-
-減るのは状態と RPC のロジックで、`app.rs` の `new`、`event`、`reduce`、`submit`、`load_detail`、`send_turn`、`load_older`、`refresh_models`、`supported_model_settings` と `conversation.rs`、`rpc.rs` が対象になる。合計約 2,000 行が消え、そのうち 700 行前後が `agent-core` に 1 回だけ現れる。`view.rs` の 2,900 行は GPUI のビルダー記法の長さなので、型付きに変えても行数は変わらない。減らすなら `item` や `chat` の中の表示種別分岐を `Snapshot` 側で投影済みにして、描画関数を「投影済みの列を並べるだけ」にする。それでも 2 割程度である。
+削除する。Swift は UniFFI 経由で直接 Rust を呼び、Android は UniFFI の Kotlin バインディングを使う。Kotlin/Native の cinterop、XCFramework ビルド、`MobileStateCodec` が不要になる。ネイティブ側に残るのは描画とプラットフォーム API(カメラ、通知、ファイル、Keychain)だけ。
 
 ### host-daemon
 
-減るのは 1 割程度で、そこを狙って設計を歪めない。worktree、ファイル操作、レビュー、アカウント、音声認識、リモート Host 管理は他に重複のない機能実装なので移動先がない。減らせるのは `codex_rpc/service.rs` と `desktop_projects/*` の Value 操作(合計約 170 箇所)を型付きモデルに置き換える分で 300〜500 行、それに iroh 採用で消える `ssh_gateway.rs` と `device_auth.rs` の約 600 行である。
-
-**フォールバック: daemon のリモート多重化(iroh 不採用時のみ)。** リモート Host の `ssh_gateway.rs` は SSH 接続 1 本につき RPC subsystem を 1 つしか受け付けない(`rpc_session_id` が単一の `Option`)。リモート Host 側の制限を緩める方式は、全リモート Host の更新が必要で SSH の受け口も広がるため採らない。クライアント側 daemon の `serve_local` の `Remote` 分岐で、profile ごとに relay セッションを 1 本持ち、`routing.rs` の `SessionRouter` で下流を多重化する。`SessionRouter` は Codex app-server に結合しておらず再利用できる。注意点は、ローカル接続ごとの watchKey 所有権の追跡、最後のローカル接続が閉じたときの relay 切断と保留リクエストの失敗、SSH の 8 チャネル上限が転送の合計にかかること、の 3 つである。
+減るのは iroh 採用で消える `ssh_gateway.rs`、`device_auth.rs`、`serve_local` の分岐(約 900 行)と、`service.rs` と `desktop_projects/*` の Value 操作を型付きモデルに置き換える分(300〜500 行)。worktree、ファイル操作、レビュー、アカウント、音声認識は他に重複のない機能実装なので残る。`SessionRouter` は iroh 接続ごとのセッションにそのまま使う。Linux と Windows で動かすため、上記のプラットフォーム抽象を daemon にも適用する。
 
 ### 自作している汎用処理の置き換え
-
-Rust 側は `similar`、`pulldown-cmark`、`russh`、`ring`、`tungstenite`、`reqwest`、`notify`、`qrcode` を使っており、全体としては筋が良い。置き換えるのは次の箇所。
 
 | 場所 | 自作している内容 | 代替 | 削減見込み |
 |---|---|---|---|
 | JSON-RPC peer 4 実装 | リクエスト ID 対応付けと再接続 | `agent-core::client` の peer | 約 1,400 行 |
-| `host-daemon/command_line.rs` | `set_once`、`next_non_empty_value` を持つ引数パーサ | `clap` の derive | 約 200 行 |
-| `host-protocol/rpc.rs` の `rewrite_top_level_id` | JSON の `id` のバイト位置をポインタ演算で求めて置換 | `Box<RawValue>` + `#[serde(flatten)]` で読んで書き直す | 約 60 行 |
-| `xtask/ios.rs`、`macos.rs`、`command.rs` | `xcrun simctl` と `xcodebuild` の呼び出しを Rust で包んだもの | シェルスクリプトか `just` | 約 700 行 |
+| `host-daemon/command_line.rs` | 手書き引数パーサ | `clap` の derive | 約 200 行 |
+| `host-protocol/rpc.rs` の `rewrite_top_level_id` | JSON のバイト位置をポインタ演算で置換 | `Box<RawValue>` + `#[serde(flatten)]` | 約 60 行 |
+| `xtask/ios.rs`、`macos.rs`、`command.rs` | `xcrun` と `xcodebuild` の Rust ラッパー | シェルスクリプトか `just` | 約 700 行 |
 | `desktop/app.rs` の `basename` | パス末尾の取り出し | `Path::file_name` | 数行 |
-| `MobileController.kt` のメッセージ ID | `Random.nextLong()` を 2 つ連結 | `kotlin.uuid.Uuid.random()`(Kotlin common 削除までの暫定) | 数行 |
-| `GatewayResult` と独自 `fold` | Result 型の再発明 | `kotlin.Result`(同上) | 数十行 |
-| `CodexJsonFields.kt` 経由の JSON 走査 74 箇所 | 手動の JSON 読み取り | `@Serializable` の型付き受信(同上) | 数百行 |
-| `ConversationScrollPosition.swift` 197 行 | `UIScrollView` 直叩きの末尾追従 | `scrollPosition(id:)` と `defaultScrollAnchor(.bottom)` | 要実機確認。UIKit のレース回避と書かれているため、置き換え前に再現手順を残す |
+| `ConversationScrollPosition.swift` 197 行 | `UIScrollView` 直叩きの末尾追従 | `scrollPosition(id:)` と `defaultScrollAnchor(.bottom)` | 要実機確認 |
 
-自作のままでよいもの: `dictation.rs` の WAV ヘッダ 10 行、`codex_rpc/routing.rs` の proxy ID 書き換え(ローカル socket と Codex 上流で引き続き使う)、xtask の fixture サーバ群(UI テスト用の偽 Host)。Phoenix チャネルのフレーム解析は iroh 採用で不要になる。
+Kotlin common 側の自作(`GatewayResult`、`CodexJsonFields.kt`、`Random` によるメッセージ ID)は Kotlin common ごと消えるので個別対応しない。自作のままでよいもの: `dictation.rs` の WAV ヘッダ、`codex_rpc/routing.rs` の proxy ID 書き換え、xtask の fixture サーバ群。
 
 ## 進め方
 
-各 PR が単独で行数マイナスまたはゼロになる順で切る。1 PR が 1 週間以内にマージできない大きさなら切り方が大きすぎると判断する。
+「常に動く状態を保つ」順序は採らない。先に中核を完成させ、全 UI を一度に載せ替える。各段階の完了条件は `agent-core` のテストと `agent-cli` の結合テストが通ることで、旧 UI が動くことは条件にしない。
 
-### 1. peer の統合(進行中)
+### 0. iroh 検証(2 日)
 
-- `agent-core::client` の peer を `AsyncRead + AsyncWrite` 上の汎用実装にし、`codex-app-server/peer.rs`、`mobile-client/rpc.rs`、`desktop/rpc.rs`、`xtask/fixture/server.rs` を置き換えて削除する。テストは `tokio::io::duplex` で transport なしに書く。
-- ファイル転送も汎用ストリーム上に置く。
-- `command_line.rs` を `clap` に、`rewrite_top_level_id` を `RawValue` に置き換える。
-- `relay-transport::ssh` は触らない。iroh を混ぜない。
-- 受け入れ条件: リクエスト ID を対応付ける実装が workspace に 1 つ。desktop から std スレッドの RPC が消える。peer のテストが transport に依存しない。
+上記 3 点を確認して採否を決める。
 
-### 1'. iroh 検証(1 と並行、2 日)
+### 1. agent-core の完成
 
-- 上記「通信層: iroh」の 3 点を確認し、採否を決める。
-- 採用なら 2 へ。不採用なら「フォールバック: daemon のリモート多重化」を 2 の代わりに実施する。
+- 型付きモデル、`client`(peer、操作、ファイル転送)、`transport`(iroh)、`Snapshot`、`reduce`、`Store`、永続化。
+- `agent-cli` を作り、fixture サーバと `tokio::io::duplex` でテストする。
+- 完了条件: フィクスチャ corpus が全て通る。`agent-cli` が fixture サーバに対して接続、一覧、送信、承認応答をこなす。`&mut self` を持つ型が `Store` だけ。
 
-### 2. iroh 置き換え
+### 2. daemon の載せ替え
 
-- PR B: iroh transport。Mac daemon の受け口(ALPN)、モバイルの接続、NodeId の allowlist、QR ペイロードの変更。ビューごとに双方向ストリーム 1 本、その上に JSONL(ストリーム = セッション)。両端を同時に切り替えるので再ペアリングが発生する。
-- PR C: SSH、Phoenix(`apps/server`)、`relay-transport`、`device_auth.rs`、`ssh_gateway.rs`、`mobile-client/transport.rs` の削除と superseding ADR。
-- B と C は同じリリースに入れ、PR は分けてレビューする。
-- 受け入れ条件: リポジトリから `russh` と `tokio-tungstenite` が消える。同一 Host に 2 ビューから接続してもリレーセッションは 1 本。Wi-Fi と LTE の切替で会話が切れない。
+- iroh エンドポイント、NodeId の allowlist、ローカル端末の自動ペアリング、`SessionRouter` の接続。型付きモデルへの切り替え。`clap`、`keyring`、`directories` の導入。
+- 削除: unix socket、`LocalHeader`、`ssh_gateway.rs`、`device_auth.rs`、`relay-transport`、`mobile-client`、`codex-app-server/peer.rs`、Phoenix(`apps/server`)。
+- 完了条件: `agent-cli` が macOS、Linux、Windows の daemon に対して動く。iPhone 実機から `agent-cli` 相当の操作が通る(この時点ではモバイル UI は未接続で構わない)。リポジトリから `russh` と `tokio-tungstenite` が消える。
 
-### 3. 型付きモデルと操作
+### 3. desktop の載せ替え
 
-- `agent-core` に型付きモデルと操作を入れる。
-- desktop の `app.rs` からリクエスト組み立てと応答検証を消し、`agent-core` の関数を呼ぶ。daemon の `service.rs` と `desktop_projects/*` も同じモデルに切り替える。
-- 受け入れ条件: desktop と daemon の `["key"]` 参照が半減以下。操作ごとのフィクスチャテストが Rust にある。
+- `app.rs`、`conversation.rs`、`rpc.rs` を捨て、`Store` の上に書き直す。`view.rs` は `Arc<Snapshot>` を描く形に直す。`platform/` にプラットフォーム抽象を入れ、macOS、Linux、Windows でビルドとスモークテストを通す。
+- 完了条件: 3 OS で起動し、ローカル daemon に自動ペアリングして会話できる。`["key"]` 参照が `view.rs` の描画分岐以外にない。
 
-### 4. 会話ストア
+### 4. mobile の載せ替え
 
-- `Snapshot`、`reduce`、`Store` を `agent-core` に入れる。
-- desktop の `conversation.rs` を削除し、`ConversationView` は `Arc<Snapshot>` を描くだけにする。
-- 受け入れ条件: `agent-core` で `&mut self` を持つのは `Store` のみ。Rust 内に会話 reducer が 1 つだけ。
+- UniFFI バインディングを生成し、Kotlin common を丸ごと削除。SwiftUI と Compose は `Store` を購読するだけにする。永続化は `Snapshot` の serde 出力。
+- 完了条件: `apps/mobile/src/commonMain` が空。手書きの `extern "C"` と `Java_...` がゼロ。Swift の `[String: Any]` がゼロ。iOS と Android の実機で会話、承認、履歴、添付が通る。
 
-### 5. UniFFI 導入とモバイル接続
+### 5. xtask とツールチェーン
 
-- UniFFI を導入し、`Store` をバインディング経由で公開する。手書きの C ヘッダ、JNI、cinterop を削除する。
-- Swift と Android を `Store` に接続し、Kotlin common を次の順に削除する: `CommonCodexClient` → `ConversationTransitions` → `AppStateReducer` → `MobileStateCodec` → `HostSessionCoordinator` → 残り。
-- 永続化は `Snapshot` の serde 出力に切り替える。既存形式からの移行は 1 回だけ読み込むコードを用意し、次のリリースで削除する。
-- 受け入れ条件: `apps/mobile/src/commonMain` が空。手書きの `extern "C"` と `Java_...` 関数がゼロ。Swift の `[String: Any]` がゼロ。
-
-### 6. xtask とツールチェーン
-
-- `xtask/ios.rs`、`macos.rs`、`command.rs` をシェルスクリプトか `just` に置き換える。fixture サーバ群は残す。
-- iOS/Android の最低バージョン、AGP、Gradle の更新は上記と混ぜず、単独の PR にする。
-
-### 7. ストリーム = 呼び出し(任意)
-
-- 2 が安定した後、リクエストごとのストリームに移行して peer の ID 対応付けをクライアント向けから外す。ローカル socket と Codex 上流の JSON-RPC は残る。効果と 2 種類のプロトコルが並存するコストを見て判断する。
+- `xtask/ios.rs`、`macos.rs`、`command.rs` をシェルスクリプトか `just` に置き換える。fixture サーバ群は残す。Linux と Windows のビルドを CI に加える。
+- iOS/Android の最低バージョン、AGP、Gradle の更新は単独の PR にする。
 
 ## レビュー基準
-
-全ての PR に次を適用する。
 
 - データ型に `Job`、ソケット、コールバック、ロックを入れない。
 - `agent-core` で `&mut self` を持つのは `Store` だけ。
 - UI 層に setter や controller を作らない。状態変更は `store.dispatch(intent)` 経由。
 - 同じ RPC メソッド名が 2 つ以上のクライアント実装に現れない。
-- peer と操作は transport を知らない。iroh、unix socket、stdio のどれに載せても同じコード。
-- リクエスト ID の対応付け、引数解析、UUID 生成、Result 型、暗号化 transport、リレーを新たに書かない。標準機能か既存 crate を使う。
-- 行数が増える PR は、増える理由を本文で説明する。
+- peer と操作は transport を知らない。iroh を知るのは `agent-core::transport` だけ。
+- `cfg(target_os)` は `platform/` の下にしか書かない。
+- リクエスト ID の対応付け、引数解析、UUID 生成、Result 型、暗号化 transport、リレー、秘密情報の保存を新たに書かない。標準機能か既存 crate を使う。
+- プロトコルのバージョン番号と移行コードを書かない。リリース時に付ける。
 
 ## 期待される効果
 
 | 削減対象 | 概算 |
 |---|---|
 | Kotlin common | 約 8,000 行 |
-| 通信基盤(SSH、リレー、デバイス認証、ペアリング) | 約 2,500 行 + Phoenix リレー一式 |
+| 通信基盤(SSH、リレー、デバイス認証、ペアリング、unix socket) | 約 3,000 行 + Phoenix リレー一式 |
 | desktop の状態と RPC ロジック | 約 2,000 行(うち 700 行は agent-core に 1 回だけ移る) |
 | JSON-RPC peer の重複 | 約 1,400 行 |
 | xtask の xcrun ラッパー | 約 700 行 |
 | daemon の Value 操作 | 300〜500 行 |
 | 手書き FFI(C ヘッダ、JNI、cinterop) | 数百行 |
 | Swift の状態ロジックと untyped JSON | 数百行 |
-| その他(clap、RawValue、basename 等) | 約 300 行 |
 
-減らないもの: `view.rs` の描画コード、daemon の機能実装、xtask の fixture サーバ。運用面では Fly 上の Phoenix リレーと Kotlin/Native、cinterop、XCFramework の各工程がなくなる。
+減らないもの: `view.rs` の描画コード、daemon の機能実装、xtask の fixture サーバ。増えるもの: `agent-cli`(数百行)、`platform/` の Linux と Windows 実装。運用面では Phoenix リレー、Kotlin/Native、cinterop、XCFramework の各工程がなくなる。
+
+## フォールバック(iroh 不採用時のみ)
+
+リモート Host の `ssh_gateway.rs` は SSH 接続 1 本につき RPC subsystem を 1 つしか受け付けない。クライアント側 daemon の `serve_local` の `Remote` 分岐で profile ごとに relay セッションを 1 本持ち、`routing.rs` の `SessionRouter` で下流を多重化する。注意点は、ローカル接続ごとの watchKey 所有権の追跡、最後のローカル接続が閉じたときの relay 切断、SSH の 8 チャネル上限が転送の合計にかかること、の 3 つ。Windows 対応のため unix socket は named pipe に置き換える必要が別途生じる。
