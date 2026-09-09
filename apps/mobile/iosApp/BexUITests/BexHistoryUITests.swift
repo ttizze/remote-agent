@@ -68,7 +68,8 @@ extension BexLaunchUITests {
         let initialDetailValue = detail.value as? String ?? ""
         XCTAssertFalse(initialDetailValue.isEmpty)
 
-        // A slow drag toward older content ends less than 80pt from the bottom.
+        // Use an explicit low velocity: XCTest .slow is 250px/s and can coast beyond 80pt.
+        // This drag toward older content must end less than 80pt from the bottom.
         // The subsequent turn update must leave the reader detached at that point.
         let latestButton = app.buttons["task.latest"]
         if latestButton.exists {
@@ -80,7 +81,7 @@ extension BexLaunchUITests {
         let beforeDrag = anchor.frame.minY
         let start = detail.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.55))
         start.press(forDuration: 0.4, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 25)),
-                    withVelocity: .slow, thenHoldForDuration: 0.5)
+                    withVelocity: XCUIGestureVelocity(rawValue: 40), thenHoldForDuration: 0.5)
         let readingPosition = anchor.frame.minY
         XCTAssertGreaterThan(readingPosition - beforeDrag, 5)
         XCTAssertLessThan(readingPosition - beforeDrag, 80)
