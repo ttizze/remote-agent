@@ -1,7 +1,8 @@
+use agent_client::operations::AgentClient;
 use host_protocol::{
-    DEFAULT_MAX_MESSAGE_BYTES, HOST_REQUEST_LIMIT, RpcEvent, RpcPeer, RpcPeerError, rpc_runtime,
+    DEFAULT_MAX_MESSAGE_BYTES, HOST_REQUEST_LIMIT, RpcEvent, RpcPeer, rpc_runtime,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
@@ -111,35 +112,44 @@ impl Rpc {
         Self(inner)
     }
 
+    fn connection(
+        &self,
+        deadline: Duration,
+    ) -> Result<(&'static tokio::runtime::Runtime, AgentClient), String> {
+        let peer = self
+            .0
+            .connection
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("Host に接続していません")?;
+        Ok((rpc_runtime()?, AgentClient::new(peer, deadline)))
+    }
+
     /// The shared reader completes a snapshot before its following notification.
     pub(crate) fn request_async(
         &self,
-        method: &str,
+        method: &'static str,
         params: Value,
         done: impl FnOnce(Reply) + Send + 'static,
     ) {
-        let peer = self.0.connection.lock().unwrap().clone();
-        let Some(peer) = peer else {
-            done(Err("Host に接続していません".into()));
-            return;
-        };
-        let runtime = match rpc_runtime() {
-            Ok(runtime) => runtime,
-            Err(reason) => {
-                done(Err(reason.into()));
+        let deadline = Duration::from_secs(if method == "host/transfer" { 150 } else { 30 });
+        let (runtime, client) = match self.connection(deadline) {
+            Ok(connection) => connection,
+            Err(error) => {
+                done(Err(error));
                 return;
             }
         };
-        let deadline = Duration::from_secs(if method == "host/transfer" { 150 } else { 30 });
-        let line = json!({"id":0,"method":method,"params":params}).to_string();
         runtime.spawn(async move {
-            peer.request_with(&line, deadline, move |response| {
-                done(decode_response(response));
-            })
-            .await;
+            client
+                .request_with(method, &params, move |result| {
+                    done(result.map_err(|error| error.to_string()))
+                })
+                .await;
         });
     }
-    pub(crate) fn request(&self, method: &str, params: Value) -> Reply {
+    pub(crate) fn request(&self, method: &'static str, params: Value) -> Reply {
         let (tx, rx) = mpsc::channel();
         self.request_async(method, params, move |result| {
             let _ = tx.send(result);
@@ -158,38 +168,26 @@ impl Rpc {
             + Send
             + 'static,
     {
-        let peer = self.0.connection.lock().unwrap().clone();
-        let Some(peer) = peer else {
-            done(Err("Host に接続していません".into()));
-            return;
-        };
-        let runtime = match rpc_runtime() {
-            Ok(runtime) => runtime,
+        let (runtime, client) = match self.connection(Duration::from_secs(30)) {
+            Ok(connection) => connection,
             Err(error) => {
-                done(Err(error.into()));
+                done(Err(error));
                 return;
             }
         };
-        let client = agent_client::operations::AgentClient::new(peer, Duration::from_secs(30));
         runtime.spawn(async move {
             done(operation(client).await.map_err(|error| error.to_string()));
         });
     }
 
     pub(crate) fn read_thread(&self, thread_id: String, done: impl FnOnce(Reply) + Send + 'static) {
-        let peer = self.0.connection.lock().unwrap().clone();
-        let Some(peer) = peer else {
-            done(Err("Host に接続していません".into()));
-            return;
-        };
-        let runtime = match rpc_runtime() {
-            Ok(runtime) => runtime,
+        let (runtime, client) = match self.connection(Duration::from_secs(30)) {
+            Ok(connection) => connection,
             Err(error) => {
-                done(Err(error.into()));
+                done(Err(error));
                 return;
             }
         };
-        let client = agent_client::operations::AgentClient::new(peer, Duration::from_secs(30));
         runtime.spawn(async move {
             client
                 .read_thread_with(thread_id, true, move |result| {
@@ -248,27 +246,10 @@ async fn connect_stream(
     .await
     .map_err(|_| "Host への接続がタイムアウトしました".to_owned())?
 }
-fn decode_response(response: Result<String, RpcPeerError>) -> Reply {
-    let raw = response.map_err(|error| match error {
-        RpcPeerError::RequestTimeout { method } => {
-            format!("{method}: 応答を確認できません。状態を更新してください。")
-        }
-        other => other.to_string(),
-    })?;
-    let mut message: Value = serde_json::from_str(&raw).map_err(|_| "Host の応答が不正です")?;
-    if message.get("error").is_some() {
-        Err(message["error"]["message"]
-            .as_str()
-            .unwrap_or("Host request failed")
-            .into())
-    } else {
-        Ok(message["result"].take())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::{
         io::{BufRead, BufReader, Write},
         net::Shutdown,

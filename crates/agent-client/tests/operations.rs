@@ -125,3 +125,51 @@ async fn snapshot_completion_precedes_the_next_wire_notification() {
     serve.await.unwrap();
     peer.close();
 }
+
+#[tokio::test]
+async fn generic_host_calls_retain_null_results_and_remote_error_data() {
+    for response in [
+        serde_json::json!({"result": null}),
+        serde_json::json!({"result": [{"future": [null, {"id": "nested"}]}]}),
+        serde_json::json!({"error": {"code": -32000, "message": "rejected", "data": {"future": true}}}),
+    ] {
+        let expected = response.clone();
+        let (client, server) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(client);
+        let peer = Arc::new(RpcPeer::open(reader, writer, 4096, 4, |_| {}));
+        let agent = AgentClient::new(peer.clone(), Duration::from_secs(1));
+        let serve = tokio::spawn(async move {
+            let (reader, mut writer) = tokio::io::split(server);
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "host/custom");
+            assert_eq!(
+                request["params"],
+                serde_json::json!({"future": [null, {"id": 7}]})
+            );
+            let mut response = response;
+            response["id"] = request["id"].clone();
+            writer
+                .write_all(format!("{response}\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        let result = agent
+            .request::<_, Value>(
+                "host/custom",
+                &serde_json::json!({"future": [null, {"id": 7}]}),
+            )
+            .await;
+        if let Some(error) = expected.get("error") {
+            let native: Value =
+                serde_json::from_str(&result.unwrap_err().into_native_error()).unwrap();
+            assert_eq!(&native["rawError"], error);
+        } else {
+            assert_eq!(result.unwrap(), expected["result"]);
+        }
+        serve.await.unwrap();
+        peer.close();
+    }
+}

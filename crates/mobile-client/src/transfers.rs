@@ -18,8 +18,8 @@ struct Grant {
 }
 
 impl Grant {
-    fn parse(value: Value) -> Result<Self, MobileClientError> {
-        let grant: Self = serde_json::from_value(value)?;
+    fn validate(self) -> Result<Self, MobileClientError> {
+        let grant = self;
         let mut digest = [0; 32];
         let mut token = [0; 32];
         if grant.size > LIMIT
@@ -72,13 +72,11 @@ impl MobileClient {
             }
             let sha256 = URL_SAFE_NO_PAD.encode(digest.finish().as_ref());
             file.rewind().await?;
-            let grant = Grant::parse(
-                self.request(
+            let grant = self.agent().request::<_, Grant>(
                     "host/blob/upload",
-                    json!({"directory":directory,"fileName":file_name,"size":size,"sha256":sha256}),
+                    &json!({"directory":directory,"fileName":file_name,"size":size,"sha256":sha256}),
                 )
-                .await?,
-            )?;
+                .await?.validate()?;
             if grant.size != size || grant.sha256 != sha256 {
                 return Err(MobileClientError::Protocol(
                     "upload grant changed content metadata".into(),
@@ -126,10 +124,11 @@ impl MobileClient {
         destination: &Path,
     ) -> Result<(), MobileClientError> {
         tokio::time::timeout(Duration::from_secs(120), async {
-            let grant = Grant::parse(
-                self.request("host/blob/download", json!({"path":source}))
-                    .await?,
-            )?;
+            let grant = self
+                .agent()
+                .request::<_, Grant>("host/blob/download", &json!({"path":source}))
+                .await?
+                .validate()?;
             let parent = destination.parent().ok_or_else(|| {
                 MobileClientError::Protocol("download destination has no parent".into())
             })?;

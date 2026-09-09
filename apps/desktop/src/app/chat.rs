@@ -331,26 +331,6 @@ impl ConversationView {
         std::thread::spawn(move || done(task()));
     }
 
-    fn request(
-        &mut self,
-        manager: bool,
-        method: &'static str,
-        params: Value,
-        busy: bool,
-        apply: impl FnOnce(&mut Self, Value, &mut Window, &mut Context<Self>) + Send + 'static,
-    ) {
-        let done = self.complete(busy, move |s, result, w, cx| match result {
-            Ok(value) => apply(s, value, w, cx),
-            Err(error) => s.error = error,
-        });
-        let rpc = if manager {
-            &self.manager
-        } else {
-            &self.session.host.rpc
-        };
-        rpc.request_async(method, params, done);
-    }
-
     fn thread_draft_key(&self, id: &str) -> String {
         format!(
             "{}:{id}",
@@ -1279,8 +1259,7 @@ impl ConversationView {
                 done,
             );
         } else {
-            // Selection always installs a read/start snapshot. The catalogue
-            // is only a fallback for clients restoring a persisted cache.
+            // Selection installs the current read/start snapshot before sending.
             let plan = conversation_presentation::state::plan_send(
                 &self.session.conversation.thread,
                 &Value::Null,

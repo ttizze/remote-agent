@@ -160,7 +160,7 @@ pub(crate) fn agent_command_json(handle: &Handle, command: &str) -> Result<Strin
 
 fn encode_mobile_error(error: MobileClientError) -> String {
     match error {
-        MobileClientError::Remote { error } => error,
+        MobileClientError::Agent(error) => error.into_native_error(),
         other => other.to_string(),
     }
 }

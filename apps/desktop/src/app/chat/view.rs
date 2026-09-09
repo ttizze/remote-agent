@@ -1505,15 +1505,19 @@ impl ConversationView {
         let recording = phase == Some(Phase::Recording);
         let processing = matches!(phase, Some(Phase::Permission | Phase::Transcribing));
         let send = if let Some(turn) = running.filter(|_| empty && phase.is_none()) {
-            let id = turn["id"].clone();
+            let turn_id = text(turn, "id").to_owned();
             icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
-                s.request(
-                    false,
-                    "turn/interrupt",
-                    json!({"threadId":s.session.selected,"turnId":id}),
-                    true,
-                    |_, _, _, _| {},
-                )
+                let thread_id = s.session.selected.clone();
+                let turn_id = turn_id.clone();
+                let done = s.complete(true, |s, result, _, _| {
+                    if let Err(error) = result {
+                        s.error = error;
+                    }
+                });
+                s.session.host.rpc.agent_async(
+                    move |client| async move { client.interrupt_turn(&thread_id, &turn_id).await },
+                    done,
+                );
             })
             .icon(Icon::default().path("bex/stop.svg"))
             .disabled(!self.session.connected || self.busy > 0)

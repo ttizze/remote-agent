@@ -197,27 +197,6 @@ private fun NSData.toByteArray(): ByteArray =
 internal class IosMobileRepository : MobileRepository {
     private val path = "${NSHomeDirectory()}/Library/Application Support/Bex/mobile-state.json"
 
-    override fun load(): AppState {
-        val state = loadState()
-        val defaults = platform.Foundation.NSUserDefaults.standardUserDefaults
-        val models = defaults.dictionaryForKey("bex.models.v1").orEmpty()
-        val efforts = defaults.dictionaryForKey("bex.efforts.v1").orEmpty()
-        if (models.isEmpty() && efforts.isEmpty()) return state
-        val choices = buildMap {
-            for (key in models.keys + efforts.keys) {
-                if (key is String)
-                    put(
-                        key,
-                        CodexTurnOptions(
-                            (models[key] as? String)?.takeIf(String::isNotEmpty),
-                            (efforts[key] as? String)?.takeIf(String::isNotEmpty),
-                        ),
-                    )
-            }
-        }
-        return state.copy(turnChoices = choices + state.turnChoices)
-    }
-
     override fun save(state: AppState) {
         NSFileManager.defaultManager.createDirectoryAtPath(
             "${NSHomeDirectory()}/Library/Application Support/Bex",
@@ -227,22 +206,14 @@ internal class IosMobileRepository : MobileRepository {
         )
         val bytes = MobileStateCodec.encode(state)
         check(bytes.toNSData().writeToFile(path, atomically = true))
-        platform.Foundation.NSUserDefaults.standardUserDefaults.removeObjectForKey("bex.models.v1")
-        platform.Foundation.NSUserDefaults.standardUserDefaults.removeObjectForKey("bex.efforts.v1")
     }
 
-    private fun loadState(): AppState =
+    override fun load(): AppState =
         try {
             val bytes = NSData.Companion.dataWithContentsOfFile(path)?.toByteArray() ?: return AppState()
             when (val result = MobileStateCodec.decode(bytes)) {
                 is MobileStateDecodeResult.Success -> result.value
-                is MobileStateDecodeResult.Failure ->
-                    AppState().also { empty ->
-                        // The obsolete v1 file contained relay secrets. Replace it on migration.
-                        if (result.reason == MobileStateDecodeReason.UnsupportedVersion) {
-                            check(MobileStateCodec.encode(empty).toNSData().writeToFile(path, atomically = true))
-                        }
-                    }
+                is MobileStateDecodeResult.Failure -> AppState()
             }
         } catch (_: Throwable) {
             AppState()

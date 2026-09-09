@@ -439,10 +439,11 @@ internal class MobileTurnControllerTest : MobileControllerTestFixture() {
         assertEquals(sources, accepted.imageSources)
         assertEquals("Look", accepted.text)
         val restored =
-            assertIs<MobileStateDecodeResult.Success<MobileCache>>(
-                    MobileStateCodec.decodeCache(MobileStateCodec.encodeCache(controller.state.cache))
+            assertIs<MobileStateDecodeResult.Success<AppState>>(
+                    MobileStateCodec.decode(MobileStateCodec.encode(controller.state))
                 )
                 .value
+                .cache
         assertEquals(
             sources,
             restored

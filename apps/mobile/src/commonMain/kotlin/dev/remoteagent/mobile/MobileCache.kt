@@ -1,5 +1,8 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+
 private const val DEFAULT_CACHE_BYTES = 512 * 1024
 
 /** Limits are local-device bounds, never a statement about Codex history retention. */
@@ -16,12 +19,14 @@ data class MobileCacheLimits(
     }
 }
 
+@Serializable
 data class ProfileMobileCache(
-    val projects: List<CodexProject> = emptyList(),
+    @Transient val projects: List<CodexProject> = emptyList(),
     val threadList: List<ThreadSummary> = emptyList(),
     val snapshots: Map<String, ThreadSnapshot> = emptyMap(),
 )
 
+@Serializable
 data class MobileCache(val profiles: Map<String, ProfileMobileCache> = emptyMap()) {
     fun profile(hostIdentity: String): ProfileMobileCache = profiles[hostIdentity] ?: ProfileMobileCache()
 

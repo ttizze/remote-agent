@@ -64,7 +64,7 @@ async fn replayed_requests_and_initial_events_survive_until_the_first_subscriber
     use host_protocol::{JsonlReader, JsonlWriter};
     use serde_json::json;
     let (client, server) = tokio::io::duplex(8192);
-    let peer = crate::rpc::RpcPeer::open(client, 8192, Duration::from_secs(1)).unwrap();
+    let peer = MobileClient::from_channel(None, client, Duration::from_secs(1));
     let host = tokio::spawn(async move {
         let (read, write) = tokio::io::split(server);
         let mut reader = JsonlReader::new(read);
@@ -85,7 +85,10 @@ async fn replayed_requests_and_initial_events_survive_until_the_first_subscriber
     });
     // Receiving this response proves the read loop already consumed both
     // earlier events. No scheduling sleep or timing assumption is involved.
-    peer.request("thread/list".into(), json!({})).await.unwrap();
+    peer.agent()
+        .request::<_, serde_json::Value>("thread/list", &json!({}))
+        .await
+        .unwrap();
     let mut events = peer.subscribe();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(
@@ -120,7 +123,7 @@ async fn native_event_order_preserves_approval_before_resolution() {
         r#"{"method":"serverRequest/resolved","params":{"requestId":"approval"}}"#,
     ];
     let (client, server) = tokio::io::duplex(8192);
-    let peer = crate::rpc::RpcPeer::open(client, 8192, Duration::from_secs(1)).unwrap();
+    let peer = MobileClient::from_channel(None, client, Duration::from_secs(1));
     let host = tokio::spawn(async move {
         let (read, write) = tokio::io::split(server);
         let mut reader = JsonlReader::new(read);
@@ -138,7 +141,10 @@ async fn native_event_order_preserves_approval_before_resolution() {
     });
     // The response is a read-loop barrier: all events are queued before polling,
     // exactly the condition that used to prioritize resolution over approval.
-    peer.request("barrier".into(), json!({})).await.unwrap();
+    peer.agent()
+        .request::<_, serde_json::Value>("barrier", &json!({}))
+        .await
+        .unwrap();
     let mut events = peer.subscribe();
     for expected in trace {
         assert_eq!(events.try_recv().unwrap(), expected);

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Remove the remaining `MobileClient` request/response API, RPC adapter, connected-host metadata, and duplicate Mac RPC decoder. Route file-transfer grants and all Rust callers through `AgentClient`; use the shared interrupt operation for Mac Stop. Preserve JSON-RPC null results and remote error data.
+- Replace five duplicate persisted-state DTOs with explicit durable/transient fields on immutable state values. Remove unused standalone cache persistence APIs, old cache repair, and iOS `NSUserDefaults` imports. Accept only state format 3, with no migration; existing mobile installations require pairing again.
+
 - Centralize Mac/mobile agent operations and pure conversation, history, lifecycle, and submission decisions in Rust. Keep Kotlin mobile coordination and native UI adapters thin; preserve unknown payload metadata without copying conversation bodies through the native bridge. Exercise both adapters with 87 shared fixture cases, retaining the original 72.
 - Share the asynchronous JSONL RPC engine and preserve snapshot-before-notification delivery. Move Host title/history projection into its own owner while retaining session routing and authorization in the RPC service.
 - Keep Mac main and Side Chat as independent native views sharing one RPC per Host and one ordered reply/event queue. Give each view an independent history watch; a closed or recreated Side cannot cancel Main. Share Host catalogue, management, and draft resources without mutable Host/draft services. Remove the stale catalogue input from desktop submission decisions.

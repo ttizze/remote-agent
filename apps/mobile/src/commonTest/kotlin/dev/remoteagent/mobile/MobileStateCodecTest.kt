@@ -9,63 +9,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 
 class MobileStateCodecTest {
-    @Test
-    fun version_two_cache_discards_duplicate_raw_bodies_and_obsolete_logs_on_load() {
-        val metadata = buildJsonObject {
-            put("turns", JsonArray(emptyList()))
-            put("path", JsonPrimitive("/fixture/rollout.jsonl"))
-        }
-        val summary = summary("thread-1").copy(raw = metadata)
-        val turn =
-            CodexTurn(
-                "turn-1",
-                TurnStatus.Completed,
-                listOf(CodexItem.AgentMessage("answer", "retained")),
-                raw =
-                    buildJsonObject {
-                        put("items", JsonArray(emptyList()))
-                        put("itemsNextCursor", JsonPrimitive("older-items"))
-                    },
-            )
-        val snapshot = ThreadSnapshot(summary, listOf(turn), raw = metadata)
-        val legacy = buildJsonObject {
-            put("format", JsonPrimitive("remote-agent-mobile-state"))
-            put("version", JsonPrimitive(2))
-            put("kind", JsonPrimitive("mobileCache"))
-            put(
-                "payload",
-                buildJsonObject {
-                    put(
-                        "profiles",
-                        buildJsonObject {
-                            put(
-                                "host",
-                                buildJsonObject {
-                                    put("threadList", Json.encodeToJsonElement(listOf(summary)))
-                                    put("snapshots", Json.encodeToJsonElement(mapOf(summary.id to snapshot)))
-                                    put("rawNotifications", JsonArray(listOf(JsonPrimitive("obsolete"))))
-                                    put("unknownEvents", JsonArray(listOf(JsonPrimitive("obsolete"))))
-                                },
-                            )
-                        },
-                    )
-                },
-            )
-        }
-        val cache = success(MobileStateCodec.decodeCache(legacy.toString().encodeToByteArray()))
-        val restored = cache.snapshot("host", summary.id) ?: error("Legacy conversation must survive")
-        assertEquals("retained", (restored.turns.single().items.single() as CodexItem.AgentMessage).text)
-        assertNull(restored.summary.raw?.get("turns"))
-        assertNull(restored.raw?.get("turns"))
-        assertNull(restored.turns.single().raw?.get("items"))
-        assertEquals("older-items", restored.turns.single().olderItemsCursor)
-        assertEquals(JsonPrimitive("/fixture/rollout.jsonl"), restored.raw?.get("path"))
-    }
-
     @Test
     fun a_large_reply_is_saved_once_without_losing_paging_metadata() {
         val body = "x".repeat(256 * 1024)
@@ -187,7 +133,7 @@ class MobileStateCodecTest {
     }
 
     @Test
-    fun cache_codec_round_trip_applies_limits() {
+    fun restored_app_state_applies_cache_limits() {
         val summaries = (1..3).map { summary("thread-$it", updatedAtMs = it.toLong()) }
         val cache =
             MobileCache(
@@ -203,28 +149,39 @@ class MobileStateCodecTest {
 
         val restored =
             success(
-                MobileStateCodec.decodeCache(
-                    MobileStateCodec.encodeCache(cache),
+                MobileStateCodec.decode(
+                    MobileStateCodec.encode(
+                        AppState(
+                            profiles =
+                                listOf(HostProfile("runner", "Fixture", "wss://fixture.invalid", "host-1", "key")),
+                            cache = cache,
+                        )
+                    ),
                     MobileCacheLimits(maxThreads = 1, maxTurnsPerThread = 10, maxApproximateBytes = 16 * 1024),
                 )
             )
 
-        assertEquals(listOf("thread-3", "thread-2", "thread-1"), restored.profile("host-1").threadList.map { it.id })
-        assertEquals(setOf("thread-3"), restored.profile("host-1").snapshots.keys)
+        assertEquals(
+            listOf("thread-3", "thread-2", "thread-1"),
+            restored.cache.profile("host-1").threadList.map { it.id },
+        )
+        assertEquals(setOf("thread-3"), restored.cache.profile("host-1").snapshots.keys)
     }
 
     @Test
-    fun unknown_version_is_a_safe_structured_failure() {
+    fun old_and_unknown_versions_are_rejected_without_migration() {
         val root = Json.parseToJsonElement(MobileStateCodec.encode(AppState()).decodeToString()).jsonObject
-        val future = buildJsonObject {
-            root.forEach { (name, value) -> put(name, if (name == "version") JsonPrimitive(999) else value) }
+        for (version in listOf(1, 2, 999)) {
+            val incompatible = buildJsonObject {
+                root.forEach { (name, value) -> put(name, if (name == "version") JsonPrimitive(version) else value) }
+            }
+            val failure =
+                assertIs<MobileStateDecodeResult.Failure>(
+                    MobileStateCodec.decode(incompatible.toString().encodeToByteArray())
+                )
+            assertEquals(MobileStateDecodeReason.UnsupportedVersion, failure.reason)
+            assertEquals(version, failure.version)
         }
-
-        val failure =
-            assertIs<MobileStateDecodeResult.Failure>(MobileStateCodec.decode(future.toString().encodeToByteArray()))
-
-        assertEquals(MobileStateDecodeReason.UnsupportedVersion, failure.reason)
-        assertEquals(999, failure.version)
     }
 
     @Test

@@ -1,6 +1,10 @@
 package dev.remoteagent.mobile
 
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
+
 /** Public connection metadata; device keys and relay tokens live in platform secure storage. */
+@Serializable
 data class HostProfile(
     val runnerId: String,
     val name: String,
@@ -33,34 +37,36 @@ sealed interface LoadPhase {
     data class Failed(val message: String) : LoadPhase
 }
 
+@Serializable
 data class ProfileViewState(
-    val connection: ConnectionPhase = ConnectionPhase.Disconnected,
+    @Transient val connection: ConnectionPhase = ConnectionPhase.Disconnected,
     val workingDirectoryPath: String = "",
-    val threadList: LoadPhase = LoadPhase.Idle,
-    val loadingMoreThreads: Boolean = false,
-    val visibleProjectCount: Int = 5,
-    val visibleChatCount: Int = 5,
-    val projectThreadLimits: Map<String, Int> = emptyMap(),
-    val threadSearchTerm: String = "",
-    val moreProjectIds: Set<String> = emptySet(),
-    val hasMoreChats: Boolean = false,
-    val hasMoreProjects: Boolean = false,
+    @Transient val threadList: LoadPhase = LoadPhase.Idle,
+    @Transient val loadingMoreThreads: Boolean = false,
+    @Transient val visibleProjectCount: Int = 5,
+    @Transient val visibleChatCount: Int = 5,
+    @Transient val projectThreadLimits: Map<String, Int> = emptyMap(),
+    @Transient val threadSearchTerm: String = "",
+    @Transient val moreProjectIds: Set<String> = emptySet(),
+    @Transient val hasMoreChats: Boolean = false,
+    @Transient val hasMoreProjects: Boolean = false,
     val selectedThreadId: String? = null,
     val unreadCompletedThreadIds: Set<String> = emptySet(),
-    val newThreadCwd: String? = null,
-    val threadDetail: LoadPhase = LoadPhase.Idle,
-    val loadingHistory: Boolean = false,
-    val interruptingTurnId: String? = null,
-    val notice: String? = null,
+    @Transient val newThreadCwd: String? = null,
+    @Transient val threadDetail: LoadPhase = LoadPhase.Idle,
+    @Transient val loadingHistory: Boolean = false,
+    @Transient val interruptingTurnId: String? = null,
+    @Transient val notice: String? = null,
 )
 
+@Serializable
 data class AppState(
     val profiles: List<HostProfile> = emptyList(),
     val selectedProfileId: String? = null,
     val profileViews: Map<String, ProfileViewState> = emptyMap(),
     val cache: MobileCache = MobileCache(),
-    val showingPairing: Boolean = false,
-    val pairingError: String? = null,
+    @Transient val showingPairing: Boolean = false,
+    @Transient val pairingError: String? = null,
     val turnChoices: Map<String, CodexTurnOptions> = emptyMap(),
 ) {
     val selectedProfile: HostProfile?

@@ -29,11 +29,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "secure random generation failed")?;
     let reconnected = MobileClient::connect(config, key.as_ref()).await?;
     let projects = reconnected
-        .request("host/project/list", json!({ "limit": 1 }))
+        .agent()
+        .request::<_, serde_json::Value>("host/project/list", &json!({ "limit": 1 }))
         .await?;
 
     let threads = reconnected
-        .request("host/thread/list", json!({ "limit": 20 }))
+        .agent()
+        .request::<_, serde_json::Value>("host/thread/list", &json!({ "limit": 20 }))
         .await?;
     let thread_entries = threads
         .get("data")
@@ -73,9 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut duplicate_item_id_count = 0;
     for (thread_index, thread_id) in thread_ids.iter().enumerate() {
         let read = reconnected
-            .request(
+            .agent()
+            .request::<_, serde_json::Value>(
                 "host/thread/read",
-                json!({
+                &json!({
                     "threadId": thread_id,
                     "includeTurns": true,
                 }),

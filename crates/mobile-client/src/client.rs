@@ -3,13 +3,17 @@ use std::{
     time::Duration,
 };
 
-use host_protocol::{DEFAULT_MAX_MESSAGE_BYTES, Ed25519PublicKey, PairingToken, RelayEndpoint};
-use serde_json::Value;
+use agent_client::operations::{AgentClient, AgentError};
+use host_protocol::{
+    DEFAULT_MAX_MESSAGE_BYTES, Ed25519PublicKey, HOST_REQUEST_LIMIT, PairingToken, RelayEndpoint,
+    RpcEventQueue, RpcPeer,
+};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-use crate::{rpc::RpcPeer, transport};
+use crate::transport;
 
 /// Connection parameters obtained from a trusted pairing payload.
 #[derive(Debug, Clone)]
@@ -43,22 +47,14 @@ impl MobileClientConfig {
     }
 }
 
-/// Relay connection metadata exposed to platform wrappers. The token is
-/// intentionally omitted so callers cannot accidentally display or log it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConnectedHost {
-    pub relay_url: String,
-    pub runner_id: String,
-    pub host_identity: Ed25519PublicKey,
-}
-
 pub struct MobileClient {
     // Keeping the relay task alive keeps the WebSocket session alive after the
     // reader/writer tasks are spawned. Dropping it closes only this mobile
     // connection; the Host-owned Codex process is unaffected.
     session: StdMutex<Option<Arc<transport::Connection>>>,
-    peer: RpcPeer,
-    host: ConnectedHost,
+    peer: Arc<RpcPeer>,
+    events: RpcEventQueue,
+    request_timeout: Duration,
 }
 
 impl MobileClient {
@@ -74,63 +70,47 @@ impl MobileClient {
             timeout(config.request_timeout, transport::establish(&config, key))
                 .await
                 .map_err(|_| MobileClientError::ConnectionTimeout)??;
-        let peer = RpcPeer::open(stream, DEFAULT_MAX_MESSAGE_BYTES, config.request_timeout)?;
-        Ok(Self {
-            session: StdMutex::new(Some(Arc::new(session))),
-            peer,
-            host: ConnectedHost {
-                relay_url: config.relay.relay_url,
-                runner_id: config.relay.runner_id,
-                host_identity: config.host_identity,
-            },
-        })
+        Ok(Self::from_channel(
+            Some(session),
+            stream,
+            config.request_timeout,
+        ))
     }
 
-    pub fn agent(&self) -> agent_client::operations::AgentClient {
-        self.peer.agent()
+    pub(super) fn from_channel<S>(
+        session: Option<transport::Connection>,
+        stream: S,
+        request_timeout: Duration,
+    ) -> Self
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let events = RpcEventQueue::new(4096);
+        let sink = events.clone();
+        let (reader, writer) = tokio::io::split(stream);
+        let peer = RpcPeer::open(
+            reader,
+            writer,
+            DEFAULT_MAX_MESSAGE_BYTES,
+            HOST_REQUEST_LIMIT,
+            move |event| sink.deliver(event),
+        );
+        Self {
+            session: StdMutex::new(session.map(Arc::new)),
+            peer: Arc::new(peer),
+            events,
+            request_timeout,
+        }
     }
 
-    pub fn host(&self) -> &ConnectedHost {
-        &self.host
+    pub fn agent(&self) -> AgentClient {
+        AgentClient::new(self.peer.clone(), self.request_timeout)
     }
 
     /// Ordered raw notifications and Host requests. A request retains its original
     /// JSON id for the response. Lagged receivers must resynchronize the session.
     pub fn subscribe(&self) -> broadcast::Receiver<String> {
-        self.peer.subscribe()
-    }
-
-    pub async fn request(
-        &self,
-        method: impl Into<String>,
-        params: Value,
-    ) -> Result<Value, MobileClientError> {
-        self.peer.request(method.into(), params).await
-    }
-
-    /// Sends a request while retaining the caller's raw JSON params text.
-    /// This is useful to wrappers that already have Codex JSONL and avoids a
-    /// needless params deserialize/re-serialize cycle at the mobile boundary.
-    pub async fn request_raw(
-        &self,
-        method: impl Into<String>,
-        params: impl Into<String>,
-    ) -> Result<Value, MobileClientError> {
-        self.peer.request_raw(method.into(), params.into()).await
-    }
-
-    /// Sends a response while retaining the caller's raw JSON result/error.
-    /// This is the preferred seam for mobile wrappers that receive Codex JSON
-    /// as text and should not deserialize/re-serialize it.
-    pub async fn respond_raw(
-        &self,
-        id: impl Into<String>,
-        field: &'static str,
-        payload: impl Into<String>,
-    ) -> Result<(), MobileClientError> {
-        self.peer
-            .respond_raw(id.into(), field, payload.into())
-            .await
+        self.events.subscribe()
     }
 
     pub(crate) fn connection(&self) -> Result<Arc<transport::Connection>, MobileClientError> {
@@ -174,20 +154,12 @@ pub enum MobileClientError {
     Io(#[from] std::io::Error),
     #[error("relay connection did not complete before the deadline")]
     ConnectionTimeout,
-    #[error("JSONL transport failed: {0}")]
-    Jsonl(#[from] host_protocol::JsonlError),
-    #[error("invalid Codex JSONL message: {0}")]
-    Message(#[from] host_protocol::RpcMessageError),
     #[error("Host disconnected: {0}")]
     Disconnected(String),
     #[error("RPC protocol violation: {0}")]
     Protocol(String),
-    #[error("request ID space exhausted")]
-    RequestIdExhausted,
-    #[error("RPC request {method} timed out")]
-    RequestTimeout { method: String },
-    #[error("Host returned an RPC error: {error}")]
-    Remote { error: String },
+    #[error(transparent)]
+    Agent(#[from] AgentError),
     #[error("failed to encode JSON: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -203,21 +175,13 @@ mod native_handle_tests {
     use super::*;
     use crate::ffi;
     use host_protocol::{JsonlReader, JsonlWriter};
+    use serde_json::Value;
     use std::ffi::{CStr, CString};
 
     fn connected_peer(runtime: &'static tokio::runtime::Runtime) -> (u64, tokio::io::DuplexStream) {
         runtime.block_on(async {
             let (client, server) = tokio::io::duplex(4096);
-            let peer = RpcPeer::open(client, 4096, Duration::from_secs(5)).unwrap();
-            let client = MobileClient {
-                session: StdMutex::new(None),
-                peer,
-                host: ConnectedHost {
-                    relay_url: "fixture".into(),
-                    runner_id: "fixture".into(),
-                    host_identity: Ed25519PublicKey::from_bytes([1; 32]),
-                },
-            };
+            let client = MobileClient::from_channel(None, client, Duration::from_secs(5));
             (ffi::register_client(runtime, client).unwrap(), server)
         })
     }

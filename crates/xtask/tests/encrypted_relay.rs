@@ -179,7 +179,10 @@ async fn encrypted_relay_authenticates_devices_isolates_ids_rejects_tampering_an
         let first_cwd = directory.path().join("private-alpha-7da76fbedf25447b");
         let second_cwd = directory.path().join("private-bravo-c1a36dd641944c23");
         // Both clients issue request ID 1; neither response may cross routes.
-        let (a, b) = tokio::join!(first.request("thread/start", json!({"cwd": first_cwd})), second.request("thread/start", json!({"cwd": second_cwd})));
+        let (a, b) = tokio::join!(
+            async { first.agent().request::<_, Value>("thread/start", &json!({"cwd": first_cwd})).await },
+            async { second.agent().request::<_, Value>("thread/start", &json!({"cwd": second_cwd})).await },
+        );
         let a = a.unwrap();
         let b = b.unwrap();
         assert_eq!(a["thread"]["cwd"], first_cwd.to_string_lossy().as_ref());
@@ -195,11 +198,11 @@ async fn encrypted_relay_authenticates_devices_isolates_ids_rejects_tampering_an
 
         let mut messages = first.subscribe();
         let thread_id = &a["thread"]["id"];
-        let started = first.request("turn/start", json!({
+        let started = first.agent().request::<_, serde_json::Value>("turn/start", &json!({
             "threadId":thread_id,"clientUserMessageId":"first-client-message",
             "input":[{"type":"text","text":"[delayed-input] Begin"}]
         })).await.unwrap();
-        first.request("turn/steer", json!({
+        first.agent().request::<_, serde_json::Value>("turn/steer", &json!({
             "threadId":thread_id,"expectedTurnId":started["turn"]["id"],
             "clientUserMessageId":"steering-client-message","input":[{"type":"text","text":"Follow through"}]
         })).await.unwrap();
@@ -215,21 +218,21 @@ async fn encrypted_relay_authenticates_devices_isolates_ids_rejects_tampering_an
             ids
         }).await.expect("accepted inputs must retain their client IDs across the encrypted native event stream");
         assert_eq!(ids, ["first-client-message".to_owned(), "steering-client-message".to_owned()].into());
-        let history = first.request("host/thread/read", json!({"threadId":thread_id,"includeTurns":true})).await.unwrap();
+        let history = first.agent().request::<_, serde_json::Value>("host/thread/read", &json!({"threadId":thread_id,"includeTurns":true})).await.unwrap();
         let user_ids = history["thread"]["turns"][0]["items"].as_array().unwrap().iter()
             .filter(|item| item["type"] == "userMessage").map(|item| item["clientId"].as_str().unwrap()).collect::<Vec<_>>();
         assert_eq!(user_ids.len(), 2);
 
         tamper.store(true, Ordering::SeqCst);
-        assert!(first.request("thread/start", json!({"cwd": directory.path().join("tampered")})).await.is_err(), "SSH must reject modified ciphertext");
-        assert_eq!(second.request("thread/list", json!({})).await.unwrap()["data"].as_array().unwrap().len(), 2, "tampered command reached Codex");
+        assert!(first.agent().request::<_, serde_json::Value>("thread/start", &json!({"cwd": directory.path().join("tampered")})).await.is_err(), "SSH must reject modified ciphertext");
+        assert_eq!(second.agent().request::<_, serde_json::Value>("thread/list", &json!({})).await.unwrap()["data"].as_array().unwrap().len(), 2, "tampered command reached Codex");
         first.close();
         let reconnected = MobileClient::connect(config(&endpoint, host_public, None), &first_key).await.unwrap();
         let mut closed = reconnected.subscribe();
         authentication.lock().await.revoke(public_key(&first_key)).unwrap();
         assert!(tokio::time::timeout(Duration::from_secs(5), closed.recv()).await.unwrap().is_err());
-        assert!(reconnected.request("thread/list", json!({})).await.is_err());
-        assert_eq!(second.request("thread/list", json!({})).await.unwrap()["data"].as_array().unwrap().len(), 2);
+        assert!(reconnected.agent().request::<_, serde_json::Value>("thread/list", &json!({})).await.is_err());
+        assert_eq!(second.agent().request::<_, serde_json::Value>("thread/list", &json!({})).await.unwrap()["data"].as_array().unwrap().len(), 2);
         assert!(matches!(MobileClient::connect(config(&endpoint, host_public, None), &first_key).await, Err(MobileClientError::AuthenticationRejected)));
 
         reconnected.close();
@@ -290,7 +293,7 @@ async fn local_management_and_relay_share_one_codex_and_shutdown_releases_sessio
         // A recording longer than the former phone limit must reach Host
         // dictation, never the Codex request parser. This fixture has no account.
         let audio = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, vec![0_u8; 24_000 * 2 * 31]);
-        let error = mobile.request("host/dictation/transcribe", json!({"audio":audio})).await.unwrap_err().to_string();
+        let error = mobile.agent().request::<_, serde_json::Value>("host/dictation/transcribe", &json!({"audio":audio})).await.unwrap_err().to_string();
         assert!(error.contains("dictation_failed"), "dictation escaped the Host route: {error}");
         assert!(error.contains("ChatGPT"), "long recording did not reach authentication: {error}");
         let document = directory.path().join("document.txt");
@@ -336,13 +339,13 @@ async fn local_management_and_relay_share_one_codex_and_shutdown_releases_sessio
             if line["id"] == 7 { assert_eq!(line["result"]["thread"]["cwd"], "/isolated-local"); break; }
         }
         drop(local);
-        let threads = mobile.request("thread/list", json!({})).await.unwrap();
+        let threads = mobile.agent().request::<_, serde_json::Value>("thread/list", &json!({})).await.unwrap();
         assert_eq!(threads["data"].as_array().unwrap().len(), 1, "closing local UI must preserve shared Codex state");
-        assert!(mobile.request("host/invite", json!({})).await.is_err(), "remote RPC cannot reach local management");
+        assert!(mobile.agent().request::<_, serde_json::Value>("host/invite", &json!({})).await.is_err(), "remote RPC cannot reach local management");
         writer.write_line(&json!({"id":3,"method":"host/revoke","params":{"identity":public_key(&device_key)}}).to_string()).await.unwrap();
         let revoked: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
         assert!(revoked.get("result").is_some());
-        assert!(mobile.request("thread/list", json!({})).await.is_err());
+        assert!(mobile.agent().request::<_, serde_json::Value>("thread/list", &json!({})).await.is_err());
         writer.write_line(r#"{"id":4,"method":"host/invite"}"#).await.unwrap();
         let invitation: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
         writer.write_line(&json!({"id":5,"method":"host/pairRemote","params":{"invitation":invitation["result"],"deviceName":"Other Mac"}}).to_string()).await.unwrap();
@@ -409,14 +412,14 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         });
         let ticket = authentication.lock().await.invite(identity.public_key(), "Mac".into(), endpoint.clone(), now()).unwrap().ticket;
         let mobile = MobileClient::connect(config(&endpoint, identity.public_key(), Some(ticket)), &key()).await.unwrap();
-        let started = mobile.request("host/thread/start", json!({"cwd":directory.path().join("large-history")})).await.unwrap();
+        let started = mobile.agent().request::<_, serde_json::Value>("host/thread/start", &json!({"cwd":directory.path().join("large-history")})).await.unwrap();
         assert_eq!(started["thread"]["projectId"], "workspace");
         let thread = &started["thread"]["id"];
-        let listed = mobile.request("host/thread/list", json!({"limit":20})).await.unwrap();
+        let listed = mobile.agent().request::<_, serde_json::Value>("host/thread/list", &json!({"limit":20})).await.unwrap();
         assert_eq!(listed["data"][0]["id"], *thread);
         assert_eq!(listed["data"][0]["projectId"], "workspace");
         let start = std::time::Instant::now();
-        let preview = mobile.request("host/thread/read", json!({"threadId":thread,"includeTurns":true,"deferItemDetails":true})).await.unwrap();
+        let preview = mobile.agent().request::<_, serde_json::Value>("host/thread/read", &json!({"threadId":thread,"includeTurns":true,"deferItemDetails":true})).await.unwrap();
         let preview_bytes = serde_json::to_vec(&preview).unwrap().len();
         assert_eq!(preview["thread"]["projectId"], "workspace");
         println!("large history preview: {preview_bytes} bytes, {} ms", start.elapsed().as_millis());
@@ -426,17 +429,17 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         assert_eq!(turn["items"][0]["content"][0]["text"], "Read the whole output");
         assert_eq!(turn["items"][2]["text"], "Large history is complete");
         assert_eq!(turn["deferredItemIds"], json!(["large-command"]));
-        let full = mobile.request("host/thread/read", json!({"threadId":thread,"includeTurns":true})).await.unwrap();
+        let full = mobile.agent().request::<_, serde_json::Value>("host/thread/read", &json!({"threadId":thread,"includeTurns":true})).await.unwrap();
         assert!(full["thread"]["turns"][0].get("deferredItemIds").is_none(), "full-history clients must retain inline details");
-        let detail = mobile.request("host/thread/item/read", json!({"threadId":thread,"turnId":"large-turn","itemId":"large-command"})).await.unwrap();
+        let detail = mobile.agent().request::<_, serde_json::Value>("host/thread/item/read", &json!({"threadId":thread,"turnId":"large-turn","itemId":"large-command"})).await.unwrap();
         assert_eq!(detail["item"]["aggregatedOutput"], format!("{}END_OF_LARGE_OUTPUT", "output line\n".repeat(700000)));
         assert_eq!(detail["item"], full["thread"]["turns"][0]["items"][1]);
-        assert!(mobile.request("host/thread/item/read", json!({"threadId":thread,"turnId":"wrong-turn","itemId":"large-command"})).await.is_err());
+        assert!(mobile.agent().request::<_, serde_json::Value>("host/thread/item/read", &json!({"threadId":thread,"turnId":"wrong-turn","itemId":"large-command"})).await.is_err());
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
             {"id":"fixture-long-history","cwd":directory.path(),"historyMode":"paginated","updatedAt":1}
         ])).unwrap()).unwrap();
-        mobile.request("host/thread/list", json!({"useStateDbOnly":true})).await.unwrap();
-        let mut page = mobile.request("host/thread/read", json!({"threadId":"fixture-long-history","includeTurns":true,"paginateHistory":true})).await.unwrap();
+        mobile.agent().request::<_, serde_json::Value>("host/thread/list", &json!({"useStateDbOnly":true})).await.unwrap();
+        let mut page = mobile.agent().request::<_, serde_json::Value>("host/thread/read", &json!({"threadId":"fixture-long-history","includeTurns":true,"paginateHistory":true})).await.unwrap();
         assert_eq!(page["thread"]["turns"].as_array().unwrap().len(), 5);
         assert_eq!(page["thread"]["turns"].as_array().unwrap().iter().map(|t| t["items"].as_array().unwrap().len()).sum::<usize>(), 500);
         assert_eq!(page["thread"]["turns"][4]["items"][153]["id"], "long-latest-message");
@@ -453,24 +456,24 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
                     }
                     if items["itemsHasMore"] != true { break; }
                     let cursor = &items["itemsNextCursor"];
-                    items = mobile.request("host/thread/items/list", json!({"threadId":"fixture-long-history","turnId":turn["id"],"cursor":cursor})).await.unwrap()["thread"]["turns"][0].take();
+                    items = mobile.agent().request::<_, serde_json::Value>("host/thread/items/list", &json!({"threadId":"fixture-long-history","turnId":turn["id"],"cursor":cursor})).await.unwrap()["thread"]["turns"][0].take();
                 }
             }
             let Some(cursor) = page["thread"]["historyCursor"].as_str() else { break; };
-            page = mobile.request("host/thread/turns/list", json!({"threadId":"fixture-long-history","cursor":cursor})).await.unwrap();
+            page = mobile.agent().request::<_, serde_json::Value>("host/thread/turns/list", &json!({"threadId":"fixture-long-history","cursor":cursor})).await.unwrap();
         }
         assert_eq!(turn_ids.len(), 10);
         assert_eq!(item_ids.len(), 3718);
 
-        let started = mobile.request("host/thread/start", json!({"cwd":directory.path()})).await.unwrap();
+        let started = mobile.agent().request::<_, serde_json::Value>("host/thread/start", &json!({"cwd":directory.path()})).await.unwrap();
         let image_thread = &started["thread"]["id"];
         let mut messages = mobile.subscribe();
-        mobile.request("turn/start", json!({"threadId":image_thread,"input":[{"type":"text","text":"[generated-images]"}]})).await.unwrap();
+        mobile.agent().request::<_, serde_json::Value>("turn/start", &json!({"threadId":image_thread,"input":[{"type":"text","text":"[generated-images]"}]})).await.unwrap();
         loop {
             let event: Value = serde_json::from_str(&messages.recv().await.unwrap()).unwrap();
             if event["method"] == "turn/completed" && event["params"]["threadId"] == *image_thread { break; }
         }
-        let history = mobile.request("host/thread/read", json!({"threadId":image_thread,"includeTurns":true,"paginateHistory":true,"deferItemDetails":true})).await.unwrap();
+        let history = mobile.agent().request::<_, serde_json::Value>("host/thread/read", &json!({"threadId":image_thread,"includeTurns":true,"paginateHistory":true,"deferItemDetails":true})).await.unwrap();
         let turn = &history["thread"]["turns"][0];
         let images: Vec<_> = turn["items"].as_array().unwrap().iter().filter(|item| item["type"] == "imageGeneration").collect();
         assert_eq!(images.len(), 2);
@@ -540,7 +543,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let mobile = MobileClient::connect(config(&endpoint, identity.public_key(), Some(ticket)), &key()).await.unwrap();
         let request = |project_limit, chat_limit, thread_limit| json!({"titleOnly":true,"projectLimit":project_limit,"chatLimit":chat_limit,"projectThreadLimits":{"project-5":thread_limit}});
         let start = std::time::Instant::now();
-        let first = mobile.request("host/thread/list", request(5, 5, 5)).await.unwrap();
+        let first = mobile.agent().request::<_, serde_json::Value>("host/thread/list", &request(5, 5, 5)).await.unwrap();
         let bytes = serde_json::to_vec(&first).unwrap().len();
         println!("title list through encrypted relay: {bytes} bytes, {} ms", start.elapsed().as_millis());
         assert!(bytes < 16 * 1024, "initial titles exceeded the transfer budget");
@@ -558,25 +561,25 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(first["moreProjectIds"].as_array().unwrap().len(), 5);
         assert_eq!(first["hasMoreChats"], true);
 
-        let more = mobile.request("host/thread/list", request(5, 5, 15)).await.unwrap();
+        let more = mobile.agent().request::<_, serde_json::Value>("host/thread/list", &request(5, 5, 15)).await.unwrap();
         assert_eq!(more["data"].as_array().unwrap().len(), 40);
         assert_eq!(more["data"][14]["id"], "p5-5");
-        let end = mobile.request("host/thread/list", request(15, 25, 25)).await.unwrap();
+        let end = mobile.agent().request::<_, serde_json::Value>("host/thread/list", &request(15, 25, 25)).await.unwrap();
         assert_eq!(end["data"].as_array().unwrap().len(), 19 + 6*5 + 19);
         assert_eq!(end["hasMoreChats"], false);
         assert_eq!(end["hasMoreProjects"], false);
         assert!(!end["moreProjectIds"].as_array().unwrap().contains(&json!("project-5")));
-        let found = mobile.request("host/thread/list", json!({"titleOnly":true,"searchTerm":"Project 01"})).await.unwrap();
+        let found = mobile.agent().request::<_, serde_json::Value>("host/thread/list", &json!({"titleOnly":true,"searchTerm":"Project 01"})).await.unwrap();
         assert_eq!(found["projects"].as_array().unwrap().len(), 1);
         assert_eq!(found["data"].as_array().unwrap().len(), 5);
         assert_eq!(found["data"][0]["id"], "p1-18");
-        let body = mobile.request("host/thread/read", json!({"threadId":"p5-1","includeTurns":true})).await.unwrap();
+        let body = mobile.agent().request::<_, serde_json::Value>("host/thread/read", &json!({"threadId":"p5-1","includeTurns":true})).await.unwrap();
         assert_eq!(body["thread"]["turns"][0]["items"][0]["text"], "History for Project 05 conversation 01");
         assert_eq!(body["thread"]["status"]["type"], "notLoaded");
-        let item = mobile.request("host/thread/item/read", json!({"threadId":"p5-1","turnId":"turn-p5-1","itemId":"answer-p5-1"})).await.unwrap();
+        let item = mobile.agent().request::<_, serde_json::Value>("host/thread/item/read", &json!({"threadId":"p5-1","turnId":"turn-p5-1","itemId":"answer-p5-1"})).await.unwrap();
         assert_eq!(item["item"]["text"], "History for Project 05 conversation 01");
         let mut changes = mobile.subscribe();
-        mobile.request("host/thread/watch", json!({"watchKey":1,"watchId":1,"threadId":"p5-1","path":rollout})).await.unwrap();
+        mobile.agent().request::<_, serde_json::Value>("host/thread/watch", &json!({"watchKey":1,"watchId":1,"threadId":"p5-1","path":rollout})).await.unwrap();
         std::fs::write(&rollout, "external client persisted a reply\n").unwrap();
         let changed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -585,7 +588,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             }
         }).await.expect("rollout changes must cross the encrypted relay");
         assert_eq!(changed["params"], json!({"watchKey":1,"watchId":1,"threadId":"p5-1"}));
-        mobile.request("host/thread/unwatch", json!({"watchKey":1,"watchId":1})).await.unwrap();
+        mobile.agent().request::<_, serde_json::Value>("host/thread/unwatch", &json!({"watchKey":1,"watchId":1})).await.unwrap();
         mobile.close(); drop(runner); serving.await.unwrap(); drop(service);
         Arc::try_unwrap(server).ok().expect("Codex process retained").shutdown().await.unwrap();
         relay_server.kill().await.unwrap(); relay_server.wait().await.unwrap();

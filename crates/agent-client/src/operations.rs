@@ -658,7 +658,32 @@ impl AgentClient {
         })
     }
 
-    async fn request<P: Serialize + ?Sized, R: DeserializeOwned>(
+    /// Complete in reader order before the following notification is dispatched.
+    pub async fn request_with<P: Serialize + ?Sized, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &P,
+        done: impl FnOnce(Result<R, AgentError>) + Send + 'static,
+    ) {
+        let line = match request_line(method, params) {
+            Ok(line) => line,
+            Err(error) => {
+                done(Err(error));
+                return;
+            }
+        };
+        self.peer
+            .request_with(&line, self.deadline, move |reply| {
+                done(
+                    reply
+                        .map_err(AgentError::from)
+                        .and_then(|raw| decode_response(&raw)),
+                );
+            })
+            .await;
+    }
+
+    pub async fn request<P: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
         method: &str,
         params: &P,
@@ -793,8 +818,15 @@ fn request_line<P: Serialize + ?Sized>(method: &str, params: &P) -> Result<Strin
 }
 
 fn decode_response<R: DeserializeOwned>(raw: &str) -> Result<R, AgentError> {
+    fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+        deserializer: D,
+    ) -> Result<Option<T>, D::Error> {
+        T::deserialize(deserializer).map(Some)
+    }
     #[derive(Deserialize)]
+    #[serde(bound(deserialize = "R: Deserialize<'de>"))]
     struct Response<R> {
+        #[serde(default, deserialize_with = "present")]
         result: Option<R>,
         error: Option<Value>,
     }
