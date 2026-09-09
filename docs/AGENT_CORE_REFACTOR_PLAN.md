@@ -34,6 +34,7 @@ PR #2 が失敗した原因は、既存の desktop と Kotlin の形を残した
 ### 第 1 段階(agent-core の完成)の進め方
 
 - 型付きモデルと `client`(操作)は、既存の `app.rs` や `CommonCodexClient.kt` から移さず、フィクスチャ corpus(87 ケース)を仕様として新規に書く。既存コードはメソッド名と検証内容を確認する参照にだけ使う。
+- corpus の所在: ブランチ `codex/refactor-unused-code` の `crates/agent-client/tests/fixtures/`(`operations.json` 48、`host-operations.json` 15、`history.json` 8、`events.json` 7、`submission.json` 9)。main には無い。コマンドの形はそのブランチ独自なので、`resultRef` / `errorRawRef` の参照を展開して平文にした上で、`agent-core` の型付き API に合わせてテストを書き直す。
 - `Snapshot` / `reduce` / `Store` も同様に、desktop の `conversation.rs` と Kotlin の `ConversationTransitions.kt` から移さない。両方の振る舞いをフィクスチャに落としてから新規に書く。
 - `transport` は iroh 検証(第 0 段階)の結果を待ってから着手する。それまでは `tokio::io::duplex` で peer と `Store` をテストする。
 - `agent-cli` を最初に作り、以後の全段階でこれを結合テストの基準にする。
