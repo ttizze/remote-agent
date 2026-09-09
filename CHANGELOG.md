@@ -4,7 +4,7 @@
 
 - Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
 
-- Kill the entire quality process group or Windows job on timeout before removing its checkout. Derive the Windows CI Rust version from the pinned Nix shell and cache native Cargo dependencies and build artifacts.
+- Kill the entire quality process group or Windows job on timeout before removing its checkout. Derive the Windows CI Rust version from the pinned Nix shell, declare one inherited Rust 1.98 minimum for every workspace crate, and cache native Cargo dependencies and build artifacts.
 
 - Replace Rust Xcode/build wrappers with `just` recipes and scripts. Preserve certificate signing, bundle rollback, isolated Simulator/Host cleanup and exact zero-skip test counts. Keep the Rust fixture servers and quality queue/status; use standard file locks and process-wrap for managed quality subprocesses. Add native Linux/Windows CI and a Nix native development shell.
 

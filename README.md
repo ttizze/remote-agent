@@ -191,7 +191,7 @@ The command checks every selected language and returns a failure if any check fa
 
 | Language | Configuration and policy |
 | --- | --- |
-| Rust | `cargo fmt --all --check` and Clippy over all workspace targets, with warnings denied. Keep Clippy's default lint groups; do not enable `restriction` or `pedantic` wholesale. The toolchain is pinned by `flake.lock`. |
+| Rust | `cargo fmt --all --check` and Clippy over all workspace targets, with warnings denied. Keep Clippy's default lint groups; do not enable `restriction` or `pedantic` wholesale. The toolchain is pinned by `flake.lock`; all workspace crates inherit the Rust 1.98 minimum from the root manifest. |
 | Kotlin | ktfmt Gradle plugin 0.26.0 with Kotlin style and 120-column wrapping, plus detekt 1.23.8 with `buildUponDefaultConfig`, validated `detekt.yml`, and handwritten Android `src/main/kotlin` sources. Apply the official Compose naming/default-parameter adjustments. This stable release runs source analysis; its Kotlin 2.0 compiler does not establish Kotlin 2.3 type-resolution coverage. Kotlin compilation and tests remain separate checks. |
 | Swift | Nix-pinned SwiftLint and SwiftFormat, `.swiftlint.yml` and `.swiftformat`, Swift 6.3 formatting syntax with Swift 5 language mode matching Xcode, four-space indentation, LF, 120-column wrapping, and inline commas. Lint handwritten iOS/macOS sources and UI fixtures; build products and dependencies are outside the included roots. |
 
