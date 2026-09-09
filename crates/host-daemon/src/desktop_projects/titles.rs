@@ -1,15 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
+use agent_core::models::{Project, Thread, ThreadList};
 use serde_json::{Value, json};
 
 /// Select from newest-first DB metadata. Retain only visible titles and one
 /// lookahead per section; never retain rollout bodies or unused thread fields.
 pub(crate) struct TitleList {
-    projects: Vec<Value>,
+    projects: Vec<Project>,
     known_projects: HashSet<String>,
     recent_projects: Vec<String>,
-    threads: HashMap<String, Vec<Value>>,
-    chats: Vec<Value>,
+    threads: HashMap<String, Vec<Thread>>,
+    chats: Vec<Thread>,
     project_limit: usize,
     chat_limit: usize,
     thread_limits: HashMap<String, usize>,
@@ -25,11 +26,8 @@ fn limit(value: Option<&Value>, default: usize) -> usize {
 }
 
 impl TitleList {
-    pub(crate) fn new(projects: Vec<Value>, params: &Value) -> Self {
-        let known_projects = projects
-            .iter()
-            .filter_map(|project| project["id"].as_str().map(str::to_owned))
-            .collect();
+    pub(crate) fn new(projects: Vec<Project>, params: &Value) -> Self {
+        let known_projects = projects.iter().map(|project| project.id.clone()).collect();
         Self {
             projects,
             known_projects,
@@ -59,9 +57,11 @@ impl TitleList {
         self.thread_limits.get(project_id).copied().unwrap_or(5)
     }
 
-    pub(crate) fn push(&mut self, mut thread: Value) {
-        let project_id = thread["projectId"]
-            .as_str()
+    pub(crate) fn push(&mut self, mut thread: Thread) {
+        let project_id = thread
+            .project_id
+            .as_ref()
+            .and_then(Option::as_deref)
             .filter(|id| self.known_projects.contains(*id));
         let target = if let Some(project_id) = project_id {
             let position = match self.recent_projects.iter().position(|id| id == project_id) {
@@ -90,37 +90,32 @@ impl TitleList {
             }
             &mut self.chats
         };
-        if let Some(object) = thread.as_object_mut() {
-            // Untitled threads use a short first-message title, not its payload.
-            if !object
-                .get("name")
+        // Untitled threads use a short first-message title, not its payload.
+        if !thread
+            .name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty())
+        {
+            let title: String = thread
+                .extra
+                .get("preview")
                 .and_then(Value::as_str)
-                .is_some_and(|name| !name.trim().is_empty())
-            {
-                let title = object
-                    .get("preview")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("")
-                    .trim()
-                    .chars()
-                    .take(120)
-                    .collect::<String>();
-                if title.is_empty() {
-                    object.remove("name");
-                } else {
-                    object.insert("name".into(), Value::String(title));
-                }
-            }
-            object.retain(|key, _| {
-                matches!(
-                    key.as_str(),
-                    "id" | "name" | "cwd" | "projectId" | "createdAt" | "updatedAt" | "status"
-                )
-            });
+                .unwrap_or("")
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(120)
+                .collect();
+            thread.name = (!title.is_empty()).then_some(title);
         }
+        thread.turns = None;
+        thread.history_cursor = None;
+        thread.path = None;
+        thread
+            .extra
+            .retain(|key, _| matches!(key.as_str(), "createdAt" | "updatedAt"));
         target.push(thread);
     }
 
@@ -138,7 +133,7 @@ impl TitleList {
                 .all(|id| self.threads[id].len() > self.thread_limit(id))
     }
 
-    pub(crate) fn finish(mut self) -> Value {
+    pub(crate) fn finish(mut self) -> ThreadList {
         let positions: HashMap<_, _> = self
             .recent_projects
             .iter()
@@ -147,16 +142,16 @@ impl TitleList {
             .collect();
         if self.searching {
             self.projects
-                .retain(|project| positions.contains_key(project["id"].as_str().unwrap_or("")));
+                .retain(|project| positions.contains_key(project.id.as_str()));
         }
         self.projects.sort_by_key(|project| {
             positions
-                .get(project["id"].as_str().unwrap_or(""))
+                .get(project.id.as_str())
                 .copied()
                 .unwrap_or(usize::MAX)
         });
         for (position, project) in self.projects.iter_mut().enumerate() {
-            project["position"] = json!(position);
+            project.extra.insert("position".into(), json!(position));
         }
         let mut more_project_ids = Vec::new();
         let mut data = Vec::new();
@@ -164,7 +159,7 @@ impl TitleList {
             let maximum = self.thread_limit(id);
             let mut threads = self.threads.remove(id).unwrap_or_default();
             if threads.len() > maximum {
-                more_project_ids.push(id);
+                more_project_ids.push(id.clone());
                 threads.truncate(maximum);
             }
             data.extend(threads);
@@ -174,28 +169,44 @@ impl TitleList {
         let more_chats = self.chats.len() > self.chat_limit;
         self.chats.truncate(self.chat_limit);
         data.extend(self.chats);
-        json!({"data": data, "projects": self.projects, "moreProjectIds": more_project_ids, "hasMoreProjects": more_projects, "hasMoreChats": more_chats})
+        ThreadList {
+            data,
+            projects: self.projects,
+            more_project_ids,
+            has_more_projects: more_projects,
+            has_more_chats: more_chats,
+            extra: Default::default(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn thread(value: Value) -> Thread {
+        serde_json::from_value(value).unwrap()
+    }
+    fn project(id: &str) -> Project {
+        Project {
+            id: id.into(),
+            name: id.into(),
+            roots: vec![],
+            extra: Default::default(),
+        }
+    }
 
     #[test]
     fn returns_latest_five_titles_per_recent_project_and_independent_chat_page() {
-        let projects = (1..=7)
-            .map(|id| json!({"id":format!("p{id}"),"position":id}))
-            .collect();
+        let projects = (1..=7).map(|id| project(&format!("p{id}"))).collect();
         let mut list = TitleList::new(projects, &json!({}));
         for index in 0..9 {
             for project in (1..=7).rev() {
-                list.push(json!({"id":format!("p{project}-{index}"),"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{}]}));
+                list.push(thread(json!({"id":format!("p{project}-{index}"),"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
             }
-            list.push(json!({"id":format!("chat-{index}"),"preview":"\nFirst line\nprivate body","cwd":"/other"}));
+            list.push(thread(json!({"id":format!("chat-{index}"),"preview":"\nFirst line\nprivate body","cwd":"/other"})));
         }
         assert!(list.complete());
-        let result = list.finish();
+        let result = serde_json::to_value(list.finish()).unwrap();
         let data = result["data"].as_array().unwrap();
         assert_eq!(data.len(), 30);
         assert_eq!(data[0]["id"], "p7-0");
@@ -218,13 +229,15 @@ mod tests {
     #[test]
     fn repeated_expansion_has_no_hidden_total_title_limit() {
         let mut list = TitleList::new(
-            vec![json!({"id":"p"})],
+            vec![project("p")],
             &json!({"projectThreadLimits":{"p":1005}}),
         );
         for index in 0..1001 {
-            list.push(json!({"id":format!("t{index}"),"projectId":"p","name":"Title"}));
+            list.push(thread(
+                json!({"id":format!("t{index}"),"projectId":"p","name":"Title"}),
+            ));
         }
-        let result = list.finish();
+        let result = serde_json::to_value(list.finish()).unwrap();
         assert_eq!(result["data"].as_array().unwrap().len(), 1001);
         assert_eq!(result["data"][1000]["id"], "t1000");
         assert_eq!(result["moreProjectIds"], json!([]));
@@ -233,14 +246,18 @@ mod tests {
     #[test]
     fn expanding_one_project_does_not_expand_other_sections_and_exact_end_has_no_more() {
         let mut list = TitleList::new(
-            vec![json!({"id":"p"}), json!({"id":"q"})],
+            vec![project("p"), project("q")],
             &json!({"projectThreadLimits":{"p":15}}),
         );
         for index in 0..15 {
-            list.push(json!({"id":format!("p{index}"),"projectId":"p","name":"P"}));
-            list.push(json!({"id":format!("q{index}"),"projectId":"q","name":"Q"}));
+            list.push(thread(
+                json!({"id":format!("p{index}"),"projectId":"p","name":"P"}),
+            ));
+            list.push(thread(
+                json!({"id":format!("q{index}"),"projectId":"q","name":"Q"}),
+            ));
         }
-        let result = list.finish();
+        let result = serde_json::to_value(list.finish()).unwrap();
         assert_eq!(result["data"].as_array().unwrap().len(), 20);
         assert_eq!(result["moreProjectIds"], json!(["q"]));
         assert_eq!(result["hasMoreChats"], false);

@@ -144,7 +144,7 @@ pub(super) async fn run(
         "items" => {
             for item in [
                 json!({"id":format!("fixture-plan-{suffix}"),"type":"plan","text":"確認計画"}),
-                json!({"id":format!("fixture-mcp-{suffix}"),"type":"mcpToolCall","server":"fixture","tool":"lookup","status":"inProgress"}),
+                json!({"id":format!("fixture-mcp-{suffix}"),"type":"mcpToolCall","server":"fixture","tool":"lookup","status":"completed","result":{"content":[{"type":"text","text":"Fixture lookup result"}]}}),
                 json!({"id":format!("fixture-dynamic-{suffix}"),"type":"dynamicToolCall","tool":"fixture","status":"inProgress"}),
                 json!({"id":format!("fixture-collab-{suffix}"),"type":"collabAgentToolCall","tool":"spawn_agent","status":"inProgress"}),
                 json!({"id":format!("fixture-subagent-{suffix}"),"type":"subAgentActivity","status":"running"}),

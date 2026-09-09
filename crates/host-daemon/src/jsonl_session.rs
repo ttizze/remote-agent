@@ -1,104 +1,99 @@
-use std::sync::Arc;
+use crate::{CodexSession, HostRuntime};
+use agent_core::{
+    peer::{PeerEvent, RpcPeer},
+    transport::NodeId,
+};
+use futures_util::{
+    StreamExt,
+    future::{AbortHandle, abortable},
+    stream::FuturesUnordered,
+};
+use host_protocol::{RpcMessageKind, classify_message};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::{sync::broadcast, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::CodexRpcService;
-use host_protocol::{
-    DEFAULT_MAX_MESSAGE_BYTES, JsonlReader, JsonlWriter, RpcMessageKind, classify_message,
-};
-use tokio::{
-    io::{AsyncRead, AsyncWrite, split},
-    sync::Semaphore,
-    task::JoinSet,
-};
-
-const MAX_IN_FLIGHT_REQUESTS: usize = 8;
-
-pub(crate) async fn serve_jsonl_session<S>(
-    stream: S,
-    service: CodexRpcService,
-    disconnect: CancellationToken,
-    mut session: crate::CodexSession,
-) -> Result<(), String>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let session_id = session.id();
-    let (reader, writer) = split(stream);
-    let mut reader = JsonlReader::with_max_message_bytes(reader, DEFAULT_MAX_MESSAGE_BYTES);
-    let mut writer = JsonlWriter::with_max_message_bytes(writer, DEFAULT_MAX_MESSAGE_BYTES);
-    let permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
+pub(crate) async fn serve_jsonl_session(
+    peer: Arc<RpcPeer>,
+    mut events: broadcast::Receiver<PeerEvent>,
+    runtime: Arc<HostRuntime>,
+    node: NodeId,
+    stop: CancellationToken,
+    mut session: CodexSession,
+) -> Result<(), String> {
+    let id = session.id();
     let mut tasks = JoinSet::<Result<(), String>>::new();
-
-    let result = async {
-        loop {
-            let mut task_error = None;
-            while let Some(result) = tasks.try_join_next() {
-                match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        task_error = Some(error);
-                        break;
+    let mut requests = FuturesUnordered::new();
+    let mut aliases = HashMap::<String, (u64, AbortHandle)>::new();
+    let result = loop {
+        tokio::select! {
+            _ = stop.cancelled() => break Ok(()),
+            completed = requests.next(), if !requests.is_empty() => {
+                if let Some(Ok(Err(error))) = completed { break Err(error); }
+            },
+            completed = tasks.join_next(), if !tasks.is_empty() => match completed {
+                Some(Ok(Ok(()))) => {},
+                Some(Ok(Err(error))) => break Err(error),
+                Some(Err(error)) => break Err(error.to_string()),
+                None => {},
+            },
+            incoming = events.recv() => match incoming {
+                Ok(PeerEvent::Response { .. }) => {},
+                Ok(PeerEvent::Closed(_)) => break Ok(()),
+                Err(error) => break Err(error.to_string()),
+                Ok(PeerEvent::Message(message)) => {
+                    let notification = classify_message(&message.value).map_err(|e| e.to_string())?.kind() == RpcMessageKind::Notification;
+                    if notification {
+                        runtime.dispatch(node, id, message.value.to_string()).await?;
+                    } else {
+                        if tasks.len() >= 128 { break Err("maximum in-flight request count reached".into()); }
+                        let peer = peer.clone();
+                        let runtime = runtime.clone();
+                        tasks.spawn(async move {
+                            if let Some(response) = runtime.dispatch(node, id, message.value.to_string()).await? {
+                                peer.send_raw(response).await.map_err(|e| e.to_string())?;
+                            }
+                            Ok(())
+                        });
                     }
-                    Err(error) => {
-                        task_error = Some(format!("request task failed: {error}"));
-                        break;
-                    }
-                }
-            }
-            if let Some(error) = task_error {
-                break Err(error);
-            }
-
-            tokio::select! {
-                biased;
-                _ = disconnect.cancelled() => break Ok(()),
-                incoming = reader.read_line() => {
-                    let Some(line) = incoming.map_err(|error| error.to_string())? else {
-                        break Ok(());
-                    };
-                    let message = classify_message(&line)
-                        .map_err(|error| format!("invalid JSONL message: {error}"))?;
-                    match message.kind() {
-                        RpcMessageKind::Request => {
-                            let Ok(permit) = permits.clone().try_acquire_owned() else {
-                                break Err("maximum in-flight request count reached".to_owned());
-                            };
-                            let service = service.clone();
-                            tasks.spawn(async move {
-                                let _permit = permit;
-                                service
-                                    .dispatch_request(session_id, line)
-                                    .await
-                                    .map_err(|error| error.to_string())
-                            });
-                        }
-                        RpcMessageKind::Response => {
-                            service
-                                .dispatch_response(session_id, line)
-                                .await
-                                .map_err(|error| error.to_string())?;
-                        }
-                        RpcMessageKind::Notification => {
-                            service
-                                .dispatch_notification(session_id, line)
-                                .await
-                                .map_err(|error| error.to_string())?;
+                },
+            },
+            outgoing = session.recv() => {
+                let Some(mut line) = outgoing else { break Err("session outbound queue closed".into()); };
+                let message = match classify_message(&line) {
+                    Ok(message) => message,
+                    Err(error) => break Err(error.to_string()),
+                };
+                if message.kind() == RpcMessageKind::Request {
+                    let alias = message.raw_id().ok_or("server request ID missing")?.to_owned();
+                    let request = peer.request_raw(&line);
+                    let wire_id = request.wire_id().ok_or("invalid server request")?;
+                    let service = &runtime.service;
+                    let (request, abort) = abortable(async move {
+                        let response = request.await.map_err(|e| e.to_string())?;
+                        service.dispatch_response(id, response.value).await.map_err(|e| e.to_string())?;
+                        Ok::<_, String>(())
+                    });
+                    if let Some((_, previous)) = aliases.insert(alias, (wire_id, abort)) { previous.abort(); }
+                    requests.push(request);
+                } else {
+                    if message.method() == Some("serverRequest/resolved") {
+                        let mut notification: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+                        if let Some(request_id) = notification.get_mut("params").and_then(|params| params.get_mut("requestId"))
+                            && let Some((wire_id, abort)) = aliases.remove(&request_id.to_string()) {
+                            abort.abort();
+                            *request_id = wire_id.into();
+                            line = notification.to_string();
                         }
                     }
-                }
-                outgoing = session.recv() => {
-                    let Some(line) = outgoing else {
-                        break Err("session outbound queue closed".to_owned());
-                    };
-                    writer.write_line(&line).await.map_err(|error| error.to_string())?;
+                    if let Err(error) = tokio::time::timeout(Duration::from_secs(30), peer.send_raw(line)).await.map_err(|_| "JSONL write timed out".to_owned()).and_then(|r| r.map_err(|e| e.to_string())) {
+                        break Err(error);
+                    }
                 }
             }
         }
-    }
-    .await;
-
+    };
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    service.close_session(session_id);
     result
 }

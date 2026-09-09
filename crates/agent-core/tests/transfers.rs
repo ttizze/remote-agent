@@ -41,6 +41,7 @@ async fn upload_and_download_use_distinct_iroh_streams_and_preserve_content() {
         let (read, write) = tokio::io::split(control);
         let mut reader = JsonlReader::new(read);
         let mut writer = JsonlWriter::new(write);
+        assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
         for method in ["host/blob/upload", "host/blob/download"] {
             let request: Value =
                 serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();

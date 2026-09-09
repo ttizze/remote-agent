@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde_json::Value;
+use agent_core::models::{Project, Thread};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
 
 pub(crate) mod state;
@@ -20,6 +22,24 @@ pub const HOST_PROJECT_METHODS: &[&str] = &[
     HOST_THREAD_START_METHOD,
 ];
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectPage {
+    pub data: Vec<Project>,
+    pub next_cursor: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadPage {
+    pub data: Vec<Thread>,
+    pub next_cursor: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
 const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -29,11 +49,9 @@ pub struct DesktopProjectStore {
 
 impl DesktopProjectStore {
     pub fn from_environment() -> Result<Self, DesktopProjectError> {
-        let codex_home = env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".codex"))
-        });
+        let codex_home = env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".codex")));
         let codex_home = codex_home.ok_or(DesktopProjectError::MissingHome)?;
         Ok(Self::new(codex_home.join(".codex-global-state.json")))
     }
@@ -42,14 +60,17 @@ impl DesktopProjectStore {
         Self { path: path.into() }
     }
 
-    pub async fn project_list(&self, params: &Value) -> Result<Value, DesktopProjectError> {
+    pub async fn project_list(&self, params: &Value) -> Result<ProjectPage, DesktopProjectError> {
         let snapshot = self.load().await?;
         snapshot.project_list(params).map_err(map_state_error)
     }
 
-    pub async fn enrich_threads(&self, result: Value) -> Result<Value, DesktopProjectError> {
+    pub async fn enrich_threads(&self, threads: &mut [Thread]) -> Result<(), DesktopProjectError> {
         let snapshot = self.load().await?;
-        Ok(snapshot.enrich_threads(result))
+        for thread in threads {
+            snapshot.enrich_thread(thread);
+        }
+        Ok(())
     }
 
     pub(crate) async fn load(&self) -> Result<state::Snapshot, DesktopProjectError> {
@@ -95,7 +116,7 @@ fn map_state_error(error: state::Error) -> DesktopProjectError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DesktopProjectError {
-    #[error("neither CODEX_HOME nor HOME is available")]
+    #[error("neither CODEX_HOME nor the user home directory is available")]
     MissingHome,
     #[error("failed to read Codex Desktop project state: {0}")]
     Read(#[source] io::Error),
@@ -148,7 +169,7 @@ mod tests {
         let snapshot = DesktopProjectStore::new(path).load().await.unwrap();
 
         assert_eq!(
-            snapshot.project_list(&Value::Null).unwrap(),
+            serde_json::to_value(snapshot.project_list(&Value::Null).unwrap()).unwrap(),
             json!({
                 "data": [],
                 "nextCursor": null,

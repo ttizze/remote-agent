@@ -22,8 +22,12 @@ pub struct Thread {
         with = "serde_with::rust::double_option"
     )]
     pub history_cursor: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
+    pub project_id: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(flatten)]

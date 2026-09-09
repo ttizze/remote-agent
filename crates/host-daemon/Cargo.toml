@@ -3,37 +3,33 @@ name = "host-daemon"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+rust-version = "1.91"
 
 [dependencies]
-mobile-client = { path = "../mobile-client" }
+agent-core = { path = "../agent-core" }
+keyring = "4.2"
+directories = "6"
+uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4.5", features = ["derive"] }
 base64.workspace = true
 codex-app-server = { path = "../codex-app-server" }
 host-protocol = { path = "../host-protocol" }
-relay-transport = { path = "../relay-transport" }
 ring.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "multipart", "json", "http2", "system-proxy"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-russh.workspace = true
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
-tokio-tungstenite = { version = "0.29.0", default-features = false, features = [
-    "connect",
-    "rustls-tls-native-roots",
-] }
+async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink", "tokio-rustls-native-certs"] }
+futures-io = "0.3"
 tokio-util.workspace = true
 zeroize.workspace = true
 tempfile = "3"
-libc = "0.2"
+scopeguard = "1.2"
+atomicwrites = "0.4.4"
 notify = "8.2.0"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework.workspace = true
-security-framework-sys.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

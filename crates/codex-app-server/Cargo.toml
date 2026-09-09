@@ -8,7 +8,7 @@ rust-version.workspace = true
 [dependencies]
 agent-core = { path = "../agent-core" }
 host-protocol = { path = "../host-protocol" }
-ring.workspace = true
+tempfile = "3"
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true

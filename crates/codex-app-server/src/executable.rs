@@ -5,7 +5,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::Error;
+use crate::{
+    Error,
+    platform::{bundled_codex_path, executable_path, is_executable},
+};
 
 pub(crate) const DEFAULT_CODEX_PROGRAM: &str = "codex";
 
@@ -20,9 +23,11 @@ fn resolve_from(
     bundled_codex: Option<&Path>,
 ) -> Result<PathBuf, Error> {
     if program.components().count() > 1 || program.is_absolute() {
-        let resolved = fs::canonicalize(program).map_err(|source| Error::ResolveExecutable {
-            program: program.to_path_buf(),
-            source,
+        let resolved = fs::canonicalize(executable_path(program)).map_err(|source| {
+            Error::ResolveExecutable {
+                program: program.to_path_buf(),
+                source,
+            }
         })?;
         if is_executable(&resolved) {
             return Ok(resolved);
@@ -38,7 +43,7 @@ fn resolve_from(
 
     let path = path.ok_or_else(|| Error::ExecutableNotFound(program.to_path_buf()))?;
     for directory in env::split_paths(path) {
-        let candidate = directory.join(program);
+        let candidate = directory.join(executable_path(program));
         if let Some(resolved) = resolve_candidate(Some(&candidate))? {
             return Ok(resolved);
         }
@@ -59,31 +64,6 @@ fn resolve_candidate(candidate: Option<&Path>) -> Result<Option<PathBuf>, Error>
             program: candidate.to_path_buf(),
             source,
         })
-}
-
-#[cfg(target_os = "macos")]
-fn bundled_codex_path() -> Option<&'static Path> {
-    Some(Path::new(
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-    ))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn bundled_codex_path() -> Option<&'static Path> {
-    None
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
 }
 
 #[cfg(test)]
@@ -142,7 +122,7 @@ mod tests {
         fs::create_dir_all(bundled.parent().unwrap()).unwrap();
         fs::create_dir(&path_directory).unwrap();
         write_executable(&bundled);
-        let path_codex = path_directory.join("codex");
+        let path_codex = path_directory.join(executable_path(Path::new("codex")));
         write_executable(&path_codex);
 
         let resolved = resolve_from(
@@ -163,7 +143,7 @@ mod tests {
             .join("missing/ChatGPT.app/Contents/Resources/codex");
         let path_directory = root.path().join("path");
         fs::create_dir(&path_directory).unwrap();
-        let path_codex = path_directory.join("codex");
+        let path_codex = path_directory.join(executable_path(Path::new("codex")));
         write_executable(&path_codex);
 
         let resolved = resolve_from(
@@ -179,7 +159,7 @@ mod tests {
     #[test]
     fn keeps_an_explicit_codex_path_authoritative() {
         let root = TestDirectory::new("explicit");
-        let explicit = root.path().join("custom-codex");
+        let explicit = root.path().join(executable_path(Path::new("custom-codex")));
         let bundled = root.path().join("bundled-codex");
         let path_directory = root.path().join("path");
         fs::create_dir(&path_directory).unwrap();

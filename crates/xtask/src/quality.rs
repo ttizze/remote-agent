@@ -3,9 +3,9 @@ use tokio::process::Command;
 use xtask::Result;
 
 pub async fn run(language: Option<&str>) -> Result<()> {
-    const LANGUAGES: [&str; 4] = ["rust", "elixir", "kotlin", "swift"];
+    const LANGUAGES: [&str; 3] = ["rust", "kotlin", "swift"];
     if language.is_some_and(|name| !LANGUAGES.contains(&name)) {
-        return Err("quality expects rust, elixir, kotlin, or swift".into());
+        return Err("quality expects rust, kotlin, or swift".into());
     }
     let mut failed = false;
     for name in LANGUAGES {
@@ -41,14 +41,6 @@ async fn check(language: &str) -> Result<()> {
             ]))
             .await;
             format.and(lint)
-        }
-        "elixir" => {
-            command::run(
-                Command::new("mix")
-                    .arg("quality")
-                    .current_dir("apps/server"),
-            )
-            .await
         }
         "kotlin" => {
             command::run(Command::new("./gradlew").args([

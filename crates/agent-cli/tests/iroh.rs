@@ -29,44 +29,47 @@ async fn exercise(command: &[&str], expected: Value) {
         let (read, write) = tokio::io::split(stream);
         let mut reader = JsonlReader::new(read);
         let mut writer = JsonlWriter::new(write);
-        let first: Value =
-            serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
-        if mode == "send" {
-            assert_eq!(first["method"], "host/thread/read");
-            assert_eq!(
-                first["params"],
-                json!({"threadId":"fixture-thread","includeTurns":true,"paginateHistory":true,"deferItemDetails":true})
-            );
-            writer.write_line(&json!({"id":first["id"],"result":{"thread":{"id":"fixture-thread","cwd":"/fixture","status":{"type":"idle"},"turns":[]}}}).to_string()).await.unwrap();
-            let send: Value =
+        assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+        if mode == "approve" {
+            let request_id: Value = serde_json::from_str(command[1]).unwrap();
+            writer.write_line(&json!({"id":request_id,"method":"item/commandExecution/requestApproval","params":{"threadId":"fixture-thread"}}).to_string()).await.unwrap();
+            let answer: Value =
                 serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
-            assert_eq!(send["method"], "turn/start");
             assert_eq!(
-                send["params"],
-                json!({"threadId":"fixture-thread","clientUserMessageId":"fixture-message","input":[{"type":"text","text":"hello","text_elements":[]}]})
+                answer,
+                json!({"id":request_id,"result":{"decision":"decline"}})
             );
-            writer
-                .write_line(
-                    &json!({"id":send["id"],"result":{"turn":{"id":"fixture-turn"}}}).to_string(),
-                )
-                .await
-                .unwrap();
         } else {
-            assert_eq!(first["method"], "host/thread/list");
-            assert_eq!(
-                first["params"],
-                json!({"titleOnly":true,"projectLimit":5,"chatLimit":5,"projectThreadLimits":{},"searchTerm":""})
-            );
-            writer.write_line(&json!({"id":first["id"],"result":{"data":[{"id":"fixture-thread","name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
-            if mode == "approve" {
-                let request_id: Value = serde_json::from_str(command[1]).unwrap();
-                writer.write_line(&json!({"id":request_id,"method":"item/commandExecution/requestApproval","params":{"threadId":"fixture-thread"}}).to_string()).await.unwrap();
-                let answer: Value =
-                    serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+            let first: Value =
+                serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+            if mode == "send" {
+                assert_eq!(first["method"], "host/thread/read");
                 assert_eq!(
-                    answer,
-                    json!({"id":request_id,"result":{"decision":"decline"}})
+                    first["params"],
+                    json!({"threadId":"fixture-thread","includeTurns":true,"paginateHistory":true,"deferItemDetails":true})
                 );
+                writer.write_line(&json!({"id":first["id"],"result":{"thread":{"id":"fixture-thread","cwd":"/fixture","status":{"type":"idle"},"turns":[]}}}).to_string()).await.unwrap();
+                let send: Value =
+                    serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(send["method"], "turn/start");
+                assert_eq!(
+                    send["params"],
+                    json!({"threadId":"fixture-thread","clientUserMessageId":"fixture-message","input":[{"type":"text","text":"hello","text_elements":[]}]})
+                );
+                writer
+                    .write_line(
+                        &json!({"id":send["id"],"result":{"turn":{"id":"fixture-turn"}}})
+                            .to_string(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                assert_eq!(first["method"], "host/thread/list");
+                assert_eq!(
+                    first["params"],
+                    json!({"titleOnly":true,"projectLimit":5,"chatLimit":5,"projectThreadLimits":{},"searchTerm":""})
+                );
+                writer.write_line(&json!({"id":first["id"],"result":{"data":[{"id":"fixture-thread","name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
             }
         }
         // Keep the QUIC endpoint alive until the CLI has consumed its reply.

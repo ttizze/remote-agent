@@ -1,14 +1,13 @@
 use std::{
     collections::HashSet,
-    env, fs,
+    fs,
     future::Future,
     io,
-    path::{Path, PathBuf},
+    path::Path,
     process::{ExitStatus, Stdio},
     time::Duration,
 };
 
-use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -23,7 +22,7 @@ pub(crate) async fn generate_and_validate(
     executable: &Path,
     request_timeout: Duration,
 ) -> Result<HashSet<String>, Error> {
-    let directory = PrivateSchemaDirectory::create()?;
+    let directory = crate::platform::schema_directory().map_err(Error::CreateSchemaDirectory)?;
     let mut command = Command::new(executable);
     command
         .arg("app-server")
@@ -109,51 +108,6 @@ fn collect_request_methods(schema: &Value) -> HashSet<String> {
         }
     }
     methods
-}
-
-struct PrivateSchemaDirectory {
-    path: PathBuf,
-}
-
-impl PrivateSchemaDirectory {
-    fn create() -> Result<Self, Error> {
-        for _ in 0..16 {
-            let mut random = [0_u8; 16];
-            SystemRandom::new()
-                .fill(&mut random)
-                .map_err(|_| Error::SchemaRandom)?;
-            let suffix = random
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            let path = env::temp_dir().join(format!("remote-agent-codex-schema-{suffix}"));
-            let mut builder = fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            match builder.create(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(Error::CreateSchemaDirectory(error)),
-            }
-        }
-        Err(Error::CreateSchemaDirectory(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate a unique schema directory",
-        )))
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for PrivateSchemaDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
 }
 
 #[cfg(test)]

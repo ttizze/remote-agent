@@ -1,5 +1,5 @@
 //! iroh is confined to this module. A session is one bidirectional JSONL stream.
-use crate::peer::{PeerError, RpcPeer};
+use crate::peer::{PeerError, PeerEvent, RpcPeer};
 use iroh::{EndpointAddr, RelayMode, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,10 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
+    sync::broadcast,
+};
 use uuid::Uuid;
 
 const ALPN: &[u8] = b"remote-agent";
@@ -205,6 +208,38 @@ impl IncomingSession {
     pub fn node_id(&self) -> NodeId {
         self.0.as_ref().unwrap().node_id()
     }
+    /// Read only the typed pairing request. No RPC peer or stream is exposed
+    /// until the owner commits trust and authorizes the request.
+    pub async fn pairing(self) -> Result<PairingRequest, TransportError> {
+        let stream = self.0.as_ref().unwrap().accept_stream().await?;
+        let (read, write) = tokio::io::split(stream);
+        let peer = RpcPeer::open(host_protocol::JsonlReader::new(read), write, None, 128)?;
+        let mut events = peer.subscribe();
+        let PeerEvent::Message(message) = events.recv().await.map_err(connection)? else {
+            return Err(TransportError::Unauthorized);
+        };
+        #[derive(Deserialize)]
+        struct Request {
+            id: serde_json::Value,
+            method: String,
+            params: Params,
+        }
+        #[derive(Deserialize)]
+        struct Params {
+            invitation: Uuid,
+        }
+        let request: Request = serde_json::from_str(&message.value).map_err(connection)?;
+        if request.method != "host/pair" || !(request.id.is_string() || request.id.is_number()) {
+            return Err(TransportError::Unauthorized);
+        }
+        Ok(PairingRequest {
+            incoming: self,
+            peer,
+            events,
+            id: request.id,
+            invitation: request.params.invitation,
+        })
+    }
     /// Only an allowlisted identity can become an application session. Pairing
     /// must persist the updated trust before passing it to this gate.
     pub fn authorize(mut self, trust: &Trust) -> Result<Session, TransportError> {
@@ -217,6 +252,31 @@ impl Drop for IncomingSession {
         if let Some(session) = &self.0 {
             session.close();
         }
+    }
+}
+/// A pairing request whose underlying connection remains inaccessible.
+pub struct PairingRequest {
+    incoming: IncomingSession,
+    peer: RpcPeer,
+    events: broadcast::Receiver<PeerEvent>,
+    id: serde_json::Value,
+    pub invitation: Uuid,
+}
+impl PairingRequest {
+    /// Supply the persisted allowlist after consuming `invitation` atomically.
+    pub async fn authorize(
+        self,
+        trust: &Trust,
+    ) -> Result<(Session, RpcPeer, broadcast::Receiver<PeerEvent>), TransportError> {
+        let session = scopeguard::guard(self.incoming.authorize(trust)?, |session| session.close());
+        self.peer
+            .send_raw(serde_json::json!({"id":self.id,"result":{}}).to_string())
+            .await?;
+        Ok((
+            scopeguard::ScopeGuard::into_inner(session),
+            self.peer,
+            self.events,
+        ))
     }
 }
 #[derive(Clone)]
@@ -255,12 +315,15 @@ impl Session {
         timeout: Duration,
         max_requests: usize,
     ) -> Result<RpcPeer, TransportError> {
-        let stream = self.open_stream().await?;
+        let mut stream = self.open_stream().await?;
+        // QUIC does not advertise a bidirectional stream until it carries data.
+        // A JSONL blank line registers passive approval clients immediately.
+        stream.write_all(b"\n").await.map_err(connection)?;
         let (read, write) = tokio::io::split(stream);
         Ok(RpcPeer::open(
             host_protocol::JsonlReader::new(read),
             write,
-            timeout,
+            Some(timeout),
             max_requests,
         )?)
     }

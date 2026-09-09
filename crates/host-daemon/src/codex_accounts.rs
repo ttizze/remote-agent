@@ -1,5 +1,6 @@
-use std::{collections::HashMap, io::Write, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
+use agent_core::peer::PeerEvent;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,7 @@ struct Registry {
 struct Login {
     directory: tempfile::TempDir,
     server: CodexAppServer,
-    events: broadcast::Receiver<String>,
+    events: broadcast::Receiver<PeerEvent>,
     id: String,
     completed: bool,
 }
@@ -231,9 +232,9 @@ impl Accounts {
         }
         while !login.completed {
             match login.events.try_recv() {
-                Ok(line) => {
+                Ok(PeerEvent::Message(message)) => {
                     let event: Value =
-                        serde_json::from_str(&line).map_err(|_| "認証応答が無効です。")?;
+                        serde_json::from_str(&message.value).map_err(|_| "認証応答が無効です。")?;
                     if event["method"] != "account/login/completed"
                         || event["params"]["loginId"] != login.id
                     {
@@ -245,10 +246,11 @@ impl Accounts {
                     }
                     login.completed = true;
                 }
+                Ok(PeerEvent::Response { .. }) => {}
                 Err(broadcast::error::TryRecvError::Empty) => {
                     return Ok(json!({"completed":false}));
                 }
-                Err(_) => {
+                Ok(PeerEvent::Closed(_)) | Err(_) => {
                     self.login = None;
                     return Err("認証処理との接続が切れました。".into());
                 }
@@ -332,16 +334,15 @@ impl Accounts {
     }
 
     fn save(&self) -> Result<(), String> {
-        let mut file = tempfile::NamedTempFile::new_in(&self.directory)
-            .map_err(|_| "アカウント設定を保存できませんでした。")?;
-        serde_json::to_writer(&mut file, &self.registry)
-            .map_err(|_| "アカウント設定を保存できませんでした。")?;
-        file.flush()
-            .and_then(|_| file.as_file().sync_all())
-            .map_err(|_| "アカウント設定を保存できませんでした。")?;
-        file.persist(self.directory.join("accounts.json"))
-            .map_err(|_| "アカウント設定を保存できませんでした。")?;
-        Ok(())
+        atomicwrites::AtomicFile::new(
+            self.directory.join("accounts.json"),
+            atomicwrites::AllowOverwrite,
+        )
+        .write_with_options(
+            |file| serde_json::to_writer(file, &self.registry),
+            crate::platform::private_file_options(),
+        )
+        .map_err(|_| "アカウント設定を保存できませんでした。".into())
     }
 }
 

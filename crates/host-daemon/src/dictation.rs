@@ -1,15 +1,15 @@
 use std::{sync::OnceLock, time::Duration};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use codex_app_server::CodexAppServer;
-use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
-use serde_json::{Value, json};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_tungstenite::{
+use async_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
+use codex_app_server::CodexAppServer;
+use futures_io::{AsyncRead, AsyncWrite};
+use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
+use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 // 100ms of PCM16 at 24kHz. Base64 and sample boundaries both remain aligned.
@@ -119,32 +119,30 @@ async fn transcribe_stream(
         "User-Agent",
         HeaderValue::from_str(user_agent).map_err(|_| "Codexの接続情報が無効です。")?,
     );
-    let (socket, _) =
-        tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|error| match error {
-                tokio_tungstenite::tungstenite::Error::Http(response)
-                    if response
-                        .headers()
-                        .get("cf-mitigated")
-                        .is_some_and(|value| value == "challenge") =>
-                {
-                    "Codexの音声サービスがブラウザでの確認を要求しているため、接続できません。"
-                        .into()
-                }
-                tokio_tungstenite::tungstenite::Error::Http(response) => format!(
-                    "Codexの音声処理に接続できませんでした（HTTP {}）。",
-                    response.status().as_u16()
-                ),
-                tokio_tungstenite::tungstenite::Error::Tls(_) => {
-                    "Codexの音声処理とのTLS接続に失敗しました。".into()
-                }
-                tokio_tungstenite::tungstenite::Error::Io(error) => format!(
-                    "Codexの音声処理に接続できませんでした（通信エラー: {:?}）。",
-                    error.kind()
-                ),
-                _ => "Codexの音声処理とのWebSocket接続に失敗しました。".into(),
-            })?;
+    let (socket, _) = async_tungstenite::tokio::connect_async(request)
+        .await
+        .map_err(|error| match error {
+            async_tungstenite::tungstenite::Error::Http(response)
+                if response
+                    .headers()
+                    .get("cf-mitigated")
+                    .is_some_and(|value| value == "challenge") =>
+            {
+                "Codexの音声サービスがブラウザでの確認を要求しているため、接続できません。".into()
+            }
+            async_tungstenite::tungstenite::Error::Http(response) => format!(
+                "Codexの音声処理に接続できませんでした（HTTP {}）。",
+                response.status().as_u16()
+            ),
+            async_tungstenite::tungstenite::Error::Tls(_) => {
+                "Codexの音声処理とのTLS接続に失敗しました。".into()
+            }
+            async_tungstenite::tungstenite::Error::Io(error) => format!(
+                "Codexの音声処理に接続できませんでした（通信エラー: {:?}）。",
+                error.kind()
+            ),
+            _ => "Codexの音声処理とのWebSocket接続に失敗しました。".into(),
+        })?;
     transcribe_socket(socket, audio).await
 }
 
@@ -157,7 +155,7 @@ async fn transcribe_recording(
     static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
     let client = CLIENT
         .get_or_init(|| {
-            // Match the SSH/WebSocket transport's ring backend. Another transport
+            // Use the same ring backend as iroh. Another transport
             // may already have installed it; keep that process-wide choice.
             if rustls::crypto::CryptoProvider::get_default().is_none() {
                 let _ = rustls::crypto::ring::default_provider().install_default();
@@ -310,7 +308,7 @@ where
                 }
             }
             Message::Ping(_) => socket.flush().await.map_err(|_| "音声処理との接続が切れました。")?,
-            Message::Close(frame) if started && frame.as_ref().is_some_and(|frame| frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal) => {
+            Message::Close(frame) if started && frame.as_ref().is_some_and(|frame| frame.code == async_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal) => {
                 return transcript_text(transcripts);
             }
             Message::Close(_) => return Err("文字起こしが完了する前に接続が切れました。".into()),
@@ -341,8 +339,8 @@ fn transcript_text(transcripts: Vec<(String, u64, String)>) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_tungstenite::tungstenite::protocol::{CloseFrame, Role, frame::coding::CloseCode};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, frame::coding::CloseCode};
 
     // The provider is the only test double. Both sides exercise the real
     // WebSocket implementation and dictation protocol, without account access.
@@ -353,8 +351,18 @@ mod tests {
     ) -> Result<String, String> {
         tokio::time::timeout(Duration::from_secs(3), async {
             let (client, server) = tokio::io::duplex(4096);
-            let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
-            let mut server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+            let client = WebSocketStream::from_raw_socket(
+                async_tungstenite::tokio::TokioAdapter::new(client),
+                Role::Client,
+                None,
+            )
+            .await;
+            let mut server = WebSocketStream::from_raw_socket(
+                async_tungstenite::tokio::TokioAdapter::new(server),
+                Role::Server,
+                None,
+            )
+            .await;
             let provider = async {
                 let start: Value =
                     serde_json::from_str(server.next().await.unwrap().unwrap().to_text().unwrap())

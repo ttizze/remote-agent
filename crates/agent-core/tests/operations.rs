@@ -206,8 +206,15 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
 async fn run_case(case: &Value) {
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let (read, write) = tokio::io::split(client_io);
-    let peer =
-        Arc::new(RpcPeer::open(JsonlReader::new(read), write, Duration::from_secs(1), 16).unwrap());
+    let peer = Arc::new(
+        RpcPeer::open(
+            JsonlReader::new(read),
+            write,
+            Some(Duration::from_secs(1)),
+            16,
+        )
+        .unwrap(),
+    );
     let client = Client::new(peer.clone());
     let server = async {
         let (read, write) = tokio::io::split(server_io);

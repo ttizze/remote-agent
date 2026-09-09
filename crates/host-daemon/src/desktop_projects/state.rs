@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use super::ProjectPage;
+use agent_core::models::{Project, ProjectRoot, Thread};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -51,7 +53,7 @@ impl Snapshot {
         })
     }
 
-    pub(crate) fn project_list(&self, params: &Value) -> Result<Value, Error> {
+    pub(crate) fn project_list(&self, params: &Value) -> Result<ProjectPage, Error> {
         let offset = params
             .get("cursor")
             .and_then(Value::as_str)
@@ -71,50 +73,30 @@ impl Snapshot {
             .unwrap_or_default()
             .iter()
             .enumerate()
-            .map(|(page_position, project)| {
-                project.to_rpc_value(offset.saturating_add(page_position))
-            })
+            .map(|(page_position, project)| project.to_model(offset.saturating_add(page_position)))
             .collect::<Vec<_>>();
         let next_cursor = (end < self.projects.len()).then(|| format!("{CURSOR_PREFIX}{end}"));
-        Ok(json!({
-            "data": page,
-            "nextCursor": next_cursor,
-        }))
+        Ok(ProjectPage {
+            data: page,
+            next_cursor,
+            extra: Default::default(),
+        })
     }
 
-    pub(crate) fn enrich_threads(&self, mut result: Value) -> Value {
-        if let Some(data) = result.get_mut("data").and_then(Value::as_array_mut) {
-            for thread in data {
-                self.enrich_thread(thread);
-            }
-        }
-        if let Some(thread) = result.get_mut("thread") {
-            self.enrich_thread(thread);
-        } else if result.get("id").is_some() {
-            self.enrich_thread(&mut result);
-        }
-        result
-    }
-
-    fn enrich_thread(&self, thread: &mut Value) {
-        let Some(thread_object) = thread.as_object_mut() else {
-            return;
-        };
-        let Some(thread_id) = thread_object.get("id").and_then(Value::as_str) else {
+    pub(crate) fn enrich_thread(&self, thread: &mut Thread) {
+        let Some(thread_id) = thread.id.as_deref() else {
             return;
         };
         // Explicit Desktop decisions override workspace matching, including
         // projectless threads whose cwd happens to be inside a project.
         if let Some(assignment) = self.assignments.get(thread_id) {
-            thread_object.insert(
-                "projectId".to_owned(),
-                Value::String(assignment.project_id.clone()),
-            );
+            thread.project_id = Some(Some(assignment.project_id.clone()));
         } else if self.projectless_thread_ids.contains(thread_id) {
-            thread_object.insert("projectId".to_owned(), Value::Null);
-        } else if thread_object
-            .get("projectId")
-            .and_then(Value::as_str)
+            thread.project_id = Some(None);
+        } else if thread
+            .project_id
+            .as_ref()
+            .and_then(Option::as_ref)
             .is_none()
         {
             let project_id = self
@@ -122,13 +104,13 @@ impl Snapshot {
                 .get(thread_id)
                 .and_then(|root| self.project_for_workspace(root))
                 .or_else(|| {
-                    thread_object
-                        .get("cwd")
-                        .and_then(Value::as_str)
+                    thread
+                        .cwd
+                        .as_deref()
                         .and_then(|cwd| self.project_for_workspace(cwd))
                 });
             if let Some(project_id) = project_id {
-                thread_object.insert("projectId".to_owned(), Value::String(project_id.to_owned()));
+                thread.project_id = Some(Some(project_id.to_owned()));
             }
         }
     }
@@ -210,16 +192,25 @@ struct DesktopProject {
 }
 
 impl DesktopProject {
-    fn to_rpc_value(&self, position: usize) -> Value {
-        json!({
-            "id": self.id,
-            "name": self.name,
-            "roots": self.root_paths.iter().map(|path| json!({"path": path})).collect::<Vec<_>>(),
-            "position": position,
-            "createdAt": self.created_at,
-            "updatedAt": self.updated_at,
-            "source": "codexDesktop",
-        })
+    fn to_model(&self, position: usize) -> Project {
+        Project {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            roots: self
+                .root_paths
+                .iter()
+                .map(|path| ProjectRoot {
+                    path: path.clone(),
+                    extra: Default::default(),
+                })
+                .collect(),
+            extra: serde_json::Map::from_iter([
+                ("position".into(), json!(position)),
+                ("createdAt".into(), json!(self.created_at)),
+                ("updatedAt".into(), json!(self.updated_at)),
+                ("source".into(), json!("codexDesktop")),
+            ]),
+        }
     }
 }
 
@@ -232,6 +223,25 @@ struct ProjectAssignment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    impl Snapshot {
+        fn enrich_threads(&self, mut result: Value) -> Value {
+            let enrich = |value: &mut Value| {
+                let mut thread: Thread = serde_json::from_value(value.take()).unwrap();
+                self.enrich_thread(&mut thread);
+                *value = serde_json::to_value(thread).unwrap();
+            };
+            if let Some(data) = result.get_mut("data").and_then(Value::as_array_mut) {
+                for thread in data {
+                    enrich(thread);
+                }
+            } else if let Some(thread) = result.get_mut("thread") {
+                enrich(thread);
+            } else {
+                enrich(&mut result);
+            }
+            result
+        }
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot::parse(
@@ -266,7 +276,8 @@ mod tests {
 
     #[test]
     fn lists_desktop_projects_in_desktop_order_with_roots() {
-        let page = snapshot().project_list(&json!({"limit": 1})).unwrap();
+        let page =
+            serde_json::to_value(snapshot().project_list(&json!({"limit": 1})).unwrap()).unwrap();
         assert_eq!(
             page,
             json!({
@@ -285,20 +296,20 @@ mod tests {
         let second = snapshot()
             .project_list(&json!({"cursor": "desktop-projects:1", "limit": 1}))
             .unwrap();
-        assert_eq!(second["data"][0]["id"], "project-b");
-        assert!(second["nextCursor"].is_null());
+        assert_eq!(second.data[0].id, "project-b");
+        assert!(second.next_cursor.is_none());
     }
 
     #[test]
     fn clamps_page_limits_without_changing_global_positions() {
         let first = snapshot().project_list(&json!({"limit": 0})).unwrap();
-        assert_eq!(first["data"].as_array().unwrap().len(), 1);
-        assert_eq!(first["data"][0]["position"], 0);
-        assert_eq!(first["nextCursor"], "desktop-projects:1");
+        assert_eq!(first.data.len(), 1);
+        assert_eq!(first.data[0].extra["position"], 0);
+        assert_eq!(first.next_cursor.as_deref(), Some("desktop-projects:1"));
 
         let all = snapshot().project_list(&json!({"limit": 9999})).unwrap();
-        assert_eq!(all["data"].as_array().unwrap().len(), 2);
-        assert!(all["nextCursor"].is_null());
+        assert_eq!(all.data.len(), 2);
+        assert!(all.next_cursor.is_none());
     }
 
     #[test]

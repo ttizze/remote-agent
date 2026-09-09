@@ -21,3 +21,4 @@ tokio-util.workspace = true
 thiserror.workspace = true
 tempfile = "3"
 scopeguard = "1.2"
+pin-project-lite = "0.2"

@@ -16,6 +16,15 @@ pub trait Operation: Serialize {
     }
 }
 
+#[derive(Serialize)]
+pub struct Pair {
+    pub invitation: uuid::Uuid,
+}
+impl Operation for Pair {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/pair";
+}
+
 pub struct Client {
     peer: Arc<RpcPeer>,
 }

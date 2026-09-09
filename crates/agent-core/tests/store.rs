@@ -18,7 +18,13 @@ fn setup(
 ) {
     let (client, server) = tokio::io::duplex(65536);
     let (read, write) = tokio::io::split(client);
-    let peer = RpcPeer::open(JsonlReader::new(read), write, Duration::from_secs(1), 16).unwrap();
+    let peer = RpcPeer::open(
+        JsonlReader::new(read),
+        write,
+        Some(Duration::from_secs(1)),
+        16,
+    )
+    .unwrap();
     let (read, write) = tokio::io::split(server);
     (
         Arc::new(Store::new(peer, snapshot)),
