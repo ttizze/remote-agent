@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Consolidate desktop, mobile, App Server and fixture JSONL request correlation in `agent-core`. Keep SSH/Phoenix transport and native mobile APIs intact. Share generic-stream file transfers, use clap for daemon arguments, and normalize outer JSON object formatting when rewriting RPC IDs while preserving nested raw values.
+
 - Refresh the iPhone composer's file and line counts during active commands, tools, and file edits instead of waiting for the turn to finish. Coalesce activity notifications and discard canceled review responses. Verify live worktree edits on iOS Simulator while the turn remains running.
 
 - Keep only Copy and Branch beneath iPhone answers; remove Share and Expand along with their dedicated sheets.

@@ -17,7 +17,11 @@ fn review_counts(change: &Value) -> AnyElement {
             .into_any_element(),
         _ => counts
             .text_color(rgb(0x999999))
-            .child(if change.get("additions").is_some() { "バイナリ" } else { "—" })
+            .child(if change.get("additions").is_some() {
+                "バイナリ"
+            } else {
+                "—"
+            })
             .into_any_element(),
     }
 }
@@ -1534,17 +1538,15 @@ impl Desktop {
             .into_any_element()
     }
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let navigation = SidebarMenu::new()
-            .gap_1()
-            .child(
-                SidebarMenuItem::new("新しいチャット")
-                    .icon(IconName::Plus)
-                    .disable(!self.connected)
-                    .on_click(cx.listener(|s, _, w, cx| {
-                        s.new_thread(String::new(), w, cx);
-                        cx.notify();
-                    })),
-            );
+        let navigation = SidebarMenu::new().gap_1().child(
+            SidebarMenuItem::new("新しいチャット")
+                .icon(IconName::Plus)
+                .disable(!self.connected)
+                .on_click(cx.listener(|s, _, w, cx| {
+                    s.new_thread(String::new(), w, cx);
+                    cx.notify();
+                })),
+        );
         let mut projects = SidebarMenu::new().gap_1();
         for project in &self.projects {
             let id = text(project, "id").to_owned();
@@ -1695,33 +1697,30 @@ impl Desktop {
                         0x999999
                     })))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                self.button(
-                                    "sidebar-settings",
-                                    if self.remote.is_empty() {
-                                        "この Mac".to_owned()
-                                    } else {
-                                        self.hosts
-                                            .iter()
-                                            .find(|host| text(host, "id") == self.remote)
-                                            .map(|host| text(host, "hostName"))
-                                            .unwrap_or("Host")
-                                            .to_owned()
-                                    },
-                                    cx,
-                                    |s, _, _| {
-                                        s.tab = Tab::Settings;
-                                        s.refresh_manager();
-                                        s.refresh_worktree_settings();
-                                    },
-                                )
-                                .accessibility_label("設定を開く")
-                                .tooltip("設定を開く")
-                                .selected(self.tab == Tab::Settings),
-                            ),
+                        div().flex_1().min_w_0().child(
+                            self.button(
+                                "sidebar-settings",
+                                if self.remote.is_empty() {
+                                    "この Mac".to_owned()
+                                } else {
+                                    self.hosts
+                                        .iter()
+                                        .find(|host| text(host, "id") == self.remote)
+                                        .map(|host| text(host, "hostName"))
+                                        .unwrap_or("Host")
+                                        .to_owned()
+                                },
+                                cx,
+                                |s, _, _| {
+                                    s.tab = Tab::Settings;
+                                    s.refresh_manager();
+                                    s.refresh_worktree_settings();
+                                },
+                            )
+                            .accessibility_label("設定を開く")
+                            .tooltip("設定を開く")
+                            .selected(self.tab == Tab::Settings),
+                        ),
                     )
                     .child(self.icon_button(
                         "refresh-threads",
@@ -1989,7 +1988,13 @@ impl Desktop {
                     .child(div().flex_1())
                     .child(self.model_menu(cx))
                     .child(microphone)
-                    .child(send.large().rounded(px(22.)).w(px(44.)).h(px(44.)).primary()),
+                    .child(
+                        send.large()
+                            .rounded(px(22.))
+                            .w(px(44.))
+                            .h(px(44.))
+                            .primary(),
+                    ),
             );
         let controls = v_flex()
             .w_full()
@@ -2004,9 +2009,10 @@ impl Desktop {
                         .child(self.composer_folder(cx)),
                 )
             })
-            .when(!self.selected.is_empty() && !array(&self.review["files"]).is_empty(), |column| {
-                column.child(self.review_card(cx))
-            })
+            .when(
+                !self.selected.is_empty() && !array(&self.review["files"]).is_empty(),
+                |column| column.child(self.review_card(cx)),
+            )
             .when(phase.is_some(), |column| {
                 column.child(
                     div()
@@ -2037,7 +2043,11 @@ impl Desktop {
     }
     fn review_card(&self, cx: &Context<Self>) -> AnyElement {
         let files = array(&self.review["files"]);
-        let visible = if self.review_expanded { files.len() } else { files.len().min(3) };
+        let visible = if self.review_expanded {
+            files.len()
+        } else {
+            files.len().min(3)
+        };
         v_flex()
             .w_full()
             .rounded(px(12.))
@@ -2052,17 +2062,36 @@ impl Desktop {
                     .bg(rgb(0x232323))
                     .border_b_1()
                     .border_color(rgb(0x383838))
-                    .child(div().p_2().rounded(px(9.)).bg(rgb(0x141414))
-                        .child(Icon::new(IconName::Replace).size_4()))
-                    .child(v_flex().flex_1().min_w_0().gap_1()
-                        .child(div().text_sm().child(format!("{} 件のファイルを変更", files.len())))
-                        .child(review_counts(&self.review)))
-                    .child(self.button("review-changes", "レビューする", cx, |s, _, _| {
-                        s.panel = Panel::Diff;
-                        s.panel_open = true;
-                        s.tab = Tab::Chat;
-                        s.refresh_review();
-                    }).border_1().rounded(px(8.)).disabled(!self.connected)),
+                    .child(
+                        div()
+                            .p_2()
+                            .rounded(px(9.))
+                            .bg(rgb(0x141414))
+                            .child(Icon::new(IconName::Replace).size_4()),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("{} 件のファイルを変更", files.len())),
+                            )
+                            .child(review_counts(&self.review)),
+                    )
+                    .child(
+                        self.button("review-changes", "レビューする", cx, |s, _, _| {
+                            s.panel = Panel::Diff;
+                            s.panel_open = true;
+                            s.tab = Tab::Chat;
+                            s.refresh_review();
+                        })
+                        .border_1()
+                        .rounded(px(8.))
+                        .disabled(!self.connected),
+                    ),
             )
             .child(
                 v_flex()
@@ -2071,21 +2100,40 @@ impl Desktop {
                     .overflow_y_scroll()
                     .py_1()
                     .children(files.iter().take(visible).map(|file| {
-                        h_flex().px_3().h(px(36.)).flex_shrink_0().gap_3()
-                            .child(div().flex_1().min_w_0().text_sm().text_ellipsis()
-                                .child(text(file, "path").to_owned()))
+                        h_flex()
+                            .px_3()
+                            .h(px(36.))
+                            .flex_shrink_0()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .text_ellipsis()
+                                    .child(text(file, "path").to_owned()),
+                            )
                             .child(review_counts(file))
                     })),
             )
             .when(files.len() > 3, |card| {
                 card.child(
                     div().px_2().py_1().bg(rgb(0x232323)).child(
-                        self.button("expand-review-files", if self.review_expanded {
-                            "折りたたむ".to_owned()
+                        self.button(
+                            "expand-review-files",
+                            if self.review_expanded {
+                                "折りたたむ".to_owned()
+                            } else {
+                                format!("あと {} 個のファイルを表示", files.len() - 3)
+                            },
+                            cx,
+                            |s, _, _| s.review_expanded = !s.review_expanded,
+                        )
+                        .icon(if self.review_expanded {
+                            IconName::ChevronUp
                         } else {
-                            format!("あと {} 個のファイルを表示", files.len() - 3)
-                        }, cx, |s, _, _| s.review_expanded = !s.review_expanded)
-                        .icon(if self.review_expanded { IconName::ChevronUp } else { IconName::ChevronDown }),
+                            IconName::ChevronDown
+                        }),
                     ),
                 )
             })
@@ -2732,10 +2780,10 @@ impl Render for Desktop {
         if !composer_visible {
             self.cancel_recording();
         }
-        if let Some(chat) = &self.side_chat {
-            if !active || self.panel != Panel::SideChat {
-                chat.update(cx, |chat, _| chat.cancel_recording());
-            }
+        if let Some(chat) = &self.side_chat
+            && (!active || self.panel != Panel::SideChat)
+        {
+            chat.update(cx, |chat, _| chat.cancel_recording());
         }
         if let Some(view) = self.browser.clone() {
             view.update(cx, |v, cx| {

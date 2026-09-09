@@ -1,7 +1,7 @@
 use std::{collections::HashSet, env, time::Duration};
 
+use agent_core::client::{MobileClient, MobileClientConfig};
 use host_protocol::{CURRENT_PROTOCOL_VERSION, PairingQrPayload};
-use mobile_client::{MobileClient, MobileClientConfig};
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde_json::json;
 

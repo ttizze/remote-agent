@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use agent_core::client::{MobileClient, MobileClientConfig};
 use host_protocol::{CURRENT_PROTOCOL_VERSION, Ed25519PublicKey, PairingQrPayload, RelayEndpoint};
-use mobile_client::{MobileClient, MobileClientConfig};
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;

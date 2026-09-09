@@ -1,3 +1,4 @@
+use agent_core::rpc::{self, Rpc};
 mod clipboard;
 mod dictation;
 mod view;
@@ -7,7 +8,6 @@ use crate::{
     conversation::{self, Conversation, array, text},
     diff::DiffView,
     platform,
-    rpc::{self, Rpc},
 };
 use base64::Engine;
 use gpui_kit::{
@@ -1017,7 +1017,10 @@ impl Desktop {
         if !self.connected || self.worktree_settings.is_null() {
             return;
         }
-        let previous = self.worktree_save_pending.as_ref().unwrap_or(&self.worktree_settings);
+        let previous = self
+            .worktree_save_pending
+            .as_ref()
+            .unwrap_or(&self.worktree_settings);
         let mut settings = previous.clone();
         if let Some((field, checked)) = toggle {
             settings[field] = json!(checked);
@@ -1059,9 +1062,15 @@ impl Desktop {
                         s.worktree_settings = value;
                         s.worktree_saved = s.worktree_directory.read(cx).value().trim()
                             == text(&s.worktree_settings, "worktreeDirectory")
-                            && s.worktree_copy_paths.read(cx).value().lines()
-                                .map(str::trim).filter(|line| !line.is_empty())
-                                .eq(array(&s.worktree_settings["copyPaths"]).iter().filter_map(Value::as_str));
+                            && s.worktree_copy_paths
+                                .read(cx)
+                                .value()
+                                .lines()
+                                .map(str::trim)
+                                .filter(|line| !line.is_empty())
+                                .eq(array(&s.worktree_settings["copyPaths"])
+                                    .iter()
+                                    .filter_map(Value::as_str));
                     }
                     Err(error) => {
                         s.worktree_settings = previous;

@@ -1,11 +1,10 @@
 mod executable;
-mod peer;
 mod schema;
 
 use std::{collections::HashSet, env, io, path::PathBuf, process::Stdio, time::Duration};
 
+use agent_core::peer::{EventDelivery, PeerError, RpcPeer};
 use host_protocol::{RpcMessageKind, classify_message, raw_object};
-use peer::RpcPeer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::{
@@ -158,7 +157,13 @@ impl CodexAppServer {
 
         let stdin = child.stdin.take().ok_or(Error::MissingPipe("stdin"))?;
         let stdout = child.stdout.take().ok_or(Error::MissingPipe("stdout"))?;
-        let peer = RpcPeer::open(stdout, stdin, config.request_timeout);
+        let peer = RpcPeer::open(
+            host_protocol::JsonlReader::new(stdout),
+            stdin,
+            config.request_timeout,
+            1024,
+            EventDelivery::Unified,
+        )?;
         let initialize_response = parse_initialize_response(
             &peer
                 .request_raw(&initialize_request(&config.client))
@@ -198,7 +203,7 @@ impl CodexAppServer {
         if let Some(method) = message.method() {
             ensure_public_method(method)?;
         }
-        self.peer.request_raw(line).await
+        self.peer.request_raw(line).await.map_err(Into::into)
     }
 
     /// Sends a raw Codex notification or response exactly as supplied after
@@ -206,7 +211,7 @@ impl CodexAppServer {
     /// [`Self::request_raw`] so their ids can be correlated.
     pub async fn send_raw(&self, line: &str) -> Result<(), Error> {
         ensure_public_send_method(line)?;
-        self.peer.send_raw(line).await
+        self.peer.send_raw(line).await.map_err(Into::into)
     }
 
     pub async fn shutdown(mut self) -> Result<(), Error> {
@@ -316,6 +321,20 @@ fn remote_error_fields(error: &Value) -> (Value, String, Option<Value>, Map<Stri
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
     (code, message, data, additional_fields)
+}
+
+impl From<PeerError> for Error {
+    fn from(error: PeerError) -> Self {
+        match error {
+            PeerError::InvalidMessage(message) => Self::InvalidMessage(message),
+            PeerError::ConnectionClosed(message) => Self::ConnectionClosed(message),
+            PeerError::RequestTimeout { method, .. } => Self::RequestTimeout { method },
+            PeerError::RequestIdExhausted => {
+                Self::InvalidMessage("request ID space exhausted".into())
+            }
+            PeerError::Remote { error } => Self::InvalidMessage(error),
+        }
+    }
 }
 
 #[cfg(test)]

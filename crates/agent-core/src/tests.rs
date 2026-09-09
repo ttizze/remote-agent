@@ -4,7 +4,7 @@ use host_protocol::{Ed25519PublicKey, RelayEndpoint};
 use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use tokio::net::TcpListener;
 
-use super::*;
+use crate::client::*;
 
 fn valid_config() -> MobileClientConfig {
     MobileClientConfig {
@@ -64,7 +64,15 @@ async fn replayed_requests_and_initial_events_survive_until_the_first_subscriber
     use host_protocol::{JsonlReader, JsonlWriter};
     use serde_json::json;
     let (client, server) = tokio::io::duplex(8192);
-    let peer = crate::rpc::RpcPeer::open(client, 8192, Duration::from_secs(1)).unwrap();
+    let (reader, writer) = tokio::io::split(client);
+    let peer = crate::peer::RpcPeer::open(
+        host_protocol::JsonlReader::with_max_message_bytes(reader, 8192),
+        writer,
+        Duration::from_secs(1),
+        1024,
+        crate::peer::EventDelivery::SplitRequests,
+    )
+    .unwrap();
     let host = tokio::spawn(async move {
         let (read, write) = tokio::io::split(server);
         let mut reader = JsonlReader::new(read);
@@ -85,9 +93,9 @@ async fn replayed_requests_and_initial_events_survive_until_the_first_subscriber
     });
     // Receiving this response proves the read loop already consumed both
     // earlier events. No scheduling sleep or timing assumption is involved.
-    peer.request("thread/list".into(), json!({})).await.unwrap();
+    peer.request("thread/list", &json!({})).await.unwrap();
     let mut requests = peer.subscribe_server_requests();
-    let mut notifications = peer.subscribe_notifications();
+    let mut notifications = peer.subscribe();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(
             &requests

@@ -56,6 +56,7 @@ kotlin {
                 inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
                 inputs.dir(rootProject.file("crates/conversation-presentation"))
                 inputs.dir(rootProject.file("crates/host-protocol"))
+                inputs.dir(rootProject.file("crates/agent-core"))
                 inputs.dir(rootProject.file("crates/relay-transport"))
                 inputs.dir(rootProject.file("crates/mobile-client"))
                 outputs.file(rootProject.file("target/$rustTarget/release/libmobile_client.a"))
@@ -124,6 +125,7 @@ val buildMobileClientAndroid by
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/conversation-presentation"))
         inputs.dir(rootProject.file("crates/host-protocol"))
+        inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/relay-transport"))
         inputs.dir(rootProject.file("crates/mobile-client"))
         outputs.files(
@@ -164,7 +166,8 @@ val buildMobileClientJvmTests by
         environment("RUSTC", mobileRustc.get())
         commandLine(mobileCargo.get(), "build", "--package", "mobile-client", "--features", "jni", "--lib")
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
-        for (crate in listOf("conversation-presentation", "host-protocol", "relay-transport", "mobile-client")) {
+        for (crate in
+            listOf("agent-core", "conversation-presentation", "host-protocol", "relay-transport", "mobile-client")) {
             inputs.dir(rootProject.file("crates/$crate"))
         }
         outputs.file(rootProject.file("target/debug/" + System.mapLibraryName("mobile_client")))

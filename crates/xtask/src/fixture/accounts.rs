@@ -87,21 +87,21 @@ impl Accounts {
                 context.respond(id, &json!({"accountId":self.current["accountId"]}))
             }
             "fixture/account/refresh" => {
-                let refresh_id = "fixture-auth-refresh";
-                let (sender, receiver) = tokio::sync::oneshot::channel();
-                context
-                    .pending
-                    .borrow_mut()
-                    .insert(refresh_id.into(), sender);
-                context.request(refresh_id, "account/chatgptAuthTokens/refresh", &json!({"reason":"unauthorized","previousAccountId":params["previousAccountId"]}))?;
                 let context = context.clone();
                 let id = id.clone();
+                let params = json!({"reason":"unauthorized","previousAccountId":params["previousAccountId"]});
                 tokio::task::spawn_local(async move {
-                    match tokio::time::timeout(std::time::Duration::from_secs(10), receiver).await {
-                        Ok(Ok(result)) => {
+                    let result: Result<Value> = async {
+                        let (_, reply) =
+                            context.request("account/chatgptAuthTokens/refresh", &params)?;
+                        tokio::time::timeout(std::time::Duration::from_secs(10), reply).await?
+                    }
+                    .await;
+                    match result {
+                        Ok(result) => {
                             let _ = context.respond(&id, &json!({"accountId":result["chatgptAccountId"],"hasToken":result["accessToken"].as_str().is_some_and(|token| !token.is_empty())}));
                         }
-                        _ => {
+                        Err(_) => {
                             let _ = context.error(&id, -32603, "refresh response missing");
                         }
                     }

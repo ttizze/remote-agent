@@ -9,7 +9,10 @@ use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
-use crate::{rpc::RpcPeer, transport};
+use crate::{
+    peer::{EventDelivery, PeerError, RpcPeer},
+    transport,
+};
 
 /// Connection parameters obtained from a trusted pairing payload.
 #[derive(Debug, Clone)]
@@ -43,12 +46,6 @@ impl MobileClientConfig {
     }
 }
 
-/// A notification preserved exactly as it appeared on the Codex JSONL wire.
-pub type Notification = String;
-
-/// A request initiated by the Host, preserved as its raw JSON object.
-pub type ServerRequest = String;
-
 /// Relay connection metadata exposed to platform wrappers. The token is
 /// intentionally omitted so callers cannot accidentally display or log it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +77,14 @@ impl MobileClient {
             timeout(config.request_timeout, transport::establish(&config, key))
                 .await
                 .map_err(|_| MobileClientError::ConnectionTimeout)??;
-        let peer = RpcPeer::open(stream, DEFAULT_MAX_MESSAGE_BYTES, config.request_timeout)?;
+        let (reader, writer) = tokio::io::split(stream);
+        let peer = RpcPeer::open(
+            host_protocol::JsonlReader::with_max_message_bytes(reader, DEFAULT_MAX_MESSAGE_BYTES),
+            writer,
+            config.request_timeout,
+            1024,
+            EventDelivery::SplitRequests,
+        )?;
         Ok(Self {
             session: StdMutex::new(Some(Arc::new(session))),
             peer,
@@ -96,13 +100,13 @@ impl MobileClient {
         &self.host
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
-        self.peer.subscribe_notifications()
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.peer.subscribe()
     }
 
     /// Subscribes to raw requests initiated by the Host. The request includes
     /// its original JSON `id`, which must be supplied unchanged when replying.
-    pub fn subscribe_server_requests(&self) -> broadcast::Receiver<ServerRequest> {
+    pub fn subscribe_server_requests(&self) -> broadcast::Receiver<String> {
         self.peer.subscribe_server_requests()
     }
 
@@ -111,7 +115,7 @@ impl MobileClient {
         method: impl Into<String>,
         params: Value,
     ) -> Result<Value, MobileClientError> {
-        self.peer.request(method.into(), params).await
+        Ok(self.peer.request(&method.into(), &params).await?)
     }
 
     /// Sends a request while retaining the caller's raw JSON params text.
@@ -122,7 +126,10 @@ impl MobileClient {
         method: impl Into<String>,
         params: impl Into<String>,
     ) -> Result<Value, MobileClientError> {
-        self.peer.request_raw(method.into(), params.into()).await
+        Ok(self
+            .peer
+            .request_params_raw(&method.into(), &params.into())
+            .await?)
     }
 
     /// Sends a successful response to a Host-initiated request.
@@ -131,7 +138,10 @@ impl MobileClient {
         id: impl Into<String>,
         result: Value,
     ) -> Result<(), MobileClientError> {
-        self.peer.respond_result(id.into(), result).await
+        Ok(self
+            .peer
+            .respond_raw(&id.into(), "result", &serde_json::to_string(&result)?)
+            .await?)
     }
 
     /// Sends a response whose `error` member is already represented as JSON.
@@ -141,7 +151,10 @@ impl MobileClient {
         id: impl Into<String>,
         error: Value,
     ) -> Result<(), MobileClientError> {
-        self.peer.respond_error(id.into(), error).await
+        Ok(self
+            .peer
+            .respond_raw(&id.into(), "error", &serde_json::to_string(&error)?)
+            .await?)
     }
 
     /// Sends a response while retaining the caller's raw JSON result/error.
@@ -153,9 +166,10 @@ impl MobileClient {
         field: &'static str,
         payload: impl Into<String>,
     ) -> Result<(), MobileClientError> {
-        self.peer
-            .respond_raw(id.into(), field, payload.into())
-            .await
+        Ok(self
+            .peer
+            .respond_raw(&id.into(), field, &payload.into())
+            .await?)
     }
 
     pub(crate) fn connection(&self) -> Result<Arc<transport::Connection>, MobileClientError> {
@@ -167,6 +181,7 @@ impl MobileClient {
     }
 
     pub fn close(&self) {
+        self.peer.close();
         let session = self
             .session
             .lock()
@@ -219,5 +234,83 @@ pub enum MobileClientError {
 impl Drop for MobileClient {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// Proxy a local application's raw RPC stream through the same pinned,
+/// authenticated transport used by MobileClient. No JSON fields or IDs change.
+pub async fn forward_rpc<S>(
+    config: MobileClientConfig,
+    device_pkcs8: &[u8],
+    mut local: S,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<(), MobileClientError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    config.validate()?;
+    let key = transport::decode_device_key(device_pkcs8)?;
+    let mut channel = tokio::select! {
+        _ = shutdown.cancelled() => return Ok(()),
+        result = tokio::time::timeout(config.request_timeout, transport::establish(&config, key)) => result.map_err(|_| MobileClientError::ConnectionTimeout)??,
+    };
+    tokio::select! {
+        _ = shutdown.cancelled() => {},
+        result = tokio::io::copy_bidirectional(&mut local, &mut channel.stream) => { result?; },
+    }
+    drop(channel);
+    Ok(())
+}
+
+impl From<PeerError> for MobileClientError {
+    fn from(error: PeerError) -> Self {
+        match error {
+            PeerError::ConnectionClosed(reason) => Self::Disconnected(reason),
+            PeerError::RequestTimeout { id, .. } => Self::RequestTimeout { id },
+            PeerError::RequestIdExhausted => Self::RequestIdExhausted,
+            PeerError::Remote { error } => Self::Remote { error },
+            PeerError::InvalidMessage(reason) => Self::Protocol(reason),
+        }
+    }
+}
+
+impl MobileClient {
+    pub async fn upload_file(
+        &self,
+        source: &std::path::Path,
+        directory: &std::path::Path,
+        file_name: &str,
+    ) -> Result<Value, MobileClientError> {
+        let connection = self.connection()?;
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            crate::transfers::upload_file(
+                &self.peer,
+                || transport::open_subsystem(&connection.ssh, host_protocol::BLOB_SUBSYSTEM),
+                source,
+                directory,
+                file_name,
+            ),
+        )
+        .await
+        .map_err(|_| MobileClientError::Protocol("upload timed out".into()))?
+    }
+    pub async fn download_file(
+        &self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> Result<(), MobileClientError> {
+        let connection = self.connection()?;
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            crate::transfers::download_file(
+                &self.peer,
+                || transport::open_subsystem(&connection.ssh, host_protocol::BLOB_SUBSYSTEM),
+                source,
+                destination,
+            ),
+        )
+        .await
+        .map_err(|_| MobileClientError::Protocol("download timed out".into()))?
     }
 }
