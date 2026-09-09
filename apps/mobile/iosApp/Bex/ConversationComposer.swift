@@ -174,13 +174,12 @@ extension ThreadScreen {
         }
     }
 
-    @ViewBuilder var messageField: some View {
-        let binding = Binding(get: { model.draft }, set: { model.draft = $0 })
-        if #available(iOS 16.0, *) {
-            TextField(state.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: binding, axis: .vertical).lineLimit(1 ... 6)
-        } else {
-            TextField(state.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: binding)
-        }
+    var messageField: some View {
+        ConversationMessageField(
+            placeholder: state.isNewThread ? "メッセージを入力" : "追加の指示を入力",
+            draft: Binding(get: { model.draft }, set: { model.draft = $0 })
+        )
+        .id(model.draftKey)
     }
 
     func refreshReview() async {
@@ -201,6 +200,41 @@ extension ThreadScreen {
             )
         } else {
             review = nil
+        }
+    }
+}
+
+/// Keep native editing ahead of the Store notification triggered by each keystroke.
+/// The buffer belongs to this control; every edit still dispatches synchronously.
+private struct ConversationMessageField: View {
+    let placeholder: String
+    @Binding private var draft: String
+    @State private var text: String
+
+    init(placeholder: String, draft: Binding<String>) {
+        self.placeholder = placeholder
+        _draft = draft
+        _text = State(initialValue: draft.wrappedValue)
+    }
+
+    var body: some View {
+        let input = Binding(get: { text }, set: {
+            guard text != $0 else { return }
+            text = $0
+            draft = $0
+        })
+        Group {
+            if #available(iOS 16.0, *) {
+                TextField(placeholder, text: input, axis: .vertical).lineLimit(1 ... 6)
+            } else {
+                TextField(placeholder, text: input)
+            }
+        }
+        .onChange(of: draft) { _ in
+            // Read the latest Store value, including send clears and transcription.
+            if text != draft {
+                text = draft
+            }
         }
     }
 }

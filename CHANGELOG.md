@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve every typed character while iPhone Markdown responses stream. Update the message field’s editing buffer before synchronous Store notification, retain Store-driven send clears and transcription, and reset the control when its Host or task changes.
+
 - Close native snapshot waits on Store shutdown, replace stale foreground transports, and recover interrupted pending sends into drafts. Keep session requests and activity out of restored connection state. Serialize and write iOS snapshots off MainActor, await ordered background writes, and cover native Android FFI shutdown and per-Host persistence.
 
 - Use SwiftUI scroll positioning for iPhone conversations instead of mutating UIKit offsets. Preserve measured bottom coordinates when SwiftUI combines default preferences, and measure the whole lazy content while targeting the final row. Parse Markdown in the background conversation cache before publishing rows, retaining offscreen parsed bodies so lazy layout never swaps a provisional height for a full paragraph. Coalesce pending projections while keeping draft edits synchronous; embedded image data never becomes a temporary oversized text row. Restore image history after reopening, scroll long histories to the latest message after layout, and preserve the reading position when live updates arrive after a small drag toward older content.
