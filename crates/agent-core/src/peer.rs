@@ -112,7 +112,7 @@ pub struct RpcPeer {
     permits: Arc<Semaphore>,
     stop: CancellationToken,
     _close_on_drop: DropGuard,
-    request_timeout: Duration,
+    request_timeout: Option<Duration>,
     writer_done: watch::Receiver<Option<Result<(), String>>>,
 }
 
@@ -120,7 +120,7 @@ impl RpcPeer {
     pub fn open<R, W>(
         reader: JsonlReader<R>,
         writer: W,
-        request_timeout: Duration,
+        request_timeout: Option<Duration>,
         max_requests: usize,
     ) -> Result<Self, PeerError>
     where
@@ -247,11 +247,16 @@ impl RpcPeer {
             id,
             line,
         } = prepared;
-        let deadline = tokio::time::Instant::now() + self.request_timeout;
-        let _permit = match tokio::time::timeout_at(deadline, self.permits.acquire()).await {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => return Err(self.closed_error()),
-            Err(_) => return Err(PeerError::RequestTimeout { method, id }),
+        let expiration = async {
+            match self.request_timeout {
+                Some(timeout) => tokio::time::sleep(timeout).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(expiration);
+        let _permit = tokio::select! {
+            permit = self.permits.acquire() => permit.map_err(|_| self.closed_error())?,
+            _ = &mut expiration => return Err(PeerError::RequestTimeout { method, id }),
         };
         let (tx, mut rx) = oneshot::channel();
         {
@@ -273,12 +278,14 @@ impl RpcPeer {
         let _cleanup = scopeguard::guard((&self.state, id), |(state, id)| {
             state.lock().unwrap().pending.remove(&id);
         });
-        match tokio::time::timeout_at(deadline, async {
-            self.enqueue(line).await?;
-            (&mut rx).await.map_err(|_| self.closed_error())
-        })
-        .await
-        {
+        let response = tokio::select! {
+            response = async {
+                self.enqueue(line).await?;
+                (&mut rx).await.map_err(|_| self.closed_error())
+            } => Ok(response),
+            _ = &mut expiration => Err(()),
+        };
+        match response {
             Ok(Ok(value)) => value,
             failure => {
                 let error = match failure {
@@ -423,6 +430,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
             _ = stop.cancelled() => break "peer closed".into(),
             result = reader.read_line() => match result { Ok(Some(line)) => line, Ok(None) => break "JSONL stream reached EOF".into(), Err(error) => break error.to_string() }
         };
+        if line.trim().is_empty() {
+            continue;
+        }
         let message = match classify_message(&line) {
             Ok(message) => message,
             Err(error) => break error.to_string(),
@@ -532,7 +542,7 @@ mod tests {
                 RpcPeer::open(
                     JsonlReader::new(client_reader),
                     client_writer,
-                    Duration::from_secs(1),
+                    Some(Duration::from_secs(1)),
                     1024,
                 )
                 .unwrap(),
@@ -742,7 +752,7 @@ mod tests {
             RpcPeer::open(
                 JsonlReader::new(client_reader),
                 client_writer,
-                Duration::from_millis(10),
+                Some(Duration::from_millis(10)),
                 1024,
             )
             .unwrap(),

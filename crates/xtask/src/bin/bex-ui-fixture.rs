@@ -50,7 +50,11 @@ async fn main() {
         .unwrap();
     let state = directory.join("state");
     std::fs::create_dir_all(&state).unwrap();
-    let credentials = Arc::new(HostCredentials::load(Arc::new(Memory::default())).unwrap());
+    let credentials = Arc::new(
+        HostCredentials::load(Arc::new(Memory::default()), state.clone())
+            .await
+            .unwrap(),
+    );
     let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
         .await
         .unwrap();

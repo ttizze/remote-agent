@@ -1,7 +1,9 @@
 use crate::{CodexRpcService, HostCredentials, RemoteHostProfile, SessionId};
 use agent_core::{
     peer::{PeerEvent, RpcPeer},
-    transport::{Endpoint, NodeId, PairingTicket, Relays, Session, Ticket, authorize},
+    transport::{
+        Endpoint, IncomingSession, NodeId, PairingTicket, Relays, Session, Ticket, authorize,
+    },
 };
 use host_protocol::{RpcMessageKind, classify_message};
 use serde::Deserialize;
@@ -46,18 +48,28 @@ impl HostRuntime {
         self.endpoint.ticket()
     }
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<(), String> {
+        self.service.start();
         let mut sessions = JoinSet::new();
+        let authorized_slots = Arc::new(tokio::sync::Semaphore::new(64));
+        let pairing_slots = Arc::new(tokio::sync::Semaphore::new(16));
         let result = loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break Ok(()),
+                _ = self.service.stopped() => break Err("Codex App Server event stream stopped".into()),
                 incoming = self.endpoint.accept() => match incoming {
-                    Ok(session) => {
-                        if sessions.len() >= 64 { session.close(); continue; }
+                    Some(Ok(incoming)) => {
+                        let known = self.credentials.record.lock().await.trust.allowed.contains(&incoming.node_id());
+                        let slots = if known { &authorized_slots } else { &pairing_slots };
+                        let Ok(permit) = slots.clone().try_acquire_owned() else { continue; };
                         let runtime = self.clone();
                         let stop = shutdown.child_token();
-                        sessions.spawn(async move { runtime.serve(session, stop).await });
+                        let authorized_slots = authorized_slots.clone();
+                        sessions.spawn(async move {
+                            runtime.serve(incoming, stop, permit, authorized_slots).await
+                        });
                     }
-                    Err(error) => break Err(error.to_string()),
+                    Some(Err(_)) => continue,
+                    None => break Ok(()),
                 },
                 Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
             }
@@ -69,66 +81,66 @@ impl HostRuntime {
     }
     async fn serve(
         self: Arc<Self>,
-        connection: Session,
+        incoming: IncomingSession,
         stop: CancellationToken,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        authorized_slots: Arc<tokio::sync::Semaphore>,
     ) -> Result<(), String> {
-        let result = self.clone().serve_connection(&connection, stop).await;
-        connection.close();
-        result
+        let node = incoming.node_id();
+        let establish = async {
+            let record = self.credentials.record.lock().await;
+            if record.trust.allowed.contains(&node) {
+                let connection = scopeguard::guard(
+                    incoming
+                        .authorize(&record.trust)
+                        .map_err(|e| e.to_string())?,
+                    |session| session.close(),
+                );
+                drop(record);
+                let stream = connection
+                    .accept_stream()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let (read, write) = tokio::io::split(stream);
+                let peer = RpcPeer::open(host_protocol::JsonlReader::new(read), write, None, 128)
+                    .map_err(|e| e.to_string())?;
+                let events = peer.subscribe();
+                Ok((scopeguard::ScopeGuard::into_inner(connection), peer, events))
+            } else {
+                drop(record);
+                let pairing = incoming.pairing().await.map_err(|e| e.to_string())?;
+                self.pair_node(node, pairing.invitation).await?;
+                let trust = self.credentials.record.lock().await.trust.clone();
+                pairing.authorize(&trust).await.map_err(|e| e.to_string())
+            }
+        };
+        let (connection, peer, events) = tokio::select! {
+            _ = stop.cancelled() => return Ok(()),
+            result = tokio::time::timeout(Duration::from_secs(15), establish) =>
+                result.map_err(|_| "session establishment timed out")??,
+        };
+        let connection = scopeguard::guard(connection, |session| session.close());
+        let _permit = if Arc::ptr_eq(permit.semaphore(), &authorized_slots) {
+            permit
+        } else {
+            // Paired sessions move out of the pre-authorization pool.
+            let authorized = authorized_slots
+                .try_acquire_owned()
+                .map_err(|_| "maximum authorized sessions reached")?;
+            drop(permit);
+            authorized
+        };
+        self.serve_connection(&connection, Arc::new(peer), events, stop)
+            .await
     }
     async fn serve_connection(
         self: Arc<Self>,
         connection: &Session,
+        peer: Arc<RpcPeer>,
+        events: tokio::sync::broadcast::Receiver<PeerEvent>,
         stop: CancellationToken,
     ) -> Result<(), String> {
-        let stream = tokio::select! {
-            _ = stop.cancelled() => return Ok(()),
-            result = tokio::time::timeout(Duration::from_secs(15), connection.accept_stream()) =>
-                result.map_err(|_| "first stream timed out")?.map_err(|e| e.to_string())?,
-        };
-        let (read, write) = tokio::io::split(stream);
-        let peer = Arc::new(
-            RpcPeer::open(
-                host_protocol::JsonlReader::new(read),
-                write,
-                Duration::from_secs(300),
-                128,
-            )
-            .map_err(|e| e.to_string())?,
-        );
-        let mut events = peer.subscribe();
         let node = connection.node_id();
-        if !self
-            .credentials
-            .record
-            .lock()
-            .await
-            .trust
-            .allowed
-            .contains(&node)
-        {
-            let message = tokio::select! {
-                _ = stop.cancelled() => return Ok(()),
-                event = tokio::time::timeout(Duration::from_secs(15), events.recv()) =>
-                    event.map_err(|_| "pairing timed out")?.map_err(|_| "pairing connection closed")?,
-            };
-            let PeerEvent::Message(message) = message else {
-                return Err("pairing request required".into());
-            };
-            let request: Request =
-                serde_json::from_str(&message.value).map_err(|_| "invalid pairing request")?;
-            if request.method != "host/pair" {
-                return Err("pairing request required".into());
-            }
-            let result = self.pair_node(node, request.params).await;
-            peer.send_raw(response(
-                request.id,
-                result.as_ref().map(|_| json!({})).map_err(Clone::clone),
-            ))
-            .await
-            .map_err(|e| e.to_string())?;
-            result?;
-        }
         let session = {
             // Registration and revocation use the same lock order. A revoked node
             // cannot become active in the gap after initial authentication.
@@ -178,20 +190,14 @@ impl HostRuntime {
         let closed = peer.close().await.map_err(|e| e.to_string());
         result.and(rpc_result).and(closed)
     }
-    async fn pair_node(&self, node: NodeId, params: Value) -> Result<(), String> {
-        #[derive(Deserialize)]
-        struct Pair {
-            invitation: uuid::Uuid,
-        }
-        let params: Pair = serde_json::from_value(params).map_err(|_| "invalid invitation")?;
+    async fn pair_node(&self, node: NodeId, invitation: uuid::Uuid) -> Result<(), String> {
         let mut record = self.credentials.record.lock().await;
-        if let Some(trust) = authorize(&record.trust, node, Some(params.invitation), now())
-            .map_err(|e| e.to_string())?
+        if let Some(trust) =
+            authorize(&record.trust, node, Some(invitation), now()).map_err(|e| e.to_string())?
         {
             let mut next = record.clone();
             next.trust = trust;
-            self.credentials.persist(&next)?;
-            *record = next;
+            *record = self.credentials.persist(next).await?;
         }
         Ok(())
     }
@@ -217,9 +223,9 @@ impl HostRuntime {
         if management && message.kind() == RpcMessageKind::Request {
             let request: Request = serde_json::from_str(&line).map_err(|e| e.to_string())?;
             let result = if request.method == "host/pair" {
-                self.pair_node(node, request.params)
-                    .await
-                    .map(|_| json!({}))
+                // Only authorized sessions reach dispatch; the invitation was
+                // already consumed at the transport gate.
+                Ok(json!({}))
             } else if node != self.local_node {
                 Err("management requires the local node".into())
             } else {
@@ -263,8 +269,7 @@ impl HostRuntime {
                 next.trust
                     .invitations
                     .insert(ticket.invitation, ticket.expires_at);
-                self.credentials.persist(&next)?;
-                *record = next;
+                *record = self.credentials.persist(next).await?;
                 serde_json::to_value(ticket).map_err(|e| e.to_string())
             }
             "host/revoke" => {
@@ -281,8 +286,7 @@ impl HostRuntime {
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
                 next.trust.allowed.remove(&params.node_id);
-                self.credentials.persist(&next)?;
-                *record = next;
+                *record = self.credentials.persist(next).await?;
                 for connection in self.active.lock().unwrap().values() {
                     if connection.node_id() == params.node_id {
                         connection.close();
@@ -343,8 +347,7 @@ impl HostRuntime {
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
                 next.remotes.insert(profile.id, profile.clone());
-                self.credentials.persist(&next)?;
-                *record = next;
+                *record = self.credentials.persist(next).await?;
                 serde_json::to_value(profile).map_err(|e| e.to_string())
             }
             "host/removeRemote" => {
@@ -357,8 +360,7 @@ impl HostRuntime {
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
                 next.remotes.remove(&params.id);
-                self.credentials.persist(&next)?;
-                *record = next;
+                *record = self.credentials.persist(next).await?;
                 Ok(json!({}))
             }
             _ => Err("unknown management method".into()),

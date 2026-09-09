@@ -10,10 +10,7 @@ use host_daemon::{
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::sync::broadcast;
@@ -23,16 +20,12 @@ use zeroize::Zeroizing;
 #[derive(Default)]
 struct Memory {
     bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,
-    fail: AtomicBool,
 }
 impl CredentialStore for Memory {
     fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         Ok(self.bytes.lock().unwrap().clone())
     }
     fn save(&self, bytes: &[u8]) -> Result<(), String> {
-        if self.fail.load(Ordering::SeqCst) {
-            return Err("isolated credential write failure".into());
-        }
         *self.bytes.lock().unwrap() = Some(Zeroizing::new(bytes.to_vec()));
         Ok(())
     }
@@ -58,8 +51,14 @@ struct Fixture {
 }
 impl Fixture {
     async fn start(directory: &Path) -> Self {
-        let memory = Arc::new(Memory::default());
-        let credentials = Arc::new(HostCredentials::load(memory.clone()).unwrap());
+        Self::start_with_memory(directory, Arc::new(Memory::default())).await
+    }
+    async fn start_with_memory(directory: &Path, memory: Arc<Memory>) -> Self {
+        let credentials = Arc::new(
+            HostCredentials::load(memory.clone(), directory.join("state"))
+                .await
+                .unwrap(),
+        );
         let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
             .await
             .unwrap();
@@ -182,7 +181,10 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
         let invitation: PairingTicket =
             serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
         let key = Identity::generate().to_bytes();
-        fixture.memory.fail.store(true, Ordering::SeqCst);
+        let trust_path = directory.path().join("state/trust.json");
+        let backup = directory.path().join("state/trust-backup.json");
+        std::fs::rename(&trust_path, &backup).unwrap();
+        std::fs::create_dir(&trust_path).unwrap();
         let failed = fixture.connect(Identity::from_bytes(key)).await;
         assert!(
             failed
@@ -192,7 +194,8 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .is_err()
         );
         failed.endpoint.close().await;
-        fixture.memory.fail.store(false, Ordering::SeqCst);
+        std::fs::remove_dir(&trust_path).unwrap();
+        std::fs::rename(&backup, &trust_path).unwrap();
         let paired = fixture.connect(Identity::from_bytes(key)).await;
         rpc(
             &paired.peer,
@@ -237,7 +240,10 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .unwrap()
                 .contains(&json!(paired.endpoint.node_id()))
         );
-        let restored = HostCredentials::load(fixture.memory.clone()).unwrap();
+        let restored =
+            HostCredentials::load(fixture.memory.clone(), directory.path().join("state"))
+                .await
+                .unwrap();
         assert_eq!(
             restored.local_identity().await.node_id(),
             local.endpoint.node_id()
@@ -758,4 +764,182 @@ async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
     })
     .await
     .expect("file edit deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn daemon_model_wire_fixture() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!({
+            "local-projects":{"workspace":{"id":"workspace","name":"Workspace","rootPaths":[directory.path()]}}
+        })).unwrap()).unwrap();
+        let fixture = Fixture::start(directory.path()).await;
+        let local = fixture.local().await;
+        let started = rpc(&local.peer, "host/thread/start", json!({"cwd":directory.path()})).await;
+        let thread_id = &started["thread"]["id"];
+        let mut events = local.peer.subscribe();
+        rpc(&local.peer, "turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":"[items]"}]})).await;
+        next_method(&mut events, "turn/completed").await;
+        let list = rpc(&local.peer, "host/thread/list", json!({"titleOnly":true})).await;
+        let history = rpc(&local.peer, "host/thread/read", json!({"threadId":thread_id,"includeTurns":true})).await;
+        assert_eq!(list["projects"][0]["roots"][0]["path"], directory.path().to_str().unwrap());
+        assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["result"].is_object()));
+        let capture = serde_json::to_string_pretty(&json!({"list":list,"history":history})).unwrap()
+            .replace(directory.path().to_str().unwrap(), "/fixture/workspace");
+        assert_eq!(serde_json::from_str::<Value>(&capture).unwrap(), serde_json::from_str::<Value>(include_str!("../../agent-core/tests/fixtures/daemon-wire.json")).unwrap());
+        local.close().await;
+        fixture.close().await;
+    }).await.expect("wire fixture deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_handshakes_do_not_stop_the_host() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::start(directory.path()).await;
+        let stranger = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .bind()
+            .await
+            .unwrap();
+        let ticket: iroh_tickets::endpoint::EndpointTicket =
+            fixture.ticket.to_string().parse().unwrap();
+        assert!(
+            stranger
+                .connect(ticket.endpoint_addr().clone(), b"wrong-alpn")
+                .await
+                .is_err()
+        );
+        let local = fixture.local().await;
+        assert_eq!(
+            rpc(&local.peer, "thread/list", json!({})).await["data"],
+            json!([])
+        );
+        stranger.close().await;
+        local.close().await;
+        fixture.close().await;
+    })
+    .await
+    .expect("handshake isolation deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upstream_exit_disconnects_store_and_stops_host() {
+    use agent_core::{
+        state::{Intent, Snapshot},
+        store::Store,
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::start(directory.path()).await;
+        let local = fixture.local().await;
+        let store = Store::new(local.peer, Snapshot::default());
+        store
+            .dispatch(Intent::ListThreads(Default::default()))
+            .await
+            .unwrap();
+        assert!(store.snapshot().connected);
+        let mut updates = store.subscribe();
+        std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
+        assert!(
+            store
+                .dispatch(Intent::ListThreads(Default::default()))
+                .await
+                .is_err()
+        );
+        while updates.borrow_and_update().connected {
+            updates.changed().await.unwrap();
+        }
+        assert!(updates.borrow().error.is_some());
+        assert!(
+            fixture
+                .running
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("event stream stopped")
+        );
+        store.close().await.ok();
+        local.session.close();
+        local.endpoint.close().await;
+        Arc::try_unwrap(fixture.server)
+            .ok()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("upstream shutdown deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::start(directory.path()).await;
+        let local = fixture.local().await;
+        let invitation: PairingTicket =
+            serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
+        let saved_keys = fixture.memory.clone();
+        local.close().await;
+        fixture.close().await;
+        std::fs::remove_file(directory.path().join("bex-codex-fixture")).unwrap();
+        let path = directory.path().join("state/trust.json");
+        let mut trust: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        trust["trust"]["invitations"][invitation.invitation.to_string()] = json!(0);
+        std::fs::write(&path, serde_json::to_vec(&trust).unwrap()).unwrap();
+        // Reload this isolated Host's expired trust while preserving its key store.
+        let fixture = Fixture::start_with_memory(directory.path(), saved_keys).await;
+        let stranger = fixture.connect(Identity::generate()).await;
+        assert!(
+            stranger
+                .peer
+                .request::<_, Value>("host/pair", &json!({"invitation":invitation.invitation}))
+                .await
+                .is_err()
+        );
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["trust"]["invitations"][invitation.invitation.to_string()],
+            0
+        );
+        stranger.endpoint.close().await;
+        let local = fixture.local().await;
+        assert_eq!(
+            rpc(&local.peer, "host/status", json!({})).await["devices"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        local.close().await;
+        fixture.close().await;
+    })
+    .await
+    .expect("expired invitation deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn passive_client_can_approve_after_five_minutes_without_reconnecting() {
+    tokio::time::timeout(Duration::from_secs(330), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::start(directory.path()).await;
+        let sender = fixture.local().await;
+        let started = rpc(&sender.peer, "thread/start", json!({"cwd":directory.path()})).await;
+        let mut sender_events = sender.peer.subscribe();
+        rpc(&sender.peer, "turn/start", json!({"threadId":started["thread"]["id"],"input":[{"type":"text","text":"[approval]"}]})).await;
+        next_method(&mut sender_events, "item/commandExecution/requestApproval").await;
+        // No dummy request: opening this peer must register it and replay approval.
+        let passive = fixture.local().await;
+        let mut events = passive.peer.subscribe();
+        let request = next_method(&mut events, "item/commandExecution/requestApproval").await;
+        tokio::time::sleep(Duration::from_secs(301)).await;
+        passive.peer.respond_raw(&request["id"].to_string(), "result", r#"{"decision":"accept"}"#).await.unwrap();
+        assert_eq!(next_method(&mut events, "turn/completed").await["params"]["turn"]["status"], "completed");
+        passive.close().await;
+        sender.close().await;
+        fixture.close().await;
+    }).await.expect("unattended approval deadline");
 }

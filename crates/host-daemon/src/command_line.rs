@@ -1,6 +1,12 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum KeyStorage {
+    Keyring,
+    File,
+}
+
 #[derive(Parser)]
 #[command(
     name = "host-daemon",
@@ -15,6 +21,9 @@ pub(crate) struct StartupConfig {
     /// Defaults to the platform's application data directory.
     #[arg(long)]
     pub(crate) state_dir: Option<PathBuf>,
+    /// Use file storage on headless servers without an OS keyring service.
+    #[arg(long, value_enum, default_value = "keyring")]
+    pub(crate) key_storage: KeyStorage,
     #[arg(long, default_value = "BEX Host")]
     pub(crate) name: String,
     /// Use only local addresses; intended for isolated fixtures.

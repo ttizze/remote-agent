@@ -106,7 +106,6 @@ pub async fn run(arguments: &[String]) -> Result<()> {
     let build = tempfile::Builder::new()
         .prefix("ios-build-")
         .tempdir_in(&qa)?;
-    // Darwin Unix sockets have a 104-byte path limit; macOS TMPDIR is too long.
     let fixture = tempfile::Builder::new()
         .prefix("bex-ios.")
         .tempdir_in("/tmp")?;
@@ -139,12 +138,14 @@ pub async fn run(arguments: &[String]) -> Result<()> {
     )?;
     let state = fixture.path().join("host/state");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while !state.join("host.sock").exists() {
+    while !state.join("host.ticket").exists() || !state.join("local.key").exists() {
         if host.exited()? {
-            return Err("UI fixture exited before creating its private socket".into());
+            return Err(
+                "UI fixture exited before publishing its endpoint and local identity".into(),
+            );
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("Host did not create its private socket".into());
+            return Err("Host did not publish its endpoint and local identity".into());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

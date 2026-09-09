@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let peer = RpcPeer::open(
             JsonlReader::new(process.stdout.take().expect("piped stdout")),
             process.stdin.take().expect("piped stdin"),
-            Duration::from_secs(30),
+            Some(Duration::from_secs(30)),
             64,
         )?;
         child = Some(process);
@@ -161,14 +161,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             request_id,
             decision,
         } => {
-            // The first RPC activates the bidirectional QUIC stream and registers this client.
-            store
-                .dispatch(Intent::ListThreads(ListQuery {
-                    project_limit: 5,
-                    chat_limit: 5,
-                    ..Default::default()
-                }))
-                .await?;
             let mut updates = store.subscribe();
             tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
