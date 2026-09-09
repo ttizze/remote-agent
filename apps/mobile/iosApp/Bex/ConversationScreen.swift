@@ -16,8 +16,8 @@ struct ThreadScreen: View {
     @State var showingFiles = false
     @State var showingModelSettings = false
     @State var scrollViewportHeight: CGFloat = 0
-    @State private var isFollowingLatest = true
-    @StateObject var scrollPosition = ConversationScrollPosition()
+    @State var isFollowingLatest = true
+    @State private var isNearLatest = true
     @State var scrollingToOlder = false
     @State var historyBoundaries = [String: CGFloat]()
     @State var historyRequestPending = false
@@ -52,63 +52,87 @@ struct ThreadScreen: View {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(conversationRows(thread)) { row in
-                            conversationRow(row)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(conversationRows(thread)) { row in
+                                conversationRow(row)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            Color.clear.frame(height: 1)
+                                .id("conversation-latest")
+                                .background(GeometryReader { geometry in
+                                    Color.clear.preference(key: LatestMessageBottomPreferenceKey.self,
+                                                           value: geometry.frame(in: .named("thread-scroll")).maxY)
+                                })
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                    }
+                    .accessibilityIdentifier("task.detail")
+                    .accessibilityValue(threadAccessibilityValue(thread))
+                    .buttonStyle(.plain)
+                    .simultaneousGesture(DragGesture(minimumDistance: 1).onChanged { gesture in
+                        guard abs(gesture.translation.height) > abs(gesture.translation.width) else { return }
+                        isFollowingLatest = false
+                        scrollingToOlder = gesture.translation.height > 0
+                        loadVisibleHistory()
+                    }.onEnded { gesture in
+                        if gesture.translation.height <= 0, isNearLatest {
+                            isFollowingLatest = true
+                        }
+                    })
+                    .onPreferenceChange(LatestMessageBottomPreferenceKey.self) { bottom in
+                        isNearLatest = bottom > 0 && bottom <= scrollViewportHeight + 80
+                        if isFollowingLatest, bottom > scrollViewportHeight + 1 {
+                            proxy.scrollTo("conversation-latest", anchor: .bottom)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                }
-                .buttonStyle(.plain)
-                .background(ConversationScrollViewObserver(position: scrollPosition,
-                                                           accessibilityValue: threadAccessibilityValue(thread),
-                                                           onFollowingLatest: { isFollowingLatest = $0 },
-                                                           onDirection: { upward in
-                                                               if scrollingToOlder !=
-                                                                   upward {
-                                                                   scrollingToOlder = upward
-                                                               }
-                                                               loadVisibleHistory()
-                                                           }))
-                .overlay(alignment: .bottom) {
-                    if !isFollowingLatest {
-                        Button { scrollPosition.scrollToLatest(animated: true) } label: {
-                            Image(systemName: "arrow.down").font(.title3.weight(.medium))
+                    .overlay(alignment: .bottom) {
+                        if !isNearLatest {
+                            Button {
+                                isFollowingLatest = true
+                                scrollingToOlder = false
+                                withAnimation { proxy.scrollTo("conversation-latest", anchor: .bottom) }
+                            } label: {
+                                Image(systemName: "arrow.down").font(.title3.weight(.medium))
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
+                            .controlSize(.large)
+                            .accessibilityLabel("最新のメッセージへ")
+                            .accessibilityIdentifier("task.latest")
+                            .padding(.bottom, 6)
                         }
-                        .buttonStyle(.bordered)
-                        .buttonBorderShape(.capsule)
-                        .controlSize(.large)
-                        .accessibilityLabel("最新のメッセージへ")
-                        .accessibilityIdentifier("task.latest")
-                        .padding(.bottom, 6)
                     }
-                }
-                .coordinateSpace(name: "thread-scroll")
-                .background(GeometryReader { geometry in
-                    Color.clear.preference(key: ScrollViewportPreferenceKey.self,
-                                           value: geometry.size.height - geometry.safeAreaInsets.top - geometry
-                                               .safeAreaInsets.bottom)
-                })
-                .onPreferenceChange(HistoryBoundaryPreferenceKey.self) { boundaries in
-                    historyBoundaries = boundaries
-                    loadVisibleHistory()
-                }
-                .onChange(of: state.loadingHistory) {
-                    if !$0 {
+                    .coordinateSpace(name: "thread-scroll")
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: ScrollViewportPreferenceKey.self, value: geometry.size.height)
+                    })
+                    .onPreferenceChange(HistoryBoundaryPreferenceKey.self) { boundaries in
+                        historyBoundaries = boundaries
+                        loadVisibleHistory()
+                    }
+                    .onChange(of: state.loadingHistory) {
+                        if !$0 {
+                            historyRequestPending = false
+                        }
+                    }
+                    .onPreferenceChange(ScrollViewportPreferenceKey.self) { height in
+                        scrollViewportHeight = height
+                        if isFollowingLatest {
+                            proxy.scrollTo("conversation-latest", anchor: .bottom)
+                        }
+                    }
+                    .onChange(of: thread.id) { _ in
+                        scrollingToOlder = false
                         historyRequestPending = false
+                        historyBoundaries.removeAll()
+                        expandedItemIds.removeAll()
+                        activityExpansionOverrides.removeAll()
+                        isFollowingLatest = true
+                        proxy.scrollTo("conversation-latest", anchor: .bottom)
                     }
-                }
-                .onPreferenceChange(ScrollViewportPreferenceKey.self) { scrollViewportHeight = $0 }
-                .onChange(of: thread.id) { _ in
-                    scrollingToOlder = false
-                    historyRequestPending = false
-                    historyBoundaries.removeAll()
-                    expandedItemIds.removeAll()
-                    activityExpansionOverrides.removeAll()
-                    scrollPosition.scrollToLatest(animated: false)
                 }
             } else if state.isNewThread {
                 Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)

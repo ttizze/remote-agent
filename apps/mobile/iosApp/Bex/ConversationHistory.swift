@@ -83,7 +83,7 @@ extension ThreadScreen {
         case let .activity(item, turnId):
             ThreadItemRow(item: item, model: model, isExpanded: expandedItemIds.contains(item.id),
                           toggleExpanded: {
-                              scrollPosition.stopFollowingLatest()
+                              isFollowingLatest = false
                               if expandedItemIds.contains(item.id) {
                                   expandedItemIds.remove(item.id)
                               } else {
@@ -110,7 +110,7 @@ extension ThreadScreen {
         let expanded = activityIsExpanded(turn)
         if turn.activityCanCollapse {
             Button {
-                scrollPosition.stopFollowingLatest()
+                isFollowingLatest = false
                 activityExpansionOverrides[turn.id] = (turn.status, !expanded)
             } label: {
                 ThreadActivityHeader(turn: turn, expanded: expanded)
@@ -133,7 +133,7 @@ extension ThreadScreen {
 
     func requestHistory(_ turnId: String?) {
         guard !state.loadingHistory else { return }
-        scrollPosition.stopFollowingLatest()
+        isFollowingLatest = false
         scrollingToOlder = false
         historyRequestPending = true
         model.loadOlderHistory(turnId)
