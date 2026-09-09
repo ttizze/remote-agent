@@ -2,11 +2,12 @@ mod command;
 mod ios;
 mod macos;
 mod quality;
+mod quality_background;
 
 use std::process::ExitCode;
 use xtask::{Result, repository_root};
 
-const USAGE: &str = "Usage: cargo xtask <command>\n\nCommands:\n  build-host-macos       Build and verify the signed Host executable\n  build-desktop-macos    Build and verify target/Bex.app\n  ios-e2e [TEST ...]     Run isolated Simulator E2E tests (all by default)\n  relay-e2e             Run the real Phoenix transport and encrypted Host tests\n  relay-secrets         Emit Fly secrets using REMOTE_AGENT_RELAY_TOKEN\n  quality [LANGUAGE]    Check rust, elixir, kotlin, swift (all by default)\n";
+const USAGE: &str = "Usage: cargo xtask <command>\n\nCommands:\n  build-host-macos       Build and verify the signed Host executable\n  build-desktop-macos    Build and verify target/Bex.app\n  ios-e2e [TEST ...]     Run isolated Simulator E2E tests (all by default)\n  relay-e2e             Run the real Phoenix transport and encrypted Host tests\n  relay-secrets         Emit Fly secrets using REMOTE_AGENT_RELAY_TOKEN\n  quality [LANGUAGE]    Check rust, elixir, kotlin, swift (all by default)\n  quality-worker       Drain the post-commit quality queue\n  quality-status [--wait] Report quality for HEAD and worktree cleanliness\n";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -29,6 +30,14 @@ async fn main() -> ExitCode {
 }
 
 async fn execute(arguments: &[String]) -> Result<()> {
+    match (arguments[0].as_str(), &arguments[1..]) {
+        ("quality-worker", []) => return quality_background::worker().await,
+        ("quality-status", []) => return quality_background::status(false).await,
+        ("quality-status", [flag]) if flag == "--wait" => {
+            return quality_background::status(true).await;
+        }
+        _ => {}
+    }
     std::env::set_current_dir(repository_root())?;
     match (arguments[0].as_str(), &arguments[1..]) {
         ("build-host-macos", []) => macos::build_host().await,

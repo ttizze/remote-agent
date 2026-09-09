@@ -138,14 +138,26 @@ nix develop . --command cargo xtask relay-e2e
 
 Other verification commands:
 
-Code quality uses the same command locally and in `.github/workflows/quality.yml`:
+Code quality runs locally on macOS with Xcode installed. Install the Nix-pinned Lefthook once per clone to run checks asynchronously after each commit:
+
+```sh
+nix develop .
+lefthook install
+nix-store --realise "$(dirname "$(dirname "$(command -v lefthook)")")" --add-root "$(git rev-parse --path-format=absolute --git-common-dir)/bex-lefthook"
+```
+
+The GC root keeps the installed hook executable available outside the development shell. Commit and push do not wait for checks. One worker checks immutable commits in temporary worktrees; consecutive queued commits from the same source worktree are replaced by its newest request. Results and logs remain under the shared Git directory in `bex-quality/`; no desktop notification is sent. GitHub Actions is no longer configured.
+
+Agents and humans can inspect the current commit with `nix develop . --command cargo xtask quality-status --wait` (omit `--wait` for an immediate result). JSON includes the commit, status, log paths, and `workingTreeDirty`. Exit status is successful only for a passed commit and clean worktree. Waiting is bounded to one hour; missing, queued, failed, interrupted, and superseded results are not passes. An idle queue can be drained with `cargo xtask quality-worker`. A worker crash may leave its temporary checkout under `bex-quality/worktrees/`; logs are retained for diagnosis.
+
+Manual checks remain available:
 
 ```sh
 nix develop . --command cargo xtask quality
 nix develop . --command cargo xtask quality rust # or elixir, kotlin, swift
 ```
 
-The command checks every selected language and returns a failure if any check fails. It does not rewrite files. Run `mix deps.get --check-locked` inside `apps/server` in the Nix shell before the first Elixir check. CI installs dependencies from the committed lockfile.
+The command checks every selected language and returns a failure if any check fails. It does not rewrite files. Run `mix deps.get --check-locked` inside `apps/server` in the Nix shell before the first Elixir check. The background worker installs dependencies from the committed lockfile and reuses local Cargo/Mix caches. Each check has a one-hour timeout.
 
 | Language | Configuration and policy |
 | --- | --- |

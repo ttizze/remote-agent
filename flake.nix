@@ -46,6 +46,7 @@
               jdk21
               rustToolchain
               cargo-ndk
+              lefthook
               flyctl
               beamPackages.elixir
               beamPackages.elixir-ls
