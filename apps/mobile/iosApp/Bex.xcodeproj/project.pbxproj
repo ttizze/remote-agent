@@ -20,7 +20,7 @@
 		FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */; };
 		1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */; };
 		A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */; };
-		5A3CBF53E37832387C3B6921 /* ConversationScrollPosition.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCCB9E9A7F58A1958BB1F5B7 /* ConversationScrollPosition.swift */; };
+		5A3CBF53E37832387C3B6921 /* ConversationScrollPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCCB9E9A7F58A1958BB1F5B7 /* ConversationScrollPreferences.swift */; };
 		B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2036041A039EEBAA78D55844 /* AppPresentationData.swift */; };
 		556D7396D1777928A463D2DF /* ConversationHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 109E523F621AEB123226918A /* ConversationHistory.swift */; };
 		110EFBD84D6039D2705F2B1F /* ConversationMediaImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4134613DBAED1B9229F23DE5 /* ConversationMediaImport.swift */; };
@@ -61,7 +61,7 @@
 		D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdown.swift; sourceTree = "<group>"; };
 		CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMediaPickers.swift; sourceTree = "<group>"; };
-		FCCB9E9A7F58A1958BB1F5B7 /* ConversationScrollPosition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScrollPosition.swift; sourceTree = "<group>"; };
+		FCCB9E9A7F58A1958BB1F5B7 /* ConversationScrollPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScrollPreferences.swift; sourceTree = "<group>"; };
 		2036041A039EEBAA78D55844 /* AppPresentationData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresentationData.swift; sourceTree = "<group>"; };
 		109E523F621AEB123226918A /* ConversationHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistory.swift; sourceTree = "<group>"; };
 		4134613DBAED1B9229F23DE5 /* ConversationMediaImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMediaImport.swift; sourceTree = "<group>"; };
@@ -151,7 +151,7 @@
 				D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */,
 				CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */,
 				8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */,
-				FCCB9E9A7F58A1958BB1F5B7 /* ConversationScrollPosition.swift */,
+				FCCB9E9A7F58A1958BB1F5B7 /* ConversationScrollPreferences.swift */,
 				A10000000000000000000016 /* Info.plist */,
 				A10000000000000000000018 /* Assets.xcassets */,
 			);
@@ -283,7 +283,7 @@
 				FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */,
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
 				A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */,
-				5A3CBF53E37832387C3B6921 /* ConversationScrollPosition.swift in Sources */,
+				5A3CBF53E37832387C3B6921 /* ConversationScrollPreferences.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

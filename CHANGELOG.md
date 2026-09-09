@@ -4,6 +4,8 @@
 
 - Replace Rust Xcode/build wrappers with `just` recipes and scripts. Preserve certificate signing, bundle rollback, isolated Simulator/Host cleanup and exact zero-skip test counts. Keep the Rust fixture servers and quality queue/status; use standard file locks and process-wrap for managed quality subprocesses. Add native Linux/Windows CI and a Nix native development shell.
 
+- Use SwiftUI scroll positioning for iPhone conversations instead of mutating UIKit offsets. Restore image history after reopening, scroll long histories to the latest message after layout, and preserve the reading position when live updates arrive after a small drag toward older content.
+
 - Preserve mobile title expansion in ten-entry increments and wait for an existing iPhone conversation to load before navigating. Render changing activity groups in a lazy scroll stack so completing a live turn cannot invalidate native List indices; retain independent expansion and history paging. Reset isolated fixture controls between UI tests and treat HTTP control failures as failures.
 
 - Move SwiftUI and Android Compose onto generated UniFFI bindings for the common Rust Store. Remove Kotlin common state and handwritten FFI; retain native identity storage, media, QR and lifecycle adapters. Cache immutable conversation projections, expose each activity as a lazy native row, and persist per-Host snapshots. Commit iOS native text before accepting a send and flush submissions and media changes atomically before reporting completion.

@@ -148,7 +148,7 @@ nix develop . --command scripts/build-agent-ios.sh simulator
 open apps/mobile/iosApp/Bex.xcodeproj
 ```
 
-Select the Bex scheme and an iPhone Simulator. Xcode also runs the library build for the selected SDK. `scripts/build-agent-ios.sh device` builds device libraries without installing or signing an app. Physical-device signing and installation are separate. Rust tools come from Nix; Apple SDK compilation and linking use Xcode clang and Swift as a platform exception. Generated Swift/Kotlin sources and libraries stay under `target/` and are never committed.
+Select the Bex scheme and an iPhone Simulator. Rerun the library build after changing Rust sources or the selected SDK; Xcode consumes the existing libraries and generated bindings. `scripts/build-agent-ios.sh device` builds device libraries without installing or signing an app. Physical-device signing and installation are separate. Rust tools come from Nix; Apple SDK compilation and linking use Xcode clang and Swift as a platform exception. Generated Swift/Kotlin sources and libraries stay under `target/` and are never committed.
 
 The fixture runner starts an isolated iroh Host with a deterministic Codex process and exercises the native SwiftUI app. It rejects failures and skipped tests:
 
