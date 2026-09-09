@@ -14,7 +14,6 @@ use crate::{
     transport,
 };
 
-/// Connection parameters obtained from a trusted pairing payload.
 #[derive(Debug, Clone)]
 pub struct MobileClientConfig {
     pub relay: RelayEndpoint,
@@ -46,8 +45,7 @@ impl MobileClientConfig {
     }
 }
 
-/// Relay connection metadata exposed to platform wrappers. The token is
-/// intentionally omitted so callers cannot accidentally display or log it.
+/// Public connection metadata; pairing tokens remain private.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedHost {
     pub relay_url: String,
@@ -56,9 +54,7 @@ pub struct ConnectedHost {
 }
 
 pub struct MobileClient {
-    // Keeping the relay task alive keeps the WebSocket session alive after the
-    // reader/writer tasks are spawned. Dropping it closes only this mobile
-    // connection; the Host-owned Codex process is unaffected.
+    // Owns the relay task for the lifetime of this connection.
     session: StdMutex<Option<Arc<transport::Connection>>>,
     peer: RpcPeer,
     host: ConnectedHost,
@@ -118,9 +114,7 @@ impl MobileClient {
         Ok(self.peer.request(&method.into(), &params).await?)
     }
 
-    /// Sends a request while retaining the caller's raw JSON params text.
-    /// This is useful to wrappers that already have Codex JSONL and avoids a
-    /// needless params deserialize/re-serialize cycle at the mobile boundary.
+    /// Retains the caller's raw JSON params without re-encoding them.
     pub async fn request_raw(
         &self,
         method: impl Into<String>,
@@ -132,7 +126,6 @@ impl MobileClient {
             .await?)
     }
 
-    /// Sends a successful response to a Host-initiated request.
     pub async fn respond_result(
         &self,
         id: impl Into<String>,
@@ -144,8 +137,6 @@ impl MobileClient {
             .await?)
     }
 
-    /// Sends a response whose `error` member is already represented as JSON.
-    /// The error object is not decoded into a fixed DTO.
     pub async fn respond_error(
         &self,
         id: impl Into<String>,
@@ -157,9 +148,7 @@ impl MobileClient {
             .await?)
     }
 
-    /// Sends a response while retaining the caller's raw JSON result/error.
-    /// This is the preferred seam for mobile wrappers that receive Codex JSON
-    /// as text and should not deserialize/re-serialize it.
+    /// Retains the caller's raw JSON result/error without re-encoding it.
     pub async fn respond_raw(
         &self,
         id: impl Into<String>,
@@ -237,8 +226,7 @@ impl Drop for MobileClient {
     }
 }
 
-/// Proxy a local application's raw RPC stream through the same pinned,
-/// authenticated transport used by MobileClient. No JSON fields or IDs change.
+/// Forwards RPC over the pinned transport without changing JSON fields or IDs.
 pub async fn forward_rpc<S>(
     config: MobileClientConfig,
     device_pkcs8: &[u8],
