@@ -673,7 +673,10 @@ mod tests {
         let (reply, _writer) = tokio::join!(peer.request::<_, Value>("read", &params), server);
         let reply = reply.unwrap();
         assert_eq!(reply.value["text"], "base");
-        let PeerEvent::Response { sequence, method, .. } = events.recv().await.unwrap() else {
+        let PeerEvent::Response {
+            sequence, method, ..
+        } = events.recv().await.unwrap()
+        else {
             panic!("expected response")
         };
         let PeerEvent::Message(delta) = events.recv().await.unwrap() else {

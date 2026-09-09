@@ -680,13 +680,13 @@ impl Desktop {
             self.diffs.clear();
             self.markdown_cache.clear();
         }
-        if navigated || self.composer_pending.is_none() {
-            if self.composer_value.as_ref() != self.draft().text {
-                let value: SharedString = self.draft().text.clone().into();
-                self.composer_value = value.clone();
-                self.composer
-                    .update(cx, |input, cx| input.set_value(value, window, cx));
-            }
+        if (navigated || self.composer_pending.is_none())
+            && self.composer_value.as_ref() != self.draft().text
+        {
+            let value: SharedString = self.draft().text.clone().into();
+            self.composer_value = value.clone();
+            self.composer
+                .update(cx, |input, cx| input.set_value(value, window, cx));
         }
         let model = self.selected_model();
         let efforts = model

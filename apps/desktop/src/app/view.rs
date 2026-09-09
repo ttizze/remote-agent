@@ -1287,12 +1287,19 @@ impl Desktop {
         ) {
             let defaults = ["accept", "acceptForSession", "decline", "cancel"];
             let decisions = field(params, "availableDecisions").as_array();
+            let defaults = if decisions.is_none() {
+                defaults.as_slice()
+            } else {
+                &[]
+            };
             let mut row = h_flex().gap_2().flex_wrap();
-            for index in 0..decisions.map_or(defaults.len(), Vec::len) {
-                let decision = decisions.and_then(|decisions| decisions.get(index));
-                let value = decision
-                    .and_then(Value::as_str)
-                    .or_else(|| decisions.is_none().then(|| defaults[index]));
+            for (index, (value, decision)) in decisions
+                .into_iter()
+                .flatten()
+                .map(|decision| (decision.as_str(), Some(decision)))
+                .chain(defaults.iter().map(|value| (Some(*value), None)))
+                .enumerate()
+            {
                 let label = match value {
                     Some("accept") => "許可".into(),
                     Some("acceptForSession") => "このセッションで許可".into(),
@@ -2816,8 +2823,7 @@ impl Desktop {
                 .gap_3()
                 .child(
                     h_flex()
-                        .child(
-                            div().flex_1().child(format!(
+                        .child(div().flex_1().child(format!(
                                 "変更  +{} −{}",
                                 self.snapshot
                                     .workspace
@@ -2829,8 +2835,7 @@ impl Desktop {
                                     .review
                                     .as_ref()
                                     .map_or(0, |review| review.deletions)
-                            )),
-                        )
+                            )))
                         .child(self.icon_button(
                             "refresh-diff",
                             IconName::RotateCw,
