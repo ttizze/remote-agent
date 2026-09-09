@@ -91,7 +91,8 @@ where
             "host/blob/upload",
             &json!({"directory":directory,"fileName":file_name,"size":size,"sha256":sha256}),
         )
-        .await?,
+        .await?
+        .value,
     )?;
     if grant.size != size || grant.sha256 != sha256 {
         return Err(TransferError::Protocol(
@@ -113,6 +114,11 @@ where
     }
     let mut response = vec![0; length as usize];
     stream.read_exact(&mut response).await?;
+    if stream.read(&mut buffer[..1]).await? != 0 {
+        return Err(TransferError::Protocol(
+            "upload acknowledgement has trailing data".into(),
+        ));
+    }
     let response: Value = serde_json::from_slice(&response)?;
     if response["sha256"] != sha256
         || response["size"] != size
@@ -142,7 +148,8 @@ where
 {
     let grant = Grant::parse(
         peer.request("host/blob/download", &json!({"path":source}))
-            .await?,
+            .await?
+            .value,
     )?;
     let parent = destination
         .parent()

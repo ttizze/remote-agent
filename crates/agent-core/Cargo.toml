@@ -3,12 +3,18 @@ name = "agent-core"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+rust-version = "1.91"
 
 [dependencies]
+iroh = { version = "=1.1.0", default-features = false, features = ["tls-ring", "portmapper"] }
+iroh-tickets = "=1.0.0"
+uuid = { version = "1", features = ["v4", "serde"] }
+futures-util.workspace = true
 base64.workspace = true
 ring.workspace = true
 host-protocol = { path = "../host-protocol" }
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_with = { version = "=3.17.0", default-features = false, features = ["std"] }
 serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true, features = ["fs"] }
 tokio-util.workspace = true

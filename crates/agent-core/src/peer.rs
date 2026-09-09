@@ -1,9 +1,9 @@
-//! One lossless, bidirectional JSONL peer for local sockets, relay streams and child processes.
+//! Transport-independent, bidirectional JSONL with one ordered receive stream.
 use host_protocol::{
     JsonlReader, JsonlWriter, RpcMessageKind, classify_message, raw_object, rewrite_top_level_id,
 };
-use serde::Serialize;
-use serde_json::{Value, value::RawValue};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::value::RawValue;
 use std::{
     collections::HashMap,
     sync::{
@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{Semaphore, broadcast, mpsc, oneshot},
+    sync::{Semaphore, broadcast, mpsc, oneshot, watch},
 };
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -24,6 +24,13 @@ const QUEUE_CAPACITY: usize = 4096;
 pub enum PeerError {
     #[error("invalid JSONL message: {0}")]
     InvalidMessage(String),
+    #[error("Invalid {method} response: {reason}")]
+    InvalidResponse {
+        method: String,
+        reason: String,
+        raw: String,
+        sequence: Option<u64>,
+    },
     #[error("connection closed: {0}")]
     ConnectionClosed(String),
     #[error("request {method} timed out")]
@@ -31,30 +38,27 @@ pub enum PeerError {
     #[error("request ID space exhausted")]
     RequestIdExhausted,
     #[error("remote RPC error: {error}")]
-    Remote { error: String },
+    Remote {
+        error: String,
+        sequence: Option<u64>,
+    },
 }
+/// Wire position shared by replies and the receive stream.
+#[derive(Clone, Debug)]
+pub struct Reply<T> {
+    pub sequence: u64,
+    pub value: T,
+}
+#[derive(Clone, Debug)]
 pub enum PeerEvent {
-    Message(String),
+    /// Notifications and server requests retain their complete envelopes.
+    Message(Reply<Arc<str>>),
+    /// A response marker lets Store order a typed completion with surrounding events.
+    Response {
+        sequence: u64,
+        method: Option<Arc<str>>,
+    },
     Closed(String),
-}
-pub enum EventDelivery {
-    Unified,
-    SplitRequests,
-    /// Runs on the reader, before the next frame is consumed.
-    Callback(Arc<dyn Fn(PeerEvent) + Send + Sync>),
-}
-struct EventChannel {
-    sender: Option<broadcast::Sender<String>>,
-    initial: Option<broadcast::Receiver<String>>,
-}
-impl EventChannel {
-    fn new() -> Self {
-        let (sender, initial) = broadcast::channel(QUEUE_CAPACITY);
-        Self {
-            sender: Some(sender),
-            initial: Some(initial),
-        }
-    }
 }
 struct PreparedRequest {
     original_id: String,
@@ -62,24 +66,30 @@ struct PreparedRequest {
     id: u64,
     line: String,
 }
+struct Outbound {
+    line: String,
+    written: oneshot::Sender<()>,
+}
 struct Pending {
     original_id: String,
-    complete: Box<dyn FnOnce(Result<String, PeerError>) + Send>,
+    method: Arc<str>,
+    complete: oneshot::Sender<Result<Reply<String>, PeerError>>,
 }
 struct State {
     pending: HashMap<u64, Pending>,
     closed: Option<String>,
-    events: Option<EventChannel>,
-    requests: Option<EventChannel>,
+    events: Option<broadcast::Sender<PeerEvent>>,
+    initial: Option<broadcast::Receiver<PeerEvent>>,
 }
 pub struct RpcPeer {
     next_id: AtomicU64,
-    outbound: mpsc::Sender<String>,
+    outbound: mpsc::Sender<Outbound>,
     state: Arc<Mutex<State>>,
     permits: Arc<Semaphore>,
     stop: CancellationToken,
     _close_on_drop: DropGuard,
     request_timeout: Duration,
+    writer_done: watch::Receiver<Option<Result<(), String>>>,
 }
 
 impl RpcPeer {
@@ -88,7 +98,6 @@ impl RpcPeer {
         writer: W,
         request_timeout: Duration,
         max_requests: usize,
-        delivery: EventDelivery,
     ) -> Result<Self, PeerError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -105,27 +114,22 @@ impl RpcPeer {
                 "max_requests must be positive".into(),
             ));
         }
-        let events = (!matches!(delivery, EventDelivery::Callback(_))).then(EventChannel::new);
-        let requests = matches!(delivery, EventDelivery::SplitRequests).then(EventChannel::new);
-        let callback = match delivery {
-            EventDelivery::Callback(callback) => Some(callback),
-            _ => None,
-        };
+        let (events, initial) = broadcast::channel(QUEUE_CAPACITY);
         let state = Arc::new(Mutex::new(State {
             pending: HashMap::new(),
             closed: None,
-            events,
-            requests,
+            events: Some(events),
+            initial: Some(initial),
         }));
         let permits = Arc::new(Semaphore::new(max_requests));
         let stop = CancellationToken::new();
         let (outbound, outgoing) = mpsc::channel(QUEUE_CAPACITY);
+        let (writer_finished, writer_done) = watch::channel(None);
         tokio::spawn(read_loop(
             reader,
             state.clone(),
             permits.clone(),
             stop.clone(),
-            callback.clone(),
         ));
         tokio::spawn(write_loop(
             writer,
@@ -134,7 +138,7 @@ impl RpcPeer {
             permits.clone(),
             stop.clone(),
             maximum,
-            callback,
+            writer_finished,
         ));
         Ok(Self {
             next_id: AtomicU64::new(1),
@@ -144,31 +148,39 @@ impl RpcPeer {
             _close_on_drop: stop.clone().drop_guard(),
             stop,
             request_timeout,
+            writer_done,
         })
     }
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
-        subscribe(&mut self.state.lock().unwrap().events)
+    /// Lag is explicit through `RecvError::Lagged`; consumers must refresh state.
+    pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(initial) = state.initial.take() {
+            return initial;
+        }
+        if let Some(events) = &state.events {
+            return events.subscribe();
+        }
+        let (sender, receiver) = broadcast::channel(1);
+        drop(sender);
+        receiver
     }
-    pub fn subscribe_server_requests(&self) -> broadcast::Receiver<String> {
-        subscribe(&mut self.state.lock().unwrap().requests)
-    }
-    pub fn close(&self) {
+    /// Stops new work and waits for the writer's transport shutdown.
+    pub async fn close(&self) -> Result<(), PeerError> {
         self.stop.cancel();
+        let mut done = self.writer_done.clone();
+        loop {
+            if let Some(result) = done.borrow_and_update().clone() {
+                return result.map_err(PeerError::ConnectionClosed);
+            }
+            done.changed()
+                .await
+                .map_err(|_| PeerError::ConnectionClosed("writer task stopped".into()))?;
+        }
     }
 
     /// Returns the original response line with only the caller-owned top-level ID restored.
-    pub async fn request_raw(&self, line: &str) -> Result<String, PeerError> {
-        self.exchange(self.prepare(line), self.request_timeout, |result| result)
-            .await?
-    }
-    /// A completion and the following notification execute in wire order, even on multithreaded runtimes.
-    pub async fn request_callback(
-        &self,
-        line: &str,
-        timeout: Duration,
-        complete: impl FnOnce(Result<String, PeerError>) + Send + 'static,
-    ) {
-        let _ = self.exchange(self.prepare(line), timeout, complete).await;
+    pub async fn request_raw(&self, line: &str) -> Result<Reply<String>, PeerError> {
+        self.exchange(self.prepare(line)?).await
     }
     fn prepare(&self, line: &str) -> Result<PreparedRequest, PeerError> {
         let message = classify_message(line).map_err(invalid)?;
@@ -197,46 +209,18 @@ impl RpcPeer {
             line,
         })
     }
-    /// Exposes the wire ID for servers that later emit a request-resolved notification.
-    /// Reservation does no I/O; dropping the future also drops any pending response.
-    pub fn request_identified<'a, P: Serialize>(
-        &'a self,
-        method: &str,
-        params: &P,
-    ) -> Result<
-        (
-            u64,
-            impl std::future::Future<Output = Result<String, PeerError>> + use<'a, P>,
-        ),
-        PeerError,
-    > {
-        let prepared = self.prepare(&request_line(method, params)?)?;
-        let id = prepared.id;
-        Ok((id, async move {
-            self.exchange(Ok(prepared), self.request_timeout, |result| result)
-                .await?
-        }))
-    }
-    async fn exchange<T: Send + 'static>(
-        &self,
-        prepared: Result<PreparedRequest, PeerError>,
-        timeout: Duration,
-        map: impl FnOnce(Result<String, PeerError>) -> T + Send + 'static,
-    ) -> Result<T, PeerError> {
+    async fn exchange(&self, prepared: PreparedRequest) -> Result<Reply<String>, PeerError> {
         let PreparedRequest {
             original_id,
             method,
             id,
             line,
-        } = match prepared {
-            Ok(value) => value,
-            Err(error) => return Ok(map(Err(error))),
-        };
-        let deadline = tokio::time::Instant::now() + timeout;
+        } = prepared;
+        let deadline = tokio::time::Instant::now() + self.request_timeout;
         let _permit = match tokio::time::timeout_at(deadline, self.permits.acquire()).await {
             Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => return Ok(map(Err(self.closed_error()))),
-            Err(_) => return Ok(map(Err(PeerError::RequestTimeout { method, id }))),
+            Ok(Err(_)) => return Err(self.closed_error()),
+            Err(_) => return Err(PeerError::RequestTimeout { method, id }),
         };
         let (tx, mut rx) = oneshot::channel();
         {
@@ -244,15 +228,14 @@ impl RpcPeer {
             if let Some(reason) = &state.closed {
                 let error = PeerError::ConnectionClosed(reason.clone());
                 drop(state);
-                return Ok(map(Err(error)));
+                return Err(error);
             }
             state.pending.insert(
                 id,
                 Pending {
                     original_id,
-                    complete: Box::new(move |result| {
-                        let _ = tx.send(map(result));
-                    }),
+                    method: Arc::from(method.as_str()),
+                    complete: tx,
                 },
             );
         }
@@ -265,7 +248,7 @@ impl RpcPeer {
         })
         .await
         {
-            Ok(Ok(value)) => Ok(value),
+            Ok(Ok(value)) => value,
             failure => {
                 let error = match failure {
                     Ok(Err(error)) => error,
@@ -274,23 +257,39 @@ impl RpcPeer {
                 };
                 let pending = self.state.lock().unwrap().pending.remove(&id);
                 if let Some(pending) = pending {
-                    (pending.complete)(Err(error));
+                    let _ = pending.complete.send(Err(error));
                 }
-                rx.await.map_err(|_| self.closed_error())
+                rx.await.map_err(|_| self.closed_error())?
             }
         }
     }
-    pub async fn request<P: Serialize>(
+    pub async fn request<P: Serialize, T: DeserializeOwned>(
         &self,
         method: &str,
         params: &P,
-    ) -> Result<Value, PeerError> {
-        let line = request_line(method, params)?;
-        response_value(&self.request_raw(&line).await?)
-    }
-    pub async fn request_params_raw(&self, method: &str, params: &str) -> Result<Value, PeerError> {
-        let params: &RawValue = serde_json::from_str(params).map_err(invalid)?;
-        self.request(method, &params).await
+    ) -> Result<Reply<T>, PeerError> {
+        let reply = self.request_raw(&request_line(method, params)?).await?;
+        let object = raw_object(&reply.value).map_err(invalid)?;
+        if let Some(error) = object.get("error") {
+            return Err(PeerError::Remote {
+                error: error.get().into(),
+                sequence: Some(reply.sequence),
+            });
+        }
+        let result = object
+            .get("result")
+            .ok_or_else(|| invalid("response has no result or error"))?;
+        Ok(Reply {
+            sequence: reply.sequence,
+            value: serde_json::from_str(result.get()).map_err(|error| {
+                PeerError::InvalidResponse {
+                    method: method.into(),
+                    reason: error.to_string(),
+                    raw: result.get().into(),
+                    sequence: Some(reply.sequence),
+                }
+            })?,
+        })
     }
     pub async fn send_raw(&self, line: impl Into<String>) -> Result<(), PeerError> {
         let line = line.into();
@@ -311,10 +310,15 @@ impl RpcPeer {
         if self.stop.is_cancelled() {
             return Err(self.closed_error());
         }
+        let (written, completed) = oneshot::channel();
         self.outbound
-            .send(line)
+            .send(Outbound { line, written })
             .await
-            .map_err(|_| self.closed_error())
+            .map_err(|_| self.closed_error())?;
+        tokio::select! {
+            result = completed => result.map_err(|_| self.closed_error()),
+            _ = self.stop.cancelled() => Err(self.closed_error()),
+        }
     }
     fn closed_error(&self) -> PeerError {
         PeerError::ConnectionClosed(
@@ -328,19 +332,6 @@ impl RpcPeer {
     }
 }
 
-fn subscribe(channel: &mut Option<EventChannel>) -> broadcast::Receiver<String> {
-    if let Some(channel) = channel {
-        if let Some(initial) = channel.initial.take() {
-            return initial;
-        }
-        if let Some(sender) = &channel.sender {
-            return sender.subscribe();
-        }
-    }
-    let (sender, receiver) = broadcast::channel(1);
-    drop(sender);
-    receiver
-}
 fn allocate_id(next: &AtomicU64) -> Result<u64, PeerError> {
     next.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .map_err(|_| PeerError::RequestIdExhausted)
@@ -385,18 +376,6 @@ pub fn response_line(id: &str, field: &'static str, payload: &str) -> Result<Str
         serde_json::to_string(&ErrorResponse { id, error: payload }).map_err(invalid)
     }
 }
-pub fn response_value(line: &str) -> Result<Value, PeerError> {
-    let object = raw_object(line).map_err(invalid)?;
-    if let Some(error) = object.get("error") {
-        return Err(PeerError::Remote {
-            error: error.get().into(),
-        });
-    }
-    let result = object
-        .get("result")
-        .ok_or_else(|| invalid("response has no result or error"))?;
-    serde_json::from_str(result.get()).map_err(invalid)
-}
 fn invalid(error: impl std::fmt::Display) -> PeerError {
     PeerError::InvalidMessage(error.to_string())
 }
@@ -406,8 +385,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
     state: Arc<Mutex<State>>,
     permits: Arc<Semaphore>,
     stop: CancellationToken,
-    callback: Option<Arc<dyn Fn(PeerEvent) + Send + Sync>>,
 ) {
+    let mut sequence = 0u64;
     let reason = loop {
         let line = tokio::select! {
             _ = stop.cancelled() => break "peer closed".into(),
@@ -417,90 +396,87 @@ async fn read_loop<R: AsyncRead + Unpin>(
             Ok(message) => message,
             Err(error) => break error.to_string(),
         };
-        match message.kind() {
-            RpcMessageKind::Response => {
-                let Some(id) = message
-                    .raw_id()
-                    .and_then(|id| serde_json::from_str::<u64>(id).ok())
-                else {
-                    continue;
-                };
-                let pending = state.lock().unwrap().pending.remove(&id);
-                if let Some(pending) = pending {
-                    let response = if message.raw_id() == Some(pending.original_id.as_str()) {
-                        Ok(line)
-                    } else {
-                        rewrite_top_level_id(&line, &pending.original_id).map_err(invalid)
-                    };
-                    (pending.complete)(response);
+        sequence += 1;
+        if message.kind() == RpcMessageKind::Response {
+            let id = message
+                .raw_id()
+                .and_then(|id| serde_json::from_str::<u64>(id).ok());
+            let pending = {
+                let mut state = state.lock().unwrap();
+                let pending = id.and_then(|id| state.pending.remove(&id));
+                if let Some(events) = &state.events {
+                    let _ = events.send(PeerEvent::Response {
+                        sequence,
+                        method: pending.as_ref().map(|pending| pending.method.clone()),
+                    });
                 }
-            }
-            kind => {
-                if let Some(callback) = &callback {
-                    callback(PeerEvent::Message(line));
+                pending
+            };
+            if let Some(pending) = pending {
+                let response = if message.raw_id() == Some(pending.original_id.as_str()) {
+                    Ok(line)
                 } else {
-                    let state = state.lock().unwrap();
-                    let channel = if kind == RpcMessageKind::Request {
-                        state.requests.as_ref().or(state.events.as_ref())
-                    } else {
-                        state.events.as_ref()
-                    };
-                    if let Some(sender) = channel.and_then(|channel| channel.sender.as_ref()) {
-                        let _ = sender.send(line);
-                    }
-                }
+                    rewrite_top_level_id(&line, &pending.original_id).map_err(invalid)
+                };
+                let _ = pending
+                    .complete
+                    .send(response.map(|value| Reply { sequence, value }));
+            }
+        } else {
+            let state = state.lock().unwrap();
+            if let Some(events) = &state.events {
+                let _ = events.send(PeerEvent::Message(Reply {
+                    sequence,
+                    value: Arc::from(line.as_str()),
+                }));
             }
         }
     };
-    terminate(&state, &permits, &stop, &callback, reason);
+    terminate(&state, &permits, &stop, reason);
 }
 async fn write_loop<W: AsyncWrite + Unpin>(
     writer: W,
-    mut outgoing: mpsc::Receiver<String>,
+    mut outgoing: mpsc::Receiver<Outbound>,
     state: Arc<Mutex<State>>,
     permits: Arc<Semaphore>,
     stop: CancellationToken,
     maximum: usize,
-    callback: Option<Arc<dyn Fn(PeerEvent) + Send + Sync>>,
+    finished: watch::Sender<Option<Result<(), String>>>,
 ) {
     let mut writer = JsonlWriter::with_max_message_bytes(writer, maximum);
     let reason = loop {
         let line = tokio::select! { _ = stop.cancelled() => break "peer closed".into(), line = outgoing.recv() => match line { Some(line) => line, None => break "JSONL writer stopped".into() } };
-        let result = tokio::select! { _ = stop.cancelled() => break "peer closed".into(), result = writer.write_line(&line) => result };
+        let result = tokio::select! { _ = stop.cancelled() => break "peer closed".into(), result = writer.write_line(&line.line) => result };
         if let Err(error) = result {
             break error.to_string();
         }
+        let _ = line.written.send(());
     };
-    terminate(&state, &permits, &stop, &callback, reason);
+    let result = match tokio::time::timeout(Duration::from_secs(3), writer.shutdown()).await {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(_) => Err("writer shutdown timed out".into()),
+    };
+    finished.send_replace(Some(result));
+    terminate(&state, &permits, &stop, reason);
 }
-fn terminate(
-    state: &Mutex<State>,
-    permits: &Semaphore,
-    stop: &CancellationToken,
-    callback: &Option<Arc<dyn Fn(PeerEvent) + Send + Sync>>,
-    reason: String,
-) {
+fn terminate(state: &Mutex<State>, permits: &Semaphore, stop: &CancellationToken, reason: String) {
     let pending = {
         let mut state = state.lock().unwrap();
         if state.closed.is_some() {
             return;
         }
         state.closed = Some(reason.clone());
-        if let Some(channel) = &mut state.events {
-            channel.sender.take();
-        }
-        if let Some(channel) = &mut state.requests {
-            channel.sender.take();
+        if let Some(events) = state.events.take() {
+            let _ = events.send(PeerEvent::Closed(reason.clone()));
         }
         std::mem::take(&mut state.pending)
     };
     permits.close();
     stop.cancel();
     for pending in pending.into_values() {
-        (pending.complete)(Err(PeerError::ConnectionClosed(reason.clone())));
-    }
-    if let Some(callback) = callback {
-        callback(PeerEvent::Closed(reason));
+        let _ = pending
+            .complete
+            .send(Err(PeerError::ConnectionClosed(reason.clone())));
     }
 }
 
@@ -527,7 +503,6 @@ mod tests {
                     client_writer,
                     Duration::from_secs(1),
                     1024,
-                    EventDelivery::Unified,
                 )
                 .unwrap(),
             ),
@@ -602,32 +577,14 @@ mod tests {
             .await
             .unwrap();
 
-        let first: Value = serde_json::from_str(&first.await.unwrap().unwrap()).unwrap();
-        let second: Value = serde_json::from_str(&second.await.unwrap().unwrap()).unwrap();
+        let first: Value = serde_json::from_str(&first.await.unwrap().unwrap().value).unwrap();
+        let second: Value = serde_json::from_str(&second.await.unwrap().unwrap().value).unwrap();
         assert_eq!(first["id"], "mobile-a");
         assert_eq!(first["error"]["futureError"]["id"], 7);
         assert_eq!(first["extension"]["keep"], true);
         assert_eq!(second["id"], 42);
         assert_eq!(second["result"]["futureResult"]["id"], 99);
         assert_eq!(second["unknown"], json!([true]));
-    }
-
-    #[tokio::test]
-    async fn identified_requests_expose_wire_id_and_preserve_error_envelopes() {
-        let (peer, server_reader, mut writer) = make_peer();
-        let (id, response) = peer
-            .request_identified("account/refresh", &json!({}))
-            .unwrap();
-        let server = async {
-            let mut reader = BufReader::new(server_reader);
-            let request: Value = serde_json::from_str(&read_line(&mut reader).await).unwrap();
-            assert_eq!(request["id"], id);
-            writer.write_all(format!("{{\"id\":{id},\"error\":{{\"code\":-1,\"message\":\"denied\"}},\"future\":true}}\n").as_bytes()).await.unwrap();
-        };
-        let (response, ()) = tokio::join!(response, server);
-        let response: Value = serde_json::from_str(&response.unwrap()).unwrap();
-        assert_eq!(response["error"]["message"], "denied");
-        assert_eq!(response["future"], true);
     }
 
     #[tokio::test]
@@ -642,8 +599,64 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(events.recv().await.unwrap(), notification);
-        assert_eq!(events.recv().await.unwrap(), request);
+        let PeerEvent::Message(first) = events.recv().await.unwrap() else {
+            panic!("closed")
+        };
+        let PeerEvent::Message(second) = events.recv().await.unwrap() else {
+            panic!("closed")
+        };
+        assert_eq!(&*first.value, notification);
+        assert_eq!(&*second.value, request);
+        assert_eq!(second.sequence, first.sequence + 1);
+    }
+
+    #[tokio::test]
+    async fn response_and_following_delta_share_wire_order() {
+        let (peer, server_reader, mut writer) = make_peer();
+        let mut events = peer.subscribe();
+        let server = async {
+            let mut reader = BufReader::new(server_reader);
+            let request: Value = serde_json::from_str(&read_line(&mut reader).await).unwrap();
+            writer.write_all(format!("{{\"id\":{},\"result\":{{\"text\":\"base\"}}}}\n{{\"method\":\"delta\",\"params\":{{\"text\":\"next\"}}}}\n", request["id"]).as_bytes()).await.unwrap();
+            writer
+        };
+        let params = json!({});
+        let (reply, _writer) = tokio::join!(peer.request::<_, Value>("read", &params), server);
+        let reply = reply.unwrap();
+        assert_eq!(reply.value["text"], "base");
+        let PeerEvent::Response { sequence, method } = events.recv().await.unwrap() else {
+            panic!("expected response")
+        };
+        let PeerEvent::Message(delta) = events.recv().await.unwrap() else {
+            panic!("closed")
+        };
+        assert_eq!(sequence, reply.sequence);
+        assert_eq!(method.as_deref(), Some("read"));
+        assert_eq!(delta.sequence, reply.sequence + 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&delta.value).unwrap()["method"],
+            "delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_completion_means_written_before_close() {
+        use std::{future::Future, task::Poll};
+        let (peer, server_reader, _server_writer) = make_peer();
+        let response = r#"{"id":"approval","result":{"decision":"decline"}}"#;
+        let mut send = std::pin::pin!(peer.send_raw(response));
+        std::future::poll_fn(|cx| {
+            assert!(
+                send.as_mut().poll(cx).is_pending(),
+                "must wait for the writer"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        send.await.unwrap();
+        peer.close().await.unwrap();
+        let mut lines = BufReader::new(server_reader);
+        assert_eq!(read_line(&mut lines).await, response);
     }
 
     #[tokio::test]
@@ -684,7 +697,7 @@ mod tests {
             .write_all(format!("{{\"id\":{id},\"result\":{{\"ok\":true}}}}\n").as_bytes())
             .await
             .unwrap();
-        let response: Value = serde_json::from_str(&request.await.unwrap().unwrap()).unwrap();
+        let response: Value = serde_json::from_str(&request.await.unwrap().unwrap().value).unwrap();
         assert_eq!(response["id"], "caller");
         assert_eq!(response["result"]["ok"], true);
     }
@@ -700,7 +713,6 @@ mod tests {
                 client_writer,
                 Duration::from_millis(10),
                 1024,
-                EventDelivery::Unified,
             )
             .unwrap(),
         );
@@ -711,28 +723,6 @@ mod tests {
             .unwrap_err();
         let _ = read_line(&mut lines).await;
         assert!(matches!(error, Error::RequestTimeout { method, .. } if method == "blocked"));
-    }
-
-    #[tokio::test]
-    async fn callback_uses_the_callers_deadline() {
-        let (peer, _server_reader, _server_writer) = make_peer();
-        let (sent, received) = tokio::sync::oneshot::channel();
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            peer.request_callback(
-                r#"{"id":"callback","method":"blocked","params":{}}"#,
-                Duration::ZERO,
-                move |reply| {
-                    let _ = sent.send(reply);
-                },
-            ),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            received.await.unwrap(),
-            Err(PeerError::RequestTimeout { .. })
-        ));
     }
 
     #[tokio::test]
@@ -770,7 +760,7 @@ mod tests {
             .write_all(format!("{{\"id\":{next_id},\"result\":{{\"ok\":true}}}}\n").as_bytes())
             .await
             .unwrap();
-        let response: Value = serde_json::from_str(&next.await.unwrap().unwrap()).unwrap();
+        let response: Value = serde_json::from_str(&next.await.unwrap().unwrap().value).unwrap();
         assert_eq!(response["id"], "next");
         assert_eq!(response["result"]["ok"], true);
     }

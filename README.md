@@ -1,10 +1,38 @@
 # Bex
 
-Bex controls Codex on a Mac from its Rust/GPUI Mac application or native iPhone application. The Mac can also control another paired Host. One Rust daemon owns the Codex App Server independently of application windows; multiple paired devices can operate it concurrently.
+Bex controls a long-lived Codex App Server through a separate Rust Host daemon. The current migration makes `agent-core` the state owner for the headless CLI, GPUI, SwiftUI and Compose clients. See [ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md).
 
-Both peers connect outbound to a local Phoenix relay. The relay routes opaque SSH ciphertext. Host-key pinning, per-device keys and expiring single-use invitations protect application access. Codex credentials and workspace files stay on the Host. Private keys and saved relay credentials use Keychain.
+This stage implements the shared core and `agent-cli`. The daemon and native UIs still use their previous interfaces and are replaced in the following stages. Their builds are temporarily broken by the peer API cutover. The descriptions and setup instructions below the core section document those existing applications; they do not claim the daemon or UI migration is complete.
 
-`agent-core::peer::RpcPeer` owns JSONL request correlation for desktop, mobile, the Codex App Server and fixtures over generic asynchronous streams. Reconnecting local sockets remain in the desktop adapter; SSH/relay connections remain in `mobile-client`. `agent-core` exposes only the shared peer and generic-stream transfers. File transfers use the same generic-stream upload/download code. The shared classifier borrows the source line and raw ID; ID rewriting normalizes outer whitespace and key order, collapses duplicate keys, and preserves nested raw values and unknown fields. Response callbacks execute before subsequent notifications.
+## Core and headless client
+
+`agent-core` contains typed RPC operations, immutable serde models, `Snapshot`, the pure `reduce` function, and `Store`. Store owns one `RwLock<Arc<Snapshot>>`; subscribers receive immutable snapshots and submit typed `Intent`s. Deltas copy only the changed thread/turn/item path. JSON persistence is `serde_json::to_vec(&snapshot)` with no version wrapper or migration layer. Unknown model fields and raw RPC errors are retained.
+
+`RpcPeer` exposes one typed request and one raw request. One ordered stream carries notifications, server requests and response markers. Store uses the markers to apply typed responses before later deltas while allowing approval responses during other requests. Closing waits for stream shutdown; iroh streams wait for acknowledgment of the final data. Applications must also await endpoint closure before terminating their runtime.
+
+Only `agent-core::transport` knows iroh. It provides identities, native endpoint tickets, expiring single-use invitation data, pure NodeId authorization, and bidirectional streams. The state owner must commit pairing updates atomically before accepting another invitation use. A session uses one JSONL RPC stream; file transfers use separate streams on that session. Local fixtures disable public relays and address lookup.
+
+Run the migration gates through Nix:
+
+```sh
+nix develop . --command cargo test -p agent-core -p agent-cli
+nix develop . --command cargo clippy -p agent-core -p agent-cli --all-targets -- -D warnings
+```
+
+The tests execute all 87 expanded behavior-corpus cases and launch the actual CLI against isolated iroh fixture servers for listing, sending and numeric/string approval IDs. They also cover ordered Store publication, concurrent approval handling, unchanged draft preservation and ticket authorization. These checks do not verify the legacy UIs, production daemon, mobile devices or other operating systems.
+
+The CLI accepts either `--stdio <fixture-executable>` with repeatable `--stdio-arg`, or `--ticket <endpoint-ticket> --identity-file <existing-32-byte-client-key>` for an already paired iroh Host. `--no-relay` disables relays and public address lookup for isolated fixtures. It prints JSON results to stdout and errors to stderr. Supported commands:
+
+```sh
+agent-cli <connection-options> list
+agent-cli <connection-options> send <thread-id> <text> --client-message-id <submission-id>
+agent-cli <connection-options> approve 7 --decision 2
+agent-cli <connection-options> approve '"request-id"' --decision 2
+```
+
+Approval IDs are JSON values, preserving the difference between numeric and string IDs. The decision index refers to the request's advertised choices; index 2 declines requests using the default choices. The `send` command reads current thread state, then chooses start, steer or queue and preserves failed drafts in Store.
+
+## Existing application behavior
 
 Mac and iPhone conversations show generated images outside collapsed work, including after reopening history. Images load from the selected Host's saved path or the inline result when no path is available. Image output is never truncated as an activity detail. Markdown file links resolve against the conversation's working directory on that Host, including escaped spaces and line suffixes. Mac opens image files in its image viewer and other files in the system application; iPhone downloads a temporary copy into a Quick Look sheet with a Close button. HTTP/HTTPS links open in the system browser.
 
