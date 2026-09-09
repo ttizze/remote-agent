@@ -141,14 +141,14 @@ The iPhone conversation uses a dark native layout with expandable work rows, Mar
 
 New iPhone chats place the environment and folder menus directly above the composer. Choose a paired Host and one of its project folders, or **チャット** for an unassigned conversation. The folder menu can load more projects. Open conversations retain their own upload directory even when a refreshed recent-task list no longer includes their title, so subsequent attachments continue to use that conversation's workspace.
 
-The iPhone app is SwiftUI over the Rust Store through generated UniFFI bindings. Build the Simulator libraries, then open the Xcode project:
+The iPhone app requires iOS 17 or newer and uses SwiftUI over the Rust Store through generated UniFFI bindings. Build the Simulator libraries, then open the Xcode project:
 
 ```sh
 nix develop . --command scripts/build-agent-ios.sh simulator
 open apps/mobile/iosApp/Bex.xcodeproj
 ```
 
-Select the Bex scheme and an iPhone Simulator. Xcode also runs the library build for the selected SDK. `scripts/build-agent-ios.sh device` builds device libraries without installing or signing an app. Physical-device signing and installation are separate. Rust tools come from Nix; Apple SDK compilation and linking use Xcode clang and Swift as a platform exception. Generated Swift/Kotlin sources and libraries stay under `target/` and are never committed.
+Select the Bex scheme and an iPhone Simulator. Rerun the library build after changing Rust sources or the selected SDK; Xcode consumes the existing libraries and generated bindings. `scripts/build-agent-ios.sh device` builds device libraries without installing or signing an app. Physical-device signing and installation are separate. Rust tools come from Nix; Apple SDK compilation and linking use Xcode clang and Swift as a platform exception. Generated Swift/Kotlin sources and libraries stay under `target/` and are never committed.
 
 The fixture runner starts an isolated iroh Host with a deterministic Codex process and exercises the native SwiftUI app. It rejects failures and skipped tests:
 
@@ -206,6 +206,6 @@ nix develop . --command cargo test --package agent-core --package agent-ffi
 nix develop . --command ./gradlew :apps:mobile:assembleDebug
 ```
 
-Android uses native Compose over the same generated UniFFI Store API. `assembleDebug` builds both arm64 and x86_64 Rust libraries. The `android-test` Nix shell provides an API 36 emulator and system image; use an isolated AVD and pairing fixture. Android Keystore seals device identity, while iOS uses Keychain. Both native owners persist opaque per-Host snapshots and keep platform media, QR, and lifecycle handling outside Core. Kotlin common source sets and handwritten FFI have been removed.
+Android requires Android 9 (API 28) or newer and uses native Compose over the same generated UniFFI Store API. The build uses AGP 9.3.2 with built-in Kotlin and Gradle 9.5.0. `assembleDebug` builds both arm64 and x86_64 Rust libraries. The `android-test` Nix shell provides an API 36 emulator and system image; use an isolated AVD and pairing fixture. Android Keystore seals device identity, while iOS uses Keychain. Both native owners persist opaque per-Host snapshots and keep platform media, QR, and lifecycle handling outside Core. Kotlin common source sets and handwritten FFI have been removed.
 
 Simulator evidence does not verify physical camera, physical-device networking or distribution. See [implementation evidence](docs/IMPLEMENTATION_PLAN.md).

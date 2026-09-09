@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
+
 - Replace Rust Xcode/build wrappers with `just` recipes and scripts. Preserve certificate signing, bundle rollback, isolated Simulator/Host cleanup and exact zero-skip test counts. Keep the Rust fixture servers and quality queue/status; use standard file locks and process-wrap for managed quality subprocesses. Add native Linux/Windows CI and a Nix native development shell.
 
 - Move SwiftUI and Android Compose onto generated UniFFI bindings for the common Rust Store. Remove Kotlin common state and handwritten FFI; retain native identity storage, media, QR and lifecycle adapters. Cache immutable conversation projections, expose each activity as a lazy native row, and persist per-Host snapshots. Commit iOS native text before accepting a send and flush submissions and media changes atomically before reporting completion.

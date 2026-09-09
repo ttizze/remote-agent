@@ -217,7 +217,7 @@ extension BexLaunchUITests {
         let nextID = String(originalAnswerID.dropLast()) + "2"
         XCTAssertTrue(app.descendants(matching: .any)[nextID].waitForExistence(timeout: 25))
         // Fork the earlier completed turn after the original has a later turn.
-        let list = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch : app.tables.firstMatch
+        let list = app.descendants(matching: .any)["task.detail"]
         for _ in 0 ..< 6 where !firstFork.isHittable {
             list.swipeDown()
         }

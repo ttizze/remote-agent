@@ -3,15 +3,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 case "${1:-simulator}" in
-    simulator) rust_target=aarch64-apple-ios-sim; sdk=iphonesimulator; swift_target=arm64-apple-ios15.0-simulator ;;
-    device) rust_target=aarch64-apple-ios; sdk=iphoneos; swift_target=arm64-apple-ios15.0 ;;
+    simulator) rust_target=aarch64-apple-ios-sim; sdk=iphonesimulator; swift_target=arm64-apple-ios17.0-simulator ;;
+    device) rust_target=aarch64-apple-ios; sdk=iphoneos; swift_target=arm64-apple-ios17.0 ;;
     *) echo "usage: $0 [simulator|device]" >&2; exit 2 ;;
 esac
 scripts/build-agent-bindings.sh
 CC=/usr/bin/clang CXX=/usr/bin/clang++ \
 CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=/usr/bin/clang \
 CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=/usr/bin/clang \
-IPHONEOS_DEPLOYMENT_TARGET=15.0 cargo build -p agent-ffi --release --target "$rust_target"
+IPHONEOS_DEPLOYMENT_TARGET=17.0 cargo build -p agent-ffi --release --target "$rust_target"
 bindings="$PWD/target/agent-bindings"
 output="$PWD/target/$rust_target/release"
 xcrun --sdk "$sdk" swiftc "$bindings/AgentCore.swift" \
