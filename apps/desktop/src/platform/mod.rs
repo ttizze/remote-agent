@@ -75,7 +75,7 @@ pub(crate) async fn connect(remote: Option<&str>, snapshot: Snapshot) -> Result<
         let endpoint = Endpoint::bind(identity, Relays::Default)
             .await
             .map_err(|error| error.to_string())?;
-        return Store::connect(endpoint, &ticket, snapshot, None)
+        return Store::connect(&endpoint, &ticket, snapshot, None)
             .await
             .map_err(|error| error.to_string());
     }
@@ -147,7 +147,7 @@ pub(crate) async fn connect(remote: Option<&str>, snapshot: Snapshot) -> Result<
     let endpoint = Endpoint::bind(identity, Relays::Disabled)
         .await
         .map_err(|error| error.to_string())?;
-    Store::connect(endpoint, &ticket, snapshot, None)
+    Store::connect(&endpoint, &ticket, snapshot, None)
         .await
         .map_err(|error| error.to_string())
 }

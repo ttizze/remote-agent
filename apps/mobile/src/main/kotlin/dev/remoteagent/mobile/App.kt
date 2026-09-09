@@ -256,12 +256,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    fun connect() {
+    fun connect(force: Boolean = false) {
         val store = owner
         val profile = profiles.firstOrNull { it.id == profileId }
         if (store == null || profile == null || busy) return
         notice = null
-        if (snapshot.connected()) {
+        if (!force && snapshot.connected()) {
             refresh()
             snapshot.navigation().threadId?.let { perform(Intent.ReadThread(it)) }
             return
@@ -374,7 +374,7 @@ internal fun RemoteAgentApp(
     requestQrScan: ((onContents: (String) -> Unit) -> Unit)?,
 ) {
     DisposableEffect(model, activity) {
-        val observer = AndroidConnectionLifecycle(model::connect, model::persist)
+        val observer = AndroidConnectionLifecycle({ model.connect(force = true) }, model::persist)
         activity.lifecycle.addObserver(observer)
         onDispose { activity.lifecycle.removeObserver(observer) }
     }
@@ -389,7 +389,7 @@ internal fun RemoteAgentApp(
                 }
                 if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (!model.snapshot.connected() && model.profileId != null && model.screen != Screen.Pairing) {
-                    Button(onClick = model::connect, enabled = !model.busy) { Text("再接続") }
+                    Button(onClick = { model.connect() }, enabled = !model.busy) { Text("再接続") }
                 }
                 when {
                     model.screen == Screen.Pairing || model.profiles.isEmpty() -> PairingScreen(model, requestQrScan)

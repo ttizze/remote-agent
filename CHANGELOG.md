@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Close native snapshot waits on Store shutdown, replace stale foreground transports, and recover interrupted pending sends into drafts. Keep session requests and activity out of restored connection state. Serialize and write iOS snapshots off MainActor, await ordered background writes, and cover native Android FFI shutdown and per-Host persistence.
+
 - Use SwiftUI scroll positioning for iPhone conversations instead of mutating UIKit offsets. Restore image history after reopening, scroll long histories to the latest message after layout, and preserve the reading position when live updates arrive after a small drag toward older content.
 
 - Preserve mobile title expansion in ten-entry increments and wait for an existing iPhone conversation to load before navigating. Render changing activity groups in a lazy scroll stack so completing a live turn cannot invalidate native List indices; retain independent expansion and history paging. Reset isolated fixture controls between UI tests and treat HTTP control failures as failures.
