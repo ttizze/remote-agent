@@ -92,7 +92,7 @@ extension JsonValue {
     }
 }
 
-struct ConversationPresentation {
+struct ConversationPresentation: Sendable {
     let source: AgentCore.Thread
     let id: String
     let title: String
@@ -101,7 +101,7 @@ struct ConversationPresentation {
     let hasOlderTurns: Bool
 }
 
-struct TurnPresentation {
+struct TurnPresentation: Sendable {
     let id: String
     let turnId: String
     let hasOlderItems: Bool
@@ -118,14 +118,14 @@ struct TurnPresentation {
     let pendingRequests: [RequestPresentation]
 }
 
-struct TurnErrorPresentation {
+struct TurnErrorPresentation: Sendable {
     let title: String
     let message: String
     let details: String?
     let isReconnecting: Bool
 }
 
-struct RequestPresentation {
+struct RequestPresentation: Sendable {
     let source: Request
     var id: String {
         source.key
@@ -157,12 +157,13 @@ struct RequestPresentation {
     }
 }
 
-final class ConversationItem {
+final class ConversationItem: Sendable {
     let source: AgentCore.Item?
     let id: String
     let kind: String
     let title: String
     let collapsedBody: String
+    let markdown: [ConversationMarkdown.Block]
     let isCollapsible: Bool
     let isDeferred: Bool
     let imageSources: [String]
@@ -193,6 +194,7 @@ final class ConversationItem {
         case "imageGeneration": collapsedBody = title
         default: collapsedBody = source.status() ?? "詳細を表示"
         }
+        markdown = kind != "user" && !isCollapsible ? ConversationMarkdown.parse(collapsedBody) : []
         if kind == "imageGeneration" {
             imageSources = [source.savedPath() ?? source.result()?.string.map { "data:image/png;base64," + $0 }]
                 .compactMap(\.self).filter { !$0.isEmpty }
@@ -217,6 +219,7 @@ final class ConversationItem {
         let files = pending.draft.attachments.filter { !$0.isImage }.map { "添付: \($0.name) (\($0.path))" }
         collapsedBody = ([pending.draft.text] + files).filter { !$0.isEmpty }.joined(separator: "\n")
         imageSources = pending.draft.attachments.filter(\.isImage).map(\.path)
+        markdown = []
     }
 
     func expandedBody() -> String {

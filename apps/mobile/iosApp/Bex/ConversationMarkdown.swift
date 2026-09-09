@@ -3,17 +3,14 @@ import UniformTypeIdentifiers
 
 /// Foundation parses block structure and inline Markdown; no HTML/web view is involved.
 struct ConversationMarkdown: View {
-    let text: String
+    let blocks: [Block]
     let model: BexAppViewModel
-    @State private var blocks: [Block]?
-    @State private var pendingText: String?
-    @State private var parsing: Task<Void, Never>?
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
     @State private var previewDirectory: URL?
     @State private var previewSource: String?
     @State private var linkError: String?
-    private struct Block: Identifiable, Sendable {
+    struct Block: Identifiable, Sendable {
         let id: Int
         let content: AttributedString
         let style: ParagraphStyle
@@ -22,42 +19,36 @@ struct ConversationMarkdown: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if let blocks {
-                ForEach(blocks) { block in
-                    if let imageURL = block.imageURL {
-                        ConversationImage(
-                            source: imageURL.scheme == nil ? imageURL.path : imageURL.absoluteString,
-                            label: String(block.content.characters),
-                            identifier: "markdown.image.\(block.id)",
-                            model: model
-                        )
-                    } else if block.style.code {
-                        ScrollView(.horizontal) {
-                            Text(block.content).font(.system(.subheadline, design: .monospaced))
-                                .textSelection(.enabled).padding(12)
-                        }.background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
-                    } else {
-                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                            if let marker = block.style.marker {
-                                Text(marker).frame(minWidth: 14, alignment: .leading)
-                            }
-                            if block.style.quoted {
-                                Rectangle().fill(Color.secondary).frame(width: 2)
-                            }
-                            Text(block.content)
-                                .font(block.style.header == nil ? .system(size: 18) : .system(
-                                    size: block.style.header == 1 ? 25 : 21,
-                                    weight: .semibold
-                                ))
-                                .lineSpacing(5).textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(blocks) { block in
+                if let imageURL = block.imageURL {
+                    ConversationImage(
+                        source: imageURL.scheme == nil ? imageURL.path : imageURL.absoluteString,
+                        label: String(block.content.characters),
+                        identifier: "markdown.image.\(block.id)",
+                        model: model
+                    )
+                } else if block.style.code {
+                    ScrollView(.horizontal) {
+                        Text(block.content).font(.system(.subheadline, design: .monospaced))
+                            .textSelection(.enabled).padding(12)
+                    }.background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        if let marker = block.style.marker {
+                            Text(marker).frame(minWidth: 14, alignment: .leading)
                         }
+                        if block.style.quoted {
+                            Rectangle().fill(Color.secondary).frame(width: 2)
+                        }
+                        Text(block.content)
+                            .font(block.style.header == nil ? .system(size: 18) : .system(
+                                size: block.style.header == 1 ? 25 : 21,
+                                weight: .semibold
+                            ))
+                            .lineSpacing(5).textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-            } else {
-                // Raw image data URLs can make the initial row thousands of lines tall.
-                // Only parsed content participates in the conversation's scroll geometry.
-                ProgressView().padding(.vertical, 8)
             }
             if let linkError {
                 Text(linkError).font(.caption).foregroundColor(.red)
@@ -118,34 +109,9 @@ struct ConversationMarkdown: View {
             }
             linkTarget = nil
         }
-        .task(id: text) { enqueue(text) }
-        .onDisappear {
-            parsing?.cancel()
-            parsing = nil
-            pendingText = nil
-        }
     }
 
-    private func enqueue(_ text: String) {
-        pendingText = text
-        guard parsing == nil else { return }
-        parsing = Task {
-            // One parser per visible message. New text replaces pending work,
-            // never starts another parser or delays an active parse indefinitely.
-            while !Task.isCancelled, let source = pendingText {
-                pendingText = nil
-                let rendered = await Task.detached(priority: .userInitiated) { Self.parse(source) }.value
-                guard !Task.isCancelled else { return }
-                blocks = rendered
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-            if !Task.isCancelled {
-                parsing = nil
-            }
-        }
-    }
-
-    private nonisolated static func parse(_ text: String) -> [Block] {
+    nonisolated static func parse(_ text: String) -> [Block] {
         guard let document = try? AttributedString(markdown: text) else {
             return [Block(id: 0, content: AttributedString(text), style: ParagraphStyle([]), imageURL: nil)]
         }
@@ -180,7 +146,7 @@ struct ConversationMarkdown: View {
         return result
     }
 
-    private struct ParagraphStyle: Sendable {
+    struct ParagraphStyle: Sendable {
         var header: Int?
         var marker: String?
         var code = false
