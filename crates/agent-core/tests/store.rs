@@ -1,3 +1,4 @@
+use agent_core::state::operations as op;
 use agent_core::{
     client::Answer,
     models::Thread,
@@ -203,7 +204,9 @@ async fn read_response_precedes_following_delta_even_when_server_closes() {
     });
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        store.dispatch(Intent::ReadThread("thread".into())),
+        store.dispatch(Intent::ReadThread(op::ReadThread {
+            thread_id: "thread".into(),
+        })),
     )
     .await
     .unwrap();
@@ -236,17 +239,23 @@ async fn approval_can_complete_while_another_request_is_waiting() {
     });
     let loading = tokio::spawn({
         let store = store.clone();
-        async move { store.dispatch(Intent::ReadThread("thread".into())).await }
+        async move {
+            store
+                .dispatch(Intent::ReadThread(op::ReadThread {
+                    thread_id: "thread".into(),
+                }))
+                .await
+        }
     });
     wait_for(&store, |snapshot| {
         snapshot.requests.contains_key("\"approval\"")
     })
     .await;
     store
-        .dispatch(Intent::Respond {
+        .dispatch(Intent::Respond(op::Respond {
             request_id: json!("approval"),
             answer: Answer::Decision(2),
-        })
+        }))
         .await
         .unwrap();
     assert_eq!(loading.await.unwrap().unwrap(), Outcome::Applied);
@@ -275,7 +284,9 @@ async fn invalid_typed_reply_does_not_block_later_wire_events() {
         writer
     });
     let error = store
-        .dispatch(Intent::ReadThread("thread".into()))
+        .dispatch(Intent::ReadThread(op::ReadThread {
+            thread_id: "thread".into(),
+        }))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -286,7 +297,9 @@ async fn invalid_typed_reply_does_not_block_later_wire_events() {
         }
     ));
     store
-        .dispatch(Intent::ReadThread("thread".into()))
+        .dispatch(Intent::ReadThread(op::ReadThread {
+            thread_id: "thread".into(),
+        }))
         .await
         .unwrap();
     let _writer = server.await.unwrap();
@@ -642,12 +655,12 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
             let store = store.clone();
             async move {
                 store
-                    .dispatch(Intent::Transcribe {
+                    .dispatch(Intent::Transcribe(op::Transcribe {
                         draft_key: "thread".into(),
                         audio: "AAA=".into(),
                         send: true,
                         client_user_message_id: "dictation".into(),
-                    })
+                    }))
                     .await
             }
         });
@@ -697,12 +710,12 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::Transcribe {
+                .dispatch(Intent::Transcribe(op::Transcribe {
                     draft_key: "new:/fixture".into(),
                     audio: "AAA=".into(),
                     send: true,
                     client_user_message_id: "dictation".into(),
-                })
+                }))
                 .await
         }
     });
@@ -732,10 +745,10 @@ async fn file_navigation_ignores_a_late_reply_from_the_previous_file() {
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::ReadFile {
+                .dispatch(Intent::ReadFile(op::ReadFile {
                     path: "/first".into(),
                     discard_draft: false,
-                })
+                }))
                 .await
         }
     });
@@ -744,10 +757,10 @@ async fn file_navigation_ignores_a_late_reply_from_the_previous_file() {
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::ReadFile {
+                .dispatch(Intent::ReadFile(op::ReadFile {
                     path: "/second".into(),
                     discard_draft: false,
-                })
+                }))
                 .await
         }
     });
@@ -788,7 +801,13 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
         .unwrap();
     let saving = tokio::spawn({
         let store = store.clone();
-        async move { store.dispatch(Intent::SaveFile("/file".into())).await }
+        async move {
+            store
+                .dispatch(Intent::SaveFile(op::SaveFile {
+                    path: "/file".into(),
+                }))
+                .await
+        }
     });
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/file/write");
@@ -814,7 +833,13 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
     assert_eq!(store.snapshot().file_drafts["/file"].revision, "saved");
     let saving = tokio::spawn({
         let store = store.clone();
-        async move { store.dispatch(Intent::SaveFile("/file".into())).await }
+        async move {
+            store
+                .dispatch(Intent::SaveFile(op::SaveFile {
+                    path: "/file".into(),
+                }))
+                .await
+        }
     });
     let request = read(&mut reader).await;
     assert_eq!(
@@ -840,7 +865,13 @@ async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     let (store, mut reader, mut writer) = setup(Snapshot::default());
     let opening = tokio::spawn({
         let store = store.clone();
-        async move { store.dispatch(Intent::OpenThread("thread".into())).await }
+        async move {
+            store
+                .dispatch(Intent::OpenThread(op::OpenThread {
+                    thread_id: "thread".into(),
+                }))
+                .await
+        }
     });
     let request = read(&mut reader).await;
     store
@@ -919,9 +950,11 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::ListThreads(ListQuery {
-                    search_term: "old".into(),
-                    ..Default::default()
+                .dispatch(Intent::ListThreads(op::ListThreads {
+                    query: ListQuery {
+                        search_term: "old".into(),
+                        ..Default::default()
+                    },
                 }))
                 .await
         }
@@ -931,9 +964,11 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::ListThreads(ListQuery {
-                    search_term: "new".into(),
-                    ..Default::default()
+                .dispatch(Intent::ListThreads(op::ListThreads {
+                    query: ListQuery {
+                        search_term: "new".into(),
+                        ..Default::default()
+                    },
                 }))
                 .await
         }
@@ -970,7 +1005,9 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
         writer
     });
     let result = store
-        .dispatch(Intent::LoadSessionImages("gallery".into()))
+        .dispatch(Intent::LoadSessionImages(op::LoadSessionImages {
+            thread_id: "gallery".into(),
+        }))
         .await
         .unwrap();
     let Outcome::SessionImages(images) = result else {
@@ -1017,19 +1054,19 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         // Keep the transport alive until Store closes it.
         assert!(reader.read_line().await.unwrap().is_none());
     });
-    let start = store.dispatch(Intent::StartTerminal {
+    let start = store.dispatch(Intent::StartTerminal(op::StartTerminal {
         handle: "terminal".into(),
         cwd: "/fixture".into(),
         size: TerminalSize { cols: 80, rows: 24 },
-    });
-    let first = store.dispatch(Intent::WriteTerminal {
+    }));
+    let first = store.dispatch(Intent::WriteTerminal(op::WriteTerminal {
         handle: "terminal".into(),
         data: b"first".to_vec(),
-    });
-    let second = store.dispatch(Intent::WriteTerminal {
+    }));
+    let second = store.dispatch(Intent::WriteTerminal(op::WriteTerminal {
         handle: "terminal".into(),
         data: b"second".to_vec(),
-    });
+    }));
     second.await.unwrap();
     first.await.unwrap();
     start.await.unwrap();
@@ -1062,7 +1099,9 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         .unwrap();
     assert!(store.snapshot().terminals["terminal"].output.is_empty());
     store
-        .dispatch(Intent::CloseTerminal("terminal".into()))
+        .dispatch(Intent::CloseTerminal(op::CloseTerminal {
+            handle: "terminal".into(),
+        }))
         .await
         .unwrap();
     assert_eq!(
@@ -1087,11 +1126,11 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
         assert!(reader.read_line().await.unwrap().is_none());
     });
     store
-        .dispatch(Intent::StartTerminal {
+        .dispatch(Intent::StartTerminal(op::StartTerminal {
             handle: "terminal".into(),
             cwd: "/fixture".into(),
             size: TerminalSize { cols: 80, rows: 24 },
-        })
+        }))
         .await
         .unwrap();
     assert_eq!(
@@ -1122,11 +1161,11 @@ async fn closing_store_terminates_its_running_terminal() {
         assert!(reader.read_line().await.unwrap().is_none());
     });
     store
-        .dispatch(Intent::StartTerminal {
+        .dispatch(Intent::StartTerminal(op::StartTerminal {
             handle: "terminal".into(),
             cwd: "/fixture".into(),
             size: TerminalSize { cols: 80, rows: 24 },
-        })
+        }))
         .await
         .unwrap();
     store.close().await.unwrap();
@@ -1281,19 +1320,19 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
         writer
     });
     store
-        .dispatch(Intent::ReadOlder {
+        .dispatch(Intent::ReadOlder(op::ReadOlder {
             thread_id: "thread".into(),
             turn_id: None,
             cursor: Some("turn-page".into()),
-        })
+        }))
         .await
         .unwrap();
     store
-        .dispatch(Intent::ReadOlder {
+        .dispatch(Intent::ReadOlder(op::ReadOlder {
             thread_id: "thread".into(),
             turn_id: Some("old".into()),
             cursor: Some("item-page".into()),
-        })
+        }))
         .await
         .unwrap();
     let snapshot = store.snapshot();
@@ -1329,10 +1368,10 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
 #[tokio::test]
 async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
     let (store, mut reader, mut writer) = setup(snapshot());
-    let fork = store.dispatch(Intent::ForkThread {
+    let fork = store.dispatch(Intent::ForkThread(op::ForkThread {
         thread_id: "thread".into(),
         last_turn_id: "turn".into(),
-    });
+    }));
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "thread/fork");
     assert_eq!(request["params"]["lastTurnId"], "turn");
@@ -1359,7 +1398,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
 #[tokio::test]
 async fn account_selection_publishes_the_selected_account_and_persistence_warning() {
     let (store, mut reader, mut writer) = setup(Snapshot::default());
-    let listing = store.dispatch(Intent::ListAccounts);
+    let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts));
     let request = read(&mut reader).await;
     writer.write_line(&json!({"id":request["id"],"result":{"accounts":[{"id":"a"},{"id":"b"}],"selectedId":"a","error":null}}).to_string()).await.unwrap();
     listing.await.unwrap();
@@ -1374,7 +1413,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .as_deref(),
         Some("a")
     );
-    let selecting = store.dispatch(Intent::SelectAccount("b".into()));
+    let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount { id: "b".into() }));
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["accountId"], "b");
     writer.write_line(&json!({"id":request["id"],"result":{"selectedId":"b","persistenceError":"store unavailable"}}).to_string()).await.unwrap();
@@ -1403,13 +1442,17 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 #[tokio::test]
 async fn cancelled_account_login_ignores_an_older_status_reply() {
     let (store, mut reader, mut writer) = setup(Snapshot::default());
-    let starting = store.dispatch(Intent::StartAccountLogin);
+    let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin));
     let request = read(&mut reader).await;
     writer.write_line(&json!({"id":request["id"],"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}}).to_string()).await.unwrap();
     starting.await.unwrap();
-    let polling = store.dispatch(Intent::ReadAccountLogin("login".into()));
+    let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
+        id: "login".into(),
+    }));
     let poll = read(&mut reader).await;
-    let cancelling = store.dispatch(Intent::CancelAccountLogin("login".into()));
+    let cancelling = store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin {
+        id: "login".into(),
+    }));
     let cancel = read(&mut reader).await;
     writer
         .write_line(&json!({"id":cancel["id"],"result":{}}).to_string())
@@ -1691,30 +1734,34 @@ async fn stores_share_an_endpoint_without_closing_each_others_transport() {
 async fn navigation_invalidates_all_view_reads_and_their_errors() {
     for (intent, output) in [
         (
-            Intent::ReadFile {
+            Intent::ReadFile(op::ReadFile {
                 path: "/old/file".into(),
                 discard_draft: false,
-            },
+            }),
             file("/old/file", "r1", "old"),
         ),
         (
-            Intent::ListFiles("/old".into()),
+            Intent::ListFiles(op::ListFiles {
+                path: "/old".into(),
+            }),
             json!({"path":"/old","entries":[],"truncated":false}),
         ),
         (
-            Intent::ReviewWorkspace("/old".into()),
+            Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: "/old".into() }),
             json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":"old"}),
         ),
         (
-            Intent::ReadWorktreeSettings,
+            Intent::ReadWorktreeSettings(op::ReadWorktreeSettings),
             json!({"createOnNewSession":false,"copyOnCreate":false,"copyPaths":[],"worktreeDirectory":"old"}),
         ),
         (
-            Intent::ListAccounts,
+            Intent::ListAccounts(op::ListAccounts),
             json!({"accounts":[],"selectedId":null,"error":null}),
         ),
         (
-            Intent::ListThreads(Default::default()),
+            Intent::ListThreads(op::ListThreads {
+                query: Default::default(),
+            }),
             json!({"data":[{"id":"old"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
         ),
     ] {
@@ -1740,7 +1787,9 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         store.close().await.unwrap();
     }
     let (store, mut reader, mut writer) = setup(Snapshot::default());
-    let loading = store.dispatch(Intent::ListFiles("/old".into()));
+    let loading = store.dispatch(Intent::ListFiles(op::ListFiles {
+        path: "/old".into(),
+    }));
     let request = read(&mut reader).await;
     store
         .dispatch(Intent::NewChat("/new".into()))
@@ -1772,7 +1821,9 @@ async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_f
         })
         .await
         .unwrap();
-    let saving = store.dispatch(Intent::SaveFile("/old/file".into()));
+    let saving = store.dispatch(Intent::SaveFile(op::SaveFile {
+        path: "/old/file".into(),
+    }));
     let request = read(&mut reader).await;
     store
         .dispatch(Intent::SetFileDraft {

@@ -1,4 +1,5 @@
 use super::*;
+use agent_core::state::operations as op;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Phase {
@@ -86,12 +87,12 @@ impl Desktop {
             }
             platform::RecordingEvent::Finished(Ok(audio)) => {
                 state.control = None;
-                let intent = Intent::Transcribe {
+                let intent = Intent::Transcribe(op::Transcribe {
                     draft_key: state.key.clone(),
                     audio: base64::engine::general_purpose::STANDARD.encode(audio),
                     send: state.send && state.generation == self.snapshot.epoch,
                     client_user_message_id: uuid::Uuid::new_v4().to_string(),
-                };
+                });
                 self.perform(intent, move |view, result, window, cx| {
                     if view.dictation.as_ref().is_some_and(|state| state.id == id) {
                         view.dictation = None;

@@ -1,7 +1,7 @@
 use agent_core::{
-    models::{Item, Thread, Turn},
+    models::{Item, Thread, ThreadResponse, Turn},
     state::{
-        Event, Snapshot,
+        Effect, Event, Snapshot,
         operations::{self as op, Operation},
         reduce,
     },
@@ -19,6 +19,23 @@ fn initial(thread: Thread) -> Snapshot {
     }
 }
 
+fn applied<O: Operation>(
+    previous: &Snapshot,
+    operation: O,
+    output: O::Output,
+) -> (Snapshot, Vec<Effect>) {
+    let mut next = previous.clone();
+    let effects = operation.apply(&mut next, output);
+    (next, effects)
+}
+fn reply(thread: Thread) -> ThreadResponse {
+    ThreadResponse {
+        thread,
+        model: None,
+        extra: Default::default(),
+    }
+}
+
 #[test]
 fn submission_drafts_corpus() {
     use agent_core::state::Draft;
@@ -31,14 +48,14 @@ fn submission_drafts_corpus() {
             drafts: Arc::new(BTreeMap::from([("thread".into(), Arc::new(current))])),
             ..Default::default()
         };
-        let (next, _) = reduce(
+        let (next, _) = applied(
             &previous,
-            Event::Submitted {
+            op::SendSubmission {
                 thread_id: "thread".into(),
                 client_user_message_id: "client".into(),
                 draft: Arc::new(sent),
-                turn_id: None,
             },
+            None,
         );
         let expected: Draft = serde_json::from_value(case["expected"].clone()).unwrap();
         assert_eq!(*next.drafts["thread"], expected, "{}", case["name"]);
@@ -60,24 +77,25 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
                 client_user_message_id: "client".into(),
             }),
         );
-        let accepted = Event::Submitted {
-            thread_id: "thread".into(),
-            client_user_message_id: "client".into(),
-            draft: Arc::default(),
-            turn_id: Some("turn".into()),
-        };
-        let echoed = Event::Notification {
-            method: "item/completed".into(),
-            params: json!({"threadId":"thread","turnId":"turn","item":{"id":"native","type":"userMessage","clientId":"client","content":[]}}),
-        };
-        let (first, second) = if echo_first {
-            (echoed, accepted)
-        } else {
-            (accepted, echoed)
-        };
-        let (intermediate, _) = reduce(&pending, first);
-        assert_eq!(intermediate.pending_submissions.len(), 1);
-        let (finished, _) = reduce(&intermediate, second);
+        let mut finished = pending.clone();
+        for (index, echo) in [echo_first, !echo_first].into_iter().enumerate() {
+            if echo {
+                finished = reduce(&finished, Event::Notification {
+                    method: "item/completed".into(),
+                    params: json!({"threadId":"thread","turnId":"turn","item":{"id":"native","type":"userMessage","clientId":"client","content":[]}}),
+                }).0;
+            } else {
+                op::SendSubmission {
+                    thread_id: "thread".into(),
+                    client_user_message_id: "client".into(),
+                    draft: Arc::default(),
+                }
+                .apply(&mut finished, Some("turn".into()));
+            }
+            if index == 0 {
+                assert_eq!(finished.pending_submissions.len(), 1);
+            }
+        }
         assert!(finished.pending_submissions.is_empty());
         assert_eq!(pending.pending_submissions.len(), 1);
     }
@@ -95,16 +113,18 @@ fn model_settings_corpus() {
             drafts: Arc::new(BTreeMap::from([("thread".into(), Arc::new(draft))])),
             ..Default::default()
         };
-        let event = if let Some(model) = case["select"].as_str() {
+        let (next, effects) = if let Some(model) = case["select"].as_str() {
             previous.models = Arc::new(models);
-            Event::Intent(Intent::SelectModel {
-                thread_id: "thread".into(),
-                model: model.into(),
-            })
+            reduce(
+                &previous,
+                Event::Intent(Intent::SelectModel {
+                    thread_id: "thread".into(),
+                    model: model.into(),
+                }),
+            )
         } else {
-            Event::ModelsLoaded(models)
+            applied(&previous, op::LoadModels, models)
         };
-        let (next, effects) = reduce(&previous, event);
         assert!(effects.is_empty());
         let expected: Draft = serde_json::from_value(case["expected"].clone()).unwrap();
         assert_eq!(*next.drafts["thread"], expected, "{}", case["name"]);
@@ -122,17 +142,25 @@ fn history_corpus() {
         let id = previous.id.clone().unwrap();
         let incoming = serde_json::from_value(case["incoming"].clone()).unwrap();
         let previous = initial(previous);
-        let event = if case["operation"] == "refresh" {
-            Event::ThreadRefreshed(incoming)
+        let (next, effects) = if case["operation"] == "refresh" {
+            applied(
+                &previous,
+                op::ReadThread {
+                    thread_id: id.clone(),
+                },
+                reply(incoming),
+            )
         } else {
-            Event::OlderLoaded {
-                thread_id: id.clone(),
-                thread: incoming,
-                turn_id: case["turnId"].as_str().map(str::to_owned),
-                cursor: case["cursor"].as_str().map(str::to_owned),
-            }
+            applied(
+                &previous,
+                op::ReadOlder {
+                    thread_id: id.clone(),
+                    turn_id: case["turnId"].as_str().map(str::to_owned),
+                    cursor: case["cursor"].as_str().map(str::to_owned),
+                },
+                reply(incoming),
+            )
         };
-        let (next, effects) = reduce(&previous, event);
         assert!(effects.is_empty());
         if let Some(expected) = case.get("expected") {
             assert_eq!(next.error, None, "{}", case["name"]);
@@ -284,12 +312,12 @@ fn stopped_history_watch_cannot_reload_a_conversation() {
     use agent_core::state::Intent;
     let (watching, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::Watch {
+        Event::Intent(Intent::Watch(op::Watch {
             thread_id: "thread".into(),
             watch_key: 1,
             watch_id: 3,
             path: Some("/rollout".into()),
-        }),
+        })),
     );
     let changed = || Event::Notification {
         method: "host/thread/changed".into(),
@@ -298,10 +326,10 @@ fn stopped_history_watch_cannot_reload_a_conversation() {
     assert_eq!(reduce(&watching, changed()).1.len(), 1);
     let (stopped, _) = reduce(
         &watching,
-        Event::Intent(Intent::Unwatch {
+        Event::Intent(Intent::Unwatch(op::Unwatch {
             watch_key: 1,
             watch_id: 3,
-        }),
+        })),
     );
     assert!(reduce(&stopped, changed()).1.is_empty());
 }
@@ -316,16 +344,13 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
     }]))
     .unwrap();
     for catalog_first in [false, true] {
-        let catalog = Event::ModelsLoaded(models.clone());
-        let navigation = Event::Intent(Intent::NewChat("/fixture".into()));
-        let events = if catalog_first {
-            [catalog, navigation]
-        } else {
-            [navigation, catalog]
-        };
         let mut current = Snapshot::default();
-        for event in events {
-            current = reduce(&current, event).0;
+        for load_catalog in [catalog_first, !catalog_first] {
+            if load_catalog {
+                op::LoadModels.apply(&mut current, models.clone());
+            } else {
+                current = reduce(&current, Event::Intent(Intent::NewChat("/fixture".into()))).0;
+            }
         }
         let draft = current.drafts.get("new:/fixture").expect("new chat draft");
         assert_eq!(draft.model.as_deref(), Some("model"));
@@ -389,17 +414,19 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     };
     for cwd in ["/old", "/new"] {
         for open_thread in [false, true] {
-            let event = if open_thread {
-                op::completed(
-                    op::OpenThread {
-                        thread_id: "thread".into(),
-                    },
+            let next = if open_thread {
+                let mut next = previous.clone();
+                op::OpenThread {
+                    thread_id: "thread".into(),
+                }
+                .apply(
+                    &mut next,
                     serde_json::from_value(json!({"thread":{"id":"thread", "cwd":cwd}})).unwrap(),
-                )
+                );
+                next
             } else {
-                Event::Intent(Intent::NewChat(cwd.into()))
+                reduce(&previous, Event::Intent(Intent::NewChat(cwd.into()))).0
             };
-            let (next, _) = reduce(&previous, event);
             assert!(Arc::ptr_eq(&previous.file_drafts, &next.file_drafts));
             assert!(next.workspace.settings.is_some());
             if cwd == "/old" {
@@ -488,10 +515,10 @@ fn late_fork_preserves_new_navigation_and_stores_the_fork() {
     use agent_core::state::Intent;
     let (forking, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::ForkThread {
+        Event::Intent(Intent::ForkThread(op::ForkThread {
             thread_id: "old".into(),
             last_turn_id: "turn".into(),
-        }),
+        })),
     );
     let (navigated, _) = reduce(&forking, Event::Intent(Intent::NewChat("/new".into())));
     let mut finished = navigated;
@@ -513,10 +540,14 @@ fn account_listing_does_not_invalidate_a_concurrent_login() {
     use agent_core::state::Intent;
     let (starting, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::StartAccountLogin),
+        Event::Intent(Intent::StartAccountLogin(op::StartAccountLogin)),
     );
-    let (listing, _) = reduce(&starting, Event::Intent(Intent::ListAccounts));
-    let (finished, _)=reduce(&listing,op::completed(op::StartAccountLogin,serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap()));
+    let (listing, _) = reduce(
+        &starting,
+        Event::Intent(Intent::ListAccounts(op::ListAccounts)),
+    );
+    let mut finished = listing;
+    op::StartAccountLogin.apply(&mut finished, serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap());
     assert_eq!(
         finished.account.login.as_ref().map(|l| l.login_id.as_str()),
         Some("login")
@@ -525,7 +556,7 @@ fn account_listing_does_not_invalidate_a_concurrent_login() {
 
 #[test]
 fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
-    use agent_core::state::{Draft, Effect, Intent, Navigation};
+    use agent_core::state::{Draft, Intent, Navigation};
     let previous = Snapshot {
         drafts: Arc::new(BTreeMap::from([(
             "thread".into(),
@@ -547,10 +578,9 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
     assert!(listed.navigation.thread_id.is_none());
     assert_eq!(listed.epoch, previous.epoch + 1);
     assert!(Arc::ptr_eq(&listed.drafts, &previous.drafts));
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Execute(Intent::Unwatch { watch_id: 7, .. })]
-    ));
+    assert!(listed.navigation.watch_id.is_none());
+    assert!(listed.navigation.watch_thread_id.is_none());
+    assert_eq!(effects.len(), 1);
     let (completed, _) = reduce(
         &listed,
         Event::Notification {
@@ -560,4 +590,32 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
     );
     assert!(completed.activity.unread.contains("thread"));
     assert_eq!(completed.drafts["thread"].text, "下書き");
+}
+
+#[test]
+fn serialized_events_preserve_operation_inputs_and_replay_state() {
+    let events = vec![
+        Event::Connected,
+        Event::Intent(op::Intent::NewChat("/fixture".into())),
+        Event::Intent(op::Intent::SetDraftText { thread_id: "new:/fixture".into(), text: "再生する下書き".into() }),
+        Event::Intent(op::Intent::ReadFile(op::ReadFile { path: "/fixture/file".into(), discard_draft: true })),
+        Event::ServerRequest(serde_json::from_value(json!({"id":"request","method":"item/commandExecution/requestApproval","params":{"futureField":[1,2]},"unknown":true})).unwrap()),
+        Event::Intent(op::Intent::Respond(op::Respond { request_id: json!("request"), answer: agent_core::client::Answer::Raw(serde_json::value::to_raw_value(&json!({"decision":"accept","futureField":true})).unwrap()) })),
+        Event::Disconnected("fixture disconnect".into()),
+    ];
+    let encoded = serde_json::to_vec(&events).unwrap();
+    let decoded: Vec<Event> = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(
+        serde_json::to_value(&decoded).unwrap(),
+        serde_json::to_value(&events).unwrap()
+    );
+    let replay = |events: Vec<Event>| {
+        events
+            .into_iter()
+            .fold(Snapshot::default(), |snapshot, event| {
+                reduce(&snapshot, event).0
+            })
+    };
+    assert_eq!(replay(events.clone()), replay(decoded));
+    assert_eq!(replay(events).drafts["new:/fixture"].text, "再生する下書き");
 }

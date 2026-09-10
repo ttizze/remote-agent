@@ -694,7 +694,7 @@ pub struct ServerRequest {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Answer {
     Decision(usize),
     Permissions(bool),

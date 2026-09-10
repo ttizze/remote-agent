@@ -1,4 +1,5 @@
 use crate::Runtime;
+use agent_core::state::operations as op;
 use agent_core::{
     models::{Invitation, RemoteHost},
     state::{Intent, Snapshot},
@@ -165,7 +166,10 @@ impl Hosts {
                     Ok(store) => {
                         self.snapshot = store.snapshot();
                         self.store = Some(store);
-                        self.dispatch(Intent::LoadHostManagement, Action::Refresh);
+                        self.dispatch(
+                            Intent::LoadHostManagement(op::LoadHostManagement),
+                            Action::Refresh,
+                        );
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -322,7 +326,10 @@ impl Render for Hosts {
                 .label("別の端末を招待")
                 .disabled(disabled)
                 .on_click(cx.listener(|view, _, _, cx| {
-                    view.dispatch(Intent::CreateInvitation, Action::Invite);
+                    view.dispatch(
+                        Intent::CreateInvitation(op::CreateInvitation),
+                        Action::Invite,
+                    );
                     cx.notify();
                 })),
         );
@@ -354,7 +361,7 @@ impl Render for Hosts {
                                 .disabled(disabled)
                                 .on_click(cx.listener(move |view, _, _, cx| {
                                     view.dispatch(
-                                        Intent::RevokeDevice(node.clone()),
+                                        Intent::RevokeDevice(op::RevokeDevice { id: node.clone() }),
                                         Action::Revoke,
                                     );
                                     cx.notify();
@@ -375,10 +382,10 @@ impl Render for Hosts {
                             view.pairing.read(cx).value().as_ref(),
                         ) {
                             Ok(invitation) => view.dispatch(
-                                Intent::PairRemoteHost {
+                                Intent::PairRemoteHost(op::PairRemoteHost {
                                     invitation,
                                     name: "Bex Desktop".into(),
-                                },
+                                }),
                                 Action::Pair,
                             ),
                             Err(error) => view.error = Some(error.to_string()),
@@ -398,7 +405,9 @@ impl Render for Hosts {
                             .disabled(disabled)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 view.dispatch(
-                                    Intent::RemoveRemoteHost(id.clone()),
+                                    Intent::RemoveRemoteHost(op::RemoveRemoteHost {
+                                        id: id.clone(),
+                                    }),
                                     Action::Remove(id.clone()),
                                 );
                                 cx.notify();
@@ -411,7 +420,10 @@ impl Render for Hosts {
                 .label("接続一覧を更新")
                 .disabled(disabled)
                 .on_click(cx.listener(|view, _, _, cx| {
-                    view.dispatch(Intent::LoadHostManagement, Action::Refresh);
+                    view.dispatch(
+                        Intent::LoadHostManagement(op::LoadHostManagement),
+                        Action::Refresh,
+                    );
                     cx.notify();
                 })),
         )

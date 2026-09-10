@@ -224,7 +224,12 @@ mod tests {
                 ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(),
                 invitation: None, use_relays: false,
             };
-            let store = AgentStore::offline(Vec::new()).await.unwrap();
+            let cached = agent_core::state::Snapshot {
+                list_query: Arc::new(agent_core::models::ListQuery { project_limit: 5, chat_limit: 5, ..Default::default() }),
+                navigation: Arc::new(agent_core::state::Navigation { thread_id: Some("thread".into()), draft_key: "thread".into(), ..Default::default() }),
+                ..Default::default()
+            };
+            let store = AgentStore::offline(serde_json::to_vec(&cached).unwrap()).await.unwrap();
             let (connected, incoming) = tokio::join!(store.reconnect(connection()), host.accept());
             connected.unwrap();
             let first = incoming.unwrap().unwrap().authorize(&trust).unwrap();
@@ -235,6 +240,9 @@ mod tests {
             assert!(store.snapshot().connected());
             store.dispatch(Intent::SetDraftText { key: "thread".into(), text: "preserved".into() })
                 .unwrap().wait().await.unwrap();
+            let obsolete = store.dispatch(Intent::ReadThread { id: "thread".into() }).unwrap();
+            let old_request: Value = serde_json::from_str(&old.read_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(old_request["method"], "host/thread/read");
             let server = async {
                 assert!(!matches!(old.read_line().await, Ok(Some(_))));
                 let next = host.accept().await.unwrap().unwrap().authorize(&trust).unwrap();
@@ -242,16 +250,27 @@ mod tests {
                 let mut reader = JsonlReader::new(read);
                 let mut writer = JsonlWriter::new(write);
                 assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
-                let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
-                assert_eq!(request["method"], "host/thread/read");
-                writer.write_line(&json!({"id":request["id"], "result":{"thread":{"id":"thread","turns":[]}}}).to_string()).await.unwrap();
+                let open: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+                let list: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(open["method"], "host/thread/read");
+                assert_eq!(list["method"], "host/thread/list");
+                writer.write_line(&json!({"id":list["id"], "result":{"data":[{"id":"thread","name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
+                writer.write_line(&json!({"id":open["id"], "result":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":"after reconnect"}]}]}}}).to_string()).await.unwrap();
                 assert!(!matches!(reader.read_line().await, Ok(Some(_))));
                 next.close();
             };
             let client = async {
                 store.reconnect(connection()).await.unwrap();
-                store.dispatch(Intent::ReadThread { id: "thread".into() }).unwrap().wait().await.unwrap();
-                assert!(store.snapshot().conversation("thread".into()).is_some());
+                // The native clients establish navigation before refreshing the list.
+                let open = store.dispatch(Intent::OpenThread { id: "thread".into() }).unwrap();
+                let list = store.dispatch(Intent::ListThreads { query: ListQuery { project_limit: 5, chat_limit: 5, project_thread_limits: Default::default(), search_term: String::new() } }).unwrap();
+                open.wait().await.unwrap();
+                list.wait().await.unwrap();
+                assert!(obsolete.wait().await.is_err());
+                let snapshot = store.store.snapshot();
+                assert_eq!(snapshot.navigation.thread_id.as_deref(), Some("thread"));
+                assert!(snapshot.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_deref() == Some("thread")));
+                assert_eq!(snapshot.conversations["thread"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref(), Some("after reconnect"));
                 assert_eq!(store.store.snapshot().drafts["thread"].text, "preserved");
                 store.shutdown().await.unwrap();
             };

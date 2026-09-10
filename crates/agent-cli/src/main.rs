@@ -1,3 +1,4 @@
+use agent_core::state::operations as op;
 use agent_core::{
     client::Answer,
     models::ListQuery,
@@ -113,11 +114,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             search,
         } => {
             store
-                .dispatch(Intent::ListThreads(ListQuery {
-                    project_limit,
-                    chat_limit,
-                    search_term: search,
-                    ..Default::default()
+                .dispatch(Intent::ListThreads(op::ListThreads {
+                    query: ListQuery {
+                        project_limit,
+                        chat_limit,
+                        search_term: search,
+                        ..Default::default()
+                    },
                 }))
                 .await?;
             println!("{}", serde_json::to_string(&store.snapshot().threads)?);
@@ -130,7 +133,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             effort,
         } => {
             store
-                .dispatch(Intent::ReadThread(thread_id.clone()))
+                .dispatch(Intent::ReadThread(op::ReadThread {
+                    thread_id: thread_id.clone(),
+                }))
                 .await?;
             store
                 .dispatch(Intent::SetDraft {
@@ -173,10 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await??;
             store
-                .dispatch(Intent::Respond {
+                .dispatch(Intent::Respond(op::Respond {
                     request_id,
                     answer: Answer::Decision(decision),
-                })
+                }))
                 .await?;
             println!("null");
         }

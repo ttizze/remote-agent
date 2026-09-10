@@ -6,6 +6,7 @@ use crate::{
         ThreadList, ThreadStatus, Turn, WorkspaceReview, WorktreeSettings,
     },
 };
+use operations as op;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -145,9 +146,8 @@ pub mod operations;
 pub use operations::Intent;
 use operations::add_attachment;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    Operation(Box<dyn operations::Application>),
     TerminalFailed {
         handle: String,
         reason: String,
@@ -157,33 +157,11 @@ pub enum Event {
         draft_key: String,
         attachment: Attachment,
     },
-    HostManagementLoaded {
-        status: HostStatus,
-        remotes: Vec<RemoteHost>,
-    },
+
     RemoteHostPaired(RemoteHost),
-    Submitted {
-        thread_id: String,
-        client_user_message_id: String,
-        draft: Arc<Draft>,
-        turn_id: Option<String>,
-    },
+
     SubmissionFailed(String),
-    DraftThreadCreated {
-        thread: Thread,
-        draft_key: String,
-        current: bool,
-        client_user_message_id: String,
-        draft: Arc<Draft>,
-    },
-    ThreadRefreshed(Thread),
-    OlderLoaded {
-        thread_id: String,
-        thread: Thread,
-        turn_id: Option<String>,
-        cursor: Option<String>,
-    },
-    ModelsLoaded(Vec<Model>),
+
     ServerRequest(ServerRequest),
     RequestResolved(Value),
     Notification {
@@ -196,18 +174,17 @@ pub enum Event {
 }
 #[derive(Debug)]
 pub enum Effect {
-    Execute(Intent),
-    StartSubmission {
-        draft_key: String,
-        cwd: Option<String>,
-        client_user_message_id: String,
-        draft: Arc<Draft>,
-    },
-    Submit {
-        thread_id: String,
-        client_user_message_id: String,
-        draft: Arc<Draft>,
-    },
+    Execute(crate::store::PendingOperation),
+    UploadAttachment(operations::UploadAttachment),
+    PairRemoteHost(operations::PairRemoteHost),
+    StartSubmission(operations::StartSubmission),
+    Submit(operations::SendSubmission),
+}
+
+impl Effect {
+    pub fn execute(operation: impl operations::Operation) -> Self {
+        Self::Execute(crate::store::PendingOperation::new(operation))
+    }
 }
 
 // Invalidate both displayed content and responses still in flight. File drafts
@@ -222,57 +199,14 @@ fn clear_workspace_location(workspace: &mut Workspace) {
 pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     match event {
         Event::Intent(intent) => reduce_intent(previous, intent),
-        Event::Operation(operation) => {
-            let mut next = previous.clone();
-            let effects = operation.apply(&mut next, true);
-            (next, effects)
-        }
+
         Event::Notification { method, params } => notification(previous, &method, params),
         event => reduce_event(previous, event),
     }
 }
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
-    // A new navigation target invalidates all outstanding view reads together.
-    // Refreshes in the current view and local input do not invalidate each other.
-    if matches!(
-        &intent,
-        Intent::ShowThreadList
-            | Intent::NewChat(_)
-            | Intent::OpenThread(_)
-            | Intent::ForkThread { .. }
-            | Intent::ReadFile { .. }
-            | Intent::ListFiles(_)
-            | Intent::SelectAccount(_)
-            | Intent::StartAccountLogin
-            | Intent::CancelAccountLogin(_)
-    ) || matches!(&intent, Intent::ListThreads(query) if query != previous.list_query.as_ref())
-        || matches!(&intent, Intent::ReviewWorkspace(cwd) if previous.workspace.review_cwd.as_ref() != Some(cwd))
-    {
-        next.epoch += 1;
-    }
     match intent {
-        intent @ Intent::StartTerminal { .. } => {
-            let Intent::StartTerminal { handle, cwd, .. } = &intent else {
-                unreachable!()
-            };
-            if previous.terminals.contains_key(handle) {
-                return reduce(
-                    previous,
-                    Event::Failed("terminal handle is already in use".into()),
-                );
-            }
-            Arc::make_mut(&mut next.terminals).insert(
-                handle.clone(),
-                Arc::new(Terminal {
-                    cwd: cwd.clone(),
-                    phase: TerminalPhase::Starting,
-                    output: VecDeque::new(),
-                    sequence: 0,
-                }),
-            );
-            return (next, vec![Effect::Execute(intent)]);
-        }
         Intent::AcknowledgeTerminal { handle, sequence } => {
             if let Some(terminal) = next.terminals.get(&handle)
                 && terminal
@@ -326,11 +260,9 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     .remove(index);
             }
         }
-        Intent::ListThreads(query) => {
-            next.list_query = Arc::new(query.clone());
-            return (next, vec![Effect::Execute(Intent::ListThreads(query))]);
-        }
+
         Intent::ShowThreadList => {
+            next.epoch += 1;
             let watch = previous.navigation.watch_id;
             next.navigation = Arc::new(Navigation {
                 ..Default::default()
@@ -341,7 +273,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 watch
                     .into_iter()
                     .map(|watch_id| {
-                        Effect::Execute(Intent::Unwatch {
+                        Effect::execute(op::Unwatch {
                             watch_key: 1,
                             watch_id,
                         })
@@ -350,6 +282,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             );
         }
         Intent::NewChat(cwd) => {
+            next.epoch += 1;
             let key = format!("new:{cwd}");
             if !previous.drafts.contains_key(&key) {
                 let draft = Draft::default();
@@ -376,7 +309,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 watch
                     .into_iter()
                     .map(|watch_id| {
-                        Effect::Execute(Intent::Unwatch {
+                        Effect::execute(op::Unwatch {
                             watch_key: 1,
                             watch_id,
                         })
@@ -384,44 +317,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     .collect(),
             );
         }
-        intent @ Intent::Watch { .. } => {
-            if let Intent::Watch {
-                thread_id,
-                watch_id,
-                ..
-            } = &intent
-            {
-                let navigation = Arc::make_mut(&mut next.navigation);
-                navigation.watch_id = Some(*watch_id);
-                navigation.watch_thread_id = Some(thread_id.clone());
-            }
-            return (next, vec![Effect::Execute(intent)]);
-        }
-        intent @ Intent::Unwatch { .. } => {
-            if let Intent::Unwatch { watch_id, .. } = &intent
-                && previous.navigation.watch_id == Some(*watch_id)
-            {
-                let navigation = Arc::make_mut(&mut next.navigation);
-                navigation.watch_id = None;
-                navigation.watch_thread_id = None;
-            }
-            return (next, vec![Effect::Execute(intent)]);
-        }
-        Intent::ReadFile {
-            path,
-            discard_draft,
-        } => {
-            if discard_draft {
-                Arc::make_mut(&mut next.file_drafts).remove(&path);
-            }
-            return (
-                next,
-                vec![Effect::Execute(Intent::ReadFile {
-                    path,
-                    discard_draft,
-                })],
-            );
-        }
+
         Intent::SetFileDraft { path, text } => {
             let revision = previous
                 .file_drafts
@@ -447,14 +343,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 next.error = Some("file has not been loaded".into());
             }
         }
-        Intent::ReviewWorkspace(cwd) => {
-            let workspace = Arc::make_mut(&mut next.workspace);
-            if workspace.review_cwd.as_deref() != Some(&cwd) {
-                workspace.review = None;
-            }
-            workspace.review_cwd = Some(cwd.clone());
-            return (next, vec![Effect::Execute(Intent::ReviewWorkspace(cwd))]);
-        }
+
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
         }
@@ -523,9 +412,61 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
             }
         }
-        intent => return (next, vec![Effect::Execute(intent)]),
+        Intent::ListAccounts(operation) => return prepare(previous, next, operation),
+        Intent::SelectAccount(operation) => return prepare(previous, next, operation),
+        Intent::StartAccountLogin(operation) => return prepare(previous, next, operation),
+        Intent::ReadAccountLogin(operation) => return prepare(previous, next, operation),
+        Intent::CancelAccountLogin(operation) => return prepare(previous, next, operation),
+        Intent::ForkThread(operation) => return prepare(previous, next, operation),
+        Intent::StartTerminal(operation) => return prepare(previous, next, operation),
+        Intent::CloseTerminal(operation) => return prepare(previous, next, operation),
+        Intent::Transcribe(operation) => return prepare(previous, next, operation),
+        Intent::CreateInvitation(operation) => return prepare(previous, next, operation),
+        Intent::RemoveRemoteHost(operation) => return prepare(previous, next, operation),
+        Intent::RevokeDevice(operation) => return prepare(previous, next, operation),
+        Intent::OpenThread(operation) => return prepare(previous, next, operation),
+        Intent::ListFiles(operation) => return prepare(previous, next, operation),
+        Intent::ReadFile(operation) => return prepare(previous, next, operation),
+        Intent::SaveFile(operation) => return prepare(previous, next, operation),
+        Intent::ReviewWorkspace(operation) => return prepare(previous, next, operation),
+        Intent::ReadWorktreeSettings(operation) => return prepare(previous, next, operation),
+        Intent::UpdateWorktreeSettings(operation) => return prepare(previous, next, operation),
+        Intent::ListThreads(operation) => return prepare(previous, next, operation),
+        Intent::StartThread(operation) => return prepare(previous, next, operation),
+        Intent::ReadThread(operation) => return prepare(previous, next, operation),
+        Intent::ReadItem(operation) => return prepare(previous, next, operation),
+        Intent::ResizeTerminal(operation) => return prepare(previous, next, operation),
+        Intent::Interrupt(operation) => return prepare(previous, next, operation),
+        Intent::Watch(operation) => return prepare(previous, next, operation),
+        Intent::Unwatch(operation) => return prepare(previous, next, operation),
+        Intent::WriteTerminal(operation) => return prepare(previous, next, operation),
+        Intent::DownloadFile(operation) => return prepare(previous, next, operation),
+        Intent::LoadSessionImages(operation) => return prepare(previous, next, operation),
+        Intent::LoadHostManagement(operation) => return prepare(previous, next, operation),
+        Intent::ReadOlder(operation) => return prepare(previous, next, operation),
+        Intent::LoadModels(operation) => return prepare(previous, next, operation),
+        Intent::Respond(operation) => return prepare(previous, next, operation),
+        Intent::UploadAttachment(operation) => {
+            return (next, vec![Effect::UploadAttachment(operation)]);
+        }
+        Intent::PairRemoteHost(operation) => {
+            return (next, vec![Effect::PairRemoteHost(operation)]);
+        }
     }
     (next, Vec::new())
+}
+fn prepare<O: operations::Operation>(
+    previous: &Snapshot,
+    mut next: Snapshot,
+    operation: O,
+) -> (Snapshot, Vec<Effect>) {
+    if operation.invalidates(previous) {
+        next.epoch += 1;
+    }
+    if let Err(error) = operation.prepare(&mut next) {
+        return reduce(previous, Event::Failed(error));
+    }
+    (next, vec![Effect::execute(operation)])
 }
 fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
@@ -536,57 +477,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     TerminalPhase::Failed(reason);
             }
         }
-        Event::DraftThreadCreated {
-            thread,
-            draft_key,
-            current: same_view,
-            client_user_message_id,
-            draft,
-        } => {
-            let Some(id) = thread.id.clone() else {
-                return reduce(previous, Event::Failed("thread ID is missing".into()));
-            };
-            let (mut next, mut effects) = if same_view {
-                operations::open_thread(previous, thread, None)
-            } else {
-                reduce(previous, Event::ThreadRefreshed(thread))
-            };
-            let current = previous.drafts.get(&draft_key);
-            let original = previous
-                .pending_submissions
-                .get(&client_user_message_id)
-                .and_then(|pending| pending.clear_draft.as_ref())
-                .unwrap_or(&draft);
-            let target = if same_view {
-                current.cloned().unwrap_or_else(|| original.clone())
-            } else {
-                original.clone()
-            };
-            let drafts = Arc::make_mut(&mut next.drafts);
-            if same_view || current == Some(original) {
-                drafts.remove(&draft_key);
-            }
-            drafts.insert(id.clone(), target);
-            if let Some(pending) =
-                Arc::make_mut(&mut next.pending_submissions).get_mut(&client_user_message_id)
-            {
-                Arc::make_mut(pending).draft_key = id.clone();
-            }
-            effects.push(Effect::Submit {
-                thread_id: id,
-                client_user_message_id,
-                draft,
-            });
-            if previous.threads.is_some() {
-                let (updated, refresh) = reduce(
-                    &next,
-                    Event::Intent(Intent::ListThreads((*previous.list_query).clone())),
-                );
-                next = updated;
-                effects.extend(refresh);
-            }
-            return (next, effects);
-        }
+
         Event::SubmissionFailed(id) => {
             if let Some(pending) = Arc::make_mut(&mut next.pending_submissions).remove(&id)
                 && let Some(text) = &pending.recovery_text
@@ -605,11 +496,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         } => {
             add_attachment(&mut next, draft_key, attachment);
         }
-        Event::HostManagementLoaded { status, remotes } => {
-            let management = Arc::make_mut(&mut next.management);
-            management.status = Some(Arc::new(status));
-            management.remotes = remotes;
-        }
+
         Event::RemoteHostPaired(host) => {
             let management = Arc::make_mut(&mut next.management);
             if let Some(current) = management
@@ -622,103 +509,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 management.remotes.push(host);
             }
         }
-        Event::Submitted {
-            thread_id,
-            client_user_message_id,
-            draft,
-            turn_id,
-        } => {
-            let draft = previous
-                .pending_submissions
-                .get(&client_user_message_id)
-                .and_then(|pending| pending.clear_draft.as_ref())
-                .unwrap_or(&draft);
-            if let Some(current) = previous.drafts.get(&thread_id) {
-                let clear_text = !current.text.is_empty() && current.text == draft.text;
-                let sent_attachment = |attachment: &Attachment| {
-                    draft
-                        .attachments
-                        .iter()
-                        .any(|sent| sent.path == attachment.path)
-                };
-                if clear_text || current.attachments.iter().any(sent_attachment) {
-                    let retained = Draft {
-                        text: if clear_text {
-                            String::new()
-                        } else {
-                            current.text.clone()
-                        },
-                        attachments: current
-                            .attachments
-                            .iter()
-                            .filter(|attachment| !sent_attachment(attachment))
-                            .cloned()
-                            .collect(),
-                        model: current.model.clone(),
-                        effort: current.effort.clone(),
-                        service_tier: current.service_tier.clone(),
-                    };
-                    Arc::make_mut(&mut next.drafts).insert(thread_id.clone(), Arc::new(retained));
-                }
-            }
-            if let Some(pending) =
-                Arc::make_mut(&mut next.pending_submissions).get_mut(&client_user_message_id)
-            {
-                let pending = Arc::make_mut(pending);
-                pending.accepted = true;
-                if pending.turn_id.is_none() {
-                    pending.turn_id = turn_id;
-                }
-            }
-            reconcile_pending(&mut next, &thread_id);
-        }
-        Event::ThreadRefreshed(incoming) => {
-            let Some(id) = incoming.id.clone().filter(|id| !id.trim().is_empty()) else {
-                next.error = Some("thread ID is missing".into());
-                return (next, Vec::new());
-            };
-            let thread = previous
-                .conversations
-                .get(&id)
-                .map_or_else(|| incoming.clone(), |current| refresh(current, &incoming));
-            Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
-            reconcile_pending(&mut next, &id);
-        }
-        Event::OlderLoaded {
-            thread_id,
-            thread,
-            turn_id,
-            cursor,
-        } => {
-            let id = &thread_id;
-            if let Some(current) = previous.conversations.get(id) {
-                match older(current, &thread, turn_id.as_deref(), cursor.as_deref()) {
-                    Ok(merged) => {
-                        Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(merged));
-                        reconcile_pending(&mut next, id);
-                    }
-                    Err(error) => next.error = Some(error),
-                }
-            }
-        }
-        Event::ModelsLoaded(models) => {
-            for (id, previous_draft) in previous.drafts.iter() {
-                let settings = supported_settings(previous_draft, &models);
-                if settings
-                    != (
-                        previous_draft.model.as_deref(),
-                        previous_draft.effort.as_deref(),
-                        previous_draft.service_tier.as_deref(),
-                    )
-                {
-                    let draft = Arc::make_mut(Arc::make_mut(&mut next.drafts).get_mut(id).unwrap());
-                    draft.model = settings.0.map(str::to_owned);
-                    draft.effort = settings.1.map(str::to_owned);
-                    draft.service_tier = settings.2.map(str::to_owned);
-                }
-            }
-            next.models = Arc::new(models);
-        }
+
         Event::ServerRequest(request) => {
             Arc::make_mut(&mut next.requests).insert(request.id.to_string(), Arc::new(request));
         }
@@ -748,7 +539,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.error = Some(reason);
         }
         Event::Failed(error) => next.error = Some(error),
-        Event::Intent(_) | Event::Operation(_) | Event::Notification { .. } => {
+        Event::Intent(_) | Event::Notification { .. } => {
             unreachable!("handled by the reducer router")
         }
     }
@@ -1177,18 +968,18 @@ fn submission(
         }),
     );
     let effect = match thread_id {
-        Some(thread_id) => Effect::Submit {
+        Some(thread_id) => Effect::Submit(op::SendSubmission {
             thread_id,
             client_user_message_id,
             draft,
-        },
-        None => Effect::StartSubmission {
+        }),
+        None => Effect::StartSubmission(op::StartSubmission {
             draft_key,
             cwd: (!previous.navigation.cwd.trim().is_empty())
                 .then(|| previous.navigation.cwd.clone()),
             client_user_message_id,
             draft,
-        },
+        }),
     };
     (next, vec![effect])
 }

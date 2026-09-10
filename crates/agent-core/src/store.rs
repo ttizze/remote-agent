@@ -50,7 +50,7 @@ struct Dispatch {
 #[derive(Default)]
 struct Applied {
     sequence: Option<u64>,
-    event: Option<Event>,
+    application: Option<Box<dyn Application>>,
     outcome: Outcome,
 }
 struct Completed {
@@ -278,28 +278,48 @@ fn publish_locked(
     next: Snapshot,
     effects: Vec<Effect>,
 ) -> (Vec<Effect>, bool) {
-    let same_threads = match (&current.threads, &next.threads) {
+    // No `..`: adding a Snapshot field must update the publication contract.
+    let Snapshot {
+        account,
+        terminals,
+        conversations,
+        threads,
+        models,
+        requests,
+        drafts,
+        pending_submissions,
+        file_drafts,
+        workspace,
+        navigation,
+        activity,
+        management,
+        list_query,
+        epoch,
+        connected,
+        error,
+    } = &next;
+    let same_threads = match (&current.threads, threads) {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
         (None, None) => true,
         _ => false,
     };
-    if Arc::ptr_eq(&current.terminals, &next.terminals)
-        && Arc::ptr_eq(&current.account, &next.account)
-        && Arc::ptr_eq(&current.conversations, &next.conversations)
+    if Arc::ptr_eq(&current.terminals, terminals)
+        && Arc::ptr_eq(&current.account, account)
+        && Arc::ptr_eq(&current.conversations, conversations)
         && same_threads
-        && Arc::ptr_eq(&current.models, &next.models)
-        && Arc::ptr_eq(&current.requests, &next.requests)
-        && Arc::ptr_eq(&current.drafts, &next.drafts)
-        && Arc::ptr_eq(&current.pending_submissions, &next.pending_submissions)
-        && Arc::ptr_eq(&current.file_drafts, &next.file_drafts)
-        && Arc::ptr_eq(&current.workspace, &next.workspace)
-        && Arc::ptr_eq(&current.navigation, &next.navigation)
-        && Arc::ptr_eq(&current.activity, &next.activity)
-        && Arc::ptr_eq(&current.management, &next.management)
-        && Arc::ptr_eq(&current.list_query, &next.list_query)
-        && current.epoch == next.epoch
-        && current.connected == next.connected
-        && current.error == next.error
+        && Arc::ptr_eq(&current.models, models)
+        && Arc::ptr_eq(&current.requests, requests)
+        && Arc::ptr_eq(&current.drafts, drafts)
+        && Arc::ptr_eq(&current.pending_submissions, pending_submissions)
+        && Arc::ptr_eq(&current.file_drafts, file_drafts)
+        && Arc::ptr_eq(&current.workspace, workspace)
+        && Arc::ptr_eq(&current.navigation, navigation)
+        && Arc::ptr_eq(&current.activity, activity)
+        && Arc::ptr_eq(&current.management, management)
+        && Arc::ptr_eq(&current.list_query, list_query)
+        && &current.epoch == epoch
+        && &current.connected == connected
+        && &current.error == error
     {
         return (effects, false);
     }
@@ -333,45 +353,8 @@ fn finish(
         let mut next = snapshot.as_ref().clone();
         result = match completed.result {
             Ok(applied) => {
-                if let Some(event) = applied.event {
-                    effects = match event {
-                        Event::Operation(operation) => operation.apply(&mut next, current),
-                        Event::DraftThreadCreated {
-                            thread,
-                            draft_key,
-                            client_user_message_id,
-                            draft,
-                            ..
-                        } => {
-                            let (updated, effects) = reduce(
-                                &next,
-                                Event::DraftThreadCreated {
-                                    thread,
-                                    draft_key,
-                                    client_user_message_id,
-                                    draft,
-                                    current,
-                                },
-                            );
-                            next = updated;
-                            effects
-                        }
-                        event
-                            if current
-                                || matches!(
-                                    &event,
-                                    Event::Submitted { .. }
-                                        | Event::AttachmentUploaded { .. }
-                                        | Event::RemoteHostPaired(_)
-                                        | Event::RequestResolved(_)
-                                ) =>
-                        {
-                            let (updated, effects) = reduce(&next, event);
-                            next = updated;
-                            effects
-                        }
-                        _ => Vec::new(),
-                    };
+                if let Some(event) = applied.application {
+                    effects = event.apply(&mut next, current);
                 }
                 Ok(applied.outcome)
             }
@@ -400,7 +383,8 @@ fn finish(
     let continuation = effects.iter().position(|effect| {
         matches!(
             effect,
-            Effect::StartSubmission { .. } | Effect::Submit { .. }
+            Effect::StartSubmission(op::StartSubmission { .. })
+                | Effect::Submit(op::SendSubmission { .. })
         )
     });
     let mut complete = completed.complete;
@@ -645,7 +629,8 @@ async fn run_offline(
         let mut complete = Some(command.complete);
         for effect in command.effects {
             // Disconnect already removed the subscription on the Host.
-            if matches!(effect, Effect::Execute(Intent::Unwatch { .. })) {
+            if matches!(&effect, Effect::Execute(operation) if operation.0.disconnected_is_complete())
+            {
                 continue;
             }
             let result = perform(
@@ -669,12 +654,7 @@ async fn run_offline(
 
 fn terminal_handle(effect: &Effect) -> Option<&str> {
     match effect {
-        Effect::Execute(
-            Intent::StartTerminal { handle, .. }
-            | Intent::WriteTerminal { handle, .. }
-            | Intent::ResizeTerminal { handle, .. }
-            | Intent::CloseTerminal(handle),
-        ) => Some(handle),
+        Effect::Execute(operation) => operation.0.terminal_handle(),
         _ => None,
     }
 }
@@ -690,14 +670,14 @@ async fn perform(
 ) -> Completed {
     let terminal = terminal_handle(&effect).map(str::to_owned);
     let failed_submission = match &effect {
-        Effect::StartSubmission {
+        Effect::StartSubmission(op::StartSubmission {
             client_user_message_id,
             ..
-        }
-        | Effect::Submit {
+        })
+        | Effect::Submit(op::SendSubmission {
             client_user_message_id,
             ..
-        } => Some(client_user_message_id.clone()),
+        }) => Some(client_user_message_id.clone()),
         _ => None,
     };
     let mut request_id = None;
@@ -705,538 +685,106 @@ async fn perform(
         let client =
             client.ok_or_else(|| PeerError::ConnectionClosed("Host not connected".into()))?;
         let peer = peer.ok_or_else(|| PeerError::ConnectionClosed("Host not connected".into()))?;
+        let mut context = Execution {
+            client,
+            peer,
+            session,
+            snapshot: &snapshot,
+            ordered,
+            request_id: &mut request_id,
+            sequence: None,
+            ordered_call: false,
+        };
         let applied = match effect {
-            Effect::StartSubmission {
+            Effect::StartSubmission(operation) => {
+                PendingOperation::new(operation).0.run(&mut context).await?
+            }
+            Effect::Submit(operation) => {
+                PendingOperation::new(operation).0.run(&mut context).await?
+            }
+            Effect::Execute(operation) => operation.0.run(&mut context).await?,
+            Effect::UploadAttachment(op::UploadAttachment {
                 draft_key,
-                cwd,
-                client_user_message_id,
-                draft,
-            } => {
-                let reply = call_ordered(
-                    client,
-                    ordered,
-                    &mut request_id,
-                    &StartThread {
-                        cwd: cwd.as_deref(),
-                        model: draft.model.as_deref(),
-                    },
+                mut attachment,
+                directory,
+            }) => {
+                let session = session.ok_or_else(|| {
+                    PeerError::InvalidMessage("binary transfers require an iroh session".into())
+                })?;
+                let uploaded = crate::transfers::upload_file(
+                    peer,
+                    || async { session.open_stream().await.map_err(std::io::Error::other) },
+                    std::path::Path::new(&attachment.path),
+                    std::path::Path::new(&directory),
+                    &attachment.name,
                 )
-                .await?;
-                let id = reply.value.thread.id.clone().expect("validated thread ID");
+                .await
+                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                #[derive(serde::Deserialize)]
+                struct Uploaded {
+                    path: String,
+                }
+                let uploaded: Uploaded = serde_json::from_value(uploaded)
+                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                attachment.path = uploaded.path;
                 Applied {
-                    sequence: Some(reply.sequence),
-                    event: Some(Event::DraftThreadCreated {
-                        thread: reply.value.thread,
+                    application: Some(Box::new(Published(Event::AttachmentUploaded {
                         draft_key,
-                        current: true,
-                        client_user_message_id,
-                        draft,
-                    }),
-                    outcome: Outcome::StartedThread(id),
+                        attachment,
+                    }))),
+                    ..Applied::default()
                 }
             }
-            Effect::Submit {
-                thread_id,
-                client_user_message_id,
-                draft,
-            } => {
-                let target = submission_target(
-                    snapshot.conversations.get(&thread_id).map(Arc::as_ref),
-                    snapshot.threads.as_ref().and_then(|list| {
-                        list.data
-                            .iter()
-                            .find(|thread| thread.id.as_ref() == Some(&thread_id))
-                    }),
-                    snapshot.activity.active.get(&thread_id).copied(),
+            Effect::PairRemoteHost(op::PairRemoteHost { invitation, name }) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                if now >= invitation.expires_at {
+                    return Err(PeerError::InvalidMessage("invitation expired".into()));
+                }
+                let local = session.ok_or_else(|| {
+                    PeerError::InvalidMessage("pairing requires an iroh session".into())
+                })?;
+                let ticket = invitation.endpoint.parse().map_err(
+                    |error: crate::transport::TransportError| {
+                        PeerError::InvalidMessage(error.to_string())
+                    },
                 )?;
-                let mut input = Vec::with_capacity(
-                    draft.attachments.len() + usize::from(!draft.text.is_empty()),
-                );
-                if !draft.text.is_empty() {
-                    input.push(Input::Text {
-                        text: &draft.text,
-                        text_elements: &[],
-                    });
-                }
-                for attachment in &draft.attachments {
-                    input.push(if attachment.is_image {
-                        Input::LocalImage {
-                            path: &attachment.path,
-                        }
-                    } else {
-                        Input::Mention {
-                            path: &attachment.path,
-                            name: &attachment.name,
-                        }
-                    });
-                }
-                let reply = client
-                    .submit(
-                        &Submission {
-                            thread_id: &thread_id,
-                            client_user_message_id: &client_user_message_id,
-                            input: &input,
-                            model: draft.model.as_deref(),
-                            effort: draft.effort.as_deref(),
-                            service_tier: draft.service_tier.as_deref(),
+                {
+                    let remote = scopeguard::guard(
+                        local
+                            .connect(&ticket)
+                            .await
+                            .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
+                        |session| session.close(),
+                    );
+                    let peer = remote
+                        .open_peer(std::time::Duration::from_secs(20), 8)
+                        .await
+                        .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
+                    peer.request::<_, <Pair as Operation>::Output>(
+                        Pair::METHOD,
+                        &Pair {
+                            invitation: invitation.invitation,
                         },
-                        target,
                     )
                     .await?;
+                    peer.close().await?;
+                }
+                let reply = client
+                    .call(&RegisterRemoteHost {
+                        ticket: &invitation.endpoint,
+                        name: &name,
+                    })
+                    .await?;
+                let id = reply.value.id.clone();
                 Applied {
-                    sequence: Some(reply.sequence),
-                    event: Some(Event::Submitted {
-                        thread_id,
-                        client_user_message_id,
-                        draft,
-                        turn_id: reply.value.clone(),
-                    }),
-                    outcome: Outcome::Submitted(reply.value),
+                    application: Some(Box::new(Published(Event::RemoteHostPaired(reply.value)))),
+                    outcome: Outcome::RemoteHostPaired(id),
+                    ..Applied::default()
                 }
             }
-            Effect::Execute(intent) => match intent {
-                Intent::ListAccounts => {
-                    execute(client, ordered, &mut request_id, op::ListAccounts).await?
-                }
-                Intent::SelectAccount(id) => {
-                    execute(client, ordered, &mut request_id, op::SelectAccount { id }).await?
-                }
-                Intent::StartAccountLogin => {
-                    execute(client, ordered, &mut request_id, op::StartAccountLogin).await?
-                }
-                Intent::ReadAccountLogin(id) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::ReadAccountLogin { id },
-                    )
-                    .await?
-                }
-                Intent::CancelAccountLogin(id) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::CancelAccountLogin { id },
-                    )
-                    .await?
-                }
-                Intent::ForkThread {
-                    thread_id,
-                    last_turn_id,
-                } => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::ForkThread {
-                            thread_id,
-                            last_turn_id,
-                        },
-                    )
-                    .await?
-                }
-                Intent::StartTerminal { handle, cwd, size } => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::StartTerminal { handle, cwd, size },
-                    )
-                    .await?
-                }
-                Intent::CloseTerminal(handle) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::CloseTerminal { handle },
-                    )
-                    .await?
-                }
-                Intent::Transcribe {
-                    draft_key,
-                    audio,
-                    send,
-                    client_user_message_id,
-                } => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::Transcribe {
-                            draft: snapshot.drafts.get(&draft_key).cloned().unwrap_or_default(),
-                            draft_key,
-                            audio,
-                            send,
-                            client_user_message_id,
-                        },
-                    )
-                    .await?
-                }
-                Intent::CreateInvitation => {
-                    execute(client, ordered, &mut request_id, op::CreateInvitation).await?
-                }
-                Intent::RemoveRemoteHost(id) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::RemoveRemoteHost { id },
-                    )
-                    .await?
-                }
-                Intent::RevokeDevice(id) => {
-                    execute(client, ordered, &mut request_id, op::RevokeDevice { id }).await?
-                }
-                Intent::OpenThread(thread_id) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::OpenThread { thread_id },
-                    )
-                    .await?
-                }
-                Intent::ListFiles(path) => {
-                    execute(client, ordered, &mut request_id, op::ListFiles { path }).await?
-                }
-                Intent::ReadFile { path, .. } => {
-                    execute(client, ordered, &mut request_id, op::ReadFile { path }).await?
-                }
-                Intent::ReviewWorkspace(cwd) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::ReviewWorkspace { cwd },
-                    )
-                    .await?
-                }
-                Intent::ReadWorktreeSettings => {
-                    execute(client, ordered, &mut request_id, op::ReadWorktreeSettings).await?
-                }
-                Intent::UpdateWorktreeSettings(settings) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::UpdateWorktreeSettings { settings },
-                    )
-                    .await?
-                }
-                Intent::ListThreads(query) => {
-                    execute(client, ordered, &mut request_id, op::ListThreads { query }).await?
-                }
-                Intent::StartThread { cwd, model } => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::StartThread { cwd, model },
-                    )
-                    .await?
-                }
-                Intent::ReadThread(thread_id) => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::ReadThread { thread_id },
-                    )
-                    .await?
-                }
-                Intent::ReadItem {
-                    thread_id,
-                    turn_id,
-                    item_id,
-                } => {
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::ReadItem {
-                            thread_id,
-                            turn_id,
-                            item_id,
-                        },
-                    )
-                    .await?
-                }
-                Intent::SaveFile(path) => {
-                    let submitted = snapshot
-                        .file_drafts
-                        .get(&path)
-                        .ok_or_else(|| {
-                            PeerError::InvalidMessage("file has no draft to save".into())
-                        })?
-                        .clone();
-                    execute(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        op::SaveFile { path, submitted },
-                    )
-                    .await?
-                }
-                Intent::ResizeTerminal { handle, size } => {
-                    client
-                        .call(&ResizeTerminal {
-                            process_handle: &handle,
-                            size,
-                        })
-                        .await?;
-                    Applied::default()
-                }
-                Intent::Interrupt { thread_id, turn_id } => {
-                    client
-                        .call(&InterruptTurn {
-                            thread_id: &thread_id,
-                            turn_id: &turn_id,
-                        })
-                        .await?;
-                    Applied::default()
-                }
-                Intent::Watch {
-                    thread_id,
-                    watch_key,
-                    watch_id,
-                    path,
-                } => {
-                    client
-                        .call(&WatchThread {
-                            thread_id: &thread_id,
-                            watch_key,
-                            watch_id,
-                            path: path.as_deref(),
-                        })
-                        .await?;
-                    Applied::default()
-                }
-                Intent::Unwatch {
-                    watch_key,
-                    watch_id,
-                } => {
-                    client
-                        .call(&UnwatchThread {
-                            watch_key,
-                            watch_id,
-                        })
-                        .await?;
-                    Applied::default()
-                }
-                Intent::WriteTerminal { handle, data } => {
-                    use base64::Engine;
-                    // Requests are serialized by the Store actor, including chunks
-                    // from a single paste, so shell bytes cannot overtake each other.
-                    for chunk in data.chunks(16 * 1024) {
-                        client
-                            .call(&WriteTerminal {
-                                process_handle: &handle,
-                                delta_base64: &base64::engine::general_purpose::STANDARD
-                                    .encode(chunk),
-                            })
-                            .await?;
-                    }
-                    Applied::default()
-                }
-                Intent::UploadAttachment {
-                    draft_key,
-                    mut attachment,
-                    directory,
-                } => {
-                    let session = session.ok_or_else(|| {
-                        PeerError::InvalidMessage("binary transfers require an iroh session".into())
-                    })?;
-                    let uploaded = crate::transfers::upload_file(
-                        peer,
-                        || async { session.open_stream().await.map_err(std::io::Error::other) },
-                        std::path::Path::new(&attachment.path),
-                        std::path::Path::new(&directory),
-                        &attachment.name,
-                    )
-                    .await
-                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                    #[derive(serde::Deserialize)]
-                    struct Uploaded {
-                        path: String,
-                    }
-                    let uploaded: Uploaded = serde_json::from_value(uploaded)
-                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                    attachment.path = uploaded.path;
-                    Applied {
-                        event: Some(Event::AttachmentUploaded {
-                            draft_key,
-                            attachment,
-                        }),
-                        ..Applied::default()
-                    }
-                }
-                Intent::DownloadFile {
-                    source,
-                    destination,
-                } => {
-                    let session = session.ok_or_else(|| {
-                        PeerError::InvalidMessage("binary transfers require an iroh session".into())
-                    })?;
-                    crate::transfers::download_file(
-                        peer,
-                        || async { session.open_stream().await.map_err(std::io::Error::other) },
-                        &source,
-                        &destination,
-                    )
-                    .await
-                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                    Applied::default()
-                }
-                Intent::LoadSessionImages(thread_id) => Applied {
-                    event: None,
-                    outcome: Outcome::SessionImages(client.session_images(&thread_id).await?),
-                    ..Applied::default()
-                },
-                Intent::LoadHostManagement => {
-                    let (status, remotes) = tokio::try_join!(
-                        client.call(&ReadHostStatus {}),
-                        client.call(&ListRemoteHosts {})
-                    )?;
-                    Applied {
-                        event: Some(Event::HostManagementLoaded {
-                            status: status.value,
-                            remotes: remotes.value,
-                        }),
-                        ..Applied::default()
-                    }
-                }
-                Intent::PairRemoteHost { invitation, name } => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    if now >= invitation.expires_at {
-                        return Err(PeerError::InvalidMessage("invitation expired".into()));
-                    }
-                    let local = session.ok_or_else(|| {
-                        PeerError::InvalidMessage("pairing requires an iroh session".into())
-                    })?;
-                    let ticket = invitation.endpoint.parse().map_err(
-                        |error: crate::transport::TransportError| {
-                            PeerError::InvalidMessage(error.to_string())
-                        },
-                    )?;
-                    {
-                        let remote = scopeguard::guard(
-                            local
-                                .connect(&ticket)
-                                .await
-                                .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
-                            |session| session.close(),
-                        );
-                        let peer = remote
-                            .open_peer(std::time::Duration::from_secs(20), 8)
-                            .await
-                            .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
-                        peer.request::<_, <Pair as Operation>::Output>(
-                            Pair::METHOD,
-                            &Pair {
-                                invitation: invitation.invitation,
-                            },
-                        )
-                        .await?;
-                        peer.close().await?;
-                    }
-                    let reply = client
-                        .call(&RegisterRemoteHost {
-                            ticket: &invitation.endpoint,
-                            name: &name,
-                        })
-                        .await?;
-                    let id = reply.value.id.clone();
-                    Applied {
-                        event: Some(Event::RemoteHostPaired(reply.value)),
-                        outcome: Outcome::RemoteHostPaired(id),
-                        ..Applied::default()
-                    }
-                }
-                Intent::ReadOlder {
-                    thread_id,
-                    turn_id,
-                    cursor,
-                } => {
-                    let reply = if let Some(turn_id) = &turn_id {
-                        call_ordered(
-                            client,
-                            ordered,
-                            &mut request_id,
-                            &OlderItems {
-                                thread_id: &thread_id,
-                                turn_id,
-                                cursor: cursor.as_deref(),
-                                defer_item_details: true,
-                            },
-                        )
-                        .await?
-                    } else {
-                        call_ordered(
-                            client,
-                            ordered,
-                            &mut request_id,
-                            &OlderTurns {
-                                thread_id: &thread_id,
-                                turn_id: None,
-                                cursor: cursor.as_deref(),
-                                defer_item_details: true,
-                            },
-                        )
-                        .await?
-                    };
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::OlderLoaded {
-                            thread_id,
-                            thread: reply.value.thread,
-                            turn_id,
-                            cursor,
-                        }),
-                        ..Applied::default()
-                    }
-                }
-                Intent::LoadModels => Applied {
-                    event: Some(Event::ModelsLoaded(client.models().await?)),
-                    ..Applied::default()
-                },
-                Intent::Respond { request_id, answer } => {
-                    let request =
-                        snapshot
-                            .requests
-                            .get(&request_id.to_string())
-                            .ok_or_else(|| {
-                                PeerError::InvalidMessage(
-                                    "server request is no longer pending".into(),
-                                )
-                            })?;
-                    client.respond(request, &answer).await?;
-                    Applied {
-                        event: Some(Event::RequestResolved(request_id)),
-                        ..Applied::default()
-                    }
-                }
-                intent @ (Intent::AcknowledgeTerminal { .. }
-                | Intent::Submit { .. }
-                | Intent::AddAttachment { .. }
-                | Intent::RemoveAttachment { .. }
-                | Intent::NewChat(_)
-                | Intent::ShowThreadList
-                | Intent::SetDraft { .. }
-                | Intent::SetDraftText { .. }
-                | Intent::SelectModel { .. }
-                | Intent::SelectEffort { .. }
-                | Intent::SelectServiceTier { .. }
-                | Intent::SetFileDraft { .. }) => Applied {
-                    event: Some(Event::Intent(intent)),
-                    ..Applied::default()
-                },
-            },
         };
         Ok(applied)
     }
@@ -1251,40 +799,174 @@ async fn perform(
     }
 }
 
-// Register before polling the request: a fast reply must never overtake its
-// state publication. Gallery reads use the same RPC methods without publishing
-// conversation snapshots, so method names cannot identify these requests.
-async fn call_ordered<O: Operation + Sync>(
-    client: &Client,
-    ordered: &Mutex<BTreeSet<u64>>,
-    request_id: &mut Option<u64>,
-    operation: &O,
-) -> Result<crate::peer::Reply<O::Output>, PeerError> {
-    let request = client.call(operation);
-    *request_id = request.wire_id();
-    if let Some(id) = *request_id {
-        ordered.lock().unwrap().insert(id);
+// The typed completion is executable Store state, never part of a replayable Event.
+trait Application: Send + std::fmt::Debug {
+    fn apply(self: Box<Self>, snapshot: &mut Snapshot, current: bool) -> Vec<Effect>;
+}
+#[derive(Debug)]
+struct Completion<O: op::Operation> {
+    operation: O,
+    output: Option<O::Output>,
+}
+impl<O: op::Operation> Application for Completion<O> {
+    fn apply(self: Box<Self>, snapshot: &mut Snapshot, current: bool) -> Vec<Effect> {
+        let Self { operation, output } = *self;
+        let output = output.expect("only completed operations are published");
+        if current {
+            operation.apply(snapshot, output)
+        } else {
+            operation.stale(snapshot, output)
+        }
     }
-    request.await
+}
+// Intent is replayable data. Only the effect queue erases an operation's type;
+// the same allocation carries its output until the response marker is applied.
+#[derive(Debug)]
+pub struct PendingOperation(Box<dyn Pending>);
+impl PendingOperation {
+    pub(crate) fn new<O: op::Operation>(operation: O) -> Self {
+        Self(Box::new(Completion {
+            operation,
+            output: None,
+        }))
+    }
+}
+trait Pending: Application {
+    fn terminal_handle(&self) -> Option<&str>;
+    fn disconnected_is_complete(&self) -> bool;
+    fn run<'a>(
+        self: Box<Self>,
+        context: &'a mut Execution<'_>,
+    ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>>;
+}
+impl<O: op::Operation> Pending for Completion<O> {
+    fn terminal_handle(&self) -> Option<&str> {
+        self.operation.terminal_handle()
+    }
+    fn disconnected_is_complete(&self) -> bool {
+        self.operation.disconnected_is_complete()
+    }
+    fn run<'a>(
+        mut self: Box<Self>,
+        context: &'a mut Execution<'_>,
+    ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>> {
+        Box::pin(async move {
+            context.ordered_call = O::ORDERED;
+            let mut output = self.operation.run(context).await?;
+            let outcome = O::outcome(&mut output);
+            self.output = Some(output);
+            Ok(Applied {
+                sequence: context.sequence,
+                outcome,
+                application: Some(self),
+            })
+        })
+    }
+}
+// Pairing and upload have completed durable effects even if the view changed.
+#[derive(Debug)]
+struct Published(Event);
+impl Application for Published {
+    fn apply(self: Box<Self>, snapshot: &mut Snapshot, _current: bool) -> Vec<Effect> {
+        let (next, effects) = reduce(snapshot, self.0);
+        *snapshot = next;
+        effects
+    }
+}
+pub struct Execution<'a> {
+    pub(crate) client: &'a Client,
+    pub(crate) peer: &'a RpcPeer,
+    pub(crate) session: Option<&'a crate::transport::Session>,
+    pub(crate) snapshot: &'a Snapshot,
+    ordered: &'a Mutex<BTreeSet<u64>>,
+    request_id: &'a mut Option<u64>,
+    sequence: Option<u64>,
+    ordered_call: bool,
+}
+impl Execution<'_> {
+    pub(crate) async fn call<O: Operation + Sync>(
+        &mut self,
+        operation: &O,
+    ) -> Result<O::Output, PeerError> {
+        let request = self.client.call(operation);
+        if self.ordered_call {
+            // Register before polling: a fast reply cannot overtake publication.
+            *self.request_id = request.wire_id();
+            if let Some(id) = *self.request_id {
+                self.ordered.lock().unwrap().insert(id);
+            }
+        }
+        let reply = request.await?;
+        if self.ordered_call {
+            self.sequence = Some(reply.sequence);
+        }
+        Ok(reply.value)
+    }
 }
 
-async fn execute<O: op::Operation>(
-    client: &Client,
-    ordered: &Mutex<BTreeSet<u64>>,
-    request_id: &mut Option<u64>,
-    operation: O,
-) -> Result<Applied, PeerError> {
-    let reply = {
-        let request = operation.request();
-        if O::ORDERED {
-            call_ordered(client, ordered, request_id, &request).await?
-        } else {
-            client.call(&request).await?
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_snapshot_field_notifies_subscribers_independently() {
+        type Change = fn(&mut Snapshot);
+        let changes: &[(&str, Change)] = &[
+            ("account", |snapshot| snapshot.account = Arc::default()),
+            ("terminals", |snapshot| snapshot.terminals = Arc::default()),
+            ("conversations", |snapshot| {
+                snapshot.conversations = Arc::default()
+            }),
+            ("models", |snapshot| snapshot.models = Arc::default()),
+            ("requests", |snapshot| snapshot.requests = Arc::default()),
+            ("drafts", |snapshot| snapshot.drafts = Arc::default()),
+            ("pending_submissions", |snapshot| {
+                snapshot.pending_submissions = Arc::default()
+            }),
+            ("file_drafts", |snapshot| {
+                snapshot.file_drafts = Arc::default()
+            }),
+            ("workspace", |snapshot| snapshot.workspace = Arc::default()),
+            ("navigation", |snapshot| {
+                snapshot.navigation = Arc::default()
+            }),
+            ("activity", |snapshot| snapshot.activity = Arc::default()),
+            ("management", |snapshot| {
+                snapshot.management = Arc::default()
+            }),
+            ("list_query", |snapshot| {
+                snapshot.list_query = Arc::default()
+            }),
+            ("threads", |snapshot| {
+                snapshot.threads = Some(Arc::new(crate::models::ThreadList {
+                    data: Vec::new(),
+                    projects: Vec::new(),
+                    more_project_ids: Vec::new(),
+                    has_more_chats: false,
+                    has_more_projects: false,
+                    extra: Default::default(),
+                }))
+            }),
+            ("epoch", |snapshot| snapshot.epoch += 1),
+            ("connected", |snapshot| snapshot.connected = true),
+            ("error", |snapshot| {
+                snapshot.error = Some("fixture failure".into())
+            }),
+        ];
+        for (name, change) in changes {
+            let previous = Arc::new(Snapshot::default());
+            let (writer, reader) = watch::channel(previous.clone());
+            writer.send_if_modified(|current| {
+                publish_locked(current, previous.as_ref().clone(), Vec::new()).1
+            });
+            assert!(
+                !reader.has_changed().unwrap(),
+                "unchanged snapshot published"
+            );
+            let mut next = previous.as_ref().clone();
+            change(&mut next);
+            writer.send_if_modified(|current| publish_locked(current, next, Vec::new()).1);
+            assert!(reader.has_changed().unwrap(), "{name} update was dropped");
         }
-    };
-    Ok(Applied {
-        sequence: O::ORDERED.then_some(reply.sequence),
-        outcome: O::outcome(&reply.value),
-        event: Some(op::completed(operation, reply.value)),
-    })
+    }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use agent_core::state::operations as op;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
     sidebar::{Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem},
@@ -310,10 +311,10 @@ impl Desktop {
                     }
                     store
                         .ok_or("Host に接続していません")?
-                        .dispatch(Intent::DownloadFile {
+                        .dispatch(Intent::DownloadFile(op::DownloadFile {
                             source: path,
                             destination: destination.clone(),
-                        })
+                        }))
                         .await
                         .map_err(|error| error.to_string())?;
                     Ok(destination.to_string_lossy().into_owned())
@@ -476,10 +477,10 @@ impl Desktop {
                         download.join(path.file_name().ok_or("ファイル名がありません")?);
                     store
                         .ok_or("Host に接続していません")?
-                        .dispatch(Intent::DownloadFile {
+                        .dispatch(Intent::DownloadFile(op::DownloadFile {
                             source: path,
                             destination: destination.clone(),
-                        })
+                        }))
                         .await
                         .map_err(|error| error.to_string())?;
                     destination
@@ -512,7 +513,9 @@ impl Desktop {
             error: String::new(),
         });
         self.perform(
-            Intent::LoadSessionImages(self.selected().into()),
+            Intent::LoadSessionImages(op::LoadSessionImages {
+                thread_id: self.selected().into(),
+            }),
             move |view, result, _, _| {
                 let Some(gallery) = view
                     .image_gallery
@@ -1639,7 +1642,7 @@ impl Desktop {
                             let _ = target.update(cx, |s, cx| {
                                 let mut query = (*s.snapshot.list_query).clone();
                                 query.project_limit += 10;
-                                s.dispatch(Intent::ListThreads(query));
+                                s.dispatch(Intent::ListThreads(op::ListThreads { query }));
                                 cx.notify();
                             });
                         },
@@ -1743,7 +1746,7 @@ impl Desktop {
                             .on_click(cx.listener(move |s, _, _, cx| {
                                 let mut query = (*s.snapshot.list_query).clone();
                                 *query.project_thread_limits.entry(id.clone()).or_insert(5) += 10;
-                                s.dispatch(Intent::ListThreads(query));
+                                s.dispatch(Intent::ListThreads(op::ListThreads { query }));
                                 cx.notify();
                             })),
                     );
@@ -1760,7 +1763,7 @@ impl Desktop {
                 cx.listener(|s, _, _, cx| {
                     let mut query = (*s.snapshot.list_query).clone();
                     query.project_limit += 10;
-                    s.dispatch(Intent::ListThreads(query));
+                    s.dispatch(Intent::ListThreads(op::ListThreads { query }));
                     cx.notify();
                 }),
             ));
@@ -1793,7 +1796,7 @@ impl Desktop {
                 |s, _, _, cx| {
                     let mut query = (*s.snapshot.list_query).clone();
                     query.chat_limit += 10;
-                    s.dispatch(Intent::ListThreads(query));
+                    s.dispatch(Intent::ListThreads(op::ListThreads { query }));
                     cx.notify();
                 },
             )));
@@ -1875,7 +1878,9 @@ impl Desktop {
                                 cx,
                                 |s, _, _| {
                                     s.tab = Tab::Settings;
-                                    s.dispatch(Intent::ReadWorktreeSettings);
+                                    s.dispatch(Intent::ReadWorktreeSettings(
+                                        op::ReadWorktreeSettings,
+                                    ));
                                 },
                             )
                             .accessibility_label("設定を開く")
@@ -2030,10 +2035,10 @@ impl Desktop {
         let send = if let Some(turn) = running.filter(|_| empty && phase.is_none()) {
             let id = turn.id.clone();
             self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
-                s.dispatch(Intent::Interrupt {
+                s.dispatch(Intent::Interrupt(op::Interrupt {
                     thread_id: s.selected().into(),
                     turn_id: id.clone(),
-                });
+                }));
             })
             .icon(Icon::default().path("bex/stop.svg"))
             .disabled(!self.snapshot.connected || self.busy > 0)

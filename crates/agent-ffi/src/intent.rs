@@ -1,5 +1,6 @@
 use crate::{AgentError, Attachment, JsonValue, ListQuery, WorktreeSettings, error};
 use agent_core::state::Intent as Core;
+use agent_core::state::operations as op;
 use base64::Engine;
 use std::collections::HashMap;
 
@@ -133,39 +134,41 @@ impl TryFrom<Intent> for Core {
         Ok(match i {
             Intent::ShowThreadList => Core::ShowThreadList,
             Intent::NewChat { cwd } => Core::NewChat(cwd),
-            Intent::OpenThread { id } => Core::OpenThread(id),
-            Intent::ListThreads { query } => Core::ListThreads(query.into()),
-            Intent::ReadThread { id } => Core::ReadThread(id),
+            Intent::OpenThread { id } => Core::OpenThread(op::OpenThread { thread_id: id }),
+            Intent::ListThreads { query } => Core::ListThreads(op::ListThreads {
+                query: query.into(),
+            }),
+            Intent::ReadThread { id } => Core::ReadThread(op::ReadThread { thread_id: id }),
             Intent::ReadOlder {
                 thread_id,
                 turn_id,
                 cursor,
-            } => Core::ReadOlder {
+            } => Core::ReadOlder(op::ReadOlder {
                 thread_id,
                 turn_id,
                 cursor,
-            },
+            }),
             Intent::ReadItem {
                 thread_id,
                 turn_id,
                 item_id,
-            } => Core::ReadItem {
+            } => Core::ReadItem(op::ReadItem {
                 thread_id,
                 turn_id,
                 item_id,
-            },
+            }),
             Intent::ForkThread {
                 thread_id,
                 last_turn_id,
-            } => Core::ForkThread {
+            } => Core::ForkThread(op::ForkThread {
                 thread_id,
                 last_turn_id,
-            },
+            }),
             Intent::SetDraftText { key, text } => Core::SetDraftText {
                 thread_id: key,
                 text,
             },
-            Intent::LoadModels => Core::LoadModels,
+            Intent::LoadModels => Core::LoadModels(op::LoadModels),
             Intent::SelectModel { key, model } => Core::SelectModel {
                 thread_id: key,
                 model,
@@ -185,8 +188,10 @@ impl TryFrom<Intent> for Core {
                 thread_id,
                 client_user_message_id,
             },
-            Intent::Interrupt { thread_id, turn_id } => Core::Interrupt { thread_id, turn_id },
-            Intent::Respond { request_id, answer } => Core::Respond {
+            Intent::Interrupt { thread_id, turn_id } => {
+                Core::Interrupt(op::Interrupt { thread_id, turn_id })
+            }
+            Intent::Respond { request_id, answer } => Core::Respond(op::Respond {
                 request_id: request_id.try_into()?,
                 answer: match answer {
                     Answer::Decision { index } => {
@@ -201,7 +206,7 @@ impl TryFrom<Intent> for Core {
                             .map_err(error)?,
                     ),
                 },
-            },
+            }),
             Intent::AddAttachment { key, attachment } => Core::AddAttachment {
                 draft_key: key,
                 attachment: attachment.into(),
@@ -214,50 +219,56 @@ impl TryFrom<Intent> for Core {
                 key,
                 attachment,
                 directory,
-            } => Core::UploadAttachment {
+            } => Core::UploadAttachment(op::UploadAttachment {
                 draft_key: key,
                 attachment: attachment.into(),
                 directory,
-            },
+            }),
             Intent::DownloadFile {
                 source,
                 destination,
-            } => Core::DownloadFile {
+            } => Core::DownloadFile(op::DownloadFile {
                 source: source.into(),
                 destination: destination.into(),
-            },
-            Intent::LoadSessionImages { thread_id } => Core::LoadSessionImages(thread_id),
+            }),
+            Intent::LoadSessionImages { thread_id } => {
+                Core::LoadSessionImages(op::LoadSessionImages { thread_id })
+            }
             Intent::Transcribe {
                 key,
                 audio,
                 send,
                 client_user_message_id,
-            } => Core::Transcribe {
+            } => Core::Transcribe(op::Transcribe {
                 draft_key: key,
                 audio: base64::engine::general_purpose::STANDARD.encode(audio),
                 send,
                 client_user_message_id,
-            },
-            Intent::ListFiles { path } => Core::ListFiles(path),
+            }),
+            Intent::ListFiles { path } => Core::ListFiles(op::ListFiles { path }),
             Intent::ReadFile {
                 path,
                 discard_draft,
-            } => Core::ReadFile {
+            } => Core::ReadFile(op::ReadFile {
                 path,
                 discard_draft,
-            },
+            }),
             Intent::SetFileDraft { path, text } => Core::SetFileDraft { path, text },
-            Intent::SaveFile { path } => Core::SaveFile(path),
-            Intent::ReviewWorkspace { cwd } => Core::ReviewWorkspace(cwd),
-            Intent::ReadWorktreeSettings => Core::ReadWorktreeSettings,
+            Intent::SaveFile { path } => Core::SaveFile(op::SaveFile { path }),
+            Intent::ReviewWorkspace { cwd } => Core::ReviewWorkspace(op::ReviewWorkspace { cwd }),
+            Intent::ReadWorktreeSettings => Core::ReadWorktreeSettings(op::ReadWorktreeSettings),
             Intent::UpdateWorktreeSettings { settings } => {
-                Core::UpdateWorktreeSettings(settings.into())
+                Core::UpdateWorktreeSettings(op::UpdateWorktreeSettings {
+                    settings: settings.into(),
+                })
             }
-            Intent::ListAccounts => Core::ListAccounts,
-            Intent::SelectAccount { id } => Core::SelectAccount(id),
-            Intent::StartAccountLogin => Core::StartAccountLogin,
-            Intent::ReadAccountLogin { id } => Core::ReadAccountLogin(id),
-            Intent::CancelAccountLogin { id } => Core::CancelAccountLogin(id),
+            Intent::ListAccounts => Core::ListAccounts(op::ListAccounts),
+            Intent::SelectAccount { id } => Core::SelectAccount(op::SelectAccount { id }),
+            Intent::StartAccountLogin => Core::StartAccountLogin(op::StartAccountLogin),
+            Intent::ReadAccountLogin { id } => Core::ReadAccountLogin(op::ReadAccountLogin { id }),
+            Intent::CancelAccountLogin { id } => {
+                Core::CancelAccountLogin(op::CancelAccountLogin { id })
+            }
         })
     }
 }

@@ -80,7 +80,9 @@ pub(super) fn notification(
     if kind == Kind::WatchChanged {
         return (
             previous.clone(),
-            vec![Effect::Execute(Intent::ReadThread(params.thread_id))],
+            vec![Effect::execute(op::ReadThread {
+                thread_id: params.thread_id,
+            })],
         );
     }
     if kind == Kind::WatchFailed {
