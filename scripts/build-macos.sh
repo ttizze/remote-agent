@@ -18,6 +18,9 @@ if [[ -z $identity ]]; then
 fi
 [[ $identity != - ]] || { echo 'Certificate signing is required to retain Keychain authorization.' >&2; exit 1; }
 target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
+export BEX_BUILD_REVISION
+BEX_BUILD_REVISION=$(git rev-parse HEAD)
+if ! git diff --quiet HEAD --; then BEX_BUILD_REVISION+=-dirty; fi
 sign() { /usr/bin/codesign --force --sign "$identity" --timestamp=none "$@"; }
 verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
 if [[ $product == host ]]; then

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Exercise account-switch and fork history through the Host hydration API in integration tests, and compare startup diagnostics against native OS errors without assuming English Unix messages.
+
+- Persist rotating private JSONL error logs for desktop and Host, including RPC causes and turn errors, startup failures, timeouts, and panic diagnostics. Retain records across restarts and redact common credentials and structured payloads. Preserve string-valued errors and watch failures, distinguish intentional closes from failures, report the caller's application version, and recover from rotation failures without recursive logging deadlocks or panics on closed stderr.
+
+- Show command and integration activity by action during live conversations, without separate internal reasoning rows. Fold completed commentary and activity under a past-message count while keeping the final answer visible.
+
+- Keep desktop chat images inside their message bubbles, including wide screenshots and narrow windows. Clear recovered Store error banners while preserving newer local errors and dismissed notices.
+
 - Run native Linux builds, Core and isolated Host tests, and Rust toolchain lookup on the repository-scoped shared Hetzner runner managed by `nix-config`. Keep native Windows CI, restrict shared-runner execution to same-repository changes, and bound Linux Cargo builds to two jobs.
 
 - Apply automatic worktree creation only when a new session has an explicitly selected checkout. Global chats can send with the setting enabled. Cover saved settings on/off, global/project scope, text/photo input, first/follow-up turns, and reopened history through the real Store and isolated Host; exercise native photo/video submission after saving and reloading the enabled setting.

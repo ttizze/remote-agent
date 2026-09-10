@@ -65,7 +65,7 @@ pub struct Segment {
 impl Segment {
     pub fn role(&self, index: usize, item: ItemMetadata<'_>) -> Role {
         match item.kind {
-            "sleep" | "enteredReviewMode" | "exitedReviewMode" => Role::Hidden,
+            "reasoning" | "sleep" | "enteredReviewMode" | "exitedReviewMode" => Role::Hidden,
             "userMessage" => Role::User,
             "imageGeneration" => Role::Response,
             "agentMessage" if self.answer.is_none_or(|answer| answer == index) => Role::Response,
@@ -145,18 +145,17 @@ pub fn project_items<'a>(
             answer,
             last: end == count,
             collapsible: false,
-            initially_expanded: false,
+            initially_expanded: !completed,
             label: None,
         };
         segment.collapsible =
             (start..end).any(|index| segment.role(index, item(index)) == Role::Activity);
         segment.label = if segment.collapsible {
             Some(if answer.is_some() {
-                if segment.last {
-                    work_summary(turn)
-                } else {
-                    "作業内容".into()
-                }
+                let messages = (start..end)
+                    .filter(|&index| segment.role(index, item(index)) == Role::Activity)
+                    .count();
+                format!("{messages}件の過去のメッセージ")
             } else {
                 let summary = activity_summary(
                     (start..end)
@@ -186,45 +185,33 @@ pub fn project_items<'a>(
 fn visible(item: ItemMetadata<'_>) -> bool {
     !matches!(
         item.kind,
-        "sleep" | "enteredReviewMode" | "exitedReviewMode"
+        "reasoning" | "sleep" | "enteredReviewMode" | "exitedReviewMode"
     )
 }
 fn activity_summary<'a>(items: impl Iterator<Item = ItemMetadata<'a>>) -> String {
-    let (mut commands, mut files, mut tools, mut reasoning) = (0, 0, 0, false);
+    let (mut commands, mut files, mut tools) = (false, false, false);
     for item in items {
         match item.kind {
-            "commandExecution" => commands += 1,
-            "fileChange" => files += item.file_count,
-            "reasoning" => reasoning = true,
-            _ => tools += 1,
+            "commandExecution" => commands = true,
+            "fileChange" => files = true,
+            _ => tools = true,
         }
     }
-    use std::fmt::Write;
-    let mut summary = String::new();
-    for (count, kind) in [
-        (commands, "コマンド"),
-        (files, "ファイル変更"),
-        (tools, "ツール操作"),
-    ] {
-        if count == 0 {
-            continue;
-        }
-        if !summary.is_empty() {
-            summary.push('、');
-        }
-        write!(summary, "{count}件の{kind}").unwrap();
+    let labels: Vec<_> = [
+        (commands, "コマンドを実行しました"),
+        (files, "ファイルを変更しました"),
+        (tools, "ツールを使用しました"),
+    ]
+    .into_iter()
+    .filter_map(|(present, label)| present.then_some(label))
+    .collect();
+    if labels.is_empty() {
+        "作業の詳細".into()
+    } else {
+        labels.join("、")
     }
-    if reasoning {
-        if !summary.is_empty() {
-            summary.push('、');
-        }
-        summary.push_str("思考");
-    }
-    if summary.is_empty() {
-        summary.push_str("作業");
-    }
-    summary
 }
+
 fn work_summary(turn: &Turn) -> String {
     if turn.status.as_deref() == Some("inProgress") {
         return "作業中…".into();
@@ -362,7 +349,7 @@ pub fn item_presentation(item: &Item) -> ItemPresentation {
             "Codex".into(),
             false,
         ),
-        "reasoning" => ("reasoning", "思考".into(), true),
+        "reasoning" => ("reasoning", "作業の詳細".into(), true),
         "imageGeneration" => ("imageGeneration", tool_title(item), false),
         "commandExecution" => (
             "command",
@@ -390,9 +377,13 @@ fn tool_title(item: &Item) -> String {
         "plan" => "計画を更新しました".into(),
         "mcpToolCall" => match (field(item, "server"), tool) {
             ("", "") => "MCPツールを実行しました".into(),
-            (server, "") => compact_title(server),
+            (server, "") => format!("{}の連携を使用しました", compact_title(server)),
             ("", tool) => compact_title(tool),
-            (server, tool) => format!("{} / {}", compact_title(server), compact_title(tool)),
+            (server, tool) => format!(
+                "{}の連携を使用しました · {}",
+                compact_title(server),
+                compact_title(tool)
+            ),
         },
         "dynamicToolCall" => {
             if tool.is_empty() {
@@ -486,11 +477,12 @@ mod presentation_tests {
             rows(&p, &turn, Role::Activity)
                 .map(|i| i.id.as_str())
                 .collect::<Vec<_>>(),
-            ["r", "c", "a"]
+            ["c", "a"]
         );
         assert_eq!(rows(&p, &turn, Role::Response).next().unwrap().id, "f");
         assert!(p.collapsible);
-        assert_eq!(p.label.as_deref(), Some("40秒 作業しました"));
+        assert!(!p.initially_expanded);
+        assert_eq!(p.label.as_deref(), Some("2件の過去のメッセージ"));
     }
     #[test]
     fn completed_empty_turn_does_not_restore_thinking() {
@@ -522,15 +514,14 @@ mod presentation_tests {
         ]});
         assert_eq!(
             order(&turn),
-            [
-                "u", "intro", "c1", "c2", "progress", "tool", "followup", "r"
-            ]
+            ["u", "intro", "c1", "c2", "progress", "tool", "followup"]
         );
+        assert!(project(&turn).all(|part| part.initially_expanded));
         let labels: Vec<_> = project(&turn)
             .filter(|part| part.collapsible)
             .map(|part| part.label.unwrap())
             .collect();
-        assert_eq!(labels, ["2件のコマンド", "1件のツール操作", "思考"]);
+        assert_eq!(labels, ["コマンドを実行しました", "ツールを使用しました"]);
     }
     #[test]
     fn completed_exchanges_keep_each_answer_beside_its_question() {
@@ -554,8 +545,8 @@ mod presentation_tests {
                 rows(&parts[1], &turn, Role::Response).next().unwrap().id,
                 "f2"
             );
-            assert_eq!(parts[0].label.as_deref(), Some("作業内容"));
-            assert_eq!(parts[1].label.as_deref(), Some("24分 19秒 作業しました"));
+            assert_eq!(parts[0].label.as_deref(), Some("1件の過去のメッセージ"));
+            assert_eq!(parts[1].label.as_deref(), Some("1件の過去のメッセージ"));
         }
     }
     #[test]
@@ -581,16 +572,16 @@ mod presentation_tests {
     #[test]
     fn failures_and_interruptions_keep_partial_responses_and_status() {
         for (status, expected) in [
-            ("failed", "12秒 作業した後に失敗しました・思考"),
-            ("interrupted", "12秒 作業した後に中断しました・思考"),
+            ("failed", "12秒 作業した後に失敗しました"),
+            ("interrupted", "12秒 作業した後に中断しました"),
         ] {
             let turn = turn!({"id":"turn","status":status,"durationMs":12000,"items":[
                 {"id":"a","type":"agentMessage","phase":"commentary"},
                 {"id":"r","type":"reasoning"}
             ]});
-            assert_eq!(order(&turn), ["a", "r"]);
+            assert_eq!(order(&turn), ["a"]);
             let last = project(&turn).last().unwrap();
-            assert!(last.last && last.collapsible);
+            assert!(last.last && !last.collapsible);
             assert_eq!(last.label.as_deref(), Some(expected));
         }
     }

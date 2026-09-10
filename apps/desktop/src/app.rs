@@ -211,6 +211,10 @@ impl Drop for Desktop {
     }
 }
 impl Desktop {
+    fn set_error(&mut self, error: String) {
+        agent_core::diagnostics::error("desktop", &error);
+        self.error = error;
+    }
     fn close(&mut self) -> Option<tokio::task::JoinHandle<()>> {
         let store = self.store.take()?;
         let persistence = self.persistence.take();
@@ -291,7 +295,7 @@ impl Desktop {
                                     view.composer_pending = None;
                                 }
                                 if let Err(error) = result {
-                                    view.error = error;
+                                    view.set_error(error);
                                 }
                                 view.accept_snapshot(window, cx);
                             },
@@ -320,7 +324,7 @@ impl Desktop {
                                     view.editor_pending = None;
                                 }
                                 if let Err(error) = result {
-                                    view.error = error;
+                                    view.set_error(error);
                                 }
                                 view.accept_snapshot(window, cx);
                             },
@@ -476,7 +480,7 @@ impl Desktop {
         self.epoch += 1;
         self.connecting = true;
         self.busy = 0;
-        self.error.clear();
+        self.error = self.runtime.logging_error.clone().unwrap_or_default();
         let epoch = self.epoch;
         let remote = self.remote.clone();
         let side = self.side_chat_mode;
@@ -600,7 +604,7 @@ impl Desktop {
     fn dispatch(&self, intent: Intent) {
         self.perform(intent, |view, result, window, cx| {
             if let Err(error) = result {
-                view.error = error;
+                view.set_error(error);
             }
             view.accept_snapshot(window, cx);
         });
@@ -641,13 +645,15 @@ impl Desktop {
                         ));
                         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
                     }
-                    Err(error) => self.error = error,
+                    Err(error) => self.set_error(error),
                 }
             }
             Update::Snapshot(epoch) if epoch == self.epoch => self.accept_snapshot(window, cx),
             Update::Ui { epoch, effect } if epoch == self.epoch => effect(self, window, cx),
             Update::Recording(id, event) => self.recording_update(id, event, window, cx),
-            Update::PersistenceError { epoch, error } if epoch == self.epoch => self.error = error,
+            Update::PersistenceError { epoch, error } if epoch == self.epoch => {
+                self.set_error(error)
+            }
             _ => {}
         }
         cx.notify();
@@ -662,8 +668,13 @@ impl Desktop {
         if previous.error != self.snapshot.error
             && let Some(error) = &self.snapshot.error
         {
-            self.error = error.clone();
+            agent_core::diagnostics::error("store", error);
         }
+        sync_error_banner(
+            &mut self.error,
+            previous.error.as_deref(),
+            self.snapshot.error.as_deref(),
+        );
         let previous_draft = previous.drafts.get(&previous.navigation.draft_key);
         let sources_changed = previous_draft.map(|draft| &draft.attachments)
             != self
@@ -1045,7 +1056,7 @@ impl Desktop {
             |view, result, window, cx| {
                 view.busy = view.busy.saturating_sub(1);
                 if let Err(error) = result {
-                    view.error = error;
+                    view.set_error(error);
                 }
                 view.accept_snapshot(window, cx);
             },
@@ -1191,7 +1202,7 @@ impl Desktop {
             |view, result, window, cx| {
                 view.busy = view.busy.saturating_sub(1);
                 if let Err(error) = result {
-                    view.error = error;
+                    view.set_error(error);
                 }
                 view.accept_snapshot(window, cx);
             },
@@ -1237,7 +1248,7 @@ impl Desktop {
             _ => Ok(()),
         };
         if let Err(error) = result {
-            self.error = error;
+            self.set_error(error);
             return;
         }
         self.panel = panel;
@@ -1258,7 +1269,7 @@ impl Desktop {
                 match result {
                     Ok(Some(path)) => view.new_chat(path.to_string_lossy().into_owned()),
                     Ok(None) => {}
-                    Err(error) => view.error = error,
+                    Err(error) => view.set_error(error),
                 }
             },
         );
@@ -1367,7 +1378,7 @@ impl Desktop {
             |view, result, window, cx| {
                 view.busy = view.busy.saturating_sub(1);
                 if let Err(error) = result {
-                    view.error = error;
+                    view.set_error(error);
                 }
                 view.accept_snapshot(window, cx);
             },
@@ -1406,7 +1417,7 @@ impl Desktop {
             |view, result, _, _| {
                 view.busy = view.busy.saturating_sub(1);
                 if let Err(error) = result {
-                    view.error = error;
+                    view.set_error(error);
                 }
             },
         );
@@ -1433,7 +1444,7 @@ impl Desktop {
             |view, result, window, cx| {
                 view.busy = view.busy.saturating_sub(1);
                 if let Err(error) = result {
-                    view.error = error;
+                    view.set_error(error);
                 }
                 view.accept_snapshot(window, cx);
             },
@@ -1492,7 +1503,7 @@ impl Desktop {
             |view, result, window, cx| {
                 view.worktree_saving = false;
                 if let Err(error) = result {
-                    view.error = error;
+                    view.set_error(error);
                 }
                 view.accept_snapshot(window, cx);
                 view.worktree_dirty = !view.settings_match_inputs(cx);
@@ -1514,7 +1525,7 @@ impl Desktop {
             }),
             move |view, result, window, cx| {
                 if let Err(error) = result {
-                    view.error = error;
+                    view.set_error(error);
                     if let Some(inputs) = view.requests.get_mut(&key) {
                         inputs.sent = false;
                     }
@@ -1554,6 +1565,16 @@ fn literal(text: &str) -> String {
     }
     result
 }
+fn sync_error_banner(banner: &mut String, previous: Option<&str>, next: Option<&str>) {
+    if previous != next {
+        if let Some(error) = next {
+            *banner = error.to_owned();
+        } else if previous == Some(banner.as_str()) {
+            banner.clear();
+        }
+    }
+}
+
 fn composer_should_submit(
     input: &TextareaState,
     action: &gpui_kit::component::input::Enter,
@@ -1606,5 +1627,39 @@ mod composer_tests {
                 assert!(composer_should_submit(input, &enter, window, cx));
             })
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::sync_error_banner;
+
+    #[test]
+    fn recovered_store_error_clears_its_banner() {
+        let mut banner = String::new();
+        sync_error_banner(&mut banner, None, Some("thread read failed"));
+        assert_eq!(banner, "thread read failed");
+        sync_error_banner(&mut banner, Some("thread read failed"), None);
+        assert!(banner.is_empty());
+    }
+
+    #[test]
+    fn recovery_preserves_a_newer_local_error_and_respects_dismissal() {
+        let mut banner = "draft save failed".to_owned();
+        sync_error_banner(&mut banner, Some("thread read failed"), None);
+        assert_eq!(banner, "draft save failed");
+        banner.clear();
+        sync_error_banner(
+            &mut banner,
+            Some("thread read failed"),
+            Some("thread read failed"),
+        );
+        assert!(banner.is_empty());
+        sync_error_banner(
+            &mut banner,
+            Some("thread read failed"),
+            Some("disconnected"),
+        );
+        assert_eq!(banner, "disconnected");
     }
 }

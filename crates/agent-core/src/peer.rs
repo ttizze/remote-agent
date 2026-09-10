@@ -262,7 +262,10 @@ impl RpcPeer {
         tokio::pin!(expiration);
         let _permit = tokio::select! {
             permit = self.permits.acquire() => permit.map_err(|_| self.closed_error())?,
-            _ = &mut expiration => return Err(PeerError::RequestTimeout { method, id }),
+            _ = &mut expiration => {
+                crate::diagnostics::error(&method, "RPC request timed out waiting for capacity");
+                return Err(PeerError::RequestTimeout { method, id });
+            },
         };
         let (tx, mut rx) = oneshot::channel();
         {
@@ -296,7 +299,13 @@ impl RpcPeer {
             failure => {
                 let error = match failure {
                     Ok(Err(error)) => error,
-                    Err(_) => PeerError::RequestTimeout { method, id },
+                    Err(_) => {
+                        crate::diagnostics::error(
+                            &method,
+                            "RPC request timed out waiting for response",
+                        );
+                        PeerError::RequestTimeout { method, id }
+                    }
                     _ => unreachable!(),
                 };
                 let pending = self.state.lock().unwrap().pending.remove(&id);
@@ -430,6 +439,11 @@ fn invalid(error: impl std::fmt::Display) -> PeerError {
     PeerError::InvalidMessage(error.to_string())
 }
 
+enum Termination {
+    Requested,
+    Failed(String),
+}
+
 async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: JsonlReader<R>,
     state: Arc<Mutex<State>>,
@@ -439,15 +453,15 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let mut sequence = 0u64;
     let reason = loop {
         let line = tokio::select! {
-            _ = stop.cancelled() => break "peer closed".into(),
-            result = reader.read_line() => match result { Ok(Some(line)) => line, Ok(None) => break "JSONL stream reached EOF".into(), Err(error) => break error.to_string() }
+            _ = stop.cancelled() => break Termination::Requested,
+            result = reader.read_line() => match result { Ok(Some(line)) => line, Ok(None) => break Termination::Failed("JSONL stream reached EOF".into()), Err(error) => break Termination::Failed(error.to_string()) }
         };
         if line.trim().is_empty() {
             continue;
         }
         let message = match classify_message(&line) {
             Ok(message) => message,
-            Err(error) => break error.to_string(),
+            Err(error) => break Termination::Failed(error.to_string()),
         };
         sequence += 1;
         if message.kind() == RpcMessageKind::Response {
@@ -467,6 +481,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 pending
             };
             if let Some(pending) = pending {
+                if let Some(error) = message.raw_error() {
+                    crate::diagnostics::rpc_error(&pending.method, id, error);
+                }
                 let response = if message.raw_id() == Some(pending.original_id.as_str()) {
                     Ok(line)
                 } else {
@@ -477,6 +494,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     .send(response.map(|value| Reply { sequence, value }));
             }
         } else {
+            crate::diagnostics::notification(&message);
             let state = state.lock().unwrap();
             if let Some(events) = &state.events {
                 let _ = events.send(PeerEvent::Message(Reply {
@@ -499,10 +517,10 @@ async fn write_loop<W: AsyncWrite + Unpin>(
 ) {
     let mut writer = JsonlWriter::with_max_message_bytes(writer, maximum);
     let reason = loop {
-        let line = tokio::select! { _ = stop.cancelled() => break "peer closed".into(), line = outgoing.recv() => match line { Some(line) => line, None => break "JSONL writer stopped".into() } };
-        let result = tokio::select! { _ = stop.cancelled() => break "peer closed".into(), result = writer.write_line(&line.line) => result };
+        let line = tokio::select! { _ = stop.cancelled() => break Termination::Requested, line = outgoing.recv() => match line { Some(line) => line, None => break Termination::Requested } };
+        let result = tokio::select! { _ = stop.cancelled() => break Termination::Requested, result = writer.write_line(&line.line) => result };
         if let Err(error) = result {
-            break error.to_string();
+            break Termination::Failed(error.to_string());
         }
         let _ = line.written.send(());
     };
@@ -513,7 +531,16 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     finished.send_replace(Some(result));
     terminate(&state, &permits, &stop, reason);
 }
-fn terminate(state: &Mutex<State>, permits: &Semaphore, stop: &CancellationToken, reason: String) {
+fn terminate(
+    state: &Mutex<State>,
+    permits: &Semaphore,
+    stop: &CancellationToken,
+    termination: Termination,
+) {
+    let (reason, failed) = match termination {
+        Termination::Requested => ("peer closed".to_owned(), false),
+        Termination::Failed(reason) => (reason, true),
+    };
     let pending = {
         let mut state = state.lock().unwrap();
         if state.closed.is_some() {
@@ -528,6 +555,9 @@ fn terminate(state: &Mutex<State>, permits: &Semaphore, stop: &CancellationToken
     permits.close();
     stop.cancel();
     for pending in pending.into_values() {
+        if failed {
+            crate::diagnostics::error(&pending.method, &reason);
+        }
         let _ = pending
             .complete
             .send(Err(PeerError::ConnectionClosed(reason.clone())));

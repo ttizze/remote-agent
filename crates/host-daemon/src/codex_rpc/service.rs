@@ -360,6 +360,15 @@ impl CodexRpcService {
             Ok(response) => response,
             Err(error) => request.error("invalid_params", &error)?,
         };
+        if let Ok(response) = RpcMessage::parse(&response)
+            && let Some(error) = response.raw_error()
+        {
+            agent_core::diagnostics::rpc_error(
+                method,
+                request.raw_id().and_then(|id| id.parse().ok()),
+                error,
+            );
+        }
         self.inner
             .router
             .send_line(session, response)

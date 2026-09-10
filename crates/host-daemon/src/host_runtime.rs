@@ -64,10 +64,16 @@ impl HostRuntime {
                             runtime.serve(incoming, stop, permit, authorized_slots).await
                         });
                     }
-                    Some(Err(_)) => continue,
+                    Some(Err(error)) => agent_core::diagnostics::error("host.accept", &error.to_string()),
                     None => break Ok(()),
                 },
-                Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
+                Some(result) = sessions.join_next(), if !sessions.is_empty() => {
+                    match result {
+                        Ok(Err(error)) => agent_core::diagnostics::error("host.session", &error),
+                        Err(error) => agent_core::diagnostics::error("host.session", &error.to_string()),
+                        Ok(Ok(())) => {}
+                    }
+                }
             }
         };
         shutdown.cancel();

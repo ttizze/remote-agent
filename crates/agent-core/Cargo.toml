@@ -26,3 +26,6 @@ thiserror.workspace = true
 tempfile = "3"
 scopeguard = "1.2"
 pin-project-lite = "0.2"
+file-rotate = "0.8"
+regex = "1"
+url.workspace = true

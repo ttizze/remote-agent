@@ -1,4 +1,5 @@
 pub mod client;
+pub mod diagnostics;
 pub mod models;
 pub mod peer;
 pub mod state;

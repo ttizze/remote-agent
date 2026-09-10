@@ -13,6 +13,7 @@ pub(crate) struct Runtime {
     pub(crate) handle: tokio::runtime::Handle,
     pub(crate) connections: std::sync::Arc<platform::Connections>,
     pub(crate) closing: tokio_util::task::TaskTracker,
+    pub(crate) logging_error: Option<String>,
 }
 impl Global for Runtime {}
 struct DesktopAssets;
@@ -38,6 +39,17 @@ impl AssetSource for DesktopAssets {
     }
 }
 fn main() {
+    let logging_error = platform::state_dir()
+        .and_then(|directory| {
+            agent_core::diagnostics::initialize(
+                &directory,
+                agent_core::diagnostics::Component::Desktop,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .map_err(|error| error.to_string())
+        })
+        .err()
+        .map(|error| format!("エラーログを保存できません: {error}"));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -52,9 +64,11 @@ fn main() {
             cx.set_global(Runtime {
                 handle,
                 closing,
+                logging_error,
                 connections: std::sync::Arc::new(platform::Connections::default()),
             });
             cx.on_app_quit(|cx| {
+                agent_core::diagnostics::shutdown();
                 let runtime = cx.global::<Runtime>().clone();
                 async move {
                     runtime.closing.close();
