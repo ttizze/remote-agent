@@ -1,11 +1,11 @@
 //! The single state owner. RPC work runs concurrently; publication follows wire order.
+use crate::peer::{RpcMessageKind, classify_message};
 use crate::{
     client::*,
     peer::{PeerError, PeerEvent, RpcPeer},
     state::{Effect, Event, Intent, Snapshot, operations as op, reduce},
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use host_protocol::{RpcMessageKind, classify_message};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},

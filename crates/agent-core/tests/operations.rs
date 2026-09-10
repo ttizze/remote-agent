@@ -1,3 +1,4 @@
+use agent_core::peer::{JsonlReader, JsonlWriter};
 use agent_core::state::operations::{
     CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
     ReadAccountLogin, ReadFile, ReadItem, ReadOlder, ReadThread, ReadWorktreeSettings,
@@ -9,7 +10,6 @@ use agent_core::{
     models::{ListQuery, Thread, WorktreeSettings},
     peer::{PeerError, RpcPeer},
 };
-use host_protocol::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -140,17 +140,23 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             };
             let raw = if answer["type"] == "raw" {
                 Some(
-                    serde_json::from_str::<Box<serde_json::value::RawValue>>(text(answer, "json"))
+                    serde_json::from_str::<Value>(text(answer, "json"))
                         .map_err(|error| PeerError::InvalidMessage(error.to_string()))?,
                 )
             } else {
                 None
             };
             let answer = match text(answer, "type") {
-                "decision" => Answer::Decision(answer["index"].as_u64().unwrap() as usize),
-                "permissions" => Answer::Permissions(answer["allow"].as_bool().unwrap()),
-                "answers" => Answer::Questions(answers),
-                "raw" => Answer::Raw(raw.unwrap()),
+                "decision" => Answer::Decision {
+                    index: answer["index"].as_u64().unwrap() as u32,
+                },
+                "permissions" => Answer::Permissions {
+                    allow: answer["allow"].as_bool().unwrap(),
+                },
+                "answers" => Answer::Questions { answers },
+                "raw" => Answer::Raw {
+                    value: raw.unwrap(),
+                },
                 kind => panic!("unknown answer {kind}"),
             };
             client.respond(&request, &answer).await?;

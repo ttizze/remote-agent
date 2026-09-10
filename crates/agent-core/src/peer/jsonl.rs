@@ -1,8 +1,8 @@
 use std::io;
 
-use futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec, LinesCodecError};
+use futures_util::StreamExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 /// Last-resort safety ceiling for one JSONL message.
 ///
@@ -72,19 +72,19 @@ where
 }
 
 /// Writes newline-delimited source JSON to any asynchronous byte stream.
-pub struct JsonlWriter<W> {
-    inner: FramedWrite<W, LinesCodec>,
+pub struct JsonlWriter<W: AsyncWrite> {
+    inner: BufWriter<W>,
     maximum: usize,
 }
 
-impl<W> JsonlWriter<W> {
+impl<W: AsyncWrite> JsonlWriter<W> {
     pub fn new(writer: W) -> Self {
         Self::with_max_message_bytes(writer, DEFAULT_MAX_MESSAGE_BYTES)
     }
 
     pub fn with_max_message_bytes(writer: W, maximum: usize) -> Self {
         Self {
-            inner: FramedWrite::new(writer, LinesCodec::new_with_max_length(maximum)),
+            inner: BufWriter::new(writer),
             maximum,
         }
     }
@@ -123,37 +123,17 @@ where
     }
 
     async fn send_line(&mut self, line: &str) -> Result<(), JsonlError> {
-        self.inner
-            .send(line.to_owned())
-            .await
-            .map_err(|error| match error {
-                LinesCodecError::MaxLineLengthExceeded => JsonlError::MessageTooLarge {
-                    maximum: self.maximum,
-                },
-                LinesCodecError::Io(error) => JsonlError::Io(error),
-            })
+        self.inner.write_all(line.as_bytes()).await?;
+        self.inner.write_all(b"\n").await?;
+        self.flush().await
     }
 
     pub async fn flush(&mut self) -> Result<(), JsonlError> {
-        SinkExt::<String>::flush(&mut self.inner)
-            .await
-            .map_err(|error| match error {
-                LinesCodecError::MaxLineLengthExceeded => JsonlError::MessageTooLarge {
-                    maximum: self.maximum,
-                },
-                LinesCodecError::Io(error) => JsonlError::Io(error),
-            })
+        self.inner.flush().await.map_err(Into::into)
     }
 
     pub async fn shutdown(&mut self) -> Result<(), JsonlError> {
-        SinkExt::<String>::close(&mut self.inner)
-            .await
-            .map_err(|error| match error {
-                LinesCodecError::MaxLineLengthExceeded => JsonlError::MessageTooLarge {
-                    maximum: self.maximum,
-                },
-                LinesCodecError::Io(error) => JsonlError::Io(error),
-            })
+        self.inner.shutdown().await.map_err(Into::into)
     }
 }
 

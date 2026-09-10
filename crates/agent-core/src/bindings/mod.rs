@@ -1,11 +1,10 @@
 //! Native binding boundary. Core owns all conversation state and effects.
-mod intent;
 mod json;
 mod snapshot;
 
+use crate::state::Intent;
 use crate::transport::{Endpoint, Identity, Relays, Ticket};
 use crate::{models::Invitation, state::Snapshot, store::Outcome};
-pub use intent::*;
 use std::{
     future::Future,
     pin::Pin,
@@ -138,7 +137,7 @@ impl AgentStore {
 
     /// Enqueue synchronously; native task scheduling cannot reorder UI intents.
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {
-        let receipt = self.store.dispatch(intent.try_into()?);
+        let receipt = self.store.dispatch(intent);
         Ok(Arc::new(Receipt {
             result: Mutex::new(Some(Box::pin(async move { receipt.await.map_err(error) }))),
         }))
@@ -194,8 +193,8 @@ mod tests {
     }
     #[tokio::test]
     async fn reconnect_reloads_selected_state_without_native_dispatch() {
+        use crate::peer::{JsonlReader, JsonlWriter};
         use crate::transport::Trust;
-        use host_protocol::{JsonlReader, JsonlWriter};
         use serde_json::{Value, json};
         tokio::time::timeout(Duration::from_secs(10), async {
             let identity = Identity::generate();
@@ -219,7 +218,7 @@ mod tests {
             let mut old = JsonlReader::new(read);
             assert_eq!(old.read_line().await.unwrap().as_deref(), Some(""));
             assert!(store.snapshot().connected());
-            store.dispatch(Intent::SetDraftText { key: "thread".into(), text: "preserved".into() })
+            store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "preserved".into() })
                 .unwrap().wait().await.unwrap();
             // Leave every automatic read pending on the old transport.
             let mut methods = std::collections::BTreeSet::new();

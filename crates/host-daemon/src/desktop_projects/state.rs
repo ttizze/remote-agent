@@ -2,9 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::ProjectPage;
-use agent_core::models::{Project, ProjectRoot, Thread};
+use agent_core::models::{PageParams, Project, ProjectRoot, Thread};
 use serde::Deserialize;
-use serde_json::{Value, json};
 
 const DEFAULT_PAGE_LIMIT: usize = 100;
 const MAX_PAGE_LIMIT: usize = 512;
@@ -18,7 +17,7 @@ pub(crate) enum Error {
 
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {
-    projects: Vec<DesktopProject>,
+    pub(crate) projects: Vec<Project>,
     assignments: HashMap<String, ProjectAssignment>,
     projectless_thread_ids: HashSet<String>,
     workspace_root_hints: HashMap<String, String>,
@@ -45,7 +44,11 @@ impl Snapshot {
                 .then_with(|| left.id.cmp(&right.id))
         });
         Ok(Self {
-            projects,
+            projects: projects
+                .into_iter()
+                .enumerate()
+                .map(|(position, project)| project.into_model(position))
+                .collect(),
             assignments: state.thread_project_assignments,
             projectless_thread_ids: state.projectless_thread_ids.into_iter().collect(),
             workspace_root_hints: state.thread_workspace_root_hints,
@@ -53,32 +56,21 @@ impl Snapshot {
         })
     }
 
-    pub(crate) fn project_list(&self, params: &Value) -> Result<ProjectPage, Error> {
+    pub(crate) fn project_list(&self, params: &PageParams) -> Result<ProjectPage, Error> {
         let offset = params
-            .get("cursor")
-            .and_then(Value::as_str)
+            .cursor
+            .as_deref()
             .map(parse_cursor)
             .transpose()?
             .unwrap_or(0);
         let limit = params
-            .get("limit")
-            .and_then(Value::as_u64)
-            .and_then(|limit| usize::try_from(limit).ok())
+            .limit
             .unwrap_or(DEFAULT_PAGE_LIMIT)
             .clamp(1, MAX_PAGE_LIMIT);
         let end = offset.saturating_add(limit).min(self.projects.len());
-        let page = self
-            .projects
-            .get(offset..end)
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .map(|(page_position, project)| project.to_model(offset.saturating_add(page_position)))
-            .collect::<Vec<_>>();
-        let next_cursor = (end < self.projects.len()).then(|| format!("{CURSOR_PREFIX}{end}"));
         Ok(ProjectPage {
-            data: page,
-            next_cursor,
+            data: self.projects.get(offset..end).unwrap_or_default().to_vec(),
+            next_cursor: (end < self.projects.len()).then(|| format!("{CURSOR_PREFIX}{end}")),
             extra: Default::default(),
         })
     }
@@ -130,8 +122,8 @@ impl Snapshot {
         let mut matched: Option<(&str, usize)> = None;
         let mut ambiguous = false;
         for project in &self.projects {
-            for root in &project.root_paths {
-                let root = Path::new(root);
+            for root in &project.roots {
+                let root = Path::new(&root.path);
                 if !root.is_absolute() || !workspace.starts_with(root) {
                     continue;
                 }
@@ -192,24 +184,23 @@ struct DesktopProject {
 }
 
 impl DesktopProject {
-    fn to_model(&self, position: usize) -> Project {
+    fn into_model(self, position: usize) -> Project {
         Project {
-            id: self.id.clone(),
-            name: self.name.clone(),
+            id: self.id,
+            name: self.name,
             roots: self
                 .root_paths
-                .iter()
+                .into_iter()
                 .map(|path| ProjectRoot {
-                    path: path.clone(),
+                    path,
                     extra: Default::default(),
                 })
                 .collect(),
-            extra: serde_json::Map::from_iter([
-                ("position".into(), json!(position)),
-                ("createdAt".into(), json!(self.created_at)),
-                ("updatedAt".into(), json!(self.updated_at)),
-                ("source".into(), json!("codexDesktop")),
-            ]),
+            position: Some(position as u64),
+            created_at: Some(self.created_at),
+            updated_at: Some(self.updated_at),
+            source: Some("codexDesktop".into()),
+            extra: Default::default(),
         }
     }
 }
@@ -223,6 +214,7 @@ struct ProjectAssignment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
     impl Snapshot {
         fn enrich_threads(&self, mut result: Value) -> Value {
             let enrich = |value: &mut Value| {
@@ -276,8 +268,15 @@ mod tests {
 
     #[test]
     fn lists_desktop_projects_in_desktop_order_with_roots() {
-        let page =
-            serde_json::to_value(snapshot().project_list(&json!({"limit": 1})).unwrap()).unwrap();
+        let page = serde_json::to_value(
+            snapshot()
+                .project_list(&PageParams {
+                    limit: Some(1),
+                    ..Default::default()
+                })
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             page,
             json!({
@@ -294,7 +293,10 @@ mod tests {
             })
         );
         let second = snapshot()
-            .project_list(&json!({"cursor": "desktop-projects:1", "limit": 1}))
+            .project_list(&PageParams {
+                cursor: Some("desktop-projects:1".into()),
+                limit: Some(1),
+            })
             .unwrap();
         assert_eq!(second.data[0].id, "project-b");
         assert!(second.next_cursor.is_none());
@@ -302,12 +304,22 @@ mod tests {
 
     #[test]
     fn clamps_page_limits_without_changing_global_positions() {
-        let first = snapshot().project_list(&json!({"limit": 0})).unwrap();
+        let first = snapshot()
+            .project_list(&PageParams {
+                limit: Some(0),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(first.data.len(), 1);
-        assert_eq!(first.data[0].extra["position"], 0);
+        assert_eq!(first.data[0].position, Some(0));
         assert_eq!(first.next_cursor.as_deref(), Some("desktop-projects:1"));
 
-        let all = snapshot().project_list(&json!({"limit": 9999})).unwrap();
+        let all = snapshot()
+            .project_list(&PageParams {
+                limit: Some(9999),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(all.data.len(), 2);
         assert!(all.next_cursor.is_none());
     }
@@ -381,7 +393,10 @@ mod tests {
     #[test]
     fn rejects_foreign_cursors() {
         assert!(matches!(
-            snapshot().project_list(&json!({"cursor": "other:1"})),
+            snapshot().project_list(&PageParams {
+                cursor: Some("other:1".into()),
+                ..Default::default()
+            }),
             Err(Error::InvalidCursor)
         ));
     }

@@ -38,12 +38,7 @@ impl Snapshot {
                     ThreadSummary {
                         id,
                         name: thread.name.clone().unwrap_or_default(),
-                        preview: thread
-                            .extra
-                            .get("preview")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .into(),
+                        preview: thread.preview.clone().unwrap_or_default(),
                         cwd: thread.cwd.clone().unwrap_or_default(),
                         project_id: thread.project_id.clone().flatten(),
                         active,

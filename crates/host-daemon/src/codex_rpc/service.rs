@@ -1,13 +1,18 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::desktop_projects::ThreadPage;
+use agent_core::peer::{RpcMessageKind, classify_message, rewrite_top_level_id};
 use agent_core::{
-    models::{Item, Thread, ThreadResponse, Turn},
-    peer::PeerEvent,
+    models::{
+        HistoryItem, HistoryPage, HistoryParams, ListQuery, PageParams, Thread, ThreadListParams,
+        ThreadParams, ThreadResponse, Turn,
+    },
+    peer::{PeerEvent, RpcMessage, RpcMessageError, RpcResponse},
+    state::operations as op,
 };
 use codex_app_server::{CodexAppServer, Error as AppServerError};
-use host_protocol::{RpcMessageKind, classify_message, raw_object, rewrite_top_level_id};
-use serde_json::{Map, Value, json, value::RawValue};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use tokio::sync::broadcast;
 
 use super::routing::{
@@ -18,18 +23,56 @@ use crate::{
     HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
 };
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NativePage<T> {
-    data: Vec<T>,
-    next_cursor: Option<String>,
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Failure {
+    Host { code: &'static str, message: String },
+    Upstream(Box<RawValue>),
+}
+impl From<RpcMessageError> for Failure {
+    fn from(error: RpcMessageError) -> Self {
+        Self::new("invalid_params", error)
+    }
 }
 
-#[derive(serde::Deserialize)]
+impl Failure {
+    fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Host {
+            code,
+            message: error.to_string(),
+        }
+    }
+}
+impl From<RpcMessageError> for DispatchError {
+    fn from(error: RpcMessageError) -> Self {
+        Self::InvalidMessage(error.to_string())
+    }
+}
+impl From<serde_json::Error> for DispatchError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::InvalidMessage(error.to_string())
+    }
+}
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NativeItem {
-    item: Arc<Item>,
-    turn_id: Option<String>,
+struct TerminalParams<'a> {
+    process_handle: &'a str,
+    cwd: &'a str,
+    size: agent_core::client::TerminalSize,
+    command: &'a [&'a str],
+    env: TerminalEnvironment,
+    tty: bool,
+    stream_stdin: bool,
+    stream_stdout_stderr: bool,
+    timeout_ms: Option<u64>,
+    output_bytes_cap: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct TerminalEnvironment {
+    term: &'static str,
+    colorterm: &'static str,
 }
 
 const MOBILE_THREAD_PAGE_SIZE: usize = 5;
@@ -132,18 +175,15 @@ impl CodexRpcService {
         line: String,
     ) -> Result<(), DispatchError> {
         self.ensure_session(session)?;
-        let message = classify_message(&line)
-            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-        if message.kind() != RpcMessageKind::Request {
+        let request = RpcMessage::parse(&line)?;
+        if request.kind() != RpcMessageKind::Request {
             return Err(DispatchError::InvalidMessage(
-                "request dispatcher received a non-request".to_owned(),
+                "request dispatcher received a non-request".into(),
             ));
         }
-        let method = message
+        let method = request
             .method()
-            .ok_or_else(|| DispatchError::InvalidMessage("request has no method".to_owned()))?
-            .to_owned();
-
+            .ok_or_else(|| DispatchError::InvalidMessage("request has no method".into()))?;
         if method == "turn/start" {
             let accounts = self.inner.accounts.lock().await;
             if let Some(error) = accounts
@@ -153,157 +193,167 @@ impl CodexRpcService {
                 return self
                     .inner
                     .router
-                    .send_line(
-                        session,
-                        error_response(&line, "account_unavailable", error)?,
-                    )
+                    .send_line(session, request.error("account_unavailable", &error)?)
                     .map_err(Into::into);
             }
         }
-
-        let response = match method.as_str() {
-            "initialize" | "initialized" => error_response(
-                &line,
-                "daemon_owned_method",
-                &format!("{method} is managed by the Host daemon"),
-            )?,
-            "host/account/list"
-            | "host/account/select"
-            | "host/account/login/start"
-            | "host/account/login/status"
-            | "host/account/login/cancel" => {
-                let mut accounts = self.inner.accounts.lock().await;
-                let result = match accounts.as_mut() {
-                    Some(accounts) => {
-                        accounts
-                            .request(&self.inner.app_server, &method, &parse_params(&line)?)
-                            .await
+        let response = async {
+            let response = match method {
+                "initialize" | "initialized" => request.error(
+                    "daemon_owned_method",
+                    &format_args!("{method} is managed by the Host daemon"),
+                )?,
+                "host/account/list"
+                | "host/account/select"
+                | "host/account/login/start"
+                | "host/account/login/status"
+                | "host/account/login/cancel" => {
+                    let mut accounts = self.inner.accounts.lock().await;
+                    let result = match accounts.as_mut() {
+                        Some(accounts) => match serde_json::from_str(&line) {
+                            Ok(params) => accounts.request(&self.inner.app_server, params).await,
+                            Err(error) => Err(error.to_string()),
+                        },
+                        None => Err("このHostはアカウント切り替えに対応していません。".into()),
+                    };
+                    request.response(
+                        result.map_err(|error| Failure::new("account_operation_failed", error)),
+                    )?
+                }
+                HOST_PROJECT_LIST_METHOD => {
+                    let result = self
+                        .inner
+                        .desktop_projects
+                        .project_list(&request.params::<PageParams>()?)
+                        .await;
+                    request.response(result.map_err(|error| {
+                        Failure::new("desktop_project_state_unavailable", error)
+                    }))?
+                }
+                HOST_THREAD_LIST_METHOD => {
+                    let params: op::ListThreads = request.params()?;
+                    if params.title_only {
+                        request.response(self.host_title_list(params.query).await)?
+                    } else {
+                        request.forward_response(self.host_thread_list(&request).await)?
                     }
-                    None => Err("このHostはアカウント切り替えに対応していません。".into()),
-                };
-                match result {
-                    Ok(result) => response_with_result(&line, result)?,
-                    Err(error) => response_with_error(&line, "account_operation_failed", &error)?,
                 }
-            }
-            HOST_PROJECT_LIST_METHOD => self.host_project_list(&line).await?,
-            HOST_THREAD_LIST_METHOD => {
-                if parse_params(&line)?.get("titleOnly") == Some(&Value::Bool(true)) {
-                    self.host_title_list(&line).await?
-                } else {
-                    self.host_thread_request(&line, "thread/list", false)
-                        .await?
+                "host/thread/item/read" => {
+                    request.response(self.host_thread_item_read(request.params()?).await)?
                 }
-            }
-            "host/thread/item/read" => self.host_thread_item_read(&line).await?,
-            "host/thread/watch" | "host/thread/unwatch" => {
-                match self
-                    .inner
-                    .thread_watches
-                    .request(
-                        session,
-                        self.inner.router.clone(),
-                        method.clone(),
-                        parse_params(&line)?,
+                "host/thread/watch" | "host/thread/unwatch" => {
+                    let result = match serde_json::from_str(&line) {
+                        Ok(params) => {
+                            self.inner
+                                .thread_watches
+                                .request(session, self.inner.router.clone(), params)
+                                .await
+                        }
+                        Err(error) => Err(error.to_string()),
+                    };
+                    request.response(
+                        result.map_err(|error| Failure::new("thread_watch_failed", error)),
+                    )?
+                }
+                HOST_THREAD_READ_METHOD => request.forward_response(
+                    self.host_thread_request(&request, "thread/read", true)
+                        .await,
+                )?,
+                "host/thread/turns/list" | "host/thread/items/list" => request.response(
+                    self.host_thread_history_page(
+                        request.params()?,
+                        method.ends_with("items/list"),
                     )
-                    .await
-                {
-                    Ok(result) => response_with_result(&line, result)?,
-                    Err(error) => response_with_error(&line, "thread_watch_failed", &error)?,
+                    .await,
+                )?,
+                "host/worktree/settings/read" | "host/worktree/settings/update" => {
+                    let update = if method.ends_with("/update") {
+                        request.params().map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    let result = match update {
+                        Ok(update) => self.inner.worktrees.settings(update).await,
+                        Err(error) => Err(error.to_string()),
+                    };
+                    request.response(
+                        result.map_err(|error| Failure::new("worktree_settings_failed", error)),
+                    )?
                 }
-            }
-            HOST_THREAD_READ_METHOD => self.host_thread_request(&line, "thread/read", true).await?,
-            "host/thread/turns/list" => self.host_thread_history_page(&line, false).await?,
-            "host/thread/items/list" => self.host_thread_history_page(&line, true).await?,
-            "host/worktree/settings/read" | "host/worktree/settings/update" => {
-                let update = if method.ends_with("/update") {
-                    Some(parse_params(&line)?)
-                } else {
-                    None
-                };
-                match self.inner.worktrees.settings(update).await {
-                    Ok(result) => response_with_result(&line, result)?,
-                    Err(error) => response_with_error(&line, "worktree_settings_failed", &error)?,
-                }
-            }
-            HOST_THREAD_START_METHOD | "thread/start" => {
-                self.host_thread_request(&line, "thread/start", false)
-                    .await?
-            }
-            "host/terminal/start" => {
-                let raw = parse_params(&line)?;
-                let result: Result<agent_core::state::operations::StartTerminal<&str>, _> =
-                    serde::Deserialize::deserialize(&raw);
-                match result {
+                HOST_THREAD_START_METHOD | "thread/start" => request.forward_response(
+                    self.host_thread_request(&request, "thread/start", false)
+                        .await,
+                )?,
+                "host/terminal/start" => match request.params::<op::StartTerminal<&str>>() {
                     Ok(params) => {
-                        let upstream_params = json!({
-                            "processHandle": params.handle,
-                            "cwd": params.cwd,
-                            "size": params.size,
-                            "command": crate::platform::terminal_command(),
-                            "env": {"TERM":"xterm-256color", "COLORTERM":"truecolor"},
-                            "tty": true, "streamStdin": true, "streamStdoutStderr": true,
-                            "timeoutMs": null, "outputBytesCap": null,
-                        });
-                        let mut request = raw_object(&line)
-                            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-                        request.insert("method".into(), raw_value("process/spawn")?);
-                        request.insert("params".into(), raw_value(upstream_params)?);
-                        let upstream = serde_json::to_string(&request)
-                            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-                        match self.inner.app_server.request_raw(&upstream).await {
+                        let params = TerminalParams {
+                            process_handle: params.handle,
+                            cwd: params.cwd,
+                            size: params.size,
+                            command: crate::platform::terminal_command(),
+                            env: TerminalEnvironment {
+                                term: "xterm-256color",
+                                colorterm: "truecolor",
+                            },
+                            tty: true,
+                            stream_stdin: true,
+                            stream_stdout_stderr: true,
+                            timeout_ms: None,
+                            output_bytes_cap: None,
+                        };
+                        match self
+                            .inner
+                            .app_server
+                            .request_raw(&request.request("process/spawn", &params)?)
+                            .await
+                        {
                             Ok(response) => response,
-                            Err(error) => {
-                                response_with_error(&line, "terminal_start_failed", &error)?
-                            }
+                            Err(error) => request.error("terminal_start_failed", &error)?,
                         }
                     }
-                    Err(error) => response_with_error(&line, "invalid_terminal_params", &error)?,
+                    Err(error) => request.error("invalid_terminal_params", &error)?,
+                },
+                "host/dictation/transcribe" => {
+                    let result = match request.params() {
+                        Ok(params) => {
+                            crate::dictation::transcribe(&self.inner.app_server, &params).await
+                        }
+                        Err(_) => Err("録音データがありません。".into()),
+                    };
+                    request
+                        .response(result.map_err(|error| Failure::new("dictation_failed", error)))?
                 }
-            }
-            "host/dictation/transcribe" => {
-                match crate::dictation::transcribe(&self.inner.app_server, &parse_params(&line)?)
-                    .await
-                {
-                    Ok(result) => response_with_result(&line, result)?,
-                    Err(error) => response_with_error(&line, "dictation_failed", &error)?,
+                "host/workspace/review" => {
+                    let result = match request.params::<op::ReviewWorkspace>() {
+                        Ok(params) => crate::inspect_workspace(params.cwd).await,
+                        Err(_) => Err("working directory is required".into()),
+                    };
+                    request.response(
+                        result.map_err(|error| Failure::new("workspace_review_failed", error)),
+                    )?
                 }
-            }
-            "host/workspace/review" => {
-                let params = parse_params(&line)?;
-                let result = match params.get("cwd").and_then(Value::as_str) {
-                    Some(cwd) => {
-                        crate::inspect_workspace(cwd.to_owned())
-                            .await
-                            .and_then(|result| {
-                                serde_json::to_value(result).map_err(|error| error.to_string())
-                            })
-                    }
-                    None => Err("working directory is required".into()),
-                };
-                match result {
-                    Ok(result) => response_with_result(&line, result)?,
-                    Err(error) => response_with_error(&line, "workspace_review_failed", &error)?,
+                "host/file/list" | "host/file/read" | "host/file/write" | "host/blob/upload"
+                | "host/blob/download" => {
+                    let result = match serde_json::from_str(&line) {
+                        Ok(params) => self.inner.files.request(session, params).await,
+                        Err(_) => Err("invalid file parameters".into()),
+                    };
+                    request.response(
+                        result.map_err(|error| Failure::new("file_operation_failed", error)),
+                    )?
                 }
-            }
-            "host/file/list" | "host/file/read" | "host/file/write" | "host/blob/upload"
-            | "host/blob/download" => {
-                match self
-                    .inner
-                    .files
-                    .request(session, method.clone(), parse_params(&line)?)
-                    .await
-                {
-                    Ok(result) => response_with_result(&line, result)?,
-                    Err(error) => response_with_error(&line, "file_operation_failed", &error)?,
-                }
-            }
-            _ => match self.inner.app_server.request_raw(&line).await {
-                Ok(response) => response,
-                Err(error) => error_response(&line, "codex_unavailable", &error.to_string())?,
-            },
+                _ => match self.inner.app_server.request_raw(&line).await {
+                    Ok(response) => response,
+                    Err(error) => request.error("codex_unavailable", &error)?,
+                },
+            };
+            Ok::<_, DispatchError>(response)
+        }
+        .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => request.error("invalid_params", &error)?,
         };
-
         self.inner
             .router
             .send_line(session, response)
@@ -376,219 +426,191 @@ impl CodexRpcService {
             .map_err(Into::into)
     }
 
-    async fn host_project_list(&self, line: &str) -> Result<String, DispatchError> {
-        let params = parse_params(line)?;
-        match self.inner.desktop_projects.project_list(&params).await {
-            Ok(result) => response_with_result(line, result),
-            Err(error) => response_with_error(line, "desktop_project_state_unavailable", &error),
-        }
-    }
-
-    async fn host_title_list(&self, line: &str) -> Result<String, DispatchError> {
-        let params = parse_params(line)?;
-        let snapshot = match self.inner.desktop_projects.load().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                return response_with_error(line, "desktop_project_state_unavailable", &error);
-            }
-        };
-        let mut projects = Vec::new();
-        let mut project_cursor = None;
-        loop {
-            let mut page = snapshot
-                .project_list(&json!({"limit":512,"cursor":project_cursor}))
-                .map_err(|_| DispatchError::InvalidMessage("invalid project cursor".into()))?;
-            projects.append(&mut page.data);
-            project_cursor = page.next_cursor;
-            if project_cursor.is_none() {
-                break;
-            }
-        }
-        let mut titles = crate::desktop_projects::titles::TitleList::new(projects, &params);
+    async fn host_title_list(
+        &self,
+        query: ListQuery,
+    ) -> Result<agent_core::models::ThreadList, Failure> {
+        let snapshot = self
+            .inner
+            .desktop_projects
+            .load()
+            .await
+            .map_err(|error| Failure::new("desktop_project_state_unavailable", error))?;
+        let mut titles =
+            crate::desktop_projects::titles::TitleList::new(&snapshot.projects, &query);
         let mut cursors = std::collections::HashSet::new();
-        let mut upstream_params = json!({"limit":100,"sortKey":"updated_at","sortDirection":"desc","useStateDbOnly":true});
-        if let Some(term) = params
-            .get("searchTerm")
-            .and_then(Value::as_str)
-            .filter(|term| !term.trim().is_empty())
-        {
-            upstream_params["searchTerm"] = json!(term);
-        }
+        let mut params = ThreadListParams {
+            limit: 100,
+            sort_key: "updated_at",
+            sort_direction: "desc",
+            use_state_db_only: true,
+            search_term: (!query.search_term.trim().is_empty())
+                .then_some(query.search_term.as_str()),
+            cursor: None,
+        };
         loop {
-            // The DB-only flag avoids scanning or repairing JSONL history. A
-            // single Desktop snapshot gives every page the same membership rules.
-            let response = match self
+            // DB metadata avoids scanning or repairing the rollout. Every page
+            // uses one Desktop snapshot and the same membership decisions.
+            let response = self
                 .inner
                 .app_server
-                .request_raw(
-                    &json!({"id":0,"method":"thread/list","params":upstream_params}).to_string(),
-                )
+                .request::<_, ThreadPage>("thread/list", &params)
                 .await
-            {
-                Ok(response) => response,
-                Err(error) => return response_with_error(line, "codex_unavailable", &error),
-            };
-            let mut response: Value = serde_json::from_str(&response)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            if let Some(error) = response.get_mut("error") {
-                let mut object = response_object(line)?;
-                object.insert("error".into(), raw_value(error.take())?);
-                return serde_json::to_string(&object)
-                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
-            }
-            let result: ThreadPage = match serde_json::from_value(response["result"].take()) {
-                Ok(result) => result,
-                Err(error) => return response_with_error(line, "invalid_thread_list", &error),
-            };
-            for mut thread in result.data {
+                .map_err(|error| Failure::new("codex_unavailable", error))?;
+            let page = response.outcome.map_err(Failure::Upstream)?;
+            for mut thread in page.data {
                 snapshot.enrich_thread(&mut thread);
                 titles.push(thread);
             }
-            let next_cursor = result
-                .next_cursor
-                .as_deref()
-                .filter(|cursor| !cursor.is_empty());
-            if titles.complete() || next_cursor.is_none() {
+            params.cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
+            if titles.complete() || params.cursor.is_none() {
                 break;
             }
-            let next_cursor = next_cursor.unwrap();
-            if !cursors.insert(next_cursor.to_owned()) {
-                return error_response(line, "invalid_thread_list", "thread list cursor repeated");
+            if !cursors.insert(params.cursor.as_ref().unwrap().clone()) {
+                return Err(Failure::new(
+                    "invalid_thread_list",
+                    "thread list cursor repeated",
+                ));
             }
-            upstream_params["cursor"] = json!(next_cursor);
         }
-        response_with_result(line, titles.finish())
+        Ok(titles.finish())
+    }
+
+    async fn host_thread_list(
+        &self,
+        request: &RpcMessage<'_>,
+    ) -> Result<RpcResponse<ThreadPage>, Failure> {
+        let params: ThreadParams = request.params()?;
+        let line = self
+            .inner
+            .app_server
+            .request_raw(&request.request("thread/list", &params)?)
+            .await
+            .map_err(|error| Failure::new("codex_unavailable", error))?;
+        let mut response: RpcResponse<ThreadPage> = RpcResponse::parse(&line)?;
+        if let Ok(page) = &mut response.outcome {
+            self.inner
+                .desktop_projects
+                .enrich_threads(&mut page.data)
+                .await
+                .map_err(|error| Failure::new("desktop_project_state_unavailable", error))?;
+        }
+        Ok(response)
     }
 
     async fn host_thread_request(
         &self,
-        line: &str,
-        upstream_method: &str,
+        request: &RpcMessage<'_>,
+        method: &str,
         retain_recent_turns: bool,
-    ) -> Result<String, DispatchError> {
-        let mut upstream_line = replace_method(line, upstream_method)?;
-        let mut params = parse_params(line)?;
-        let worktree = if upstream_method == "thread/start" {
-            match self.inner.worktrees.prepare(params["cwd"].as_str()).await {
-                Ok(worktree) => worktree,
-                Err(error) => return response_with_error(line, "worktree_creation_failed", &error),
+    ) -> Result<RpcResponse<ThreadResponse>, Failure> {
+        let mut params: ThreadParams = request.params()?;
+        if method == "thread/start" {
+            match self.inner.worktrees.prepare(params.cwd.as_deref()).await {
+                Ok(Some(cwd)) => {
+                    params.cwd = Some(cwd.into_os_string().into_string().map_err(|_| {
+                        Failure::new("worktree_creation_failed", "worktree path is not UTF-8")
+                    })?)
+                }
+                Ok(None) => {}
+                Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
-        } else {
-            None
-        };
-        if let Some(cwd) = &worktree {
-            params["cwd"] = json!(cwd);
         }
-        let paginate = params
-            .as_object_mut()
-            .and_then(|params| params.remove("paginateHistory"))
-            == Some(Value::Bool(true));
-        let defer_setting = params
-            .as_object_mut()
-            .and_then(|params| params.remove("deferItemDetails"));
-        let defer_details = defer_setting == Some(Value::Bool(true));
-        let hydrate = upstream_method == "thread/read" && params["includeTurns"] == true;
+        let hydrate = method == "thread/read" && params.include_turns == Some(true);
         if hydrate {
-            params["includeTurns"] = Value::Bool(false);
+            params.include_turns = Some(false);
         }
-        if defer_setting.is_some() || hydrate || paginate || worktree.is_some() {
-            let mut request = raw_object(&upstream_line)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            request.insert("params".into(), raw_value(params)?);
-            upstream_line = serde_json::to_string(&request)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-        }
-        let response = match self.inner.app_server.request_raw(&upstream_line).await {
+        let response = match self
+            .inner
+            .app_server
+            .request_raw(&request.request(method, &params)?)
+            .await
+        {
             Ok(response) => response,
-            Err(error) => return response_with_error(line, "codex_unavailable", &error),
+            Err(error) => return Err(Failure::new("codex_unavailable", error)),
         };
-        let mut object = raw_object(&response)
-            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-        let Some(raw_result) = object.get("result") else {
-            // Error responses and future response shapes remain untouched.
-            return Ok(response);
-        };
-        if upstream_method == "thread/list" {
-            let mut page: ThreadPage = serde_json::from_str(raw_result.get())
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
+        let mut response: RpcResponse<ThreadResponse> = RpcResponse::parse(&response)?;
+        if let Ok(result) = &mut response.outcome {
+            if hydrate {
+                if result.thread.history_mode.as_deref() == Some("paginated") {
+                    let history = HistoryParams {
+                        thread_id: result.thread.id.as_deref().unwrap_or_default(),
+                        turn_id: None,
+                        cursor: None,
+                        limit: if params.paginate_history {
+                            MOBILE_THREAD_PAGE_SIZE
+                        } else {
+                            10
+                        },
+                        sort_direction: "desc",
+                        items_view: Some(if params.paginate_history {
+                            "notLoaded"
+                        } else {
+                            "full"
+                        }),
+                    };
+                    let line = match self
+                        .inner
+                        .app_server
+                        .request_raw(&request.request("thread/turns/list", &history)?)
+                        .await
+                    {
+                        Ok(line) => line,
+                        Err(error) => return Err(Failure::new("codex_unavailable", error)),
+                    };
+                    let history: RpcResponse<HistoryPage<Arc<Turn>>> = RpcResponse::parse(&line)?;
+                    let mut page = match history.into_result() {
+                        Ok(page) => page,
+                        Err(response) => return Ok(response),
+                    };
+                    if params.paginate_history
+                        && let Err(error) = self
+                            .hydrate_turn_page(
+                                &mut page,
+                                result.thread.id.as_deref().unwrap_or_default(),
+                            )
+                            .await
+                    {
+                        return Err(Failure::new("invalid_thread_history", error));
+                    }
+                    result.thread.apply_history_page(page);
+                } else {
+                    params.include_turns = Some(true);
+                    let line = match self
+                        .inner
+                        .app_server
+                        .request_raw(&request.request(method, &params)?)
+                        .await
+                    {
+                        Ok(line) => line,
+                        Err(error) => return Err(Failure::new("codex_unavailable", error)),
+                    };
+                    let history: RpcResponse<ThreadResponse> = RpcResponse::parse(&line)?;
+                    *result = match history.into_result() {
+                        Ok(result) => result,
+                        Err(response) => return Ok(response),
+                    };
+                    if !params.paginate_history
+                        && let Some(turns) = &mut result.thread.turns
+                        && turns.len() > 10
+                    {
+                        turns.drain(..turns.len() - 10);
+                    }
+                }
+            }
             if let Err(error) = self
                 .inner
                 .desktop_projects
-                .enrich_threads(&mut page.data)
+                .enrich_threads(std::slice::from_mut(&mut result.thread))
                 .await
             {
-                return response_with_error(line, "desktop_project_state_unavailable", &error);
+                return Err(Failure::new("desktop_project_state_unavailable", error));
             }
-            object.insert("result".into(), raw_value(page)?);
-            return serde_json::to_string(&object)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
-        }
-        let mut result: ThreadResponse = serde_json::from_str(raw_result.get())
-            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-        if hydrate {
-            // Paginated threads expose history through the paging API. Metadata
-            // stays available while the owning process has not flushed a rollout.
-            let paginated = result.thread.extra.get("historyMode") == Some(&json!("paginated"));
-            let mut history_request = raw_object(&upstream_line)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            if paginated {
-                history_request.insert("method".into(), raw_value(json!("thread/turns/list"))?);
-                history_request.insert("params".into(), raw_value(json!({
-                    "threadId":result.thread.id, "limit":if paginate { MOBILE_THREAD_PAGE_SIZE } else { 10 },
-                    "sortDirection":"desc", "itemsView":if paginate { "notLoaded" } else { "full" }
-                }))?);
-            } else {
-                let mut params = parse_params(&upstream_line)?;
-                params["includeTurns"] = Value::Bool(true);
-                history_request.insert("params".into(), raw_value(params)?);
-            }
-            let history_request = serde_json::to_string(&history_request)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            let response = match self.inner.app_server.request_raw(&history_request).await {
-                Ok(response) => response,
-                Err(error) => return response_with_error(line, "codex_unavailable", &error),
-            };
-            let mut history_object = raw_object(&response)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            let Some(history) = history_object.remove("result") else {
-                return Ok(response);
-            };
-            if paginated {
-                let mut history: NativePage<Arc<Turn>> = serde_json::from_str(history.get())
-                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-                if paginate
-                    && let Err(error) = self
-                        .hydrate_turn_page(&mut history, result.thread.id.as_deref().unwrap_or(""))
-                        .await
-                {
-                    return response_with_error(line, "invalid_thread_history", &error);
-                }
-                apply_native_turn_page(&mut result, history);
-            } else {
-                result = serde_json::from_str(history.get())
-                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-                if !paginate
-                    && let Some(turns) = &mut result.thread.turns
-                    && turns.len() > 10
-                {
-                    turns.drain(..turns.len() - 10);
-                }
+            if retain_recent_turns && params.defer_item_details {
+                result.thread.defer_item_details();
             }
         }
-        if let Err(error) = self
-            .inner
-            .desktop_projects
-            .enrich_threads(std::slice::from_mut(&mut result.thread))
-            .await
-        {
-            return response_with_error(line, "desktop_project_state_unavailable", &error);
-        }
-        if retain_recent_turns && defer_details {
-            defer_large_item_details(&mut result);
-        }
-        object.insert("result".to_owned(), raw_value(result)?);
-        serde_json::to_string(&object)
-            .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
+        Ok(response)
     }
 
     // Keep App Server cursors opaque. Both initial hydration and older pages
@@ -596,28 +618,20 @@ impl CodexRpcService {
     async fn history_request<T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
-        params: Value,
-    ) -> Result<NativePage<T>, String> {
-        let request = json!({"id":0,"method":method,"params":params});
-        let response = self
-            .inner
+        params: &HistoryParams<'_>,
+    ) -> Result<HistoryPage<T>, String> {
+        self.inner
             .app_server
-            .request_raw(&request.to_string())
+            .request(method, params)
             .await
-            .map_err(|error| error.to_string())?;
-        let mut response = raw_object(&response).map_err(|error| error.to_string())?;
-        if let Some(error) = response.get("error") {
-            return Err(error.get().to_owned());
-        }
-        let result = response
-            .remove("result")
-            .ok_or("history result is missing")?;
-        serde_json::from_str(result.get()).map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?
+            .outcome
+            .map_err(|error| error.get().to_owned())
     }
 
     async fn hydrate_turn_page(
         &self,
-        page: &mut NativePage<Arc<Turn>>,
+        page: &mut HistoryPage<Arc<Turn>>,
         thread_id: &str,
     ) -> Result<(), String> {
         if page.data.len() > MOBILE_THREAD_PAGE_SIZE {
@@ -633,16 +647,21 @@ impl CodexRpcService {
             let mut ids = std::collections::HashSet::new();
             while has_more && budget > 0 {
                 let page = self
-                    .history_request::<NativeItem>(
+                    .history_request::<HistoryItem>(
                         "thread/items/list",
-                        json!({
-                            "threadId":thread_id,"turnId":turn.id,"cursor":cursor,
-                            "limit":budget.min(100),"sortDirection":"desc"
-                        }),
+                        &HistoryParams {
+                            thread_id,
+                            turn_id: Some(&turn.id),
+                            cursor: cursor.as_deref(),
+                            limit: budget.min(100),
+                            sort_direction: "desc",
+                            items_view: None,
+                        },
                     )
                     .await?;
-                cursor = page.next_cursor;
-                for item in take_history_items(page.data)? {
+                let (items, next_cursor) = page.into_items()?;
+                cursor = next_cursor;
+                for item in items {
                     if ids.insert(item.id.clone()) {
                         budget = budget
                             .checked_sub(1)
@@ -677,14 +696,21 @@ impl CodexRpcService {
             return Ok(());
         }
         let opening = self
-            .history_request::<NativeItem>(
+            .history_request::<HistoryItem>(
                 "thread/items/list",
-                json!({
-                    "threadId":thread_id,"turnId":turn.id,"limit":2,"sortDirection":"asc"
-                }),
+                &HistoryParams {
+                    thread_id,
+                    turn_id: Some(&turn.id),
+                    cursor: None,
+                    limit: 2,
+                    sort_direction: "asc",
+                    items_view: None,
+                },
             )
             .await?;
-        if let Some(item) = take_history_items(opening.data)?
+        if let Some(item) = opening
+            .into_items()?
+            .0
             .into_iter()
             .find(|item| item.kind.as_deref() != Some("contextCompaction"))
             .filter(|item| item.kind.as_deref() == Some("userMessage"))
@@ -697,29 +723,28 @@ impl CodexRpcService {
 
     async fn host_thread_history_page(
         &self,
-        line: &str,
+        params: op::ReadOlder<&str>,
         items: bool,
-    ) -> Result<String, DispatchError> {
-        let params = parse_params(line)?;
-        let Some(thread_id) = params["threadId"].as_str().filter(|id| !id.is_empty()) else {
-            return error_response(line, "invalid_params", "threadId is required");
-        };
-        let cursor = params["cursor"].as_str().filter(|id| !id.is_empty());
-        if !items && cursor.is_none() {
-            return error_response(line, "invalid_params", "cursor is required");
+    ) -> Result<ThreadResponse, Failure> {
+        let thread_id = params.thread_id;
+        if thread_id.is_empty() {
+            return Err(Failure::new("invalid_params", "threadId is required"));
         }
-        let mut upstream = json!({"threadId":thread_id,"cursor":cursor,"sortDirection":"desc"});
-        let method = if items {
-            let Some(turn_id) = params["turnId"].as_str().filter(|id| !id.is_empty()) else {
-                return error_response(line, "invalid_params", "turnId is required");
-            };
-            upstream["turnId"] = json!(turn_id);
-            upstream["limit"] = json!(100);
-            "thread/items/list"
-        } else {
-            upstream["limit"] = json!(MOBILE_THREAD_PAGE_SIZE);
-            upstream["itemsView"] = json!("notLoaded");
-            "thread/turns/list"
+        let cursor = params.cursor.filter(|cursor| !cursor.is_empty());
+        if !items && cursor.is_none() {
+            return Err(Failure::new("invalid_params", "cursor is required"));
+        }
+        let turn_id = params.turn_id.filter(|id| !id.is_empty());
+        if items && turn_id.is_none() {
+            return Err(Failure::new("invalid_params", "turnId is required"));
+        }
+        let upstream = HistoryParams {
+            thread_id,
+            turn_id: if items { turn_id } else { None },
+            cursor,
+            sort_direction: "desc",
+            limit: if items { 100 } else { MOBILE_THREAD_PAGE_SIZE },
+            items_view: if items { None } else { Some("notLoaded") },
         };
         let mut result = ThreadResponse {
             thread: Thread {
@@ -729,124 +754,101 @@ impl CodexRpcService {
             model: None,
             extra: Default::default(),
         };
+        let invalid = |error| Failure::new("invalid_thread_history", error);
         if items {
-            let page = match self.history_request::<NativeItem>(method, upstream).await {
-                Ok(page) => page,
-                Err(error) => return response_with_error(line, "codex_unavailable", &error),
-            };
+            let page = self
+                .history_request::<HistoryItem>("thread/items/list", &upstream)
+                .await
+                .map_err(|error| Failure::new("codex_unavailable", error))?;
             if cursor.is_some() && page.next_cursor.as_deref() == cursor {
-                return error_response(line, "invalid_thread_history", "history cursor repeated");
+                return Err(invalid("history cursor repeated"));
             }
-            let mut values = match take_history_items(page.data) {
-                Ok(values) => values,
-                Err(error) => return response_with_error(line, "invalid_thread_history", &error),
-            };
+            let (mut values, next_cursor) = page.into_items().map_err(invalid)?;
             values.reverse();
             let mut turn = Turn {
-                id: params["turnId"].as_str().unwrap().into(),
+                id: turn_id.unwrap().into(),
                 items: Some(values),
-                items_has_more: Some(page.next_cursor.is_some()),
-                items_next_cursor: Some(page.next_cursor),
+                items_has_more: Some(next_cursor.is_some()),
+                items_next_cursor: Some(next_cursor),
                 ..Default::default()
             };
-            if cursor.is_none()
-                && let Err(error) = self.preserve_opening_question(&mut turn, thread_id).await
-            {
-                return response_with_error(line, "invalid_thread_history", &error);
+            if cursor.is_none() {
+                self.preserve_opening_question(&mut turn, thread_id)
+                    .await
+                    .map_err(|error| Failure::new("invalid_thread_history", error))?;
             }
             result.thread.turns = Some(vec![Arc::new(turn)]);
         } else {
-            let mut page = match self.history_request::<Arc<Turn>>(method, upstream).await {
-                Ok(page) => page,
-                Err(error) => return response_with_error(line, "codex_unavailable", &error),
-            };
+            let mut page = self
+                .history_request::<Arc<Turn>>("thread/turns/list", &upstream)
+                .await
+                .map_err(|error| Failure::new("codex_unavailable", error))?;
             if cursor.is_some() && page.next_cursor.as_deref() == cursor {
-                return error_response(line, "invalid_thread_history", "history cursor repeated");
+                return Err(invalid("history cursor repeated"));
             }
-            if let Err(error) = self.hydrate_turn_page(&mut page, thread_id).await {
-                return response_with_error(line, "invalid_thread_history", &error);
-            }
-            apply_native_turn_page(&mut result, page);
+            self.hydrate_turn_page(&mut page, thread_id)
+                .await
+                .map_err(|error| Failure::new("invalid_thread_history", error))?;
+            result.thread.apply_history_page(page);
         }
-        if params["deferItemDetails"] == true {
-            defer_large_item_details(&mut result);
+        if params.defer_item_details {
+            result.thread.defer_item_details();
         }
-        response_with_result(line, result)
+        Ok(result)
     }
 
-    async fn host_thread_item_read(&self, line: &str) -> Result<String, DispatchError> {
-        let params = parse_params(line)?;
-        let (Some(thread_id), Some(turn_id), Some(item_id)) = (
-            params
-                .get("threadId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty()),
-            params
-                .get("turnId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty()),
-            params
-                .get("itemId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty()),
-        ) else {
-            return error_response(
-                line,
+    async fn host_thread_item_read(
+        &self,
+        params: op::ReadItem<&str>,
+    ) -> Result<agent_core::client::ItemResponse, Failure> {
+        if [params.thread_id, params.turn_id, params.item_id]
+            .iter()
+            .any(|id| id.is_empty())
+        {
+            return Err(Failure::new(
                 "invalid_params",
                 "threadId, turnId and itemId are required",
-            );
-        };
-        let mut request = json!({"id":0,"method":"thread/items/list","params":{
-            "threadId":thread_id,"turnId":turn_id,"limit":100,"sortDirection":"asc"
-        }});
+            ));
+        }
+        let mut cursor = None;
         let mut cursors = std::collections::HashSet::new();
         loop {
-            let response = match self
+            let query = HistoryParams {
+                thread_id: params.thread_id,
+                turn_id: Some(params.turn_id),
+                limit: 100,
+                sort_direction: "asc",
+                cursor: cursor.as_deref(),
+                items_view: None,
+            };
+            let response = self
                 .inner
                 .app_server
-                .request_raw(&request.to_string())
+                .request::<_, HistoryPage<HistoryItem>>("thread/items/list", &query)
                 .await
-            {
-                Ok(response) => response,
-                Err(error) => return response_with_error(line, "codex_unavailable", &error),
-            };
-            let mut response = raw_object(&response)
-                .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-            if let Some(error) = response.remove("error") {
-                let mut object = response_object(line)?;
-                object.insert("error".into(), error);
-                return serde_json::to_string(&object)
-                    .map_err(|error| DispatchError::InvalidMessage(error.to_string()));
+                .map_err(|error| Failure::new("codex_unavailable", error))?;
+            let page = response.outcome.map_err(Failure::Upstream)?;
+            if let Some(entry) = page.data.into_iter().find(|entry| {
+                entry.turn_id.as_deref() == Some(params.turn_id) && entry.item.id == params.item_id
+            }) {
+                return Ok(agent_core::client::ItemResponse {
+                    item: Arc::unwrap_or_clone(entry.item),
+                    extra: Default::default(),
+                });
             }
-            let Some(raw) = response.remove("result") else {
-                return error_response(line, "invalid_thread_history", "item page data is missing");
-            };
-            let page: NativePage<NativeItem> = match serde_json::from_str(raw.get()) {
-                Ok(page) => page,
-                Err(error) => return response_with_error(line, "invalid_thread_history", &error),
-            };
-            if let Some(entry) = page
-                .data
-                .into_iter()
-                .find(|entry| entry.turn_id.as_deref() == Some(turn_id) && entry.item.id == item_id)
-            {
-                #[derive(serde::Serialize)]
-                struct ItemResponse {
-                    item: Arc<Item>,
-                }
-                return response_with_result(line, ItemResponse { item: entry.item });
-            }
-            let Some(cursor) = page.next_cursor.filter(|cursor| !cursor.is_empty()) else {
-                return error_response(
-                    line,
+            cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
+            let Some(next) = &cursor else {
+                return Err(Failure::new(
                     "item_not_found",
                     "The activity is no longer available. Refresh the task.",
-                );
+                ));
             };
-            if !cursors.insert(cursor.to_owned()) {
-                return error_response(line, "invalid_thread_history", "item page cursor repeated");
+            if !cursors.insert(next.clone()) {
+                return Err(Failure::new(
+                    "invalid_thread_history",
+                    "item page cursor repeated",
+                ));
             }
-            request["params"]["cursor"] = json!(cursor);
         }
     }
 
@@ -876,29 +878,32 @@ impl CodexRpcService {
                                 return;
                             };
                             tokio::spawn(async move {
-                                let Ok(mut request) = serde_json::from_str::<Value>(&line) else {
+                                #[derive(Deserialize)]
+                                #[serde(rename_all = "camelCase")]
+                                struct Refresh<'a> {
+                                    previous_account_id: Option<&'a str>,
+                                }
+                                let Ok(request) = RpcMessage::parse(&line) else {
+                                    return;
+                                };
+                                let Ok(params) = request.params::<Refresh>() else {
                                     return;
                                 };
                                 let mut accounts = inner.accounts.lock().await;
                                 let result = match accounts.as_mut() {
                                     Some(accounts) => {
-                                        accounts
-                                            .refresh(
-                                                request["params"]["previousAccountId"].as_str(),
-                                            )
-                                            .await
+                                        accounts.refresh(params.previous_account_id).await
                                     }
                                     None => Err("アカウントを選択してください。".into()),
                                 };
                                 let response = match result {
-                                    Ok(result) => {
-                                        json!({"id":request["id"].take(),"result":result})
-                                    }
-                                    Err(error) => {
-                                        json!({"id":request["id"].take(),"error":{"code":-32000,"message":error}})
-                                    }
+                                    Ok(result) => request.success(result),
+                                    Err(error) => request.error(-32000, &error),
                                 };
-                                let line = zeroize::Zeroizing::new(response.to_string());
+                                let Ok(response) = response else {
+                                    return;
+                                };
+                                let line = zeroize::Zeroizing::new(response);
                                 let _ = inner.app_server.send_raw(&line).await;
                             });
                         } else {
@@ -917,255 +922,5 @@ impl CodexRpcService {
                 }
             }
         });
-    }
-}
-
-fn parse_params(line: &str) -> Result<Value, DispatchError> {
-    let object =
-        raw_object(line).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-    let Some(params) = object.get("params") else {
-        return Ok(Value::Object(Map::new()));
-    };
-    serde_json::from_str(params.get())
-        .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
-}
-
-fn replace_method(line: &str, method: &str) -> Result<String, DispatchError> {
-    let mut object =
-        raw_object(line).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-    let method = serde_json::to_string(method)
-        .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-    let method: Box<RawValue> = serde_json::from_str(&method)
-        .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-    object.insert("method".to_owned(), method);
-    serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()))
-}
-
-fn response_with_result(
-    line: &str,
-    result: impl serde::Serialize,
-) -> Result<String, DispatchError> {
-    let mut object = response_object(line)?;
-    object.insert("result".to_owned(), raw_value(result)?);
-    serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()))
-}
-
-fn response_with_error(
-    line: &str,
-    code: &str,
-    detail: &dyn std::fmt::Display,
-) -> Result<String, DispatchError> {
-    error_response(line, code, &detail.to_string())
-}
-
-fn error_response(line: &str, code: &str, message: &str) -> Result<String, DispatchError> {
-    let mut object = response_object(line)?;
-    object.insert(
-        "error".to_owned(),
-        raw_value(json!({"code": code, "message": message}))?,
-    );
-    serde_json::to_string(&object).map_err(|error| DispatchError::InvalidMessage(error.to_string()))
-}
-
-fn response_object(
-    line: &str,
-) -> Result<std::collections::BTreeMap<String, Box<RawValue>>, DispatchError> {
-    let mut object =
-        raw_object(line).map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
-    object.remove("method");
-    object.remove("params");
-    object.remove("result");
-    object.remove("error");
-    Ok(object)
-}
-
-fn raw_value(value: impl serde::Serialize) -> Result<Box<RawValue>, DispatchError> {
-    serde_json::value::to_raw_value(&value)
-        .map_err(|error| DispatchError::InvalidMessage(error.to_string()))
-}
-
-fn apply_native_turn_page(result: &mut ThreadResponse, mut page: NativePage<Arc<Turn>>) {
-    page.data.reverse();
-    result.thread.turns = Some(page.data);
-    result.thread.history_cursor = Some(page.next_cursor.filter(|cursor| !cursor.is_empty()));
-}
-
-fn take_history_items(entries: Vec<NativeItem>) -> Result<Vec<Arc<Item>>, String> {
-    if entries.len() > 100 {
-        return Err("item page exceeds requested size".into());
-    }
-    entries
-        .into_iter()
-        .map(|entry| {
-            if entry.item.id.is_empty() {
-                Err("history item ID is missing".into())
-            } else {
-                Ok(entry.item)
-            }
-        })
-        .collect()
-}
-
-// Count JSON bytes without materializing another copy of large tool output.
-// The writer stops as soon as the inline budget is exceeded.
-fn fits_inline(value: &impl serde::Serialize) -> bool {
-    struct Budget(usize);
-    impl std::io::Write for Budget {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_sub(bytes.len())
-                .ok_or_else(|| std::io::Error::other("inline budget exceeded"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    serde_json::to_writer(Budget(4096), value).is_ok()
-}
-
-fn defer_large_item_details(result: &mut ThreadResponse) {
-    let Some(turns) = &mut result.thread.turns else {
-        return;
-    };
-    for turn in turns {
-        let turn = Arc::make_mut(turn);
-        let Some(items) = &mut turn.items else {
-            continue;
-        };
-        let mut deferred = Vec::new();
-        for item in items {
-            // Visible responses keep complete text, image bytes and paths.
-            if matches!(
-                item.kind.as_deref(),
-                Some("userMessage" | "agentMessage" | "imageGeneration")
-            ) || fits_inline(item)
-                || item.id.is_empty()
-            {
-                continue;
-            }
-            let item = Arc::make_mut(item);
-            deferred.push(item.id.clone());
-            for text in [
-                &mut item.text,
-                &mut item.status,
-                &mut item.command,
-                &mut item.aggregated_output,
-                &mut item.saved_path,
-                &mut item.client_id,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                truncate_detail(text);
-            }
-            if let Some(result) = &mut item.result
-                && !retain_detail(result)
-            {
-                item.result = None;
-            }
-            if let Some(changes) = item.extra.get_mut("changes").and_then(Value::as_array_mut) {
-                for change in changes {
-                    if let Some(change) = change.as_object_mut() {
-                        change.remove("diff");
-                    }
-                }
-            }
-            item.extra
-                .retain(|key, value| key == "changes" || retain_detail(value));
-        }
-        if !deferred.is_empty() {
-            turn.deferred_item_ids = Some(deferred);
-        }
-    }
-}
-
-fn truncate_detail(text: &mut String) {
-    let mut end = text.len().min(256);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-}
-
-fn retain_detail(value: &mut Value) -> bool {
-    if let Value::String(text) = value {
-        truncate_detail(text);
-    }
-    !value.is_array() && !value.is_object()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn host_response_keeps_request_extensions_and_raw_id() {
-        let line = r#"{"jsonrpc":"2.0","id":"mobile-1","method":"host/project/list","params":{"future":{"id":9}},"extension":{"keep":[1,true]}}"#;
-        let response = response_with_result(line, json!({"data":[]})).unwrap();
-        let object = raw_object(&response).unwrap();
-        assert_eq!(object["id"].get(), r#""mobile-1""#);
-        assert_eq!(object["extension"].get(), r#"{"keep":[1,true]}"#);
-        assert_eq!(object["result"].get(), r#"{"data":[]}"#);
-        assert!(!object.contains_key("params"));
-        assert!(!object.contains_key("method"));
-    }
-
-    #[test]
-    fn deferred_read_keeps_conversation_and_activity_headers() {
-        let text = "会話".repeat(4096);
-        let result = json!({"thread":{"turns":[{"id":"turn","items":[
-            {"id":"user","type":"userMessage","content":[{"type":"text","text":text}]},
-            {"id":"agent","type":"agentMessage","text":text},
-            {"id":"command","type":"commandExecution","command":"日本語".repeat(1000),"status":"completed","aggregatedOutput":text},
-            {"id":"files","type":"fileChange","status":"completed","changes":[{"path":"a.txt","kind":{"type":"update"},"diff":text}]},
-            {"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}},
-            {"id":"small","type":"reasoning","summary":["short"]}
-        ]}]}});
-        let mut typed = serde_json::from_value(result).unwrap();
-        defer_large_item_details(&mut typed);
-        let result = serde_json::to_value(typed).unwrap();
-        let turn = &result["thread"]["turns"][0];
-        let items = &turn["items"];
-        assert_eq!(items[0]["content"][0]["text"], text);
-        assert_eq!(items[1]["text"], text);
-        assert!(items[2]["command"].as_str().unwrap().starts_with("日本語"));
-        assert_eq!(items[2]["status"], "completed");
-        assert_eq!(items[3]["changes"][0]["path"], "a.txt");
-        assert_eq!(items[3]["changes"][0]["kind"]["type"], "update");
-        assert_eq!(items[4]["tool"], "inspect");
-        assert_eq!(items[5]["summary"], json!(["short"]));
-        assert_eq!(
-            turn["deferredItemIds"],
-            json!(["command", "files", "future"])
-        );
-    }
-
-    #[test]
-    fn generated_image_output_is_not_truncated_as_an_activity_detail() {
-        let image = json!({"id":"image","type":"imageGeneration","status":"completed",
-            "result":"A".repeat(8192),"savedPath":format!("/{} image.png", "directory/".repeat(40))});
-        let result = json!({"thread":{"turns":[{"id":"turn","items":[image]}]}});
-        let mut typed = serde_json::from_value(result).unwrap();
-        defer_large_item_details(&mut typed);
-        let result = serde_json::to_value(typed).unwrap();
-        assert_eq!(result["thread"]["turns"][0]["items"][0], image);
-        assert!(result["thread"]["turns"][0]["deferredItemIds"].is_null());
-    }
-
-    #[test]
-    fn history_page_preserves_the_opaque_cursor_and_chronological_order() {
-        let mut result = serde_json::from_value(json!({"thread":{}})).unwrap();
-        apply_native_turn_page(
-            &mut result,
-            serde_json::from_value(
-                json!({"data":[{"id":"new"},{"id":"old"}],"nextCursor":"opaque:token"}),
-            )
-            .unwrap(),
-        );
-        let result = serde_json::to_value(result).unwrap();
-        assert_eq!(result["thread"]["turns"][0]["id"], "old");
-        assert_eq!(result["thread"]["historyCursor"], "opaque:token");
     }
 }

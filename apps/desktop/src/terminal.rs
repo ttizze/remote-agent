@@ -1,5 +1,4 @@
 use crate::Runtime;
-use agent_core::state::operations as op;
 use agent_core::{
     client::TerminalSize,
     state::{Intent, Snapshot, TerminalPhase},
@@ -214,10 +213,10 @@ impl Terminal {
                     .get(&self.handle)
                     .is_some_and(|terminal| terminal.phase == TerminalPhase::Running)
                 {
-                    self.dispatch(Intent::WriteTerminal(op::WriteTerminal {
+                    self.dispatch(Intent::WriteTerminal {
                         handle: self.handle.clone(),
                         data: data.into_bytes(),
-                    }));
+                    });
                 }
             }
             Event::Frontend(Frontend::Acknowledge { sequence }) => {
@@ -240,11 +239,11 @@ impl Terminal {
             // precede the asynchronous Store publication.
             self.start_requested = true;
             self.sent_size = Some(self.size);
-            self.dispatch(Intent::StartTerminal(op::StartTerminal {
+            self.dispatch(Intent::StartTerminal {
                 handle: self.handle.clone(),
                 cwd: self.cwd.clone(),
                 size: self.size,
-            }));
+            });
         }
         if self.sent_size != Some(self.size)
             && self
@@ -254,10 +253,10 @@ impl Terminal {
                 .is_some_and(|terminal| terminal.phase == TerminalPhase::Running)
         {
             self.sent_size = Some(self.size);
-            self.dispatch(Intent::ResizeTerminal(op::ResizeTerminal {
+            self.dispatch(Intent::ResizeTerminal {
                 handle: self.handle.clone(),
                 size: self.size,
-            }));
+            });
         }
         if self.ready {
             if let Some(terminal) = self.snapshot.terminals.get(&self.handle) {

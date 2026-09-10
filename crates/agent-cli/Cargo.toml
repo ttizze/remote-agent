@@ -7,7 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 agent-core = { path = "../agent-core" }
-host-protocol = { path = "../host-protocol" }
 clap = { version = "4.5", features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true

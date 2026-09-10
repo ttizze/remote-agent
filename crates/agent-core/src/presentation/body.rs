@@ -129,25 +129,34 @@ pub fn expanded_body(item: &Item) -> String {
         }
         Some("fileChange") => {
             let mut result = String::new();
-            for (index, change) in item
-                .extra
-                .get("changes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .enumerate()
-            {
-                if index != 0 {
+            let mut first = true;
+            let mut append = |kind: &str, path: &str, diff: &str| {
+                if !first {
                     result.push_str("\n\n");
                 }
-                let kind = text(&change["kind"]).unwrap_or_else(|| field(&change["kind"], "type"));
-                write!(
-                    result,
-                    "{kind}: {}\n{}",
-                    field(change, "path"),
-                    field(change, "diff")
-                )
-                .expect("writing a String cannot fail");
+                first = false;
+                write!(result, "{kind}: {path}\n{diff}").expect("writing a String cannot fail");
+            };
+            match &item.changes {
+                Some(crate::models::ItemChanges::Files(changes)) => {
+                    for change in changes {
+                        let raw_kind = change.kind.as_ref().unwrap_or(&Value::Null);
+                        let kind = text(raw_kind).unwrap_or_else(|| field(raw_kind, "type"));
+                        append(
+                            &kind,
+                            change.path.as_deref().unwrap_or_default(),
+                            change.diff.as_deref().unwrap_or_default(),
+                        );
+                    }
+                }
+                Some(crate::models::ItemChanges::Unknown(value)) => {
+                    for change in value.as_array().into_iter().flatten() {
+                        let kind =
+                            text(&change["kind"]).unwrap_or_else(|| field(&change["kind"], "type"));
+                        append(&kind, &field(change, "path"), &field(change, "diff"));
+                    }
+                }
+                None => {}
             }
             result
         }

@@ -206,7 +206,7 @@ impl Context {
 
 pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
     tokio::task::LocalSet::new().run_until(async move {
-        let peer = Arc::new(RpcPeer::open(host_protocol::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
+        let peer = Arc::new(RpcPeer::open(agent_core::peer::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
             None, 1024)?);
         let mut lines = peer.subscribe();
         let (output, mut outbound) = mpsc::unbounded_channel();

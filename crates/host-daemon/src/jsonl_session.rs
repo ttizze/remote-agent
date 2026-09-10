@@ -1,4 +1,5 @@
 use crate::{CodexSession, HostRuntime};
+use agent_core::peer::{RpcMessageKind, classify_message};
 use agent_core::{
     peer::{PeerEvent, RpcPeer},
     transport::NodeId,
@@ -8,7 +9,6 @@ use futures_util::{
     future::{AbortHandle, abortable},
     stream::FuturesUnordered,
 };
-use host_protocol::{RpcMessageKind, classify_message};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, task::JoinSet};
 use tokio_util::sync::CancellationToken;

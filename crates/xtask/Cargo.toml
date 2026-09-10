@@ -12,7 +12,6 @@ agent-core = { path = "../agent-core" }
 base64.workspace = true
 codex-app-server = { path = "../codex-app-server" }
 host-daemon = { path = "../host-daemon" }
-host-protocol = { path = "../host-protocol" }
 ring.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true

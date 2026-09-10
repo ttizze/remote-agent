@@ -255,6 +255,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             add_attachment(&mut next, draft_key, attachment);
         }
         Intent::RemoveAttachment { draft_key, index } => {
+            let index = index as usize;
             if previous
                 .drafts
                 .get(&draft_key)
@@ -286,7 +287,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     .collect(),
             );
         }
-        Intent::NewChat(cwd) => {
+        Intent::NewChat { cwd } => {
             next.epoch += 1;
             let key = format!("new:{cwd}");
             if !previous.drafts.contains_key(&key) {
@@ -416,44 +417,182 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
             }
         }
-        Intent::ListAccounts(operation) => return prepare(previous, next, operation),
-        Intent::SelectAccount(operation) => return prepare(previous, next, operation),
-        Intent::StartAccountLogin(operation) => return prepare(previous, next, operation),
-        Intent::ReadAccountLogin(operation) => return prepare(previous, next, operation),
-        Intent::CancelAccountLogin(operation) => return prepare(previous, next, operation),
-        Intent::ForkThread(operation) => return prepare(previous, next, operation),
-        Intent::StartTerminal(operation) => return prepare(previous, next, operation),
-        Intent::CloseTerminal(operation) => return prepare(previous, next, operation),
-        Intent::Transcribe(operation) => return prepare(previous, next, operation),
-        Intent::CreateInvitation(operation) => return prepare(previous, next, operation),
-        Intent::RemoveRemoteHost(operation) => return prepare(previous, next, operation),
-        Intent::RevokeDevice(operation) => return prepare(previous, next, operation),
-        Intent::ListFiles(operation) => return prepare(previous, next, operation),
-        Intent::ReadFile(operation) => return prepare(previous, next, operation),
-        Intent::SaveFile(operation) => return prepare(previous, next, operation),
-        Intent::ReviewWorkspace(operation) => return prepare(previous, next, operation),
-        Intent::ReadWorktreeSettings(operation) => return prepare(previous, next, operation),
-        Intent::UpdateWorktreeSettings(operation) => return prepare(previous, next, operation),
-        Intent::ListThreads(operation) => return prepare(previous, next, operation),
-        Intent::StartThread(operation) => return prepare(previous, next, operation),
-        Intent::ReadThread(operation) => return prepare(previous, next, operation),
-        Intent::ReadItem(operation) => return prepare(previous, next, operation),
-        Intent::ResizeTerminal(operation) => return prepare(previous, next, operation),
-        Intent::Interrupt(operation) => return prepare(previous, next, operation),
-        Intent::Watch(operation) => return prepare(previous, next, operation),
-        Intent::Unwatch(operation) => return prepare(previous, next, operation),
-        Intent::WriteTerminal(operation) => return prepare(previous, next, operation),
-        Intent::DownloadFile(operation) => return prepare(previous, next, operation),
-        Intent::LoadSessionImages(operation) => return prepare(previous, next, operation),
-        Intent::LoadHostManagement(operation) => return prepare(previous, next, operation),
-        Intent::ReadOlder(operation) => return prepare(previous, next, operation),
-        Intent::LoadModels(operation) => return prepare(previous, next, operation),
-        Intent::Respond(operation) => return prepare(previous, next, operation),
-        Intent::UploadAttachment(operation) => {
-            return (next, vec![Effect::UploadAttachment(operation)]);
+        Intent::ListAccounts => return prepare(previous, next, op::ListAccounts {}),
+        Intent::SelectAccount { id } => return prepare(previous, next, op::SelectAccount { id }),
+        Intent::StartAccountLogin => return prepare(previous, next, op::StartAccountLogin {}),
+        Intent::ReadAccountLogin { id } => {
+            return prepare(previous, next, op::ReadAccountLogin { id });
         }
-        Intent::PairRemoteHost(operation) => {
-            return (next, vec![Effect::PairRemoteHost(operation)]);
+        Intent::CancelAccountLogin { id } => {
+            return prepare(previous, next, op::CancelAccountLogin { id });
+        }
+        Intent::ForkThread {
+            thread_id,
+            last_turn_id,
+        } => return prepare(previous, next, op::ForkThread::new(thread_id, last_turn_id)),
+        Intent::StartTerminal { handle, cwd, size } => {
+            return prepare(previous, next, op::StartTerminal { handle, cwd, size });
+        }
+        Intent::CloseTerminal { handle } => {
+            return prepare(previous, next, op::CloseTerminal { handle });
+        }
+        Intent::Transcribe {
+            draft_key,
+            audio,
+            send,
+            client_user_message_id,
+        } => {
+            return prepare(
+                previous,
+                next,
+                op::Dictate::new(draft_key, audio, send, client_user_message_id),
+            );
+        }
+        Intent::CreateInvitation => return prepare(previous, next, op::CreateInvitation {}),
+        Intent::RemoveRemoteHost { id } => {
+            return prepare(previous, next, op::RemoveRemoteHost { id });
+        }
+        Intent::RevokeDevice { id } => return prepare(previous, next, op::RevokeDevice { id }),
+        Intent::ListFiles { path } => return prepare(previous, next, op::ListFiles { path }),
+        Intent::ReadFile {
+            path,
+            discard_draft,
+        } => {
+            return prepare(
+                previous,
+                next,
+                op::ReadFile {
+                    path,
+                    discard_draft,
+                },
+            );
+        }
+        Intent::SaveFile { path } => return prepare(previous, next, op::SaveFile { path }),
+        Intent::ReviewWorkspace { cwd } => {
+            return prepare(previous, next, op::ReviewWorkspace { cwd });
+        }
+        Intent::ReadWorktreeSettings => {
+            return prepare(previous, next, op::ReadWorktreeSettings {});
+        }
+        Intent::UpdateWorktreeSettings { settings } => {
+            return prepare(previous, next, op::UpdateWorktreeSettings { settings });
+        }
+        Intent::ListThreads { query } => {
+            return prepare(previous, next, op::ListThreads::new(query));
+        }
+        Intent::StartThread { cwd, model } => {
+            return prepare(previous, next, op::StartThread { cwd, model });
+        }
+        Intent::OpenThread { id } => return prepare(previous, next, op::ReadThread::open(id)),
+        Intent::ReadThread { id } => return prepare(previous, next, op::ReadThread::new(id)),
+        Intent::ReadItem {
+            thread_id,
+            turn_id,
+            item_id,
+        } => {
+            return prepare(
+                previous,
+                next,
+                op::ReadItem {
+                    thread_id,
+                    turn_id,
+                    item_id,
+                },
+            );
+        }
+        Intent::ResizeTerminal { handle, size } => {
+            return prepare(previous, next, op::ResizeTerminal { handle, size });
+        }
+        Intent::Interrupt { thread_id, turn_id } => {
+            return prepare(previous, next, op::Interrupt { thread_id, turn_id });
+        }
+        Intent::Watch {
+            thread_id,
+            watch_key,
+            watch_id,
+            path,
+        } => {
+            return prepare(
+                previous,
+                next,
+                op::Watch {
+                    thread_id,
+                    watch_key,
+                    watch_id,
+                    path,
+                },
+            );
+        }
+        Intent::Unwatch {
+            watch_key,
+            watch_id,
+        } => {
+            return prepare(
+                previous,
+                next,
+                op::Unwatch {
+                    watch_key,
+                    watch_id,
+                },
+            );
+        }
+        Intent::WriteTerminal { handle, data } => {
+            return prepare(previous, next, op::WriteTerminal { handle, data });
+        }
+        Intent::DownloadFile {
+            source,
+            destination,
+        } => {
+            return prepare(
+                previous,
+                next,
+                op::DownloadFile {
+                    source: source.into(),
+                    destination: destination.into(),
+                },
+            );
+        }
+        Intent::LoadSessionImages { thread_id } => {
+            return prepare(previous, next, op::LoadSessionImages { thread_id });
+        }
+        Intent::LoadHostManagement => return prepare(previous, next, op::LoadHostManagement),
+        Intent::ReadOlder {
+            thread_id,
+            turn_id,
+            cursor,
+        } => {
+            return prepare(
+                previous,
+                next,
+                op::ReadOlder::new(thread_id, turn_id, cursor),
+            );
+        }
+        Intent::LoadModels => return prepare(previous, next, op::LoadModels),
+        Intent::Respond { request_id, answer } => {
+            return prepare(previous, next, op::Respond { request_id, answer });
+        }
+        Intent::UploadAttachment {
+            draft_key,
+            attachment,
+            directory,
+        } => {
+            return (
+                next,
+                vec![Effect::UploadAttachment(op::UploadAttachment {
+                    draft_key,
+                    attachment,
+                    directory,
+                })],
+            );
+        }
+        Intent::PairRemoteHost { invitation, name } => {
+            return (
+                next,
+                vec![Effect::PairRemoteHost(op::PairRemoteHost {
+                    invitation,
+                    name,
+                })],
+            );
         }
     }
     (next, Vec::new())

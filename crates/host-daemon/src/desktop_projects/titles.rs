@@ -1,60 +1,43 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use agent_core::models::{Project, Thread, ThreadList};
-use serde_json::{Value, json};
+use agent_core::models::{ListQuery, Project, Thread, ThreadList};
 
 /// Select from newest-first DB metadata. Retain only visible titles and one
 /// lookahead per section; never retain rollout bodies or unused thread fields.
-pub(crate) struct TitleList {
-    projects: Vec<Project>,
-    known_projects: HashSet<String>,
-    recent_projects: Vec<String>,
-    threads: HashMap<String, Vec<Thread>>,
+pub(crate) struct TitleList<'a> {
+    projects: &'a [Project],
+    known_projects: HashSet<&'a str>,
+    recent_projects: Vec<&'a str>,
+    threads: HashMap<&'a str, Vec<Thread>>,
     chats: Vec<Thread>,
     project_limit: usize,
     chat_limit: usize,
-    thread_limits: HashMap<String, usize>,
+    thread_limits: &'a BTreeMap<String, u32>,
     searching: bool,
 }
 
-fn limit(value: Option<&Value>, default: usize) -> usize {
-    value
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(default)
-        .max(1)
-}
-
-impl TitleList {
-    pub(crate) fn new(projects: Vec<Project>, params: &Value) -> Self {
-        let known_projects = projects.iter().map(|project| project.id.clone()).collect();
+impl<'a> TitleList<'a> {
+    pub(crate) fn new(projects: &'a [Project], params: &'a ListQuery) -> Self {
+        let known_projects = projects.iter().map(|project| project.id.as_str()).collect();
         Self {
             projects,
             known_projects,
             recent_projects: Vec::new(),
             threads: HashMap::new(),
             chats: Vec::new(),
-            project_limit: limit(params.get("projectLimit"), 5),
-            chat_limit: limit(params.get("chatLimit"), 5),
-            thread_limits: params
-                .get("projectThreadLimits")
-                .and_then(Value::as_object)
-                .map(|limits| {
-                    limits
-                        .iter()
-                        .map(|(id, count)| (id.clone(), limit(Some(count), 5)))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            searching: params
-                .get("searchTerm")
-                .and_then(Value::as_str)
-                .is_some_and(|term| !term.trim().is_empty()),
+            project_limit: params.project_limit.max(1) as usize,
+            chat_limit: params.chat_limit.max(1) as usize,
+            thread_limits: &params.project_thread_limits,
+            searching: !params.search_term.trim().is_empty(),
         }
     }
 
     fn thread_limit(&self, project_id: &str) -> usize {
-        self.thread_limits.get(project_id).copied().unwrap_or(5)
+        self.thread_limits
+            .get(project_id)
+            .copied()
+            .unwrap_or(5)
+            .max(1) as usize
     }
 
     pub(crate) fn push(&mut self, mut thread: Thread) {
@@ -62,12 +45,12 @@ impl TitleList {
             .project_id
             .as_ref()
             .and_then(Option::as_deref)
-            .filter(|id| self.known_projects.contains(*id));
+            .and_then(|id| self.known_projects.get(id).copied());
         let target = if let Some(project_id) = project_id {
-            let position = match self.recent_projects.iter().position(|id| id == project_id) {
+            let position = match self.recent_projects.iter().position(|id| *id == project_id) {
                 Some(position) => position,
                 None => {
-                    self.recent_projects.push(project_id.to_owned());
+                    self.recent_projects.push(project_id);
                     self.recent_projects.len() - 1
                 }
             };
@@ -83,7 +66,7 @@ impl TitleList {
             {
                 return;
             }
-            self.threads.entry(project_id.to_owned()).or_default()
+            self.threads.entry(project_id).or_default()
         } else {
             if self.chats.len() > self.chat_limit {
                 return;
@@ -97,9 +80,8 @@ impl TitleList {
             .is_some_and(|name| !name.trim().is_empty())
         {
             let title: String = thread
-                .extra
-                .get("preview")
-                .and_then(Value::as_str)
+                .preview
+                .as_deref()
                 .unwrap_or("")
                 .lines()
                 .find(|line| !line.trim().is_empty())
@@ -113,9 +95,9 @@ impl TitleList {
         thread.turns = None;
         thread.history_cursor = None;
         thread.path = None;
-        thread
-            .extra
-            .retain(|key, _| matches!(key.as_str(), "createdAt" | "updatedAt"));
+        thread.preview = None;
+        thread.history_mode = None;
+        thread.extra.clear();
         target.push(thread);
     }
 
@@ -138,40 +120,46 @@ impl TitleList {
             .recent_projects
             .iter()
             .enumerate()
-            .map(|(index, id)| (id.as_str(), index))
+            .map(|(index, id)| (*id, index))
             .collect();
-        if self.searching {
-            self.projects
-                .retain(|project| positions.contains_key(project.id.as_str()));
-        }
-        self.projects.sort_by_key(|project| {
+        let mut projects = self
+            .projects
+            .iter()
+            .filter(|project| !self.searching || positions.contains_key(project.id.as_str()))
+            .collect::<Vec<_>>();
+        projects.sort_by_key(|project| {
             positions
                 .get(project.id.as_str())
                 .copied()
                 .unwrap_or(usize::MAX)
         });
-        for (position, project) in self.projects.iter_mut().enumerate() {
-            project.extra.insert("position".into(), json!(position));
-        }
         let mut more_project_ids = Vec::new();
         let mut data = Vec::new();
         for id in self.recent_projects.iter().take(self.project_limit) {
             let maximum = self.thread_limit(id);
             let mut threads = self.threads.remove(id).unwrap_or_default();
             if threads.len() > maximum {
-                more_project_ids.push(id.clone());
+                more_project_ids.push((*id).to_owned());
                 threads.truncate(maximum);
             }
             data.extend(threads);
         }
-        let more_projects = self.projects.len() > self.project_limit;
-        self.projects.truncate(self.project_limit);
+        let more_projects = projects.len() > self.project_limit;
+        projects.truncate(self.project_limit);
         let more_chats = self.chats.len() > self.chat_limit;
         self.chats.truncate(self.chat_limit);
         data.extend(self.chats);
         ThreadList {
             data,
-            projects: self.projects,
+            projects: projects
+                .into_iter()
+                .enumerate()
+                .map(|(position, project)| {
+                    let mut project = project.clone();
+                    project.position = Some(position as u64);
+                    project
+                })
+                .collect(),
             more_project_ids,
             has_more_projects: more_projects,
             has_more_chats: more_chats,
@@ -183,6 +171,7 @@ impl TitleList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
     fn thread(value: Value) -> Thread {
         serde_json::from_value(value).unwrap()
     }
@@ -191,14 +180,17 @@ mod tests {
             id: id.into(),
             name: id.into(),
             roots: vec![],
-            extra: Default::default(),
+            ..Default::default()
         }
     }
 
     #[test]
     fn returns_latest_five_titles_per_recent_project_and_independent_chat_page() {
-        let projects = (1..=7).map(|id| project(&format!("p{id}"))).collect();
-        let mut list = TitleList::new(projects, &json!({}));
+        let projects = (1..=7)
+            .map(|id| project(&format!("p{id}")))
+            .collect::<Vec<_>>();
+        let query = ListQuery::default();
+        let mut list = TitleList::new(&projects, &query);
         for index in 0..9 {
             for project in (1..=7).rev() {
                 list.push(thread(json!({"id":format!("p{project}-{index}"),"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
@@ -228,10 +220,12 @@ mod tests {
 
     #[test]
     fn repeated_expansion_has_no_hidden_total_title_limit() {
-        let mut list = TitleList::new(
-            vec![project("p")],
-            &json!({"projectThreadLimits":{"p":1005}}),
-        );
+        let projects = [project("p")];
+        let query = ListQuery {
+            project_thread_limits: [("p".into(), 1005)].into(),
+            ..Default::default()
+        };
+        let mut list = TitleList::new(&projects, &query);
         for index in 0..1001 {
             list.push(thread(
                 json!({"id":format!("t{index}"),"projectId":"p","name":"Title"}),
@@ -245,10 +239,12 @@ mod tests {
 
     #[test]
     fn expanding_one_project_does_not_expand_other_sections_and_exact_end_has_no_more() {
-        let mut list = TitleList::new(
-            vec![project("p"), project("q")],
-            &json!({"projectThreadLimits":{"p":15}}),
-        );
+        let projects = [project("p"), project("q")];
+        let query = ListQuery {
+            project_thread_limits: [("p".into(), 15)].into(),
+            ..Default::default()
+        };
+        let mut list = TitleList::new(&projects, &query);
         for index in 0..15 {
             list.push(thread(
                 json!({"id":format!("p{index}"),"projectId":"p","name":"P"}),

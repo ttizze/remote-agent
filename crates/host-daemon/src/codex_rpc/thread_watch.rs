@@ -6,7 +6,7 @@ use std::{
 
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::routing::{SessionId, SessionRouter};
 
@@ -21,6 +21,7 @@ pub(super) struct ThreadWatches {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::{fs, io::Write, time::Duration};
 
     fn append(path: &std::path::Path) {
@@ -55,8 +56,11 @@ mod tests {
             .request(
                 owner.id(),
                 router.clone(),
-                "host/thread/watch".into(),
-                json!({"watchId":1,"threadId":"open","path":path}),
+                WatchRequest::Watch(WatchParams {
+                    watch_id: 1,
+                    thread_id: "open".into(),
+                    path: path.clone(),
+                }),
             )
             .await
             .unwrap();
@@ -82,32 +86,27 @@ mod tests {
         let router = SessionRouter::new();
         let mut session = router.open_session(16);
         let watches = ThreadWatches::default();
-        let register = |revision, path| json!({"watchId":revision,"threadId":"open","path":path});
+        let register = |watch_id, path: &PathBuf| {
+            WatchRequest::Watch(WatchParams {
+                watch_id,
+                thread_id: "open".into(),
+                path: path.clone(),
+            })
+        };
         watches
-            .request(
-                session.id(),
-                router.clone(),
-                "host/thread/watch".into(),
-                register(2, &second),
-            )
+            .request(session.id(), router.clone(), register(2, &second))
             .await
             .unwrap();
         watches
             .request(
                 session.id(),
                 router.clone(),
-                "host/thread/unwatch".into(),
-                json!({"watchId":1}),
+                WatchRequest::Unwatch(UnwatchParams { watch_id: 1 }),
             )
             .await
             .unwrap();
         watches
-            .request(
-                session.id(),
-                router.clone(),
-                "host/thread/watch".into(),
-                register(1, &first),
-            )
+            .request(session.id(), router.clone(), register(1, &first))
             .await
             .unwrap();
         append(&second);
@@ -119,18 +118,12 @@ mod tests {
             .request(
                 session.id(),
                 router.clone(),
-                "host/thread/unwatch".into(),
-                json!({"watchId":2}),
+                WatchRequest::Unwatch(UnwatchParams { watch_id: 2 }),
             )
             .await
             .unwrap();
         watches
-            .request(
-                session.id(),
-                router.clone(),
-                "host/thread/watch".into(),
-                register(2, &second),
-            )
+            .request(session.id(), router.clone(), register(2, &second))
             .await
             .unwrap();
         while matches!(
@@ -156,7 +149,7 @@ struct Slot {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WatchParams {
+pub(super) struct WatchParams {
     watch_id: u64,
     thread_id: String,
     path: PathBuf,
@@ -164,8 +157,17 @@ struct WatchParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UnwatchParams {
+pub(super) struct UnwatchParams {
     watch_id: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "method", content = "params")]
+pub(super) enum WatchRequest {
+    #[serde(rename = "host/thread/watch")]
+    Watch(WatchParams),
+    #[serde(rename = "host/thread/unwatch")]
+    Unwatch(UnwatchParams),
 }
 
 impl ThreadWatches {
@@ -173,24 +175,18 @@ impl ThreadWatches {
         &self,
         session: SessionId,
         router: SessionRouter,
-        method: String,
-        params: Value,
-    ) -> Result<Value, String> {
+        request: WatchRequest,
+    ) -> Result<agent_core::models::Empty, String> {
         let watches = self.clone();
         tokio::task::spawn_blocking(move || {
             router
                 .ensure_session(session)
                 .map_err(|error| error.to_string())?;
-            if method == "host/thread/unwatch" {
-                let params: UnwatchParams =
-                    serde_json::from_value(params).map_err(|error| error.to_string())?;
-                watches.unwatch(session, params.watch_id);
-                return Ok(json!({}));
+            match request {
+                WatchRequest::Unwatch(params) => watches.unwatch(session, params.watch_id),
+                WatchRequest::Watch(params) => watches.watch(session, router, params)?,
             }
-            let params: WatchParams =
-                serde_json::from_value(params).map_err(|error| error.to_string())?;
-            watches.watch(session, router, params)?;
-            Ok(json!({}))
+            Ok(agent_core::models::Empty {})
         })
         .await
         .map_err(|error| error.to_string())?

@@ -1,5 +1,6 @@
 //! Protocol notifications mutate the same immutable snapshot as RPC responses.
 use super::*;
+use crate::models::append_text;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -294,13 +295,9 @@ fn item(
         }
         if expected == "fileChange"
             && old.items.as_ref().unwrap()[index]
-                .extra
-                .get("changes")
-                .is_some_and(|changes| {
-                    changes.as_array().is_none_or(|changes| {
-                        changes.last().is_some_and(|change| !change.is_object())
-                    })
-                })
+                .changes
+                .as_ref()
+                .is_some_and(|changes| !changes.accepts_delta())
         {
             next.error = Some("invalid file change delta target".into());
             return (next, Vec::new());
@@ -318,19 +315,10 @@ fn item(
                 .get_or_insert_with(String::new)
                 .push_str(&delta),
             "reasoning" => append_text(item.extra.entry("summary").or_insert(Value::Null), &delta),
-            "fileChange" => {
-                let changes = item
-                    .extra
-                    .entry("changes")
-                    .or_insert_with(|| Value::Array(Vec::new()));
-                let changes = changes.as_array_mut().unwrap();
-                if changes.is_empty() {
-                    changes.push(serde_json::json!({"path":"","kind":"update","diff":""}));
-                }
-                if let Some(change) = changes.last_mut().and_then(Value::as_object_mut) {
-                    append_text(change.entry("diff").or_insert(Value::Null), &delta);
-                }
-            }
+            "fileChange" => item
+                .changes
+                .get_or_insert_with(|| crate::models::ItemChanges::Files(Vec::new()))
+                .append_delta(&delta),
             _ => unreachable!(),
         }
     }
@@ -338,28 +326,6 @@ fn item(
         reconcile_pending(&mut next, &params.thread_id);
     }
     (next, Vec::new())
-}
-fn append_text(value: &mut Value, delta: &str) {
-    if !value.is_string() {
-        let text = match value.take() {
-            Value::Array(parts) => parts
-                .into_iter()
-                .filter_map(|part| match part {
-                    Value::String(text) => Some(text),
-                    Value::Object(mut object) => object
-                        .remove("text")
-                        .and_then(|text| text.as_str().map(str::to_owned)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
-        *value = Value::String(text);
-    }
-    if let Value::String(text) = value {
-        text.push_str(delta);
-    }
 }
 
 fn process(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, Vec<Effect>) {

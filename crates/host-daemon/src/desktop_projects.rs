@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use agent_core::models::{Project, Thread};
+use agent_core::models::{PageParams, Project, Thread};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
@@ -60,7 +60,10 @@ impl DesktopProjectStore {
         Self { path: path.into() }
     }
 
-    pub async fn project_list(&self, params: &Value) -> Result<ProjectPage, DesktopProjectError> {
+    pub async fn project_list(
+        &self,
+        params: &PageParams,
+    ) -> Result<ProjectPage, DesktopProjectError> {
         let snapshot = self.load().await?;
         snapshot.project_list(params).map_err(map_state_error)
     }
@@ -169,7 +172,7 @@ mod tests {
         let snapshot = DesktopProjectStore::new(path).load().await.unwrap();
 
         assert_eq!(
-            serde_json::to_value(snapshot.project_list(&Value::Null).unwrap()).unwrap(),
+            serde_json::to_value(snapshot.project_list(&PageParams::default()).unwrap()).unwrap(),
             json!({
                 "data": [],
                 "nextCursor": null,

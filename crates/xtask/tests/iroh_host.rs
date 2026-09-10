@@ -1,4 +1,3 @@
-use agent_core::state::operations as op;
 use agent_core::{
     models::Invitation,
     peer::{PeerEvent, RpcPeer},
@@ -368,7 +367,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
             .await
             .unwrap();
         store
-            .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+            .dispatch(Intent::UploadAttachment {
                 draft_key: "transfer-draft".into(),
                 attachment: Attachment {
                     path: source.to_str().unwrap().into(),
@@ -376,7 +375,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
                     is_image: false,
                 },
                 directory: directory.path().to_str().unwrap().into(),
-            }))
+            })
             .await
             .unwrap();
         let uploaded =
@@ -407,10 +406,10 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         other.close().await;
         let destination = directory.path().join("download.bin");
         store
-            .dispatch(Intent::DownloadFile(op::DownloadFile {
-                source: uploaded,
-                destination: destination.clone(),
-            }))
+            .dispatch(Intent::DownloadFile {
+                source: uploaded.to_str().unwrap().into(),
+                destination: destination.to_str().unwrap().into(),
+            })
             .await
             .unwrap();
         assert_eq!(std::fs::read(destination).unwrap(), content);
@@ -450,10 +449,7 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         .await
         .unwrap();
         use agent_core::{state::Intent, store::Outcome};
-        manager_b
-            .dispatch(Intent::CreateInvitation(op::CreateInvitation {}))
-            .await
-            .unwrap();
+        manager_b.dispatch(Intent::CreateInvitation).await.unwrap();
         let invitation = manager_b
             .snapshot()
             .management
@@ -467,10 +463,10 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         let id = second.ticket.node_id().to_string();
         assert_eq!(
             manager_a
-                .dispatch(Intent::PairRemoteHost(op::PairRemoteHost {
+                .dispatch(Intent::PairRemoteHost {
                     invitation,
                     name: "remote fixture".into()
-                }))
+                })
                 .await
                 .unwrap(),
             Outcome::RemoteHostPaired { id: id.clone() }
@@ -491,7 +487,7 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
                 .is_err()
         );
         manager_a
-            .dispatch(Intent::LoadHostManagement(op::LoadHostManagement))
+            .dispatch(Intent::LoadHostManagement)
             .await
             .unwrap();
         let snapshot = manager_a.snapshot();
@@ -506,12 +502,12 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
             second.ticket.node_id()
         );
         manager_a
-            .dispatch(Intent::RemoveRemoteHost(op::RemoveRemoteHost { id }))
+            .dispatch(Intent::RemoveRemoteHost { id })
             .await
             .unwrap();
         assert!(manager_a.snapshot().management.remotes.is_empty());
         manager_a
-            .dispatch(Intent::LoadHostManagement(op::LoadHostManagement))
+            .dispatch(Intent::LoadHostManagement)
             .await
             .unwrap();
         assert!(manager_a.snapshot().management.remotes.is_empty());
@@ -892,9 +888,9 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
         let local = fixture.local().await;
         let store = Store::new(local.peer, Snapshot::default());
         store
-            .dispatch(Intent::ListThreads(
-                op::ListThreads::new(Default::default()),
-            ))
+            .dispatch(Intent::ListThreads {
+                query: Default::default(),
+            })
             .await
             .unwrap();
         assert!(store.snapshot().connected);
@@ -902,9 +898,9 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
         assert!(
             store
-                .dispatch(Intent::ListThreads(
-                    op::ListThreads::new(Default::default())
-                ))
+                .dispatch(Intent::ListThreads {
+                    query: Default::default()
+                })
                 .await
                 .is_err()
         );

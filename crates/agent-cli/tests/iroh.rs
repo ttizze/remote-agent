@@ -1,5 +1,5 @@
+use agent_core::peer::{JsonlReader, JsonlWriter};
 use agent_core::transport::{Endpoint, Identity, Relays, Trust};
-use host_protocol::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, time::Duration};
 

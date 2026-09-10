@@ -307,12 +307,12 @@ fn stopped_history_watch_cannot_reload_a_conversation() {
     use agent_core::state::Intent;
     let (watching, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::Watch(op::Watch {
+        Event::Intent(Intent::Watch {
             thread_id: "thread".into(),
             watch_key: 1,
             watch_id: 3,
             path: Some("/rollout".into()),
-        })),
+        }),
     );
     let changed = || Event::Notification {
         method: "host/thread/changed".into(),
@@ -321,10 +321,10 @@ fn stopped_history_watch_cannot_reload_a_conversation() {
     assert_eq!(reduce(&watching, changed()).1.len(), 1);
     let (stopped, _) = reduce(
         &watching,
-        Event::Intent(Intent::Unwatch(op::Unwatch {
+        Event::Intent(Intent::Unwatch {
             watch_key: 1,
             watch_id: 3,
-        })),
+        }),
     );
     assert!(reduce(&stopped, changed()).1.is_empty());
 }
@@ -344,7 +344,13 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
             if load_catalog {
                 op::LoadModels.apply(&mut current, models.clone());
             } else {
-                current = reduce(&current, Event::Intent(Intent::NewChat("/fixture".into()))).0;
+                current = reduce(
+                    &current,
+                    Event::Intent(Intent::NewChat {
+                        cwd: "/fixture".into(),
+                    }),
+                )
+                .0;
             }
         }
         let draft = current.drafts.get("new:/fixture").expect("new chat draft");
@@ -358,7 +364,12 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
                 text: "keep".into(),
             }),
         );
-        let (returned, _) = reduce(&edited, Event::Intent(Intent::NewChat("/fixture".into())));
+        let (returned, _) = reduce(
+            &edited,
+            Event::Intent(Intent::NewChat {
+                cwd: "/fixture".into(),
+            }),
+        );
         assert!(Arc::ptr_eq(&edited.drafts, &returned.drafts));
         assert_eq!(returned.drafts["new:/fixture"].text, "keep");
     }
@@ -417,7 +428,11 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
                 );
                 next
             } else {
-                reduce(&previous, Event::Intent(Intent::NewChat(cwd.into()))).0
+                reduce(
+                    &previous,
+                    Event::Intent(Intent::NewChat { cwd: cwd.into() }),
+                )
+                .0
             };
             assert!(Arc::ptr_eq(&previous.file_drafts, &next.file_drafts));
             assert!(next.workspace.settings.is_some());
@@ -492,11 +507,14 @@ fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
         );
         assert_eq!(next.error, None);
         assert_eq!(
-            next.conversations["thread"].turns.as_ref().unwrap()[0]
-                .items
-                .as_ref()
-                .unwrap()[0]
-                .extra["changes"][0]["diff"],
+            serde_json::to_value(
+                &next.conversations["thread"].turns.as_ref().unwrap()[0]
+                    .items
+                    .as_ref()
+                    .unwrap()[0]
+                    .changes
+            )
+            .unwrap()[0]["diff"],
             expected
         );
     }
@@ -507,13 +525,15 @@ fn late_fork_preserves_new_navigation_and_stores_the_fork() {
     use agent_core::state::Intent;
     let (forking, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::ForkThread(op::ForkThread {
+        Event::Intent(Intent::ForkThread {
             thread_id: "old".into(),
             last_turn_id: "turn".into(),
-            exclude_turns: false,
-        })),
+        }),
     );
-    let (navigated, _) = reduce(&forking, Event::Intent(Intent::NewChat("/new".into())));
+    let (navigated, _) = reduce(
+        &forking,
+        Event::Intent(Intent::NewChat { cwd: "/new".into() }),
+    );
     let mut finished = navigated;
     op::ForkThread {
         thread_id: "old".into(),
@@ -534,12 +554,9 @@ fn account_listing_does_not_invalidate_a_concurrent_login() {
     use agent_core::state::Intent;
     let (starting, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::StartAccountLogin(op::StartAccountLogin {})),
+        Event::Intent(Intent::StartAccountLogin),
     );
-    let (listing, _) = reduce(
-        &starting,
-        Event::Intent(Intent::ListAccounts(op::ListAccounts {})),
-    );
+    let (listing, _) = reduce(&starting, Event::Intent(Intent::ListAccounts));
     let mut finished = listing;
     op::StartAccountLogin {}.apply(&mut finished, serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap());
     assert_eq!(
@@ -590,11 +607,11 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
 fn serialized_events_preserve_operation_inputs_and_replay_state() {
     let events = vec![
         Event::Connected,
-        Event::Intent(op::Intent::NewChat("/fixture".into())),
+        Event::Intent(op::Intent::NewChat { cwd: "/fixture".into() }),
         Event::Intent(op::Intent::SetDraftText { thread_id: "new:/fixture".into(), text: "再生する下書き".into() }),
-        Event::Intent(op::Intent::ReadFile(op::ReadFile { path: "/fixture/file".into(), discard_draft: true })),
+        Event::Intent(op::Intent::ReadFile { path: "/fixture/file".into(), discard_draft: true }),
         Event::ServerRequest(serde_json::from_value(json!({"id":"request","method":"item/commandExecution/requestApproval","params":{"futureField":[1,2]},"unknown":true})).unwrap()),
-        Event::Intent(op::Intent::Respond(op::Respond { request_id: json!("request"), answer: agent_core::client::Answer::Raw(serde_json::value::to_raw_value(&json!({"decision":"accept","futureField":true})).unwrap()) })),
+        Event::Intent(op::Intent::Respond { request_id: json!("request"), answer: agent_core::client::Answer::Raw { value: json!({"decision":"accept","futureField":true}) } }),
         Event::Disconnected("fixture disconnect".into()),
     ];
     let encoded = serde_json::to_vec(&events).unwrap();

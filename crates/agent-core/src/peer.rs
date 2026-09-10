@@ -1,6 +1,11 @@
 //! Transport-independent, bidirectional JSONL with one ordered receive stream.
-use host_protocol::{
-    JsonlReader, JsonlWriter, RpcMessageKind, classify_message, raw_object, rewrite_top_level_id,
+mod jsonl;
+mod message;
+
+pub use jsonl::{DEFAULT_MAX_MESSAGE_BYTES, JsonlError, JsonlReader, JsonlWriter};
+pub use message::{
+    RpcMessage, RpcMessageError, RpcMessageKind, RpcResponse, classify_message, raw_object,
+    rewrite_top_level_id,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;

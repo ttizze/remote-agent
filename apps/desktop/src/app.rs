@@ -1,4 +1,3 @@
-use agent_core::state::operations as op;
 mod clipboard;
 mod dictation;
 mod hosts;
@@ -11,7 +10,6 @@ use agent_core::{
     state::{Attachment, Draft, Intent, PendingSubmission, Snapshot},
     store::{Outcome, Store},
 };
-use base64::Engine;
 use dictation::{Dictation, Phase};
 use gpui_kit::{
     component::{
@@ -335,7 +333,7 @@ impl Desktop {
                     if value.as_ref() != view.snapshot.list_query.search_term {
                         let mut query = (*view.snapshot.list_query).clone();
                         query.search_term = value.to_string();
-                        view.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                        view.dispatch(Intent::ListThreads { query });
                     }
                 }
             }),
@@ -517,7 +515,7 @@ impl Desktop {
                 }) {
                     snapshot = agent_core::state::reduce(
                         &snapshot,
-                        agent_core::state::Event::Intent(Intent::NewChat(cwd)),
+                        agent_core::state::Event::Intent(Intent::NewChat { cwd }),
                     )
                     .0;
                 }
@@ -640,7 +638,7 @@ impl Desktop {
                             },
                             &self.runtime.handle,
                         ));
-                        self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
+                        self.dispatch(Intent::ReadWorktreeSettings);
                     }
                     Err(error) => self.error = error,
                 }
@@ -1035,22 +1033,19 @@ impl Desktop {
     fn new_chat(&mut self, cwd: String) {
         self.tab = Tab::Chat;
         self.cancel_recording();
-        self.dispatch(Intent::NewChat(cwd));
+        self.dispatch(Intent::NewChat { cwd });
     }
     fn open_chat(&mut self, id: String) {
         self.tab = Tab::Chat;
         self.cancel_recording();
         self.busy += 1;
-        self.perform(
-            Intent::ReadThread(op::ReadThread::open(id)),
-            |view, result, window, cx| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.error = error;
-                }
-                view.accept_snapshot(window, cx);
-            },
-        );
+        self.perform(Intent::OpenThread { id }, |view, result, window, cx| {
+            view.busy = view.busy.saturating_sub(1);
+            if let Err(error) = result {
+                view.error = error;
+            }
+            view.accept_snapshot(window, cx);
+        });
     }
     fn older(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.history_loading {
@@ -1064,12 +1059,11 @@ impl Desktop {
         self.history_error.clear();
         self.list.remeasure_items(0..1);
         self.perform(
-            Intent::ReadOlder(op::ReadOlder {
+            Intent::ReadOlder {
                 thread_id: self.selected().into(),
                 turn_id,
                 cursor,
-                defer_item_details: true,
-            }),
+            },
             move |view, result, window, cx| {
                 if view.snapshot.epoch != generation {
                     return;
@@ -1111,11 +1105,11 @@ impl Desktop {
         );
         let generation = self.snapshot.epoch;
         self.perform(
-            Intent::ReadItem(op::ReadItem {
+            Intent::ReadItem {
                 thread_id: self.selected().into(),
                 turn_id,
                 item_id,
-            }),
+            },
             move |view, result, window, cx| {
                 if view.snapshot.epoch != generation {
                     return;
@@ -1204,15 +1198,15 @@ impl Desktop {
         );
     }
     fn refresh_threads(&self) {
-        self.dispatch(Intent::ListThreads(op::ListThreads::new(
-            (*self.snapshot.list_query).clone(),
-        )));
+        self.dispatch(Intent::ListThreads {
+            query: (*self.snapshot.list_query).clone(),
+        });
     }
     fn refresh_review(&self) {
         if !self.snapshot.navigation.cwd.is_empty() {
-            self.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+            self.dispatch(Intent::ReviewWorkspace {
                 cwd: self.snapshot.navigation.cwd.clone(),
-            }));
+            });
         }
     }
     fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
@@ -1352,11 +1346,11 @@ impl Desktop {
                         is_image,
                     };
                     let intent = if remote {
-                        Intent::UploadAttachment(op::UploadAttachment {
+                        Intent::UploadAttachment {
                             draft_key: key.clone(),
                             attachment,
                             directory: directory.clone(),
-                        })
+                        }
                     } else {
                         Intent::AddAttachment {
                             draft_key: key.clone(),
@@ -1397,10 +1391,13 @@ impl Desktop {
                         .map_err(|error| error.to_string())?;
                 if let Some(destination) = destination {
                     store
-                        .dispatch(Intent::DownloadFile(op::DownloadFile {
-                            source: source.into(),
-                            destination,
-                        }))
+                        .dispatch(Intent::DownloadFile {
+                            source,
+                            destination: destination
+                                .into_os_string()
+                                .into_string()
+                                .map_err(|_| "download destination is not UTF-8")?,
+                        })
                         .await
                         .map_err(|error| error.to_string())?;
                 }
@@ -1418,29 +1415,26 @@ impl Desktop {
         self.panel = Panel::Files;
         self.panel_open = true;
         self.tab = Tab::Chat;
-        self.dispatch(Intent::ListFiles(op::ListFiles { path }));
+        self.dispatch(Intent::ListFiles { path });
     }
     fn edit(&mut self, path: String, discard_draft: bool) {
-        self.dispatch(Intent::ReadFile(op::ReadFile {
+        self.dispatch(Intent::ReadFile {
             path,
             discard_draft,
-        }));
+        });
     }
     fn save_file(&mut self) {
         let Some(path) = self.editor_path.clone() else {
             return;
         };
         self.busy += 1;
-        self.perform(
-            Intent::SaveFile(op::SaveFile { path }),
-            |view, result, window, cx| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.error = error;
-                }
-                view.accept_snapshot(window, cx);
-            },
-        );
+        self.perform(Intent::SaveFile { path }, |view, result, window, cx| {
+            view.busy = view.busy.saturating_sub(1);
+            if let Err(error) = result {
+                view.error = error;
+            }
+            view.accept_snapshot(window, cx);
+        });
     }
     fn settings_match_inputs(&self, cx: &App) -> bool {
         self.snapshot
@@ -1491,7 +1485,7 @@ impl Desktop {
         self.worktree_saving = true;
         self.worktree_saved = false;
         self.perform(
-            Intent::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings }),
+            Intent::UpdateWorktreeSettings { settings },
             |view, result, window, cx| {
                 view.worktree_saving = false;
                 if let Err(error) = result {
@@ -1511,10 +1505,10 @@ impl Desktop {
             inputs.sent = true;
         }
         self.perform(
-            Intent::Respond(op::Respond {
+            Intent::Respond {
                 request_id: id,
                 answer,
-            }),
+            },
             move |view, result, window, cx| {
                 if let Err(error) = result {
                     view.error = error;

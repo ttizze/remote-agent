@@ -150,7 +150,6 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "clap",
- "host-protocol",
  "serde_json",
  "tempfile",
  "tokio",
@@ -163,7 +162,6 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
- "host-protocol",
  "iroh",
  "iroh-tickets",
  "pin-project-lite",
@@ -1634,7 +1632,6 @@ name = "codex-app-server"
 version = "0.1.0"
 dependencies = [
  "agent-core",
- "host-protocol",
  "serde",
  "serde_json",
  "tempfile",
@@ -4628,7 +4625,6 @@ dependencies = [
  "directories",
  "futures-io",
  "futures-util",
- "host-protocol",
  "keyring",
  "notify 8.2.0",
  "reqwest",
@@ -4643,18 +4639,6 @@ dependencies = [
  "tokio-util",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "host-protocol"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -13137,7 +13121,6 @@ dependencies = [
  "codex-app-server",
  "futures-util",
  "host-daemon",
- "host-protocol",
  "indexmap 2.14.2",
  "iroh",
  "iroh-tickets",

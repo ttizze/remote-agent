@@ -51,7 +51,6 @@ val buildAgentAndroid by
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
-        inputs.dir(rootProject.file("crates/host-protocol"))
         outputs.dir(layout.buildDirectory.dir("generated/jniLibs"))
     }
 

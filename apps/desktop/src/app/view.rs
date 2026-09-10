@@ -1,5 +1,5 @@
 use super::*;
-use agent_core::state::operations as op;
+use base64::Engine;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
     sidebar::{Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem},
@@ -311,10 +311,16 @@ impl Desktop {
                     }
                     store
                         .ok_or("Host に接続していません")?
-                        .dispatch(Intent::DownloadFile(op::DownloadFile {
-                            source: path,
-                            destination: destination.clone(),
-                        }))
+                        .dispatch(Intent::DownloadFile {
+                            source: path
+                                .into_os_string()
+                                .into_string()
+                                .map_err(|_| "download source is not UTF-8")?,
+                            destination: destination
+                                .to_str()
+                                .ok_or("download destination is not UTF-8")?
+                                .into(),
+                        })
                         .await
                         .map_err(|error| error.to_string())?;
                     Ok(destination.to_string_lossy().into_owned())
@@ -477,10 +483,16 @@ impl Desktop {
                         download.join(path.file_name().ok_or("ファイル名がありません")?);
                     store
                         .ok_or("Host に接続していません")?
-                        .dispatch(Intent::DownloadFile(op::DownloadFile {
-                            source: path,
-                            destination: destination.clone(),
-                        }))
+                        .dispatch(Intent::DownloadFile {
+                            source: path
+                                .into_os_string()
+                                .into_string()
+                                .map_err(|_| "download source is not UTF-8")?,
+                            destination: destination
+                                .to_str()
+                                .ok_or("download destination is not UTF-8")?
+                                .into(),
+                        })
                         .await
                         .map_err(|error| error.to_string())?;
                     destination
@@ -513,9 +525,9 @@ impl Desktop {
             error: String::new(),
         });
         self.perform(
-            Intent::LoadSessionImages(op::LoadSessionImages {
+            Intent::LoadSessionImages {
                 thread_id: self.selected().into(),
-            }),
+            },
             move |view, result, _, _| {
                 let Some(gallery) = view
                     .image_gallery
@@ -1255,7 +1267,7 @@ impl Desktop {
                             )
                         })
                         .collect();
-                    view.respond(key.clone(), id.clone(), Answer::Questions(answers));
+                    view.respond(key.clone(), id.clone(), Answer::Questions { answers });
                 },
             ));
         } else if matches!(
@@ -1291,7 +1303,13 @@ impl Desktop {
                     label,
                     cx,
                     move |view, _, _| {
-                        view.respond(key.clone(), id.clone(), Answer::Decision(index))
+                        view.respond(
+                            key.clone(),
+                            id.clone(),
+                            Answer::Decision {
+                                index: (index) as u32,
+                            },
+                        )
                     },
                 ));
             }
@@ -1305,7 +1323,7 @@ impl Desktop {
                     label,
                     cx,
                     move |view, _, _| {
-                        view.respond(key.clone(), id.clone(), Answer::Permissions(allow))
+                        view.respond(key.clone(), id.clone(), Answer::Permissions { allow })
                     },
                 ));
             }
@@ -1323,10 +1341,10 @@ impl Desktop {
                         let Some(inputs) = view.requests.get(&key) else {
                             return;
                         };
-                        match serde_json::value::RawValue::from_string(
-                            inputs.raw.read(cx).value().to_string(),
-                        ) {
-                            Ok(value) => view.respond(key.clone(), id.clone(), Answer::Raw(value)),
+                        match serde_json::from_str::<Value>(&inputs.raw.read(cx).value()) {
+                            Ok(value) => {
+                                view.respond(key.clone(), id.clone(), Answer::Raw { value })
+                            }
                             Err(error) => view.error = error.to_string(),
                         }
                     },
@@ -1642,7 +1660,7 @@ impl Desktop {
                             let _ = target.update(cx, |s, cx| {
                                 let mut query = (*s.snapshot.list_query).clone();
                                 query.project_limit += 10;
-                                s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                                s.dispatch(Intent::ListThreads { query });
                                 cx.notify();
                             });
                         },
@@ -1746,7 +1764,7 @@ impl Desktop {
                             .on_click(cx.listener(move |s, _, _, cx| {
                                 let mut query = (*s.snapshot.list_query).clone();
                                 *query.project_thread_limits.entry(id.clone()).or_insert(5) += 10;
-                                s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                                s.dispatch(Intent::ListThreads { query });
                                 cx.notify();
                             })),
                     );
@@ -1763,7 +1781,7 @@ impl Desktop {
                 cx.listener(|s, _, _, cx| {
                     let mut query = (*s.snapshot.list_query).clone();
                     query.project_limit += 10;
-                    s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                    s.dispatch(Intent::ListThreads { query });
                     cx.notify();
                 }),
             ));
@@ -1796,7 +1814,7 @@ impl Desktop {
                 |s, _, _, cx| {
                     let mut query = (*s.snapshot.list_query).clone();
                     query.chat_limit += 10;
-                    s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                    s.dispatch(Intent::ListThreads { query });
                     cx.notify();
                 },
             )));
@@ -1878,9 +1896,7 @@ impl Desktop {
                                 cx,
                                 |s, _, _| {
                                     s.tab = Tab::Settings;
-                                    s.dispatch(Intent::ReadWorktreeSettings(
-                                        op::ReadWorktreeSettings {},
-                                    ));
+                                    s.dispatch(Intent::ReadWorktreeSettings);
                                 },
                             )
                             .accessibility_label("設定を開く")
@@ -2022,7 +2038,7 @@ impl Desktop {
                 move |s, _, _| {
                     s.dispatch(Intent::RemoveAttachment {
                         draft_key: key.clone(),
-                        index: i,
+                        index: i as u32,
                     });
                 },
             ));
@@ -2035,10 +2051,10 @@ impl Desktop {
         let send = if let Some(turn) = running.filter(|_| empty && phase.is_none()) {
             let id = turn.id.clone();
             self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
-                s.dispatch(Intent::Interrupt(op::Interrupt {
+                s.dispatch(Intent::Interrupt {
                     thread_id: s.selected().into(),
                     turn_id: id.clone(),
-                }));
+                });
             })
             .icon(Icon::default().path("bex/stop.svg"))
             .disabled(!self.snapshot.connected || self.busy > 0)

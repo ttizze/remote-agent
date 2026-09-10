@@ -7,14 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use agent_core::models::{FileContent, FileEntry, FileList};
+use agent_core::models::{FileContent, FileEntry, FileList, TransferGrant};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
     digest::{self, Context, SHA256},
     rand::{SecureRandom, SystemRandom},
 };
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::SessionId;
@@ -46,15 +46,54 @@ enum GrantFile {
     Download(File),
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "method", content = "params")]
+pub(crate) enum FileRequest {
+    #[serde(rename = "host/file/list")]
+    List(PathParams),
+    #[serde(rename = "host/file/read")]
+    Read(PathParams),
+    #[serde(rename = "host/file/write")]
+    Write(Save),
+    #[serde(rename = "host/blob/upload")]
+    Upload(Upload),
+    #[serde(rename = "host/blob/download")]
+    Download(PathParams),
+}
+#[derive(Deserialize)]
+pub(crate) struct PathParams {
+    path: PathBuf,
+}
+#[derive(Deserialize)]
+pub(crate) struct Save {
+    path: PathBuf,
+    revision: String,
+    text: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Upload {
+    directory: PathBuf,
+    file_name: String,
+    size: u64,
+    sha256: String,
+}
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum FileResponse {
+    List(FileList),
+    Content(FileContent),
+    Grant(TransferGrant),
+}
+
 impl WorkspaceFiles {
     pub(crate) async fn request(
         &self,
         session: SessionId,
-        method: String,
-        params: Value,
-    ) -> Result<Value, String> {
+        request: FileRequest,
+    ) -> Result<FileResponse, String> {
         let files = self.clone();
-        tokio::task::spawn_blocking(move || files.dispatch(session, &method, params))
+        tokio::task::spawn_blocking(move || files.dispatch(session, request))
             .await
             .map_err(|error| error.to_string())?
     }
@@ -66,14 +105,9 @@ impl WorkspaceFiles {
             .retain(|_, grant| grant.session != session);
     }
 
-    fn dispatch(&self, session: SessionId, method: &str, params: Value) -> Result<Value, String> {
-        match method {
-            "host/file/list" => {
-                #[derive(Deserialize)]
-                struct List {
-                    path: PathBuf,
-                }
-                let params: List = decode(params)?;
+    fn dispatch(&self, session: SessionId, request: FileRequest) -> Result<FileResponse, String> {
+        match request {
+            FileRequest::List(params) => {
                 let path = absolute_path(&params.path)?
                     .canonicalize()
                     .map_err(io_error)?;
@@ -99,33 +133,20 @@ impl WorkspaceFiles {
                     });
                 }
                 entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.name.cmp(&b.name)));
-                serde_json::to_value(FileList {
+                Ok(FileResponse::List(FileList {
                     path: path.to_str().ok_or("directory path is not UTF-8")?.into(),
                     entries,
                     truncated,
                     extra: Default::default(),
-                })
-                .map_err(io_error)
+                }))
             }
-            "host/file/read" => {
-                #[derive(Deserialize)]
-                struct ReadFile {
-                    path: PathBuf,
-                }
-                let params: ReadFile = decode(params)?;
+            FileRequest::Read(params) => {
                 let path = absolute_path(&params.path)?
                     .canonicalize()
                     .map_err(io_error)?;
-                read_editable(&path)
+                read_editable(&path).map(FileResponse::Content)
             }
-            "host/file/write" => {
-                #[derive(Deserialize)]
-                struct Save {
-                    path: PathBuf,
-                    revision: String,
-                    text: String,
-                }
-                let params: Save = decode(params)?;
+            FileRequest::Write(params) => {
                 let path = absolute_path(&params.path)?
                     .canonicalize()
                     .map_err(io_error)?;
@@ -167,18 +188,9 @@ impl WorkspaceFiles {
                         crate::platform::private_file_options(),
                     )
                     .map_err(|error| error.to_string())?;
-                read_editable(&path)
+                read_editable(&path).map(FileResponse::Content)
             }
-            "host/blob/upload" => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct Upload {
-                    directory: PathBuf,
-                    file_name: String,
-                    size: u64,
-                    sha256: String,
-                }
-                let params: Upload = decode(params)?;
+            FileRequest::Upload(params) => {
                 let directory = absolute_path(&params.directory)?
                     .canonicalize()
                     .map_err(io_error)?;
@@ -206,13 +218,9 @@ impl WorkspaceFiles {
                     size: params.size,
                     digest: params.sha256,
                 })
+                .map(FileResponse::Grant)
             }
-            "host/blob/download" => {
-                #[derive(Deserialize)]
-                struct Download {
-                    path: PathBuf,
-                }
-                let params: Download = decode(params)?;
+            FileRequest::Download(params) => {
                 let path = absolute_path(&params.path)?;
                 let mut file = File::open(path).map_err(io_error)?;
                 if !file.metadata().map_err(io_error)?.is_file() {
@@ -228,12 +236,12 @@ impl WorkspaceFiles {
                     size,
                     digest,
                 })
+                .map(FileResponse::Grant)
             }
-            _ => Err("unknown file method".into()),
         }
     }
 
-    fn grant(&self, grant: Grant) -> Result<Value, String> {
+    fn grant(&self, grant: Grant) -> Result<TransferGrant, String> {
         if grant.size > TRANSFER_LIMIT {
             return Err("transfer exceeds 512 MiB".into());
         }
@@ -253,7 +261,11 @@ impl WorkspaceFiles {
             .fill(&mut random)
             .map_err(|_| "secure random generation failed")?;
         let token = URL_SAFE_NO_PAD.encode(random);
-        let response = json!({"token":token,"size":grant.size,"sha256":grant.digest});
+        let response = TransferGrant {
+            token: token.clone(),
+            size: grant.size,
+            sha256: grant.digest.clone(),
+        };
         grants.insert(token, grant);
         Ok(response)
     }
@@ -359,9 +371,6 @@ impl WorkspaceFiles {
     }
 }
 
-fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
-    serde_json::from_value(value).map_err(|_| "invalid file parameters".into())
-}
 fn io_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -401,7 +410,7 @@ fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
-fn read_editable(path: &Path) -> Result<Value, String> {
+fn read_editable(path: &Path) -> Result<FileContent, String> {
     let bytes = read_bounded(path, EDIT_LIMIT)?;
     let bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
     let text = std::str::from_utf8(if bom { &bytes[3..] } else { &bytes })
@@ -409,7 +418,7 @@ fn read_editable(path: &Path) -> Result<Value, String> {
     if text.contains('\0') {
         return Err("binary file; download it instead".into());
     }
-    serde_json::to_value(FileContent {
+    Ok(FileContent {
         path: path.to_str().ok_or("file path is not UTF-8")?.into(),
         revision: hash(&bytes),
         text: text.into(),
@@ -418,7 +427,6 @@ fn read_editable(path: &Path) -> Result<Value, String> {
         size: bytes.len() as u64,
         extra: Default::default(),
     })
-    .map_err(io_error)
 }
 fn line_ending(text: &str) -> &'static str {
     let crlf = text
@@ -461,8 +469,11 @@ fn digest_file(file: &mut File) -> Result<(u64, String), String> {
 mod tests {
     use super::*;
 
-    async fn send_token(stream: &mut tokio::io::DuplexStream, grant: &Value) {
-        let token = grant["token"].as_str().unwrap();
+    async fn send_token(stream: &mut tokio::io::DuplexStream, grant: &FileResponse) {
+        let FileResponse::Grant(grant) = grant else {
+            panic!("expected transfer grant")
+        };
+        let token = &grant.token;
         stream.write_u32(token.len() as u32).await.unwrap();
         stream.write_all(token.as_bytes()).await.unwrap();
     }
@@ -475,7 +486,7 @@ mod tests {
             fs::write(&path, b"private").unwrap();
             let files = WorkspaceFiles::default();
             let grant = files
-                .dispatch(1, "host/blob/download", json!({"path":path}))
+                .dispatch(1, FileRequest::Download(PathParams { path: path.clone() }))
                 .unwrap();
             let (mut client, server) = tokio::io::duplex(1024);
             send_token(&mut client, &grant).await;
@@ -502,13 +513,16 @@ mod tests {
                     .contains("consumed")
             );
             let grant = files
-                .dispatch(1, "host/blob/download", json!({"path":path}))
+                .dispatch(1, FileRequest::Download(PathParams { path: path.clone() }))
                 .unwrap();
             files
                 .grants
                 .lock()
                 .unwrap()
-                .get_mut(grant["token"].as_str().unwrap())
+                .get_mut(match &grant {
+                    FileResponse::Grant(grant) => &grant.token,
+                    _ => panic!("expected transfer grant"),
+                })
                 .unwrap()
                 .expires = Instant::now() - Duration::from_secs(1);
             let (mut client, server) = tokio::io::duplex(1024);
@@ -527,7 +541,17 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let files = WorkspaceFiles::default();
             for bytes in [&b"wrong"[..], &b"longer"[..]] {
-                let grant = files.dispatch(1, "host/blob/upload", json!({"directory":directory.path(),"fileName":"safe.txt","size":5,"sha256":hash(b"valid")})).unwrap();
+                let grant = files
+                    .dispatch(
+                        1,
+                        FileRequest::Upload(Upload {
+                            directory: directory.path().into(),
+                            file_name: "safe.txt".into(),
+                            size: 5,
+                            sha256: hash(b"valid"),
+                        }),
+                    )
+                    .unwrap();
                 let (mut client, server) = tokio::io::duplex(1024);
                 send_token(&mut client, &grant).await;
                 client.write_all(bytes).await.unwrap();
@@ -535,7 +559,21 @@ mod tests {
                 assert!(files.transfer(1, server).await.is_err());
                 assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
             }
-            assert!(files.dispatch(1, "host/blob/upload", json!({"directory":directory.path(),"fileName":"../escape","size":0,"sha256":hash(b"")})).is_err());
-        }).await.unwrap();
+            assert!(
+                files
+                    .dispatch(
+                        1,
+                        FileRequest::Upload(Upload {
+                            directory: directory.path().into(),
+                            file_name: "../escape".into(),
+                            size: 0,
+                            sha256: hash(b"")
+                        })
+                    )
+                    .is_err()
+            );
+        })
+        .await
+        .unwrap();
     }
 }

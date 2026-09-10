@@ -35,15 +35,15 @@ extension BexAppViewModel {
     }
 
     func chooseModel(_ value: String) {
-        perform(.selectModel(key: coreDraftKey, model: value))
+        perform(.selectModel(threadId: coreDraftKey, model: value))
     }
 
     func chooseEffort(_ value: String) {
-        perform(.selectEffort(key: coreDraftKey, effort: value))
+        perform(.selectEffort(threadId: coreDraftKey, effort: value))
     }
 
     func chooseServiceTier(_ value: String) {
-        perform(.selectServiceTier(key: coreDraftKey, serviceTier: value))
+        perform(.selectServiceTier(threadId: coreDraftKey, serviceTier: value))
     }
 
     func loadAccounts(selecting id: String? = nil) {

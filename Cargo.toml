@@ -6,7 +6,6 @@ members = [
     "crates/agent-ffi",
     "crates/codex-app-server",
     "crates/host-daemon",
-    "crates/host-protocol",
     "crates/xtask",
 ]
 resolver = "2"

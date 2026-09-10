@@ -212,8 +212,11 @@ final class ObservedListRows {
     }
 
     func record() {
-        for element in query.allElementsBoundByIndex where seen.insert(element.identifier).inserted {
-            order.append(element.identifier)
+        for element in query.allElementsBoundByIndex {
+            let identifier = element.identifier
+            if seen.insert(identifier).inserted {
+                order.append(identifier)
+            }
         }
     }
 

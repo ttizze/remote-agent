@@ -1,8 +1,8 @@
 use std::{future::Future, path::Path};
 
+use crate::models::TransferGrant;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::digest::{Context, SHA256};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
@@ -22,16 +22,9 @@ pub enum TransferError {
 
 const LIMIT: u64 = 512 * 1024 * 1024;
 
-#[derive(Deserialize)]
-struct Grant {
-    token: String,
-    size: u64,
-    sha256: String,
-}
-
-impl Grant {
-    fn parse(value: Value) -> Result<Self, TransferError> {
-        let grant: Self = serde_json::from_value(value)?;
+impl TransferGrant {
+    fn validate(self) -> Result<Self, TransferError> {
+        let grant = self;
         let mut digest = [0; 32];
         let mut token = [0; 32];
         if grant.size > LIMIT
@@ -86,14 +79,14 @@ where
     }
     let sha256 = URL_SAFE_NO_PAD.encode(digest.finish().as_ref());
     file.rewind().await?;
-    let grant = Grant::parse(
-        peer.request(
+    let grant = peer
+        .request::<_, TransferGrant>(
             "host/blob/upload",
             &json!({"directory":directory,"fileName":file_name,"size":size,"sha256":sha256}),
         )
         .await?
-        .value,
-    )?;
+        .value
+        .validate()?;
     if grant.size != size || grant.sha256 != sha256 {
         return Err(TransferError::Protocol(
             "upload grant changed content metadata".into(),
@@ -146,11 +139,11 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<S>>,
 {
-    let grant = Grant::parse(
-        peer.request("host/blob/download", &json!({"path":source}))
-            .await?
-            .value,
-    )?;
+    let grant = peer
+        .request::<_, TransferGrant>("host/blob/download", &json!({"path":source}))
+        .await?
+        .value
+        .validate()?;
     let parent = destination
         .parent()
         .ok_or_else(|| TransferError::Protocol("download destination has no parent".into()))?;

@@ -19,8 +19,8 @@ const TRANSCRIBE_URL: &str = "https://chatgpt.com/backend-api/transcribe";
 
 pub(crate) async fn transcribe(
     app_server: &CodexAppServer,
-    params: &Value,
-) -> Result<Value, String> {
+    params: &agent_core::client::Transcribe<&str>,
+) -> Result<agent_core::client::Transcription, String> {
     tokio::time::timeout(
         Duration::from_secs(25),
         transcribe_request(app_server, params),
@@ -29,11 +29,11 @@ pub(crate) async fn transcribe(
     .map_err(|_| "文字起こしがタイムアウトしました。")?
 }
 
-async fn transcribe_request(app_server: &CodexAppServer, params: &Value) -> Result<Value, String> {
-    let audio = params
-        .get("audio")
-        .and_then(Value::as_str)
-        .ok_or("録音データがありません。")?;
+async fn transcribe_request(
+    app_server: &CodexAppServer,
+    params: &agent_core::client::Transcribe<&str>,
+) -> Result<agent_core::client::Transcription, String> {
+    let audio = params.audio;
     let pcm = Zeroizing::new(
         STANDARD
             .decode(audio)
@@ -70,7 +70,10 @@ async fn transcribe_request(app_server: &CodexAppServer, params: &Value) -> Resu
         TRANSCRIBE_URL,
     )
     .await?;
-    Ok(json!({ "text": text }))
+    Ok(agent_core::client::Transcription {
+        text,
+        extra: Default::default(),
+    })
 }
 
 async fn transcribe_authenticated(

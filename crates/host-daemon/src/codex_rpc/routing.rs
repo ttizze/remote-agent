@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use host_protocol::{RpcMessageKind, classify_message, rewrite_top_level_id};
+use agent_core::peer::{RpcMessageKind, classify_message, rewrite_top_level_id};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -409,7 +409,7 @@ fn remove_session_locked(state: &mut State, session: SessionId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use host_protocol::raw_object;
+    use agent_core::peer::raw_object;
 
     #[tokio::test]
     async fn server_requests_get_unique_ids_and_first_response_wins() {

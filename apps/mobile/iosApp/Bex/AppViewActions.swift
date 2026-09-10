@@ -36,7 +36,7 @@ extension BexAppViewModel {
 
     var draft: String {
         get { snapshot.draft(key: coreDraftKey).text }
-        set { perform(.setDraftText(key: coreDraftKey, text: newValue)) }
+        set { perform(.setDraftText(threadId: coreDraftKey, text: newValue)) }
     }
 
     var attachments: [StagedAttachment] {
@@ -128,14 +128,14 @@ extension BexAppViewModel {
     }
 
     func removeAttachment(_ id: Int) {
-        perform(.removeAttachment(key: coreDraftKey, index: UInt32(id))) { [weak self] _ in self?.persist() }
+        perform(.removeAttachment(draftKey: coreDraftKey, index: UInt32(id))) { [weak self] _ in self?.persist() }
     }
 
     func transcribe(_ audio: Data, draftKey key: String, sendImmediately: Bool) {
         guard !transcribing, key == draftKey else { return }
         transcribing = true
         perform(.transcribe(
-            key: coreDraftKey,
+            draftKey: coreDraftKey,
             audio: audio,
             send: sendImmediately,
             clientUserMessageId: UUID().uuidString
@@ -165,7 +165,7 @@ extension BexAppViewModel {
         transferError = nil
         let attachment = Attachment(path: url.path, name: url.lastPathComponent,
                                     isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true)
-        perform(.uploadAttachment(key: coreDraftKey, attachment: attachment, directory: cwd)) { [weak self] _ in
+        perform(.uploadAttachment(draftKey: coreDraftKey, attachment: attachment, directory: cwd)) { [weak self] _ in
             self?.persist()
             if access {
                 url.stopAccessingSecurityScopedResource()

@@ -1,4 +1,4 @@
-use agent_core::state::operations as op;
+use agent_core::peer::JsonlReader;
 use agent_core::{
     client::Answer,
     models::ListQuery,
@@ -8,7 +8,6 @@ use agent_core::{
     transport::{Endpoint, Identity, Relays, Ticket},
 };
 use clap::{Parser, Subcommand};
-use host_protocol::JsonlReader;
 use serde_json::Value;
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
@@ -61,7 +60,7 @@ enum Command {
         #[arg(value_parser=parse_json)]
         request_id: Value,
         #[arg(long)]
-        decision: usize,
+        decision: u32,
     },
 }
 
@@ -205,10 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await??;
             store
-                .dispatch(Intent::Respond(op::Respond {
+                .dispatch(Intent::Respond {
                     request_id,
-                    answer: Answer::Decision(decision),
-                }))
+                    answer: Answer::Decision { index: decision },
+                })
                 .await?;
             println!("null");
         }

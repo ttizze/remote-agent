@@ -1,8 +1,8 @@
+use agent_core::models::PageParams;
+use agent_core::peer::raw_object;
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::DesktopProjectStore;
 use host_daemon::ThreadPage;
-use host_protocol::raw_object;
-use serde_json::json;
 
 #[tokio::main]
 async fn main() {
@@ -14,7 +14,12 @@ async fn main() {
 
 async fn check() -> Result<(), Box<dyn std::error::Error>> {
     let store = DesktopProjectStore::from_environment()?;
-    let result = store.project_list(&json!({"limit": 512})).await?;
+    let result = store
+        .project_list(&PageParams {
+            limit: Some(512),
+            ..Default::default()
+        })
+        .await?;
     let project_count = result.data.len();
 
     let app_server = CodexAppServer::spawn(AppServerConfig::default()).await?;

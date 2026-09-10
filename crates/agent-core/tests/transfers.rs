@@ -1,9 +1,9 @@
+use agent_core::peer::{JsonlReader, JsonlWriter};
 use agent_core::{
     transfers::{download_file, upload_file},
     transport::{Endpoint, Identity, Relays, Trust},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use host_protocol::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, io, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

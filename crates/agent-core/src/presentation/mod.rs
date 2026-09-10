@@ -34,10 +34,9 @@ impl<'a> From<&'a Item> for ItemMetadata<'a> {
             kind: item.kind.as_deref().unwrap_or_default(),
             phase: item.extra.get("phase").and_then(Value::as_str),
             file_count: item
-                .extra
-                .get("changes")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len),
+                .changes
+                .as_ref()
+                .map_or(0, crate::models::ItemChanges::len),
         }
     }
 }

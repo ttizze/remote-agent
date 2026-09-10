@@ -7,35 +7,102 @@ use crate::{
 use rpc::{Input, Submission, submission_target};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
-    ListAccounts(ListAccounts),
-    SelectAccount(SelectAccount),
-    StartAccountLogin(StartAccountLogin),
-    ReadAccountLogin(ReadAccountLogin),
-    CancelAccountLogin(CancelAccountLogin),
-    ForkThread(ForkThread),
-    StartTerminal(StartTerminal),
-    CloseTerminal(CloseTerminal),
-    Transcribe(Dictate),
-    CreateInvitation(CreateInvitation),
-    RemoveRemoteHost(RemoveRemoteHost),
-    RevokeDevice(RevokeDevice),
-    ListFiles(ListFiles),
-    ReadFile(ReadFile),
-    SaveFile(SaveFile),
-    ReviewWorkspace(ReviewWorkspace),
-    ReadWorktreeSettings(ReadWorktreeSettings),
-    UpdateWorktreeSettings(UpdateWorktreeSettings),
-    ListThreads(ListThreads),
-    StartThread(StartThread),
-    ReadThread(ReadThread),
-    ReadItem(ReadItem),
-    ResizeTerminal(ResizeTerminal),
-    Interrupt(Interrupt),
-    Watch(Watch),
-    Unwatch(Unwatch),
+    ListAccounts,
+    SelectAccount {
+        id: String,
+    },
+    StartAccountLogin,
+    ReadAccountLogin {
+        id: String,
+    },
+    CancelAccountLogin {
+        id: String,
+    },
+    ForkThread {
+        thread_id: String,
+        last_turn_id: String,
+    },
+    StartTerminal {
+        handle: String,
+        cwd: String,
+        size: rpc::TerminalSize,
+    },
+    CloseTerminal {
+        handle: String,
+    },
+    Transcribe {
+        draft_key: String,
+        audio: Vec<u8>,
+        send: bool,
+        client_user_message_id: String,
+    },
+    CreateInvitation,
+    RemoveRemoteHost {
+        id: String,
+    },
+    RevokeDevice {
+        id: String,
+    },
+    ListFiles {
+        path: String,
+    },
+    ReadFile {
+        path: String,
+        discard_draft: bool,
+    },
+    SaveFile {
+        path: String,
+    },
+    ReviewWorkspace {
+        cwd: String,
+    },
+    ReadWorktreeSettings,
+    UpdateWorktreeSettings {
+        settings: WorktreeSettings,
+    },
+    ListThreads {
+        query: ListQuery,
+    },
+    StartThread {
+        cwd: Option<String>,
+        model: Option<String>,
+    },
+    OpenThread {
+        id: String,
+    },
+    ReadThread {
+        id: String,
+    },
+    ReadItem {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+    },
+    ResizeTerminal {
+        handle: String,
+        size: rpc::TerminalSize,
+    },
+    Interrupt {
+        thread_id: String,
+        turn_id: String,
+    },
+    Watch {
+        thread_id: String,
+        watch_key: u64,
+        watch_id: u64,
+        path: Option<String>,
+    },
+    Unwatch {
+        watch_key: u64,
+        watch_id: u64,
+    },
     ShowThreadList,
-    WriteTerminal(WriteTerminal),
+    WriteTerminal {
+        handle: String,
+        data: Vec<u8>,
+    },
     AcknowledgeTerminal {
         handle: String,
         sequence: u64,
@@ -46,20 +113,38 @@ pub enum Intent {
     },
     RemoveAttachment {
         draft_key: String,
-        index: usize,
+        index: u32,
     },
-    UploadAttachment(UploadAttachment),
-    DownloadFile(DownloadFile),
-    LoadSessionImages(LoadSessionImages),
-    LoadHostManagement(LoadHostManagement),
-    PairRemoteHost(PairRemoteHost),
-    NewChat(String),
+    UploadAttachment {
+        draft_key: String,
+        attachment: Attachment,
+        directory: String,
+    },
+    DownloadFile {
+        source: String,
+        destination: String,
+    },
+    LoadSessionImages {
+        thread_id: String,
+    },
+    LoadHostManagement,
+    PairRemoteHost {
+        invitation: Invitation,
+        name: String,
+    },
+    NewChat {
+        cwd: String,
+    },
     SetFileDraft {
         path: String,
         text: String,
     },
-    ReadOlder(ReadOlder),
-    LoadModels(LoadModels),
+    ReadOlder {
+        thread_id: String,
+        turn_id: Option<String>,
+        cursor: Option<String>,
+    },
+    LoadModels,
     SetDraft {
         thread_id: String,
         draft: Draft,
@@ -81,11 +166,13 @@ pub enum Intent {
         service_tier: String,
     },
     Submit {
-        /// None submits the navigation target, creating its thread if needed.
         thread_id: Option<String>,
         client_user_message_id: String,
     },
-    Respond(Respond),
+    Respond {
+        request_id: Value,
+        answer: Answer,
+    },
 }
 
 /// Typed state application after the Store has checked its single epoch.
@@ -370,10 +457,7 @@ impl Operation for ReadAccountLogin {
         account.login_status = Some(Arc::new(status));
         if completed {
             account.login = None;
-            let (updated, mut effects) = reduce(
-                snapshot,
-                Event::Intent(Intent::ListAccounts(ListAccounts {})),
-            );
+            let (updated, mut effects) = reduce(snapshot, Event::Intent(Intent::ListAccounts));
             *snapshot = updated;
             effects.push(Effect::execute(LoadModels));
             return effects;
@@ -609,6 +693,7 @@ impl Operation for UpdateWorktreeSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListThreads<Q = ListQuery> {
+    #[serde(default)]
     pub title_only: bool,
     #[serde(flatten)]
     pub query: Q,
@@ -814,6 +899,15 @@ pub struct ForkThread<T = String> {
     pub last_turn_id: T,
     pub exclude_turns: bool,
 }
+impl<T> ForkThread<T> {
+    pub fn new(thread_id: T, last_turn_id: T) -> Self {
+        Self {
+            thread_id,
+            last_turn_id,
+            exclude_turns: false,
+        }
+    }
+}
 impl<T: Serialize> rpc::RpcMethod for ForkThread<T> {
     type Output = crate::models::ThreadResponse;
     const METHOD: &'static str = "thread/fork";
@@ -888,9 +982,24 @@ impl Operation for StartThread {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dictate {
     pub draft_key: String,
-    pub request: rpc::Transcribe,
+    pub audio: Vec<u8>,
     pub send: bool,
     pub client_user_message_id: String,
+}
+impl Dictate {
+    pub fn new(
+        draft_key: String,
+        audio: Vec<u8>,
+        send: bool,
+        client_user_message_id: String,
+    ) -> Self {
+        Self {
+            draft_key,
+            audio,
+            send,
+            client_user_message_id,
+        }
+    }
 }
 impl Operation for Dictate {
     type Output = (Arc<Draft>, rpc::Transcription);
@@ -901,7 +1010,14 @@ impl Operation for Dictate {
             .get(&self.draft_key)
             .cloned()
             .unwrap_or_default();
-        Ok((draft, context.call(&self.request).await?))
+        Ok((
+            draft,
+            context
+                .call(&rpc::Transcribe {
+                    audio: Base64Bytes(&self.audio),
+                })
+                .await?,
+        ))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         if !self.send {
@@ -1046,7 +1162,18 @@ pub struct ReadOlder<T = String> {
     pub thread_id: T,
     pub turn_id: Option<T>,
     pub cursor: Option<T>,
+    #[serde(default)]
     pub defer_item_details: bool,
+}
+impl<T> ReadOlder<T> {
+    pub fn new(thread_id: T, turn_id: Option<T>, cursor: Option<T>) -> Self {
+        Self {
+            thread_id,
+            turn_id,
+            cursor,
+            defer_item_details: true,
+        }
+    }
 }
 impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadOlder<T> {
     type Output = crate::models::ThreadResponse;

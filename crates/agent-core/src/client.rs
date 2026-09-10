@@ -501,11 +501,20 @@ pub struct ServerRequest {
     pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Answer {
-    Decision(usize),
-    Permissions(bool),
-    Questions(std::collections::BTreeMap<String, String>),
-    Raw(Box<serde_json::value::RawValue>),
+    Decision {
+        index: u32,
+    },
+    Permissions {
+        allow: bool,
+    },
+    Questions {
+        answers: std::collections::BTreeMap<String, String>,
+    },
+    Raw {
+        value: Value,
+    },
 }
 /// The UI and response validator use the same ordered choices.
 pub fn approval_decisions(request: &ServerRequest) -> &[Value] {
@@ -523,14 +532,14 @@ pub fn approval_decisions(request: &ServerRequest) -> &[Value] {
 pub fn answer_result(request: &ServerRequest, answer: &Answer) -> Result<Value, PeerError> {
     use serde_json::json;
     match answer {
-        Answer::Decision(index) => {
+        Answer::Decision { index } => {
             let choices = approval_decisions(request);
             let decision = choices
-                .get(*index)
+                .get(*index as usize)
                 .ok_or_else(|| PeerError::InvalidMessage("invalid approval choice".into()))?;
             Ok(json!({"decision":decision}))
         }
-        Answer::Permissions(allow) => {
+        Answer::Permissions { allow } => {
             let permissions = if *allow {
                 request
                     .params
@@ -545,7 +554,7 @@ pub fn answer_result(request: &ServerRequest, answer: &Answer) -> Result<Value, 
             };
             Ok(json!({"permissions":permissions,"scope":"turn"}))
         }
-        Answer::Questions(answers) => {
+        Answer::Questions { answers } => {
             #[derive(Deserialize)]
             struct Question {
                 id: String,
@@ -570,8 +579,7 @@ pub fn answer_result(request: &ServerRequest, answer: &Answer) -> Result<Value, 
             }
             Ok(json!({"answers":result}))
         }
-        Answer::Raw(raw) => serde_json::from_str(raw.get())
-            .map_err(|error| PeerError::InvalidMessage(error.to_string())),
+        Answer::Raw { value } => Ok(value.clone()),
     }
 }
 impl Client {
@@ -673,6 +681,7 @@ impl Client {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TerminalSize {
     pub cols: u16,
     pub rows: u16,

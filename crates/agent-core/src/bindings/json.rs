@@ -74,3 +74,8 @@ uniffi::custom_type!(ThreadLimits, HashMap<String, u32>, {
     remote, lower: |limits| limits.into_iter().collect(), try_lift: |limits| Ok(limits.into_iter().collect())
 });
 uniffi::custom_type!(Uuid, String, { remote, lower: |value| value.to_string(), try_lift: |value| Ok(value.parse()?) });
+
+type QuestionAnswers = std::collections::BTreeMap<String, String>;
+uniffi::custom_type!(QuestionAnswers, HashMap<String, String>, {
+    remote, lower: |answers| answers.into_iter().collect(), try_lift: |answers| Ok(answers.into_iter().collect())
+});

@@ -1,5 +1,5 @@
+use agent_core::models::WorktreeSettings;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     collections::HashMap,
     fs,
@@ -9,18 +9,9 @@ use std::{
 };
 
 #[derive(Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
-struct Settings {
-    create_on_new_session: bool,
-    copy_on_create: bool,
-    copy_paths: Vec<String>,
-    worktree_directory: String,
-}
-
-#[derive(Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct State {
-    settings: Settings,
+    settings: WorktreeSettings,
     workspace_roots: HashMap<String, String>,
 }
 
@@ -37,13 +28,16 @@ impl Worktrees {
         }
     }
 
-    pub(crate) async fn settings(&self, update: Option<Value>) -> Result<Value, String> {
+    pub(crate) async fn settings(
+        &self,
+        update: Option<WorktreeSettings>,
+    ) -> Result<WorktreeSettings, String> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
-            if let Some(update) = update {
-                let settings: Settings = serde_json::from_value(update).map_err(|e| e.to_string())?;
+            if let Some(settings) = update {
+                if !settings.extra.is_empty() { return Err("unknown worktree setting".into()); }
                 for entry in &settings.copy_paths { relative_path(entry)?; }
                 if !settings.worktree_directory.is_empty() && !Path::new(&settings.worktree_directory).is_absolute() {
                     return Err("worktree directory must be an absolute path on the Host, or empty for the default".into());
@@ -51,7 +45,7 @@ impl Worktrees {
                 state.settings = settings;
                 save(&path, &state)?;
             }
-            serde_json::to_value(state.settings).map_err(|e| e.to_string())
+            Ok(state.settings)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -281,6 +275,17 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    impl Worktrees {
+        async fn configure(&self, update: Option<Value>) -> Result<Value, String> {
+            let update = update
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(self.settings(update).await?).map_err(|error| error.to_string())
+        }
+    }
+
     use serde_json::json;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -336,9 +341,9 @@ mod tests {
         fs::create_dir(root.join("local")).unwrap();
         fs::write(root.join("local/value"), "local data").unwrap();
         let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":""});
-        store.settings(Some(settings.clone())).await.unwrap();
+        store.configure(Some(settings.clone())).await.unwrap();
         let loaded = Worktrees::new(&projects);
-        assert_eq!(loaded.settings(None).await.unwrap(), settings);
+        assert_eq!(loaded.configure(None).await.unwrap(), settings);
         let first = loaded.prepare(root.to_str()).await.unwrap().unwrap();
         assert_eq!(first.parent().unwrap(), root.join(".git/bex-worktrees"));
         assert_eq!(
@@ -382,7 +387,7 @@ mod tests {
             root.to_str().unwrap()
         );
         store
-            .settings(Some(
+            .configure(Some(
                 json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"]}),
             ))
             .await
@@ -391,7 +396,7 @@ mod tests {
         assert_ne!(first, second);
         assert!(!second.join(".env").exists());
         store
-            .settings(Some(
+            .configure(Some(
                 json!({"createOnNewSession":false,"copyOnCreate":true,"copyPaths":[".env"]}),
             ))
             .await
@@ -420,7 +425,7 @@ mod tests {
                 symlink(root.join("local"), root.join("nested")).unwrap();
             }
             store
-                .settings(Some(
+                .configure(Some(
                     json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[path]}),
                 ))
                 .await
@@ -442,7 +447,7 @@ mod tests {
         let directory = repository();
         let store = Worktrees::new(&directory.path().join("projects.json"));
         let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":""});
-        store.settings(Some(valid.clone())).await.unwrap();
+        store.configure(Some(valid.clone())).await.unwrap();
         for path in [
             "",
             "/tmp/private",
@@ -453,26 +458,26 @@ mod tests {
         ] {
             assert!(
                 store
-                    .settings(Some(json!({"copyPaths":[path]})))
+                    .configure(Some(json!({"copyPaths":[path]})))
                     .await
                     .is_err()
             );
-            assert_eq!(store.settings(None).await.unwrap(), valid);
+            assert_eq!(store.configure(None).await.unwrap(), valid);
         }
         assert!(
             store
-                .settings(Some(json!({"createOnNewSession":"yes"})))
+                .configure(Some(json!({"createOnNewSession":"yes"})))
                 .await
                 .is_err()
         );
         for path in ["relative/worktrees", "~/worktrees", "../worktrees"] {
             assert!(
                 store
-                    .settings(Some(json!({"worktreeDirectory":path})))
+                    .configure(Some(json!({"worktreeDirectory":path})))
                     .await
                     .is_err()
             );
-            assert_eq!(store.settings(None).await.unwrap(), valid);
+            assert_eq!(store.configure(None).await.unwrap(), valid);
         }
     }
 
@@ -487,7 +492,7 @@ mod tests {
         let projects = root.join("projects.json");
         let store = Worktrees::new(&projects);
         let mut settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":root.join("storage/new folder")});
-        store.settings(Some(settings.clone())).await.unwrap();
+        store.configure(Some(settings.clone())).await.unwrap();
         let restarted = Worktrees::new(&projects);
         let first = restarted.prepare(root.to_str()).await.unwrap().unwrap();
         assert_eq!(first.parent().unwrap(), real_parent.join("new folder"));
@@ -501,7 +506,7 @@ mod tests {
             0o700
         );
         settings["worktreeDirectory"] = json!(real_parent.join("second"));
-        store.settings(Some(settings)).await.unwrap();
+        store.configure(Some(settings)).await.unwrap();
         let second = restarted.prepare(first.to_str()).await.unwrap().unwrap();
         assert_eq!(second.parent().unwrap(), real_parent.join("second"));
         assert!(first.join(".env").is_file());
@@ -515,7 +520,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = Worktrees::new(&directory.path().join("projects.json"));
         store
-            .settings(Some(json!({"createOnNewSession":true})))
+            .configure(Some(json!({"createOnNewSession":true})))
             .await
             .unwrap();
         assert!(store.prepare(directory.path().to_str()).await.is_err());

@@ -196,7 +196,7 @@ impl IncomingSession {
     pub async fn pairing(self) -> Result<PairingRequest, TransportError> {
         let stream = self.0.as_ref().unwrap().accept_stream().await?;
         let (read, write) = tokio::io::split(stream);
-        let peer = RpcPeer::open(host_protocol::JsonlReader::new(read), write, None, 128)?;
+        let peer = RpcPeer::open(crate::peer::JsonlReader::new(read), write, None, 128)?;
         let mut events = peer.subscribe();
         let PeerEvent::Message(message) = events.recv().await.map_err(connection)? else {
             return Err(TransportError::Unauthorized);
@@ -308,7 +308,7 @@ impl Session {
         stream.write_all(b"\n").await.map_err(connection)?;
         let (read, write) = tokio::io::split(stream);
         Ok(RpcPeer::open(
-            host_protocol::JsonlReader::new(read),
+            crate::peer::JsonlReader::new(read),
             write,
             Some(timeout),
             max_requests,

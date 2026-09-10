@@ -1,6 +1,11 @@
 use std::{collections::HashMap, path::PathBuf};
 
-use agent_core::peer::PeerEvent;
+use agent_core::{
+    client::{AccountLogin, AccountLoginStatus},
+    models::Empty,
+    peer::PeerEvent,
+    state::operations as op,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use serde::{Deserialize, Serialize};
@@ -10,7 +15,7 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Account {
+pub(crate) struct Account {
     id: String,
     email: String,
     plan_type: String,
@@ -43,6 +48,37 @@ pub(crate) struct Accounts {
     login: Option<Login>,
     completed_login: Option<(String, String)>,
     restoration_error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "method", content = "params")]
+pub(crate) enum AccountRequest {
+    #[serde(rename = "host/account/list")]
+    List(Empty),
+    #[serde(rename = "host/account/select")]
+    Select(op::SelectAccount),
+    #[serde(rename = "host/account/login/start")]
+    LoginStart(Empty),
+    #[serde(rename = "host/account/login/status")]
+    LoginStatus(op::ReadAccountLogin),
+    #[serde(rename = "host/account/login/cancel")]
+    LoginCancel(op::CancelAccountLogin),
+}
+#[derive(Serialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub(crate) enum AccountResponse<'a> {
+    List {
+        accounts: &'a [Account],
+        selected_id: Option<&'a str>,
+        error: Option<&'a str>,
+    },
+    Selected {
+        selected_id: String,
+        persistence_error: Option<String>,
+    },
+    Login(AccountLogin),
+    Status(AccountLoginStatus),
+    Empty(Empty),
 }
 
 impl Accounts {
@@ -134,11 +170,10 @@ impl Accounts {
     pub(crate) async fn request(
         &mut self,
         primary: &CodexAppServer,
-        method: &str,
-        params: &Value,
-    ) -> Result<Value, String> {
-        match method {
-            "host/account/list" => {
+        request: AccountRequest,
+    ) -> Result<AccountResponse<'_>, String> {
+        match request {
+            AccountRequest::List(_) => {
                 self.discover_desktop().await?;
                 let selected = if self.restoration_error.is_some() {
                     None
@@ -151,18 +186,20 @@ impl Accounts {
                             .then_some("desktop")
                     })
                 };
-                Ok(
-                    json!({"accounts":self.registry.accounts,"selectedId":selected,"error":self.restoration_error}),
-                )
+                Ok(AccountResponse::List {
+                    accounts: &self.registry.accounts,
+                    selected_id: selected,
+                    error: self.restoration_error.as_deref(),
+                })
             }
-            "host/account/select" => {
-                let id = params["accountId"]
-                    .as_str()
-                    .ok_or("アカウントを指定してください。")?;
-                self.select(primary, id).await?;
-                Ok(json!({"selectedId":id,"persistenceError":self.save().err()}))
+            AccountRequest::Select(params) => {
+                self.select(primary, &params.id).await?;
+                Ok(AccountResponse::Selected {
+                    selected_id: params.id,
+                    persistence_error: self.save().err(),
+                })
             }
-            "host/account/login/start" => {
+            AccountRequest::LoginStart(_) => {
                 if self.login.is_some() {
                     self.cancel_login().await?;
                 }
@@ -189,7 +226,8 @@ impl Accounts {
                     .as_str()
                     .ok_or("ログインを開始できませんでした。")?
                     .to_owned();
-                let response = json!({"loginId":id,"userCode":result["userCode"],"verificationUrl":result["verificationUrl"]});
+                let response: AccountLogin = serde_json::from_value(result)
+                    .map_err(|_| "ログインを開始できませんでした。")?;
                 self.login = Some(Login {
                     directory,
                     server,
@@ -198,36 +236,42 @@ impl Accounts {
                     completed: false,
                 });
                 self.completed_login = None;
-                Ok(response)
+                Ok(AccountResponse::Login(response))
             }
-            "host/account/login/status" => self.login_status(params).await,
-            "host/account/login/cancel" => {
+            AccountRequest::LoginStatus(params) => self
+                .login_status(&params.id)
+                .await
+                .map(AccountResponse::Status),
+            AccountRequest::LoginCancel(params) => {
                 if self
                     .completed_login
                     .as_ref()
-                    .is_some_and(|(id, _)| params["loginId"] == *id)
+                    .is_some_and(|(id, _)| params.id == *id)
                 {
-                    return Ok(json!({}));
+                    return Ok(AccountResponse::Empty(Empty {}));
                 }
                 let login = self.login.as_ref().ok_or("ログイン手続きがありません。")?;
-                if params["loginId"] != login.id {
+                if params.id != login.id {
                     return Err("ログイン手続きが一致しません。".into());
                 }
                 self.cancel_login().await?;
-                Ok(json!({}))
+                Ok(AccountResponse::Empty(Empty {}))
             }
-            _ => Err("未対応のアカウント操作です。".into()),
         }
     }
 
-    async fn login_status(&mut self, params: &Value) -> Result<Value, String> {
+    async fn login_status(&mut self, requested_id: &str) -> Result<AccountLoginStatus, String> {
         if let Some((login_id, account_id)) = &self.completed_login
-            && params["loginId"] == *login_id
+            && requested_id == login_id
         {
-            return Ok(json!({"completed":true,"accountId":account_id}));
+            return Ok(AccountLoginStatus {
+                completed: true,
+                account_id: Some(account_id.clone()),
+                extra: Default::default(),
+            });
         }
         let login = self.login.as_mut().ok_or("ログイン手続きがありません。")?;
-        if params["loginId"] != login.id {
+        if requested_id != login.id {
             return Err("ログイン手続きが一致しません。".into());
         }
         while !login.completed {
@@ -248,7 +292,11 @@ impl Accounts {
                 }
                 Ok(PeerEvent::Response { .. }) => {}
                 Err(broadcast::error::TryRecvError::Empty) => {
-                    return Ok(json!({"completed":false}));
+                    return Ok(AccountLoginStatus {
+                        completed: false,
+                        account_id: None,
+                        extra: Default::default(),
+                    });
                 }
                 Ok(PeerEvent::Closed(_)) | Err(_) => {
                     self.login = None;
@@ -275,7 +323,11 @@ impl Accounts {
         let _ = login.directory.keep();
         self.completed_login = Some((login.id, id.clone()));
         self.helpers.insert(id.clone(), login.server);
-        Ok(json!({"completed":true,"accountId":id}))
+        Ok(AccountLoginStatus {
+            completed: true,
+            account_id: Some(id),
+            extra: Default::default(),
+        })
     }
 
     async fn select(&mut self, primary: &CodexAppServer, id: &str) -> Result<(), String> {
@@ -316,7 +368,7 @@ impl Accounts {
         Ok(())
     }
 
-    pub(crate) async fn refresh(&mut self, previous: Option<&str>) -> Result<Value, String> {
+    pub(crate) async fn refresh(&mut self, previous: Option<&str>) -> Result<Credentials, String> {
         let id = match previous {
             Some(previous) => self
                 .registry
@@ -327,10 +379,7 @@ impl Accounts {
             None => self.registry.selected_id.clone(),
         }
         .ok_or("更新対象のアカウントが見つかりません。ログインしてください。")?;
-        let auth = credentials(self.helper(&id).await?, true).await?;
-        Ok(
-            json!({"accessToken":auth.token.as_str(),"chatgptAccountId":auth.account_id,"chatgptPlanType":auth.plan}),
-        )
+        credentials(self.helper(&id).await?, true).await
     }
 
     fn save(&self) -> Result<(), String> {
@@ -346,10 +395,20 @@ impl Accounts {
     }
 }
 
-struct Credentials {
+#[derive(Serialize)]
+pub(crate) struct Credentials {
+    #[serde(rename = "accessToken", serialize_with = "serialize_token")]
     token: Zeroizing<String>,
+    #[serde(rename = "chatgptAccountId")]
     account_id: String,
+    #[serde(rename = "chatgptPlanType")]
     plan: Option<String>,
+}
+fn serialize_token<S: serde::Serializer>(
+    token: &Zeroizing<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(token)
 }
 
 async fn credentials(server: &CodexAppServer, refresh: bool) -> Result<Credentials, String> {

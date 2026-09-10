@@ -1,4 +1,4 @@
-use host_protocol::{JsonlReader, JsonlWriter};
+use agent_core::peer::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Stdio, time::Duration};
 use tokio::process::Command;

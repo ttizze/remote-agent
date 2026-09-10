@@ -1,10 +1,10 @@
 use crate::{CodexRpcService, HostCredentials, SessionId};
+use agent_core::peer::{RpcMessageKind, classify_message};
 use agent_core::{
     models::{HostStatus, Invitation, RemoteHost},
     peer::{PeerEvent, RpcPeer},
     transport::{Endpoint, IncomingSession, NodeId, Session, Ticket, authorize},
 };
-use host_protocol::{RpcMessageKind, classify_message};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -98,8 +98,9 @@ impl HostRuntime {
                     .await
                     .map_err(|e| e.to_string())?;
                 let (read, write) = tokio::io::split(stream);
-                let peer = RpcPeer::open(host_protocol::JsonlReader::new(read), write, None, 128)
-                    .map_err(|e| e.to_string())?;
+                let peer =
+                    RpcPeer::open(agent_core::peer::JsonlReader::new(read), write, None, 128)
+                        .map_err(|e| e.to_string())?;
                 let events = peer.subscribe();
                 Ok((scopeguard::ScopeGuard::into_inner(connection), peer, events))
             } else {
