@@ -1686,3 +1686,116 @@ async fn stores_share_an_endpoint_without_closing_each_others_transport() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn navigation_invalidates_all_view_reads_and_their_errors() {
+    for (intent, output) in [
+        (
+            Intent::ReadFile {
+                path: "/old/file".into(),
+                discard_draft: false,
+            },
+            file("/old/file", "r1", "old"),
+        ),
+        (
+            Intent::ListFiles("/old".into()),
+            json!({"path":"/old","entries":[],"truncated":false}),
+        ),
+        (
+            Intent::ReviewWorkspace("/old".into()),
+            json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":"old"}),
+        ),
+        (
+            Intent::ReadWorktreeSettings,
+            json!({"createOnNewSession":false,"copyOnCreate":false,"copyPaths":[],"worktreeDirectory":"old"}),
+        ),
+        (
+            Intent::ListAccounts,
+            json!({"accounts":[],"selectedId":null,"error":null}),
+        ),
+        (
+            Intent::ListThreads(Default::default()),
+            json!({"data":[{"id":"old"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+        ),
+    ] {
+        let (store, mut reader, mut writer) = setup(Snapshot::default());
+        let loading = store.dispatch(intent);
+        let request = read(&mut reader).await;
+        store
+            .dispatch(Intent::NewChat("/new".into()))
+            .await
+            .unwrap();
+        let navigated = store.snapshot();
+        writer
+            .write_line(&json!({"id":request["id"],"result":output}).to_string())
+            .await
+            .unwrap();
+        loading.await.unwrap();
+        assert_eq!(
+            store.snapshot(),
+            navigated,
+            "old {} updated the new view",
+            request["method"]
+        );
+        store.close().await.unwrap();
+    }
+    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let loading = store.dispatch(Intent::ListFiles("/old".into()));
+    let request = read(&mut reader).await;
+    store
+        .dispatch(Intent::NewChat("/new".into()))
+        .await
+        .unwrap();
+    writer
+        .write_line(
+            &json!({"id":request["id"],"error":{"code":-32000,"message":"old failure"}})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    assert!(loading.await.is_err());
+    assert!(store.snapshot().error.is_none());
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_file() {
+    let mut initial = Snapshot::default();
+    Arc::make_mut(&mut initial.workspace).file = Some(Arc::new(
+        serde_json::from_value(file("/old/file", "base", "old")).unwrap(),
+    ));
+    let (store, mut reader, mut writer) = setup(initial);
+    store
+        .dispatch(Intent::SetFileDraft {
+            path: "/old/file".into(),
+            text: "submitted".into(),
+        })
+        .await
+        .unwrap();
+    let saving = store.dispatch(Intent::SaveFile("/old/file".into()));
+    let request = read(&mut reader).await;
+    store
+        .dispatch(Intent::SetFileDraft {
+            path: "/old/file".into(),
+            text: "newer".into(),
+        })
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::NewChat("/new".into()))
+        .await
+        .unwrap();
+    writer
+        .write_line(
+            &json!({"id":request["id"],"result":file("/old/file", "saved", "submitted")})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    saving.await.unwrap();
+    let saved = store.snapshot();
+    assert_eq!(saved.file_drafts["/old/file"].text, "newer");
+    assert_eq!(saved.file_drafts["/old/file"].revision, "saved");
+    assert!(saved.workspace.file.is_none());
+    store.close().await.unwrap();
+}

@@ -1,382 +1,588 @@
 use super::*;
-use crate::client as rpc;
+use crate::{client as rpc, store::Outcome};
 
-// One declaration owns each RPC Intent, typed response, ordering and state destination.
-// Context is captured from the dispatch snapshot, never from the state at completion.
-macro_rules! operation_table {
-    ($define:ident, $snapshot:ident $(, $context:tt)*) => {
-        $define! {
-            $snapshot;
-            loaded {
-                ListAccounts => rpc::ListAccounts, rpc::ListAccounts {}, false;
-                    (generation: u64 = $snapshot.account.accounts_generation) => accounts_loaded;
-                SelectAccount(id: String) => rpc::SelectAccount<'static>, rpc::SelectAccount { account_id: &id }, false;
-                    (generation: u64 = $snapshot.account.accounts_generation) => account_selected;
-                StartAccountLogin => rpc::StartAccountLogin, rpc::StartAccountLogin {}, false;
-                    (generation: u64 = $snapshot.account.login_generation) => account_login_started;
-                ReadAccountLogin(id: String) => rpc::ReadAccountLogin<'static>, rpc::ReadAccountLogin { login_id: &id }, false;
-                    (generation: u64 = $snapshot.account.login_generation) => account_login_updated;
-                CancelAccountLogin(id: String) => rpc::CancelAccountLogin<'static>, rpc::CancelAccountLogin { login_id: &id }, false;
-                    (generation: u64 = $snapshot.account.login_generation) => account_login_cancelled;
-                ForkThread { thread_id: String, last_turn_id: String }
-                    => rpc::ForkThread<'static>, rpc::ForkThread { thread_id: &thread_id, last_turn_id: &last_turn_id, exclude_turns: false }, true;
-                    (generation: u64 = $snapshot.navigation.generation) => thread_forked
-                    [value => Outcome::StartedThread(value.thread.id.clone().expect("validated thread ID"))];
-                StartTerminal { handle: String, cwd: String, size: rpc::TerminalSize }
-                    => rpc::StartTerminal<'static>, rpc::StartTerminal { process_handle: &handle, cwd: &cwd, size }, true;
-                    (handle: String = handle) => terminal_started;
-                CloseTerminal(handle: String) => rpc::KillTerminal<'static>, rpc::KillTerminal { process_handle: &handle }, true;
-                    (handle: String = handle) => terminal_closed;
-                Transcribe { draft_key: String, audio: String, send: bool, client_user_message_id: String }
-                    => rpc::Transcribe<'static>, rpc::Transcribe { audio: &audio }, false;
-                    (draft: Arc<Draft> = $snapshot.drafts.get(&draft_key).cloned().unwrap_or_default(),
-                     draft_key: String = draft_key, generation: u64 = $snapshot.navigation.generation,
-                     send: bool = send, client_user_message_id: String = client_user_message_id) => transcribed;
-                CreateInvitation => rpc::CreateInvitation, rpc::CreateInvitation {}, false;
-                    () => invitation_created;
-                RemoveRemoteHost(id: String) => rpc::RemoveRemoteHost<'static>, rpc::RemoveRemoteHost { id: &id }, false;
-                    (id: String = id) => remote_host_removed;
-                RevokeDevice(id: String) => rpc::RevokeDevice<'static>, rpc::RevokeDevice { node_id: &id }, false;
-                    (id: String = id) => device_revoked;
-                OpenThread(thread_id: String)
-                    => rpc::ReadThread<'static>, rpc::ReadThread { thread_id: &thread_id, include_turns: true, paginate_history: true, defer_item_details: true }, true;
-                    (generation: u64 = $snapshot.navigation.generation) => thread_opened;
-                ListFiles(path: String) => rpc::ListFiles<'static>, rpc::ListFiles { path: &path }, false;
-                    (request: u64 = $snapshot.workspace.directory_request) => files_loaded;
-                ReadFile { path: String, discard_draft: bool } prepare { let _ = discard_draft; }
-                    => rpc::ReadFile<'static>, rpc::ReadFile { path: &path }, false;
-                    (request: u64 = $snapshot.workspace.file_request) => file_loaded;
-                SaveFile(path: String) prepare {
-                    let submitted = $snapshot.file_drafts.get(&path).ok_or_else(||
-                        PeerError::InvalidMessage("file has no draft to save".into()))?;
-                }
-                    => rpc::WriteFile<'static>, rpc::WriteFile { path: &path, revision: &submitted.revision, text: &submitted.text }, false;
-                    (submitted: FileDraft = submitted.clone()) => file_saved;
-                ReviewWorkspace(cwd: String) => rpc::ReviewWorkspace<'static>, rpc::ReviewWorkspace { cwd: &cwd }, false;
-                    (request: u64 = $snapshot.workspace.review_request) => review_loaded;
-                ReadWorktreeSettings => rpc::ReadWorktreeSettings, rpc::ReadWorktreeSettings {}, false;
-                    (request: u64 = $snapshot.workspace.settings_request) => worktree_settings_loaded;
-                UpdateWorktreeSettings(settings: WorktreeSettings)
-                    => rpc::UpdateWorktreeSettings<'static>, rpc::UpdateWorktreeSettings(&settings), false;
-                    (request: u64 = $snapshot.workspace.settings_request) => worktree_settings_loaded;
-                ListThreads(query: ListQuery) => rpc::ListThreads<'static>, rpc::ListThreads { title_only: true, query: &query }, true;
-                    (request: u64 = $snapshot.list_request) => threads_loaded;
-                StartThread { cwd: Option<String>, model: Option<String> }
-                    => rpc::StartThread<'static>, rpc::StartThread { cwd: cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()), model: model.as_deref() }, true;
-                    () => thread_read [value => Outcome::StartedThread(value.thread.id.clone().expect("validated thread ID"))];
-                ReadThread(thread_id: String)
-                    => rpc::ReadThread<'static>, rpc::ReadThread { thread_id: &thread_id, include_turns: true, paginate_history: true, defer_item_details: true }, true;
-                    () => thread_read;
-                ReadItem { thread_id: String, turn_id: String, item_id: String }
-                    => rpc::ReadItem<'static>, rpc::ReadItem { thread_id: &thread_id, turn_id: &turn_id, item_id: &item_id }, true;
-                    (thread_id: String = thread_id, turn_id: String = turn_id) => item_loaded;
-            }
-            ignored {
-                ResizeTerminal { handle: String, size: rpc::TerminalSize } => rpc::ResizeTerminal { process_handle: &handle, size };
-                Interrupt { thread_id: String, turn_id: String } => rpc::InterruptTurn { thread_id: &thread_id, turn_id: &turn_id };
-                Watch { thread_id: String, watch_key: u64, watch_id: u64, path: Option<String> }
-                    => rpc::WatchThread { thread_id: &thread_id, watch_key, watch_id, path: path.as_deref() };
-                Unwatch { watch_key: u64, watch_id: u64 } => rpc::UnwatchThread { watch_key, watch_id };
-            }
-            other {
-                ShowThreadList,
-                WriteTerminal { handle: String, data: Vec<u8> },
-                AcknowledgeTerminal { handle: String, sequence: u64 },
-                AddAttachment { draft_key: String, attachment: Attachment },
-                RemoveAttachment { draft_key: String, index: usize },
-                UploadAttachment { draft_key: String, attachment: Attachment, directory: String },
-                DownloadFile { source: std::path::PathBuf, destination: std::path::PathBuf },
-                LoadSessionImages(String),
-                LoadHostManagement,
-                PairRemoteHost { invitation: Invitation, name: String },
-                NewChat(String),
-                SetFileDraft { path: String, text: String },
-                ReadOlder { thread_id: String, turn_id: Option<String>, cursor: Option<String> },
-                LoadModels,
-                SetDraft { thread_id: String, draft: Draft },
-                SetDraftText { thread_id: String, text: String },
-                SelectModel { thread_id: String, model: String },
-                SelectEffort { thread_id: String, effort: String },
-                SelectServiceTier { thread_id: String, service_tier: String },
-                Submit {
-                    /// None submits the navigation target, creating its thread if needed.
-                    thread_id: Option<String>, client_user_message_id: String,
-                },
-                Respond { request_id: Value, answer: Answer },
-            }
-            $($context)*
+#[derive(Debug)]
+pub enum Intent {
+    ListAccounts,
+    SelectAccount(String),
+    StartAccountLogin,
+    ReadAccountLogin(String),
+    CancelAccountLogin(String),
+    ForkThread {
+        thread_id: String,
+        last_turn_id: String,
+    },
+    StartTerminal {
+        handle: String,
+        cwd: String,
+        size: rpc::TerminalSize,
+    },
+    CloseTerminal(String),
+    Transcribe {
+        draft_key: String,
+        audio: String,
+        send: bool,
+        client_user_message_id: String,
+    },
+    CreateInvitation,
+    RemoveRemoteHost(String),
+    RevokeDevice(String),
+    OpenThread(String),
+    ListFiles(String),
+    ReadFile {
+        path: String,
+        discard_draft: bool,
+    },
+    SaveFile(String),
+    ReviewWorkspace(String),
+    ReadWorktreeSettings,
+    UpdateWorktreeSettings(WorktreeSettings),
+    ListThreads(ListQuery),
+    StartThread {
+        cwd: Option<String>,
+        model: Option<String>,
+    },
+    ReadThread(String),
+    ReadItem {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+    },
+    ResizeTerminal {
+        handle: String,
+        size: rpc::TerminalSize,
+    },
+    Interrupt {
+        thread_id: String,
+        turn_id: String,
+    },
+    Watch {
+        thread_id: String,
+        watch_key: u64,
+        watch_id: u64,
+        path: Option<String>,
+    },
+    Unwatch {
+        watch_key: u64,
+        watch_id: u64,
+    },
+    ShowThreadList,
+    WriteTerminal {
+        handle: String,
+        data: Vec<u8>,
+    },
+    AcknowledgeTerminal {
+        handle: String,
+        sequence: u64,
+    },
+    AddAttachment {
+        draft_key: String,
+        attachment: Attachment,
+    },
+    RemoveAttachment {
+        draft_key: String,
+        index: usize,
+    },
+    UploadAttachment {
+        draft_key: String,
+        attachment: Attachment,
+        directory: String,
+    },
+    DownloadFile {
+        source: std::path::PathBuf,
+        destination: std::path::PathBuf,
+    },
+    LoadSessionImages(String),
+    LoadHostManagement,
+    PairRemoteHost {
+        invitation: Invitation,
+        name: String,
+    },
+    NewChat(String),
+    SetFileDraft {
+        path: String,
+        text: String,
+    },
+    ReadOlder {
+        thread_id: String,
+        turn_id: Option<String>,
+        cursor: Option<String>,
+    },
+    LoadModels,
+    SetDraft {
+        thread_id: String,
+        draft: Draft,
+    },
+    SetDraftText {
+        thread_id: String,
+        text: String,
+    },
+    SelectModel {
+        thread_id: String,
+        model: String,
+    },
+    SelectEffort {
+        thread_id: String,
+        effort: String,
+    },
+    SelectServiceTier {
+        thread_id: String,
+        service_tier: String,
+    },
+    Submit {
+        /// None submits the navigation target, creating its thread if needed.
+        thread_id: Option<String>,
+        client_user_message_id: String,
+    },
+    Respond {
+        request_id: Value,
+        answer: Answer,
+    },
+}
+
+/// Typed state application after the Store has checked its single epoch.
+/// Only operations with durable side effects override `stale`.
+pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
+    type Output: Send + std::fmt::Debug + 'static;
+    const ORDERED: bool = false;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync;
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect>;
+    fn stale(self, _snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
+        Vec::new()
+    }
+    fn outcome(_output: &Self::Output) -> Outcome {
+        Outcome::Applied
+    }
+}
+
+// Heterogeneous RPC outputs need one owned allocation while awaiting wire order.
+// The output remains typed; no JSON round trip or second response enum is needed.
+pub trait Application: Send + std::fmt::Debug {
+    fn apply(self: Box<Self>, snapshot: &mut Snapshot, current: bool) -> Vec<Effect>;
+}
+#[derive(Debug)]
+struct Completion<O: Operation> {
+    operation: O,
+    output: O::Output,
+}
+impl<O: Operation> Application for Completion<O> {
+    fn apply(self: Box<Self>, snapshot: &mut Snapshot, current: bool) -> Vec<Effect> {
+        if current {
+            self.operation.apply(snapshot, self.output)
+        } else {
+            self.operation.stale(snapshot, self.output)
         }
-    };
+    }
 }
-pub(crate) use operation_table;
+pub fn completed<O: Operation>(operation: O, output: O::Output) -> Event {
+    Event::Operation(Box::new(Completion { operation, output }))
+}
 
-macro_rules! define_operations {
-    ($snapshot:ident;
-     loaded { $(
-        $variant:ident $(($($arg:ident: $ty:ty),* $(,)?))? $({$($field:ident: $field_ty:ty),* $(,)?})?
-        $(prepare { $($prepare:tt)* })?
-        => $operation:ty, $params:expr, $ordered:literal;
-        ($($context:ident: $context_ty:ty = $capture:expr),* $(,)?) => $apply:ident
-        $([$value:ident => $outcome:expr])?;
-     )* }
-     ignored { $(
-        $ignored:ident $(($($iarg:ident: $ity:ty),* $(,)?))? $({$($ifield:ident: $ifield_ty:ty),* $(,)?})?
-        => $ignore_params:expr;
-     )* }
-     other { $($other:tt)* }
-    ) => {
-        #[derive(Debug)]
-        pub enum Intent {
-            $($variant $(($($ty),*))? $({$($field: $field_ty),*})?,)*
-            $($ignored $(($($ity),*))? $({$($ifield: $ifield_ty),*})?,)*
-            $($other)*
+#[derive(Debug)]
+pub struct StartTerminal {
+    pub handle: String,
+    pub cwd: String,
+    pub size: rpc::TerminalSize,
+}
+impl Operation for StartTerminal {
+    type Output = Map<String, Value>;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::StartTerminal {
+            process_handle: &self.handle,
+            cwd: &self.cwd,
+            size: self.size,
         }
-        /// A closed, typed sum of Operation outputs and their dispatch-time context.
-        #[derive(Debug)]
-        pub enum Loaded {
-            $($variant { output: <$operation as rpc::Operation>::Output, $($context: $context_ty),* },)*
+    }
+    fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
+        let Self { handle, .. } = self;
+        if let Some(terminal) = snapshot.terminals.get(&handle)
+            && terminal.phase == TerminalPhase::Starting
+        {
+            Arc::make_mut(
+                Arc::make_mut(&mut snapshot.terminals)
+                    .get_mut(&handle)
+                    .unwrap(),
+            )
+            .phase = TerminalPhase::Running;
         }
-        impl Loaded {
-            pub(crate) fn reduce(self, previous: &Snapshot) -> (Snapshot, Vec<Effect>) {
-                match self {
-                    $(Self::$variant { output, $($context),* } => $apply(previous, output, $($context),*),)*
-                }
-            }
+        Vec::new()
+    }
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        self.apply(snapshot, output)
+    }
+}
+
+#[derive(Debug)]
+pub struct CloseTerminal {
+    pub handle: String,
+}
+impl Operation for CloseTerminal {
+    type Output = Map<String, Value>;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::KillTerminal {
+            process_handle: &self.handle,
         }
-    };
-}
-operation_table!(define_operations, snapshot);
-
-fn terminal_started(
-    previous: &Snapshot,
-    _output: Map<String, Value>,
-    handle: String,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if let Some(terminal) = next.terminals.get(&handle)
-        && terminal.phase == TerminalPhase::Starting
-    {
-        Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap()).phase =
-            TerminalPhase::Running;
     }
-    (next, Vec::new())
-}
-
-fn terminal_closed(
-    previous: &Snapshot,
-    _output: Map<String, Value>,
-    handle: String,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if next.terminals.contains_key(&handle) {
-        Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap()).phase =
-            TerminalPhase::Closed;
+    fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
+        let Self { handle, .. } = self;
+        if snapshot.terminals.contains_key(&handle) {
+            Arc::make_mut(
+                Arc::make_mut(&mut snapshot.terminals)
+                    .get_mut(&handle)
+                    .unwrap(),
+            )
+            .phase = TerminalPhase::Closed;
+        }
+        Vec::new()
     }
-    (next, Vec::new())
-}
-
-fn transcribed(
-    previous: &Snapshot,
-    output: rpc::Transcription,
-    mut draft: Arc<Draft>,
-    draft_key: String,
-    generation: u64,
-    send: bool,
-    client_user_message_id: String,
-) -> (Snapshot, Vec<Effect>) {
-    let rpc::Transcription { text, .. } = output;
-    let mut next = previous.clone();
-    if send
-        && previous.navigation.generation == generation
-        && previous.navigation.draft_key == draft_key
-    {
-        let clear_draft = draft.clone();
-        append_transcript(&mut Arc::make_mut(&mut draft).text, &text);
-        let (mut next, effects) = submission(
-            previous,
-            previous.navigation.thread_id.clone(),
-            draft_key,
-            draft,
-            client_user_message_id.clone(),
-            Some(text),
-        );
-        Arc::make_mut(
-            Arc::make_mut(&mut next.pending_submissions)
-                .get_mut(&client_user_message_id)
-                .unwrap(),
-        )
-        .clear_draft = Some(clear_draft);
-        return (next, effects);
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        self.apply(snapshot, output)
     }
-    let draft = Arc::make_mut(
-        Arc::make_mut(&mut next.drafts)
-            .entry(draft_key)
-            .or_default(),
-    );
-    append_transcript(&mut draft.text, &text);
-    (next, Vec::new())
 }
 
-pub(super) fn add_attachment(next: &mut Snapshot, draft_key: String, attachment: Attachment) {
-    Arc::make_mut(
-        Arc::make_mut(&mut next.drafts)
-            .entry(draft_key)
-            .or_default(),
-    )
-    .attachments
-    .push(attachment);
-}
-
-fn invitation_created(previous: &Snapshot, invitation: Invitation) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    Arc::make_mut(&mut next.management).invitation = Some(Arc::new(invitation));
-    (next, Vec::new())
-}
-
-fn remote_host_removed(
-    previous: &Snapshot,
-    _output: Map<String, Value>,
-    id: String,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    Arc::make_mut(&mut next.management)
-        .remotes
-        .retain(|host| host.id != id);
-    (next, Vec::new())
-}
-
-fn device_revoked(
-    previous: &Snapshot,
-    _output: Map<String, Value>,
-    id: String,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if let Some(status) = Arc::make_mut(&mut next.management).status.as_mut() {
-        Arc::make_mut(status).devices.retain(|device| device != &id);
+#[derive(Debug)]
+pub struct CreateInvitation;
+impl Operation for CreateInvitation {
+    type Output = Invitation;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::CreateInvitation {}
     }
-    (next, Vec::new())
+    fn apply(self, snapshot: &mut Snapshot, invitation: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.management).invitation = Some(Arc::new(invitation));
+        Vec::new()
+    }
 }
 
-fn thread_forked(
-    previous: &Snapshot,
-    output: crate::models::ThreadResponse,
-    generation: u64,
-) -> (Snapshot, Vec<Effect>) {
-    let crate::models::ThreadResponse { thread, model, .. } = output;
-    let (mut next, mut effects) = open_thread(previous, thread, model, generation);
-    if previous.threads.is_some() {
-        let (updated, refresh) = reduce(
-            &next,
-            Event::Intent(Intent::ListThreads((*previous.list_query).clone())),
-        );
-        next = updated;
-        effects.extend(refresh);
+#[derive(Debug)]
+pub struct RemoveRemoteHost {
+    pub id: String,
+}
+impl Operation for RemoveRemoteHost {
+    type Output = Map<String, Value>;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::RemoveRemoteHost { id: &self.id }
     }
-    (next, effects)
+    fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
+        let Self { id } = self;
+        Arc::make_mut(&mut snapshot.management)
+            .remotes
+            .retain(|host| host.id != id);
+        Vec::new()
+    }
 }
 
-fn accounts_loaded(
-    previous: &Snapshot,
-    accounts: rpc::Accounts,
-    generation: u64,
-) -> (Snapshot, Vec<Effect>) {
-    if generation != previous.account.accounts_generation {
-        return (previous.clone(), Vec::new());
+#[derive(Debug)]
+pub struct RevokeDevice {
+    pub id: String,
+}
+impl Operation for RevokeDevice {
+    type Output = Map<String, Value>;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::RevokeDevice { node_id: &self.id }
     }
-
-    let mut next = previous.clone();
-    Arc::make_mut(&mut next.account).accounts = Some(Arc::new(accounts));
-    (next, Vec::new())
+    fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
+        let Self { id } = self;
+        if let Some(status) = Arc::make_mut(&mut snapshot.management).status.as_mut() {
+            Arc::make_mut(status).devices.retain(|device| device != &id);
+        }
+        Vec::new()
+    }
 }
 
-fn account_selected(
-    previous: &Snapshot,
-    output: rpc::AccountSelection,
-    generation: u64,
-) -> (Snapshot, Vec<Effect>) {
-    if generation != previous.account.accounts_generation {
-        return (previous.clone(), Vec::new());
+#[derive(Debug)]
+pub struct ListAccounts;
+impl Operation for ListAccounts {
+    type Output = rpc::Accounts;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ListAccounts {}
     }
-    let rpc::AccountSelection {
-        selected_id,
-        persistence_error,
-        ..
-    } = output;
-    let mut next = previous.clone();
-    if let Some(accounts) = &mut Arc::make_mut(&mut next.account).accounts {
-        Arc::make_mut(accounts).selected_id = Some(selected_id);
+    fn apply(self, snapshot: &mut Snapshot, accounts: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(accounts));
+        Vec::new()
     }
-    next.error = persistence_error;
-    (next, vec![Effect::Execute(Intent::LoadModels)])
 }
 
-fn account_login_started(
-    previous: &Snapshot,
-    login: rpc::AccountLogin,
-    generation: u64,
-) -> (Snapshot, Vec<Effect>) {
-    if generation != previous.account.login_generation {
-        return (previous.clone(), Vec::new());
+#[derive(Debug)]
+pub struct SelectAccount {
+    pub id: String,
+}
+impl Operation for SelectAccount {
+    type Output = rpc::AccountSelection;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::SelectAccount {
+            account_id: &self.id,
+        }
     }
-
-    let mut next = previous.clone();
-    let account = Arc::make_mut(&mut next.account);
-    account.login = Some(Arc::new(login));
-    account.login_status = None;
-    (next, Vec::new())
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let rpc::AccountSelection {
+            selected_id,
+            persistence_error,
+            ..
+        } = output;
+        if let Some(accounts) = &mut Arc::make_mut(&mut snapshot.account).accounts {
+            Arc::make_mut(accounts).selected_id = Some(selected_id);
+        }
+        snapshot.error = persistence_error;
+        vec![Effect::Execute(Intent::LoadModels)]
+    }
 }
 
-fn account_login_updated(
-    previous: &Snapshot,
-    status: rpc::AccountLoginStatus,
-    generation: u64,
-) -> (Snapshot, Vec<Effect>) {
-    if generation != previous.account.login_generation {
-        return (previous.clone(), Vec::new());
+#[derive(Debug)]
+pub struct StartAccountLogin;
+impl Operation for StartAccountLogin {
+    type Output = rpc::AccountLogin;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::StartAccountLogin {}
     }
+    fn apply(self, snapshot: &mut Snapshot, login: Self::Output) -> Vec<Effect> {
+        let account = Arc::make_mut(&mut snapshot.account);
+        account.login = Some(Arc::new(login));
+        account.login_status = None;
+        Vec::new()
+    }
+}
 
-    let mut next = previous.clone();
-    let completed = status.completed;
-    let account = Arc::make_mut(&mut next.account);
-    account.login_status = Some(Arc::new(status));
-    if completed {
+#[derive(Debug)]
+pub struct ReadAccountLogin {
+    pub id: String,
+}
+impl Operation for ReadAccountLogin {
+    type Output = rpc::AccountLoginStatus;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ReadAccountLogin { login_id: &self.id }
+    }
+    fn apply(self, snapshot: &mut Snapshot, status: Self::Output) -> Vec<Effect> {
+        let completed = status.completed;
+        let account = Arc::make_mut(&mut snapshot.account);
+        account.login_status = Some(Arc::new(status));
+        if completed {
+            account.login = None;
+            let (updated, mut effects) = reduce(snapshot, Event::Intent(Intent::ListAccounts));
+            *snapshot = updated;
+            effects.push(Effect::Execute(Intent::LoadModels));
+            return effects;
+        }
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct CancelAccountLogin {
+    pub id: String,
+}
+impl Operation for CancelAccountLogin {
+    type Output = Map<String, Value>;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::CancelAccountLogin { login_id: &self.id }
+    }
+    fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
+        let account = Arc::make_mut(&mut snapshot.account);
         account.login = None;
-        let (next, mut effects) = reduce(&next, Event::Intent(Intent::ListAccounts));
-        effects.push(Effect::Execute(Intent::LoadModels));
-        return (next, effects);
+        account.login_status = None;
+        Vec::new()
     }
-    (next, Vec::new())
 }
 
-fn account_login_cancelled(
-    previous: &Snapshot,
-    _output: Map<String, Value>,
-    generation: u64,
-) -> (Snapshot, Vec<Effect>) {
-    if generation != previous.account.login_generation {
-        return (previous.clone(), Vec::new());
+#[derive(Debug)]
+pub struct ListFiles {
+    pub path: String,
+}
+impl Operation for ListFiles {
+    type Output = FileList;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ListFiles { path: &self.path }
     }
+    fn apply(self, snapshot: &mut Snapshot, files: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.workspace).directory = Some(Arc::new(files));
+        Vec::new()
+    }
+}
 
-    let mut next = previous.clone();
-    let account = Arc::make_mut(&mut next.account);
-    account.login = None;
-    account.login_status = None;
-    (next, Vec::new())
+#[derive(Debug)]
+pub struct ReadFile {
+    pub path: String,
+}
+impl Operation for ReadFile {
+    type Output = FileContent;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ReadFile { path: &self.path }
+    }
+    fn apply(self, snapshot: &mut Snapshot, file: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.workspace).file = Some(Arc::new(file));
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct SaveFile {
+    pub path: String,
+    pub submitted: FileDraft,
+}
+impl Operation for SaveFile {
+    type Output = FileContent;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::WriteFile {
+            path: &self.path,
+            revision: &self.submitted.revision,
+            text: &self.submitted.text,
+        }
+    }
+    fn apply(self, snapshot: &mut Snapshot, file: Self::Output) -> Vec<Effect> {
+        self.rebase_draft(snapshot, &file);
+        if snapshot
+            .workspace
+            .file
+            .as_ref()
+            .is_some_and(|current| current.path == file.path)
+        {
+            Arc::make_mut(&mut snapshot.workspace).file = Some(Arc::new(file));
+        }
+        Vec::new()
+    }
+    fn stale(self, snapshot: &mut Snapshot, file: Self::Output) -> Vec<Effect> {
+        self.rebase_draft(snapshot, &file);
+        Vec::new()
+    }
+}
+impl SaveFile {
+    fn rebase_draft(self, snapshot: &mut Snapshot, file: &FileContent) {
+        let Self { submitted, .. } = self;
+        if let Some(current) = snapshot.file_drafts.get(&file.path) {
+            if current == &submitted {
+                Arc::make_mut(&mut snapshot.file_drafts).remove(&file.path);
+            } else if current.revision == submitted.revision {
+                Arc::make_mut(&mut snapshot.file_drafts)
+                    .get_mut(&file.path)
+                    .unwrap()
+                    .revision = file.revision.clone();
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ReviewWorkspace {
+    pub cwd: String,
+}
+impl Operation for ReviewWorkspace {
+    type Output = WorkspaceReview;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ReviewWorkspace { cwd: &self.cwd }
+    }
+    fn apply(self, snapshot: &mut Snapshot, review: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.workspace).review = Some(Arc::new(review));
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct ReadWorktreeSettings;
+impl Operation for ReadWorktreeSettings {
+    type Output = super::WorktreeSettings;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ReadWorktreeSettings {}
+    }
+    fn apply(self, snapshot: &mut Snapshot, settings: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.workspace).settings = Some(Arc::new(settings));
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct UpdateWorktreeSettings {
+    pub settings: super::WorktreeSettings,
+}
+impl Operation for UpdateWorktreeSettings {
+    type Output = super::WorktreeSettings;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::UpdateWorktreeSettings(&self.settings)
+    }
+    fn apply(self, snapshot: &mut Snapshot, settings: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.workspace).settings = Some(Arc::new(settings));
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct ListThreads {
+    pub query: ListQuery,
+}
+impl Operation for ListThreads {
+    type Output = ThreadList;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ListThreads {
+            title_only: true,
+            query: &self.query,
+        }
+    }
+    fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
+        snapshot.threads = Some(Arc::new(threads));
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct ReadItem {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+}
+impl Operation for ReadItem {
+    type Output = rpc::ItemResponse;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ReadItem {
+            thread_id: &self.thread_id,
+            turn_id: &self.turn_id,
+            item_id: &self.item_id,
+        }
+    }
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let Self {
+            thread_id, turn_id, ..
+        } = self;
+        let rpc::ItemResponse { item, .. } = output;
+        *snapshot = upsert_item(snapshot, &thread_id, &turn_id, item);
+        reconcile_pending(snapshot, &thread_id);
+        Vec::new()
+    }
+}
+
+#[derive(Debug)]
+pub struct ReadThread {
+    pub thread_id: String,
+}
+impl Operation for ReadThread {
+    type Output = crate::models::ThreadResponse;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ReadThread {
+            thread_id: &self.thread_id,
+            include_turns: true,
+            paginate_history: true,
+            defer_item_details: true,
+        }
+    }
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let (updated, effects) = reduce(snapshot, Event::ThreadRefreshed(output.thread));
+        *snapshot = updated;
+        effects
+    }
 }
 
 pub(super) fn open_thread(
     previous: &Snapshot,
     thread: Thread,
     model: Option<String>,
-    generation: u64,
 ) -> (Snapshot, Vec<Effect>) {
     let id = thread.id.clone();
     let cwd = thread.cwd.clone().unwrap_or_default();
     let path = thread.path.clone();
     let (mut next, mut effects) = reduce(previous, Event::ThreadRefreshed(thread));
-    if generation == previous.navigation.generation
-        && let Some(id) = id
-    {
+    if let Some(id) = id {
         if previous.navigation.cwd != cwd {
             clear_workspace_location(Arc::make_mut(&mut next.workspace));
         }
@@ -395,12 +601,12 @@ pub(super) fn open_thread(
         navigation.draft_key = id.clone();
         navigation.cwd = cwd;
         if path.is_some() {
-            navigation.watch_id = Some(generation);
+            navigation.watch_id = Some(previous.epoch);
             navigation.watch_thread_id = Some(id.clone());
             effects.push(Effect::Execute(Intent::Watch {
                 thread_id: id.clone(),
                 watch_key: 1,
-                watch_id: generation,
+                watch_id: previous.epoch,
                 path,
             }));
         }
@@ -418,108 +624,151 @@ pub(super) fn open_thread(
     (next, effects)
 }
 
-fn thread_opened(
-    previous: &Snapshot,
-    output: crate::models::ThreadResponse,
-    generation: u64,
-) -> (Snapshot, Vec<Effect>) {
-    open_thread(previous, output.thread, output.model, generation)
+pub(super) fn add_attachment(next: &mut Snapshot, draft_key: String, attachment: Attachment) {
+    Arc::make_mut(
+        Arc::make_mut(&mut next.drafts)
+            .entry(draft_key)
+            .or_default(),
+    )
+    .attachments
+    .push(attachment);
 }
 
-fn files_loaded(previous: &Snapshot, files: FileList, request: u64) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if request == previous.workspace.directory_request {
-        Arc::make_mut(&mut next.workspace).directory = Some(Arc::new(files));
-    }
-    (next, Vec::new())
+#[derive(Debug)]
+pub struct OpenThread {
+    pub thread_id: String,
 }
-
-fn file_loaded(previous: &Snapshot, file: FileContent, request: u64) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if request == previous.workspace.file_request {
-        Arc::make_mut(&mut next.workspace).file = Some(Arc::new(file));
-    }
-    (next, Vec::new())
-}
-
-fn file_saved(
-    previous: &Snapshot,
-    file: FileContent,
-    submitted: FileDraft,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if let Some(current) = previous.file_drafts.get(&file.path) {
-        if current == &submitted {
-            Arc::make_mut(&mut next.file_drafts).remove(&file.path);
-        } else if current.revision == submitted.revision {
-            Arc::make_mut(&mut next.file_drafts)
-                .get_mut(&file.path)
-                .unwrap()
-                .revision = file.revision.clone();
+impl Operation for OpenThread {
+    type Output = crate::models::ThreadResponse;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ReadThread {
+            thread_id: &self.thread_id,
+            include_turns: true,
+            paginate_history: true,
+            defer_item_details: true,
         }
     }
-    if previous
-        .workspace
-        .file
-        .as_ref()
-        .is_some_and(|current| current.path == file.path)
-    {
-        Arc::make_mut(&mut next.workspace).file = Some(Arc::new(file));
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let (next, effects) = open_thread(snapshot, output.thread, output.model);
+        *snapshot = next;
+        effects
     }
-    (next, Vec::new())
-}
-
-fn review_loaded(
-    previous: &Snapshot,
-    review: WorkspaceReview,
-    request: u64,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if request == previous.workspace.review_request {
-        Arc::make_mut(&mut next.workspace).review = Some(Arc::new(review));
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let (next, effects) = reduce(snapshot, Event::ThreadRefreshed(output.thread));
+        *snapshot = next;
+        effects
     }
-    (next, Vec::new())
 }
-
-fn worktree_settings_loaded(
-    previous: &Snapshot,
-    settings: WorktreeSettings,
-    request: u64,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if request == previous.workspace.settings_request {
-        Arc::make_mut(&mut next.workspace).settings = Some(Arc::new(settings));
+#[derive(Debug)]
+pub struct ForkThread {
+    pub thread_id: String,
+    pub last_turn_id: String,
+}
+impl Operation for ForkThread {
+    type Output = crate::models::ThreadResponse;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::ForkThread {
+            thread_id: &self.thread_id,
+            last_turn_id: &self.last_turn_id,
+            exclude_turns: false,
+        }
     }
-    (next, Vec::new())
-}
-
-fn item_loaded(
-    previous: &Snapshot,
-    output: rpc::ItemResponse,
-    thread_id: String,
-    turn_id: String,
-) -> (Snapshot, Vec<Effect>) {
-    let rpc::ItemResponse { item, .. } = output;
-    let mut next = upsert_item(previous, &thread_id, &turn_id, item);
-    reconcile_pending(&mut next, &thread_id);
-    (next, Vec::new())
-}
-
-fn threads_loaded(
-    previous: &Snapshot,
-    threads: ThreadList,
-    request: u64,
-) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
-    if request == previous.list_request {
-        next.threads = Some(Arc::new(threads));
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let (next, mut effects) = open_thread(snapshot, output.thread, output.model);
+        *snapshot = next;
+        if snapshot.threads.is_some() {
+            effects.push(Effect::Execute(Intent::ListThreads(
+                (*snapshot.list_query).clone(),
+            )));
+        }
+        effects
     }
-    (next, Vec::new())
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let (next, effects) = reduce(snapshot, Event::ThreadRefreshed(output.thread));
+        *snapshot = next;
+        effects
+    }
+    fn outcome(output: &Self::Output) -> Outcome {
+        Outcome::StartedThread(output.thread.id.clone().expect("validated thread ID"))
+    }
 }
-
-fn thread_read(
-    previous: &Snapshot,
-    output: crate::models::ThreadResponse,
-) -> (Snapshot, Vec<Effect>) {
-    reduce(previous, Event::ThreadRefreshed(output.thread))
+#[derive(Debug)]
+pub struct StartThread {
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+}
+impl Operation for StartThread {
+    type Output = crate::models::ThreadResponse;
+    const ORDERED: bool = true;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::StartThread {
+            cwd: self.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()),
+            model: self.model.as_deref(),
+        }
+    }
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let (next, effects) = reduce(snapshot, Event::ThreadRefreshed(output.thread));
+        *snapshot = next;
+        effects
+    }
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        self.apply(snapshot, output)
+    }
+    fn outcome(output: &Self::Output) -> Outcome {
+        ForkThread::outcome(output)
+    }
+}
+#[derive(Debug)]
+pub struct Transcribe {
+    pub draft: Arc<Draft>,
+    pub draft_key: String,
+    pub audio: String,
+    pub send: bool,
+    pub client_user_message_id: String,
+}
+impl Operation for Transcribe {
+    type Output = rpc::Transcription;
+    fn request(&self) -> impl rpc::Operation<Output = Self::Output> + Sync {
+        rpc::Transcribe { audio: &self.audio }
+    }
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        if !self.send {
+            return self.stale(snapshot, output);
+        }
+        let Self {
+            mut draft,
+            draft_key,
+            client_user_message_id,
+            ..
+        } = self;
+        let clear_draft = draft.clone();
+        append_transcript(&mut Arc::make_mut(&mut draft).text, &output.text);
+        let (mut next, effects) = submission(
+            snapshot,
+            snapshot.navigation.thread_id.clone(),
+            draft_key,
+            draft,
+            client_user_message_id.clone(),
+            Some(output.text),
+        );
+        Arc::make_mut(
+            Arc::make_mut(&mut next.pending_submissions)
+                .get_mut(&client_user_message_id)
+                .unwrap(),
+        )
+        .clear_draft = Some(clear_draft);
+        *snapshot = next;
+        effects
+    }
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let draft = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.drafts)
+                .entry(self.draft_key)
+                .or_default(),
+        );
+        append_transcript(&mut draft.text, &output.text);
+        Vec::new()
+    }
 }

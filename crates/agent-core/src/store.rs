@@ -1,8 +1,8 @@
 //! The single state owner. RPC work runs concurrently; publication follows wire order.
 use crate::{
-    client::{self as rpc, *},
+    client::*,
     peer::{PeerError, PeerEvent, RpcPeer},
-    state::{Effect, Event, Intent, Loaded, Snapshot, reduce},
+    state::{Effect, Event, Intent, Snapshot, operations as op, reduce},
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use host_protocol::{RpcMessageKind, classify_message};
@@ -54,6 +54,7 @@ struct Applied {
     outcome: Outcome,
 }
 struct Completed {
+    epoch: u64,
     result: Result<Applied, PeerError>,
     request_id: Option<u64>,
     failed_submission: Option<String>,
@@ -270,6 +271,13 @@ fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Effect> {
 }
 fn apply_locked(current: &mut Arc<Snapshot>, event: Event) -> (Vec<Effect>, bool) {
     let (next, effects) = reduce(current, event);
+    publish_locked(current, next, effects)
+}
+fn publish_locked(
+    current: &mut Arc<Snapshot>,
+    next: Snapshot,
+    effects: Vec<Effect>,
+) -> (Vec<Effect>, bool) {
     let same_threads = match (&current.threads, &next.threads) {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
         (None, None) => true,
@@ -289,7 +297,7 @@ fn apply_locked(current: &mut Arc<Snapshot>, event: Event) -> (Vec<Effect>, bool
         && Arc::ptr_eq(&current.activity, &next.activity)
         && Arc::ptr_eq(&current.management, &next.management)
         && Arc::ptr_eq(&current.list_query, &next.list_query)
-        && current.list_request == next.list_request
+        && current.epoch == next.epoch
         && current.connected == next.connected
         && current.error == next.error
     {
@@ -317,30 +325,78 @@ fn finish(
         ordered.lock().unwrap().remove(&id);
     }
     let mut effects = Vec::new();
-    let result = match completed.result {
-        Ok(applied) => {
-            if let Some(event) = applied.event {
-                effects = apply(updates, event);
+    let mut result = Ok(Outcome::Applied);
+    updates.send_if_modified(|snapshot| {
+        // Dispatch and completion share this lock: navigation cannot change
+        // between the epoch comparison and publication.
+        let current = completed.epoch == snapshot.epoch;
+        let mut next = snapshot.as_ref().clone();
+        result = match completed.result {
+            Ok(applied) => {
+                if let Some(event) = applied.event {
+                    effects = match event {
+                        Event::Operation(operation) => operation.apply(&mut next, current),
+                        Event::DraftThreadCreated {
+                            thread,
+                            draft_key,
+                            client_user_message_id,
+                            draft,
+                            ..
+                        } => {
+                            let (updated, effects) = reduce(
+                                &next,
+                                Event::DraftThreadCreated {
+                                    thread,
+                                    draft_key,
+                                    client_user_message_id,
+                                    draft,
+                                    current,
+                                },
+                            );
+                            next = updated;
+                            effects
+                        }
+                        event
+                            if current
+                                || matches!(
+                                    &event,
+                                    Event::Submitted { .. }
+                                        | Event::AttachmentUploaded { .. }
+                                        | Event::RemoteHostPaired(_)
+                                        | Event::RequestResolved(_)
+                                ) =>
+                        {
+                            let (updated, effects) = reduce(&next, event);
+                            next = updated;
+                            effects
+                        }
+                        _ => Vec::new(),
+                    };
+                }
+                Ok(applied.outcome)
             }
-            Ok(applied.outcome)
-        }
-        Err(error) => {
-            if let Some(handle) = completed.terminal {
-                apply(
-                    updates,
-                    Event::TerminalFailed {
-                        handle,
-                        reason: error.to_string(),
-                    },
-                );
+            Err(error) => {
+                if let Some(handle) = completed.terminal {
+                    next = reduce(
+                        &next,
+                        Event::TerminalFailed {
+                            handle,
+                            reason: error.to_string(),
+                        },
+                    )
+                    .0;
+                }
+                if let Some(id) = completed.failed_submission {
+                    next = reduce(&next, Event::SubmissionFailed(id)).0;
+                }
+                if current {
+                    next.error = Some(error.to_string());
+                }
+                Err(error)
             }
-            if let Some(id) = completed.failed_submission {
-                apply(updates, Event::SubmissionFailed(id));
-            }
-            effects = apply(updates, Event::Failed(error.to_string()));
-            Err(error)
-        }
-    };
+        };
+        publish_locked(snapshot, next, Vec::new()).1
+    });
     let continuation = effects.iter().position(|effect| {
         matches!(
             effect,
@@ -623,54 +679,6 @@ fn terminal_handle(effect: &Effect) -> Option<&str> {
     }
 }
 
-macro_rules! operation_outcome {
-    ($output:expr) => {
-        Outcome::Applied
-    };
-    ($output:expr, $value:ident => $outcome:expr) => {{
-        let $value = $output;
-        $outcome
-    }};
-}
-macro_rules! execute_operations {
-    ($snapshot:ident;
-     loaded { $(
-        $variant:ident $(($($arg:ident: $ty:ty),* $(,)?))? $({$($field:ident: $field_ty:ty),* $(,)?})?
-        $(prepare { $($prepare:tt)* })?
-        => $operation:ty, $params:expr, $is_ordered:literal;
-        ($($context:ident: $context_ty:ty = $capture:expr),* $(,)?) => $apply:ident
-        $([$value:ident => $outcome:expr])?;
-     )* }
-     ignored { $(
-        $ignored:ident $(($($iarg:ident: $ity:ty),* $(,)?))? $({$($ifield:ident: $ifield_ty:ty),* $(,)?})?
-        => $ignore_params:expr;
-     )* }
-     other { $($other:tt)* }
-     ($client:expr, $ordered:expr, $request_id:expr, $intent:expr)
-     { $($compound:tt)* }
-    ) => {
-        match $intent {
-            $(Intent::$variant $(($($arg),*))? $({$($field),*})? => {
-                $($($prepare)*)?
-                let reply = if $is_ordered {
-                    call_ordered($client, $ordered, $request_id, &$params).await?
-                } else { $client.call(&$params).await? };
-                let outcome = operation_outcome!(&reply.value $(, $value => $outcome)?);
-                Applied {
-                    sequence: $is_ordered.then_some(reply.sequence),
-                    outcome,
-                    event: Some(Event::Loaded(Loaded::$variant { $($context: $capture,)* output: reply.value })),
-                }
-            },)*
-            $(Intent::$ignored $(($($iarg),*))? $({$($ifield),*})? => {
-                $client.call(&$ignore_params).await?;
-                Applied::default()
-            },)*
-            $($compound)*
-        }
-    };
-}
-
 async fn perform(
     client: Option<&Client>,
     peer: Option<&RpcPeer>,
@@ -701,7 +709,6 @@ async fn perform(
             Effect::StartSubmission {
                 draft_key,
                 cwd,
-                generation,
                 client_user_message_id,
                 draft,
             } => {
@@ -721,7 +728,7 @@ async fn perform(
                     event: Some(Event::DraftThreadCreated {
                         thread: reply.value.thread,
                         draft_key,
-                        generation,
+                        current: true,
                         client_user_message_id,
                         draft,
                     }),
@@ -787,220 +794,455 @@ async fn perform(
                     outcome: Outcome::Submitted(reply.value),
                 }
             }
-            Effect::Execute(intent) => crate::state::operations::operation_table!(execute_operations, snapshot, (client, ordered, &mut request_id, intent), {
-                    Intent::WriteTerminal { handle, data } => {
-                        use base64::Engine;
-                        // Requests are serialized by the Store actor, including chunks
-                        // from a single paste, so shell bytes cannot overtake each other.
-                        for chunk in data.chunks(16 * 1024) {
-                            client
-                                .call(&WriteTerminal {
-                                    process_handle: &handle,
-                                    delta_base64: &base64::engine::general_purpose::STANDARD.encode(chunk),
-                                })
-                                .await?;
-                        }
-                        Applied::default()
-                    }
-                    Intent::UploadAttachment {
-                        draft_key,
-                        mut attachment,
-                        directory,
-                    } => {
-                        let session = session.ok_or_else(|| {
-                            PeerError::InvalidMessage("binary transfers require an iroh session".into())
-                        })?;
-                        let uploaded = crate::transfers::upload_file(
-                            peer,
-                            || async { session.open_stream().await.map_err(std::io::Error::other) },
-                            std::path::Path::new(&attachment.path),
-                            std::path::Path::new(&directory),
-                            &attachment.name,
-                        )
-                        .await
-                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                        #[derive(serde::Deserialize)]
-                        struct Uploaded {
-                            path: String,
-                        }
-                        let uploaded: Uploaded = serde_json::from_value(uploaded)
-                            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                        attachment.path = uploaded.path;
-                        Applied {
-                            event: Some(Event::AttachmentUploaded {
-                                draft_key,
-                                attachment,
-                            }),
-                            ..Applied::default()
-                        }
-                    }
-                    Intent::DownloadFile {
-                        source,
-                        destination,
-                    } => {
-                        let session = session.ok_or_else(|| {
-                            PeerError::InvalidMessage("binary transfers require an iroh session".into())
-                        })?;
-                        crate::transfers::download_file(
-                            peer,
-                            || async { session.open_stream().await.map_err(std::io::Error::other) },
-                            &source,
-                            &destination,
-                        )
-                        .await
-                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                        Applied::default()
-                    }
-                    Intent::LoadSessionImages(thread_id) => Applied {
-                        event: None,
-                        outcome: Outcome::SessionImages(client.session_images(&thread_id).await?),
-                        ..Applied::default()
-                    },
-                    Intent::LoadHostManagement => {
-                        let (status, remotes) = tokio::try_join!(
-                            client.call(&ReadHostStatus {}),
-                            client.call(&ListRemoteHosts {})
-                        )?;
-                        Applied {
-                            event: Some(Event::HostManagementLoaded {
-                                generation: snapshot.management.generation,
-                                status: status.value,
-                                remotes: remotes.value,
-                            }),
-                            ..Applied::default()
-                        }
-                    }
-                    Intent::PairRemoteHost { invitation, name } => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        if now >= invitation.expires_at {
-                            return Err(PeerError::InvalidMessage("invitation expired".into()));
-                        }
-                        let local = session.ok_or_else(|| {
-                            PeerError::InvalidMessage("pairing requires an iroh session".into())
-                        })?;
-                        let ticket = invitation.endpoint.parse().map_err(
-                            |error: crate::transport::TransportError| {
-                                PeerError::InvalidMessage(error.to_string())
-                            },
-                        )?;
-                        {
-                            let remote = scopeguard::guard(
-                                local
-                                    .connect(&ticket)
-                                    .await
-                                    .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
-                                |session| session.close(),
-                            );
-                            let peer = remote
-                                .open_peer(std::time::Duration::from_secs(20), 8)
-                                .await
-                                .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
-                            peer.request::<_, <Pair as Operation>::Output>(
-                                Pair::METHOD,
-                                &Pair {
-                                    invitation: invitation.invitation,
-                                },
-                            )
-                            .await?;
-                            peer.close().await?;
-                        }
-                        let reply = client
-                            .call(&RegisterRemoteHost {
-                                ticket: &invitation.endpoint,
-                                name: &name,
+            Effect::Execute(intent) => match intent {
+                Intent::ListAccounts => {
+                    execute(client, ordered, &mut request_id, op::ListAccounts).await?
+                }
+                Intent::SelectAccount(id) => {
+                    execute(client, ordered, &mut request_id, op::SelectAccount { id }).await?
+                }
+                Intent::StartAccountLogin => {
+                    execute(client, ordered, &mut request_id, op::StartAccountLogin).await?
+                }
+                Intent::ReadAccountLogin(id) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::ReadAccountLogin { id },
+                    )
+                    .await?
+                }
+                Intent::CancelAccountLogin(id) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::CancelAccountLogin { id },
+                    )
+                    .await?
+                }
+                Intent::ForkThread {
+                    thread_id,
+                    last_turn_id,
+                } => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::ForkThread {
+                            thread_id,
+                            last_turn_id,
+                        },
+                    )
+                    .await?
+                }
+                Intent::StartTerminal { handle, cwd, size } => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::StartTerminal { handle, cwd, size },
+                    )
+                    .await?
+                }
+                Intent::CloseTerminal(handle) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::CloseTerminal { handle },
+                    )
+                    .await?
+                }
+                Intent::Transcribe {
+                    draft_key,
+                    audio,
+                    send,
+                    client_user_message_id,
+                } => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::Transcribe {
+                            draft: snapshot.drafts.get(&draft_key).cloned().unwrap_or_default(),
+                            draft_key,
+                            audio,
+                            send,
+                            client_user_message_id,
+                        },
+                    )
+                    .await?
+                }
+                Intent::CreateInvitation => {
+                    execute(client, ordered, &mut request_id, op::CreateInvitation).await?
+                }
+                Intent::RemoveRemoteHost(id) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::RemoveRemoteHost { id },
+                    )
+                    .await?
+                }
+                Intent::RevokeDevice(id) => {
+                    execute(client, ordered, &mut request_id, op::RevokeDevice { id }).await?
+                }
+                Intent::OpenThread(thread_id) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::OpenThread { thread_id },
+                    )
+                    .await?
+                }
+                Intent::ListFiles(path) => {
+                    execute(client, ordered, &mut request_id, op::ListFiles { path }).await?
+                }
+                Intent::ReadFile { path, .. } => {
+                    execute(client, ordered, &mut request_id, op::ReadFile { path }).await?
+                }
+                Intent::ReviewWorkspace(cwd) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::ReviewWorkspace { cwd },
+                    )
+                    .await?
+                }
+                Intent::ReadWorktreeSettings => {
+                    execute(client, ordered, &mut request_id, op::ReadWorktreeSettings).await?
+                }
+                Intent::UpdateWorktreeSettings(settings) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::UpdateWorktreeSettings { settings },
+                    )
+                    .await?
+                }
+                Intent::ListThreads(query) => {
+                    execute(client, ordered, &mut request_id, op::ListThreads { query }).await?
+                }
+                Intent::StartThread { cwd, model } => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::StartThread { cwd, model },
+                    )
+                    .await?
+                }
+                Intent::ReadThread(thread_id) => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::ReadThread { thread_id },
+                    )
+                    .await?
+                }
+                Intent::ReadItem {
+                    thread_id,
+                    turn_id,
+                    item_id,
+                } => {
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::ReadItem {
+                            thread_id,
+                            turn_id,
+                            item_id,
+                        },
+                    )
+                    .await?
+                }
+                Intent::SaveFile(path) => {
+                    let submitted = snapshot
+                        .file_drafts
+                        .get(&path)
+                        .ok_or_else(|| {
+                            PeerError::InvalidMessage("file has no draft to save".into())
+                        })?
+                        .clone();
+                    execute(
+                        client,
+                        ordered,
+                        &mut request_id,
+                        op::SaveFile { path, submitted },
+                    )
+                    .await?
+                }
+                Intent::ResizeTerminal { handle, size } => {
+                    client
+                        .call(&ResizeTerminal {
+                            process_handle: &handle,
+                            size,
+                        })
+                        .await?;
+                    Applied::default()
+                }
+                Intent::Interrupt { thread_id, turn_id } => {
+                    client
+                        .call(&InterruptTurn {
+                            thread_id: &thread_id,
+                            turn_id: &turn_id,
+                        })
+                        .await?;
+                    Applied::default()
+                }
+                Intent::Watch {
+                    thread_id,
+                    watch_key,
+                    watch_id,
+                    path,
+                } => {
+                    client
+                        .call(&WatchThread {
+                            thread_id: &thread_id,
+                            watch_key,
+                            watch_id,
+                            path: path.as_deref(),
+                        })
+                        .await?;
+                    Applied::default()
+                }
+                Intent::Unwatch {
+                    watch_key,
+                    watch_id,
+                } => {
+                    client
+                        .call(&UnwatchThread {
+                            watch_key,
+                            watch_id,
+                        })
+                        .await?;
+                    Applied::default()
+                }
+                Intent::WriteTerminal { handle, data } => {
+                    use base64::Engine;
+                    // Requests are serialized by the Store actor, including chunks
+                    // from a single paste, so shell bytes cannot overtake each other.
+                    for chunk in data.chunks(16 * 1024) {
+                        client
+                            .call(&WriteTerminal {
+                                process_handle: &handle,
+                                delta_base64: &base64::engine::general_purpose::STANDARD
+                                    .encode(chunk),
                             })
                             .await?;
-                        let id = reply.value.id.clone();
-                        Applied {
-                            event: Some(Event::RemoteHostPaired(reply.value)),
-                            outcome: Outcome::RemoteHostPaired(id),
-                            ..Applied::default()
-                        }
                     }
-                    Intent::ReadOlder {
-                        thread_id,
-                        turn_id,
-                        cursor,
-                    } => {
-                        let reply = if let Some(turn_id) = &turn_id {
-                            call_ordered(
-                                client,
-                                ordered,
-                                &mut request_id,
-                                &OlderItems {
-                                    thread_id: &thread_id,
-                                    turn_id,
-                                    cursor: cursor.as_deref(),
-                                    defer_item_details: true,
-                                },
-                            )
-                            .await?
-                        } else {
-                            call_ordered(
-                                client,
-                                ordered,
-                                &mut request_id,
-                                &OlderTurns {
-                                    thread_id: &thread_id,
-                                    turn_id: None,
-                                    cursor: cursor.as_deref(),
-                                    defer_item_details: true,
-                                },
-                            )
-                            .await?
-                        };
-                        Applied {
-                            sequence: Some(reply.sequence),
-                            event: Some(Event::OlderLoaded {
-                                thread_id,
-                                thread: reply.value.thread,
-                                turn_id,
-                                cursor,
-                            }),
-                            ..Applied::default()
-                        }
+                    Applied::default()
+                }
+                Intent::UploadAttachment {
+                    draft_key,
+                    mut attachment,
+                    directory,
+                } => {
+                    let session = session.ok_or_else(|| {
+                        PeerError::InvalidMessage("binary transfers require an iroh session".into())
+                    })?;
+                    let uploaded = crate::transfers::upload_file(
+                        peer,
+                        || async { session.open_stream().await.map_err(std::io::Error::other) },
+                        std::path::Path::new(&attachment.path),
+                        std::path::Path::new(&directory),
+                        &attachment.name,
+                    )
+                    .await
+                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                    #[derive(serde::Deserialize)]
+                    struct Uploaded {
+                        path: String,
                     }
-                    Intent::LoadModels => Applied {
-                        event: Some(Event::ModelsLoaded(client.models().await?)),
+                    let uploaded: Uploaded = serde_json::from_value(uploaded)
+                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                    attachment.path = uploaded.path;
+                    Applied {
+                        event: Some(Event::AttachmentUploaded {
+                            draft_key,
+                            attachment,
+                        }),
                         ..Applied::default()
-                    },
-                    Intent::Respond { request_id, answer } => {
-                        let request = snapshot
+                    }
+                }
+                Intent::DownloadFile {
+                    source,
+                    destination,
+                } => {
+                    let session = session.ok_or_else(|| {
+                        PeerError::InvalidMessage("binary transfers require an iroh session".into())
+                    })?;
+                    crate::transfers::download_file(
+                        peer,
+                        || async { session.open_stream().await.map_err(std::io::Error::other) },
+                        &source,
+                        &destination,
+                    )
+                    .await
+                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                    Applied::default()
+                }
+                Intent::LoadSessionImages(thread_id) => Applied {
+                    event: None,
+                    outcome: Outcome::SessionImages(client.session_images(&thread_id).await?),
+                    ..Applied::default()
+                },
+                Intent::LoadHostManagement => {
+                    let (status, remotes) = tokio::try_join!(
+                        client.call(&ReadHostStatus {}),
+                        client.call(&ListRemoteHosts {})
+                    )?;
+                    Applied {
+                        event: Some(Event::HostManagementLoaded {
+                            status: status.value,
+                            remotes: remotes.value,
+                        }),
+                        ..Applied::default()
+                    }
+                }
+                Intent::PairRemoteHost { invitation, name } => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    if now >= invitation.expires_at {
+                        return Err(PeerError::InvalidMessage("invitation expired".into()));
+                    }
+                    let local = session.ok_or_else(|| {
+                        PeerError::InvalidMessage("pairing requires an iroh session".into())
+                    })?;
+                    let ticket = invitation.endpoint.parse().map_err(
+                        |error: crate::transport::TransportError| {
+                            PeerError::InvalidMessage(error.to_string())
+                        },
+                    )?;
+                    {
+                        let remote = scopeguard::guard(
+                            local
+                                .connect(&ticket)
+                                .await
+                                .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
+                            |session| session.close(),
+                        );
+                        let peer = remote
+                            .open_peer(std::time::Duration::from_secs(20), 8)
+                            .await
+                            .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
+                        peer.request::<_, <Pair as Operation>::Output>(
+                            Pair::METHOD,
+                            &Pair {
+                                invitation: invitation.invitation,
+                            },
+                        )
+                        .await?;
+                        peer.close().await?;
+                    }
+                    let reply = client
+                        .call(&RegisterRemoteHost {
+                            ticket: &invitation.endpoint,
+                            name: &name,
+                        })
+                        .await?;
+                    let id = reply.value.id.clone();
+                    Applied {
+                        event: Some(Event::RemoteHostPaired(reply.value)),
+                        outcome: Outcome::RemoteHostPaired(id),
+                        ..Applied::default()
+                    }
+                }
+                Intent::ReadOlder {
+                    thread_id,
+                    turn_id,
+                    cursor,
+                } => {
+                    let reply = if let Some(turn_id) = &turn_id {
+                        call_ordered(
+                            client,
+                            ordered,
+                            &mut request_id,
+                            &OlderItems {
+                                thread_id: &thread_id,
+                                turn_id,
+                                cursor: cursor.as_deref(),
+                                defer_item_details: true,
+                            },
+                        )
+                        .await?
+                    } else {
+                        call_ordered(
+                            client,
+                            ordered,
+                            &mut request_id,
+                            &OlderTurns {
+                                thread_id: &thread_id,
+                                turn_id: None,
+                                cursor: cursor.as_deref(),
+                                defer_item_details: true,
+                            },
+                        )
+                        .await?
+                    };
+                    Applied {
+                        sequence: Some(reply.sequence),
+                        event: Some(Event::OlderLoaded {
+                            thread_id,
+                            thread: reply.value.thread,
+                            turn_id,
+                            cursor,
+                        }),
+                        ..Applied::default()
+                    }
+                }
+                Intent::LoadModels => Applied {
+                    event: Some(Event::ModelsLoaded(client.models().await?)),
+                    ..Applied::default()
+                },
+                Intent::Respond { request_id, answer } => {
+                    let request =
+                        snapshot
                             .requests
                             .get(&request_id.to_string())
                             .ok_or_else(|| {
-                                PeerError::InvalidMessage("server request is no longer pending".into())
+                                PeerError::InvalidMessage(
+                                    "server request is no longer pending".into(),
+                                )
                             })?;
-                        client.respond(request, &answer).await?;
-                        Applied {
-                            event: Some(Event::RequestResolved(request_id)),
-                            ..Applied::default()
-                        }
-                    }
-                    intent @ (Intent::AcknowledgeTerminal { .. }
-                    | Intent::Submit { .. }
-                    | Intent::AddAttachment { .. }
-                    | Intent::RemoveAttachment { .. }
-                    | Intent::NewChat(_)
-                    | Intent::ShowThreadList
-                    | Intent::SetDraft { .. }
-                    | Intent::SetDraftText { .. }
-                    | Intent::SelectModel { .. }
-                    | Intent::SelectEffort { .. }
-                    | Intent::SelectServiceTier { .. }
-                    | Intent::SetFileDraft { .. }) => Applied {
-                        event: Some(Event::Intent(intent)),
+                    client.respond(request, &answer).await?;
+                    Applied {
+                        event: Some(Event::RequestResolved(request_id)),
                         ..Applied::default()
-                    },
-            }),
+                    }
+                }
+                intent @ (Intent::AcknowledgeTerminal { .. }
+                | Intent::Submit { .. }
+                | Intent::AddAttachment { .. }
+                | Intent::RemoveAttachment { .. }
+                | Intent::NewChat(_)
+                | Intent::ShowThreadList
+                | Intent::SetDraft { .. }
+                | Intent::SetDraftText { .. }
+                | Intent::SelectModel { .. }
+                | Intent::SelectEffort { .. }
+                | Intent::SelectServiceTier { .. }
+                | Intent::SetFileDraft { .. }) => Applied {
+                    event: Some(Event::Intent(intent)),
+                    ..Applied::default()
+                },
+            },
         };
         Ok(applied)
     }
     .await;
     Completed {
+        epoch: snapshot.epoch,
         result,
         request_id,
         failed_submission,
@@ -1024,4 +1266,25 @@ async fn call_ordered<O: Operation + Sync>(
         ordered.lock().unwrap().insert(id);
     }
     request.await
+}
+
+async fn execute<O: op::Operation>(
+    client: &Client,
+    ordered: &Mutex<BTreeSet<u64>>,
+    request_id: &mut Option<u64>,
+    operation: O,
+) -> Result<Applied, PeerError> {
+    let reply = {
+        let request = operation.request();
+        if O::ORDERED {
+            call_ordered(client, ordered, request_id, &request).await?
+        } else {
+            client.call(&request).await?
+        }
+    };
+    Ok(Applied {
+        sequence: O::ORDERED.then_some(reply.sequence),
+        outcome: O::outcome(&reply.value),
+        event: Some(op::completed(operation, reply.value)),
+    })
 }

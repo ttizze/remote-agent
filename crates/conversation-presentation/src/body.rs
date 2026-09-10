@@ -105,9 +105,13 @@ pub fn expanded_body(item: &Item) -> String {
         Some("userMessage" | "agentMessage") => message(item),
         Some("reasoning") => {
             let summary = item.extra.get("summary").unwrap_or(&Value::Null);
-            text(summary)
-                .map(Cow::into_owned)
-                .unwrap_or_else(|| parts(summary, "\n"))
+            if summary.is_array() {
+                parts(summary, "\n")
+            } else {
+                text(summary)
+                    .map(Cow::into_owned)
+                    .unwrap_or_else(|| item.text.clone().unwrap_or_default())
+            }
         }
         Some("commandExecution") => {
             let mut result = String::new();
@@ -168,6 +172,12 @@ mod tests {
                 json!({"id":"reason","type":"reasoning","summary":[{"text":"one"},{"unknown":true},"two"]}),
                 "詳細を表示",
                 "one\ntwo",
+                vec![],
+            ),
+            (
+                json!({"id":"reason","type":"reasoning","text":"reasoning text"}),
+                "詳細を表示",
+                "reasoning text",
                 vec![],
             ),
             (

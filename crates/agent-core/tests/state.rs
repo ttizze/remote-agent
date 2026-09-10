@@ -1,6 +1,10 @@
 use agent_core::{
     models::{Item, Thread, Turn},
-    state::{Event, Loaded, Snapshot, reduce},
+    state::{
+        Event, Snapshot,
+        operations::{self as op, Operation},
+        reduce,
+    },
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
@@ -341,7 +345,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
 }
 
 #[test]
-fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
+fn changing_workspace_clears_content_and_preserves_file_drafts() {
     use agent_core::state::{FileDraft, Intent, Navigation, Workspace};
     let file: Arc<agent_core::models::FileContent> = Arc::new(
         serde_json::from_value(json!({
@@ -373,7 +377,6 @@ fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
             review: Some(review.clone()),
             review_cwd: Some("/old".into()),
             settings: Some(Arc::default()),
-            ..Default::default()
         }),
         file_drafts: Arc::new(BTreeMap::from([(
             "/old/file".into(),
@@ -387,11 +390,12 @@ fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
     for cwd in ["/old", "/new"] {
         for open_thread in [false, true] {
             let event = if open_thread {
-                Event::Loaded(Loaded::OpenThread {
-                    generation: 0,
-                    output: serde_json::from_value(json!({"thread":{"id":"thread", "cwd":cwd}}))
-                        .unwrap(),
-                })
+                op::completed(
+                    op::OpenThread {
+                        thread_id: "thread".into(),
+                    },
+                    serde_json::from_value(json!({"thread":{"id":"thread", "cwd":cwd}})).unwrap(),
+                )
             } else {
                 Event::Intent(Intent::NewChat(cwd.into()))
             };
@@ -409,22 +413,6 @@ fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
             assert!(next.workspace.directory.is_none());
             assert!(next.workspace.review.is_none());
             assert!(next.workspace.review_cwd.is_none());
-            for response in [
-                Event::Loaded(Loaded::ReadFile {
-                    request: 0,
-                    output: (*file).clone(),
-                }),
-                Event::Loaded(Loaded::ListFiles {
-                    request: 0,
-                    output: (*directory).clone(),
-                }),
-                Event::Loaded(Loaded::ReviewWorkspace {
-                    request: 0,
-                    output: (*review).clone(),
-                }),
-            ] {
-                assert_eq!(reduce(&next, response).0.workspace, next.workspace);
-            }
         }
     }
 }
@@ -505,14 +493,15 @@ fn late_fork_preserves_new_navigation_and_stores_the_fork() {
             last_turn_id: "turn".into(),
         }),
     );
-    let generation = forking.navigation.generation;
     let (navigated, _) = reduce(&forking, Event::Intent(Intent::NewChat("/new".into())));
-    let (finished, _) = reduce(
-        &navigated,
-        Event::Loaded(Loaded::ForkThread {
-            generation,
-            output: serde_json::from_value(json!({"thread":{"id":"forked","cwd":"/old"}})).unwrap(),
-        }),
+    let mut finished = navigated;
+    op::ForkThread {
+        thread_id: "old".into(),
+        last_turn_id: "turn".into(),
+    }
+    .stale(
+        &mut finished,
+        serde_json::from_value(json!({"thread":{"id":"forked","cwd":"/old"}})).unwrap(),
     );
     assert!(finished.navigation.thread_id.is_none());
     assert_eq!(finished.navigation.cwd, "/new");
@@ -526,9 +515,8 @@ fn account_listing_does_not_invalidate_a_concurrent_login() {
         &Snapshot::default(),
         Event::Intent(Intent::StartAccountLogin),
     );
-    let generation = starting.account.login_generation;
     let (listing, _) = reduce(&starting, Event::Intent(Intent::ListAccounts));
-    let (finished, _)=reduce(&listing,Event::Loaded(Loaded::StartAccountLogin { generation,output:serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap() }));
+    let (finished, _)=reduce(&listing,op::completed(op::StartAccountLogin,serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap()));
     assert_eq!(
         finished.account.login.as_ref().map(|l| l.login_id.as_str()),
         Some("login")
@@ -549,7 +537,6 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
         navigation: Arc::new(Navigation {
             thread_id: Some("thread".into()),
             draft_key: "thread".into(),
-            generation: 8,
             watch_id: Some(7),
             watch_thread_id: Some("thread".into()),
             ..Default::default()
@@ -558,7 +545,7 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
     };
     let (listed, effects) = reduce(&previous, Event::Intent(Intent::ShowThreadList));
     assert!(listed.navigation.thread_id.is_none());
-    assert_eq!(listed.navigation.generation, 9);
+    assert_eq!(listed.epoch, previous.epoch + 1);
     assert!(Arc::ptr_eq(&listed.drafts, &previous.drafts));
     assert!(matches!(
         effects.as_slice(),

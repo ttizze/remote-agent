@@ -34,7 +34,7 @@ impl Desktop {
                 self.dictation = Some(Dictation {
                     id,
                     key: self.draft_key().into(),
-                    generation: self.snapshot.navigation.generation,
+                    generation: self.snapshot.epoch,
                     phase: Phase::Permission,
                     send: false,
                     control: Some(control),
@@ -89,7 +89,7 @@ impl Desktop {
                 let intent = Intent::Transcribe {
                     draft_key: state.key.clone(),
                     audio: base64::engine::general_purpose::STANDARD.encode(audio),
-                    send: state.send && state.generation == self.snapshot.navigation.generation,
+                    send: state.send && state.generation == self.snapshot.epoch,
                     client_user_message_id: uuid::Uuid::new_v4().to_string(),
                 };
                 self.perform(intent, move |view, result, window, cx| {

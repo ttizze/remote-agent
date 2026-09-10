@@ -36,22 +36,17 @@ pub struct FileDraft {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
-    pub directory_request: u64,
     pub directory: Option<Arc<FileList>>,
-    pub file_request: u64,
     pub file: Option<Arc<FileContent>>,
-    pub review_request: u64,
     pub review_cwd: Option<String>,
     pub review: Option<Arc<WorkspaceReview>>,
     pub settings: Option<Arc<WorktreeSettings>>,
-    pub settings_request: u64,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Navigation {
     pub thread_id: Option<String>,
     pub cwd: String,
     pub draft_key: String,
-    pub generation: u64,
     #[serde(skip)]
     pub watch_id: Option<u64>,
     #[serde(skip)]
@@ -65,7 +60,6 @@ pub struct Activity {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HostManagement {
-    pub generation: u64,
     pub status: Option<Arc<HostStatus>>,
     pub remotes: Vec<RemoteHost>,
     #[serde(skip)]
@@ -73,8 +67,6 @@ pub struct HostManagement {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccountState {
-    pub accounts_generation: u64,
-    pub login_generation: u64,
     pub accounts: Option<Arc<crate::client::Accounts>>,
     #[serde(skip)]
     pub login: Option<Arc<crate::client::AccountLogin>>,
@@ -141,7 +133,7 @@ pub struct Snapshot {
     #[serde(default)]
     pub list_query: Arc<ListQuery>,
     #[serde(default)]
-    pub list_request: u64,
+    pub epoch: u64,
     #[serde(skip)]
     pub connected: bool,
     #[serde(skip)]
@@ -149,13 +141,13 @@ pub struct Snapshot {
 }
 mod notifications;
 use notifications::notification;
-pub(crate) mod operations;
+pub mod operations;
+pub use operations::Intent;
 use operations::add_attachment;
-pub use operations::{Intent, Loaded};
 
 #[derive(Debug)]
 pub enum Event {
-    Loaded(Loaded),
+    Operation(Box<dyn operations::Application>),
     TerminalFailed {
         handle: String,
         reason: String,
@@ -166,7 +158,6 @@ pub enum Event {
         attachment: Attachment,
     },
     HostManagementLoaded {
-        generation: u64,
         status: HostStatus,
         remotes: Vec<RemoteHost>,
     },
@@ -181,7 +172,7 @@ pub enum Event {
     DraftThreadCreated {
         thread: Thread,
         draft_key: String,
-        generation: u64,
+        current: bool,
         client_user_message_id: String,
         draft: Arc<Draft>,
     },
@@ -209,7 +200,6 @@ pub enum Effect {
     StartSubmission {
         draft_key: String,
         cwd: Option<String>,
-        generation: u64,
         client_user_message_id: String,
         draft: Arc<Draft>,
     },
@@ -224,24 +214,43 @@ pub enum Effect {
 // remain keyed by absolute path so navigation never discards unsaved edits.
 fn clear_workspace_location(workspace: &mut Workspace) {
     workspace.directory = None;
-    workspace.directory_request += 1;
     workspace.file = None;
-    workspace.file_request += 1;
     workspace.review = None;
     workspace.review_cwd = None;
-    workspace.review_request += 1;
 }
 
 pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     match event {
         Event::Intent(intent) => reduce_intent(previous, intent),
-        Event::Loaded(loaded) => loaded.reduce(previous),
+        Event::Operation(operation) => {
+            let mut next = previous.clone();
+            let effects = operation.apply(&mut next, true);
+            (next, effects)
+        }
         Event::Notification { method, params } => notification(previous, &method, params),
         event => reduce_event(previous, event),
     }
 }
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
+    // A new navigation target invalidates all outstanding view reads together.
+    // Refreshes in the current view and local input do not invalidate each other.
+    if matches!(
+        &intent,
+        Intent::ShowThreadList
+            | Intent::NewChat(_)
+            | Intent::OpenThread(_)
+            | Intent::ForkThread { .. }
+            | Intent::ReadFile { .. }
+            | Intent::ListFiles(_)
+            | Intent::SelectAccount(_)
+            | Intent::StartAccountLogin
+            | Intent::CancelAccountLogin(_)
+    ) || matches!(&intent, Intent::ListThreads(query) if query != previous.list_query.as_ref())
+        || matches!(&intent, Intent::ReviewWorkspace(cwd) if previous.workspace.review_cwd.as_ref() != Some(cwd))
+    {
+        next.epoch += 1;
+    }
     match intent {
         intent @ Intent::StartTerminal { .. } => {
             let Intent::StartTerminal { handle, cwd, .. } = &intent else {
@@ -317,22 +326,13 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     .remove(index);
             }
         }
-        intent @ (Intent::LoadHostManagement
-        | Intent::PairRemoteHost { .. }
-        | Intent::RemoveRemoteHost(_)
-        | Intent::RevokeDevice(_)) => {
-            Arc::make_mut(&mut next.management).generation += 1;
-            return (next, vec![Effect::Execute(intent)]);
-        }
         Intent::ListThreads(query) => {
             next.list_query = Arc::new(query.clone());
-            next.list_request += 1;
             return (next, vec![Effect::Execute(Intent::ListThreads(query))]);
         }
         Intent::ShowThreadList => {
             let watch = previous.navigation.watch_id;
             next.navigation = Arc::new(Navigation {
-                generation: previous.navigation.generation + 1,
                 ..Default::default()
             });
             clear_workspace_location(Arc::make_mut(&mut next.workspace));
@@ -368,7 +368,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             let navigation = Arc::make_mut(&mut next.navigation);
             let watch = navigation.watch_id.take();
             navigation.watch_thread_id = None;
-            navigation.generation += 1;
             navigation.thread_id = None;
             navigation.draft_key = key;
             navigation.cwd = cwd;
@@ -384,20 +383,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     })
                     .collect(),
             );
-        }
-        intent @ (Intent::OpenThread(_) | Intent::ForkThread { .. }) => {
-            Arc::make_mut(&mut next.navigation).generation += 1;
-            return (next, vec![Effect::Execute(intent)]);
-        }
-        intent @ (Intent::ListAccounts | Intent::SelectAccount(_)) => {
-            Arc::make_mut(&mut next.account).accounts_generation += 1;
-            return (next, vec![Effect::Execute(intent)]);
-        }
-        intent @ (Intent::StartAccountLogin
-        | Intent::ReadAccountLogin(_)
-        | Intent::CancelAccountLogin(_)) => {
-            Arc::make_mut(&mut next.account).login_generation += 1;
-            return (next, vec![Effect::Execute(intent)]);
         }
         intent @ Intent::Watch { .. } => {
             if let Intent::Watch {
@@ -422,14 +407,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
             return (next, vec![Effect::Execute(intent)]);
         }
-        intent @ (Intent::ReadWorktreeSettings | Intent::UpdateWorktreeSettings(_)) => {
-            Arc::make_mut(&mut next.workspace).settings_request += 1;
-            return (next, vec![Effect::Execute(intent)]);
-        }
-        intent @ Intent::ListFiles(_) => {
-            Arc::make_mut(&mut next.workspace).directory_request += 1;
-            return (next, vec![Effect::Execute(intent)]);
-        }
         Intent::ReadFile {
             path,
             discard_draft,
@@ -437,7 +414,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             if discard_draft {
                 Arc::make_mut(&mut next.file_drafts).remove(&path);
             }
-            Arc::make_mut(&mut next.workspace).file_request += 1;
             return (
                 next,
                 vec![Effect::Execute(Intent::ReadFile {
@@ -473,7 +449,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
         Intent::ReviewWorkspace(cwd) => {
             let workspace = Arc::make_mut(&mut next.workspace);
-            workspace.review_request += 1;
             if workspace.review_cwd.as_deref() != Some(&cwd) {
                 workspace.review = None;
             }
@@ -564,17 +539,18 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Event::DraftThreadCreated {
             thread,
             draft_key,
-            generation,
+            current: same_view,
             client_user_message_id,
             draft,
         } => {
             let Some(id) = thread.id.clone() else {
                 return reduce(previous, Event::Failed("thread ID is missing".into()));
             };
-            let same_view = previous.navigation.generation == generation
-                && previous.navigation.draft_key == draft_key;
-            let (mut next, mut effects) =
-                operations::open_thread(previous, thread, None, generation);
+            let (mut next, mut effects) = if same_view {
+                operations::open_thread(previous, thread, None)
+            } else {
+                reduce(previous, Event::ThreadRefreshed(thread))
+            };
             let current = previous.drafts.get(&draft_key);
             let original = previous
                 .pending_submissions
@@ -629,16 +605,10 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         } => {
             add_attachment(&mut next, draft_key, attachment);
         }
-        Event::HostManagementLoaded {
-            generation,
-            status,
-            remotes,
-        } => {
-            if generation == previous.management.generation {
-                let management = Arc::make_mut(&mut next.management);
-                management.status = Some(Arc::new(status));
-                management.remotes = remotes;
-            }
+        Event::HostManagementLoaded { status, remotes } => {
+            let management = Arc::make_mut(&mut next.management);
+            management.status = Some(Arc::new(status));
+            management.remotes = remotes;
         }
         Event::RemoteHostPaired(host) => {
             let management = Arc::make_mut(&mut next.management);
@@ -778,7 +748,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.error = Some(reason);
         }
         Event::Failed(error) => next.error = Some(error),
-        Event::Intent(_) | Event::Loaded(_) | Event::Notification { .. } => {
+        Event::Intent(_) | Event::Operation(_) | Event::Notification { .. } => {
             unreachable!("handled by the reducer router")
         }
     }
@@ -797,7 +767,7 @@ fn reset_session(snapshot: &mut Snapshot) {
     let navigation = Arc::make_mut(&mut snapshot.navigation);
     navigation.watch_id = None;
     navigation.watch_thread_id = None;
-    navigation.generation += 1;
+    snapshot.epoch += 1;
     if !snapshot.pending_submissions.is_empty() {
         for pending in snapshot.pending_submissions.values() {
             if !pending.accepted
@@ -1216,7 +1186,6 @@ fn submission(
             draft_key,
             cwd: (!previous.navigation.cwd.trim().is_empty())
                 .then(|| previous.navigation.cwd.clone()),
-            generation: previous.navigation.generation,
             client_user_message_id,
             draft,
         },

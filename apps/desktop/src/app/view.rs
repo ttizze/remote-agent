@@ -794,13 +794,17 @@ impl Desktop {
             .scrollable(true)
             .h(px(lines as f32 * 22. + 32.))
     }
-    fn item(&mut self, item: &Item, turn: Option<&Turn>, cx: &mut Context<Self>) -> AnyElement {
+    fn item(
+        &mut self,
+        projected: &conversation_presentation::presentation::RenderedItem,
+        item: &Item,
+        turn: Option<&Turn>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = item.id.clone();
         let kind = item.kind.as_deref().unwrap_or_default();
         let expanded = self.expanded_items.contains(&id);
-        let deferred = turn
-            .and_then(|turn| turn.deferred_item_ids.as_ref())
-            .is_some_and(|ids| ids.contains(&id));
+        let deferred = projected.data.deferred;
         if expanded && deferred {
             let key = (
                 turn.map(|turn| turn.id.clone()).unwrap_or_default(),
@@ -815,7 +819,7 @@ impl Desktop {
                 Some(Some(error)) => format!("{error} · 再試行"),
                 None => "詳細を読み込む".to_owned(),
             };
-            let title = conversation_presentation::item_presentation(item).title;
+            let title = projected.data.title.clone();
             let toggle = id.clone();
             return v_flex()
                 .gap_2()
@@ -838,7 +842,7 @@ impl Desktop {
         }
         let turn_id = turn.map(|turn| turn.id.clone()).unwrap_or_default();
         match kind {
-            "agentMessage" => self.markdown(id, item.text.as_deref().unwrap_or_default(), cx),
+            "agentMessage" => self.markdown(id, &projected.data.body, cx),
             "imageGeneration" => {
                 let path = item.saved_path.as_deref().unwrap_or_default();
                 let result = item
@@ -846,7 +850,7 @@ impl Desktop {
                     .as_ref()
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let title = conversation_presentation::item_presentation(item).title;
+                let title = projected.data.title.clone();
                 let mut body = v_flex()
                     .gap_2()
                     .w_full()
@@ -924,7 +928,7 @@ impl Desktop {
                     .into_any_element()
             }
             "commandExecution" | "reasoning" => {
-                let label = conversation_presentation::item_presentation(item).title;
+                let label = projected.data.title.clone();
                 let toggle = id.clone();
                 let mut body = v_flex().gap_2().child(self.button(
                     format!("expand-{id}"),
@@ -940,26 +944,14 @@ impl Desktop {
                     },
                 ));
                 if expanded {
-                    let content = if kind == "reasoning" {
-                        if extra(item, "summary").is_array() {
-                            array(extra(item, "summary"))
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        } else {
-                            extra(item, "summary")
-                                .as_str()
-                                .or(item.text.as_deref())
-                                .unwrap_or("")
-                                .to_owned()
-                        }
-                    } else {
+                    let output = projected.expanded_body();
+                    let content = if kind == "commandExecution" {
                         format!(
-                            "$ {}\n\n{}",
-                            item.command.as_deref().unwrap_or_default(),
-                            item.aggregated_output.as_deref().unwrap_or_default()
+                            "$ {}\n\n{output}",
+                            item.command.as_deref().unwrap_or_default()
                         )
+                    } else {
+                        output
                     };
                     body = body
                         .child(Self::activity_text(format!("output-{id}"), &content, ""))
@@ -1021,7 +1013,7 @@ impl Desktop {
                         format!(
                             "{} {}",
                             if expanded { "⌄" } else { "›" },
-                            conversation_presentation::item_presentation(item).title
+                            projected.data.title.clone()
                         ),
                         cx,
                         move |s, _, _| {
@@ -1036,7 +1028,7 @@ impl Desktop {
                     .when(expanded, |body| {
                         body.child(Self::activity_text(
                             format!("json-{id}"),
-                            &serde_json::to_string_pretty(item).unwrap_or_default(),
+                            &projected.expanded_body(),
                             "json",
                         ))
                     })
@@ -1044,33 +1036,30 @@ impl Desktop {
             }
         }
     }
-    fn turn(&mut self, turn: &Arc<Turn>, cx: &mut Context<Self>) -> AnyElement {
-        let projected = self.project_turn(turn);
-        let items = turn.items.as_deref().unwrap_or_default();
+    fn turn(
+        &mut self,
+        projected: &Arc<conversation_presentation::presentation::RenderedTurn>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let turn = &projected.source;
         let mut body = v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4();
-        if let Some(opening) = &turn.opening_user_message
-            && !items.iter().any(|item| item.id == opening.id)
-        {
-            body = body.child(self.item(opening, Some(turn), cx));
-        }
-        for projection in &projected.segments {
-            let id = &projection.id;
-            let status = turn.status.as_deref().unwrap_or_default();
+        for row in &projected.rows {
+            let id = &row.id;
             let expanded = self
                 .expanded_work
                 .get(id)
-                .filter(|(previous, _)| previous == status)
-                .map_or(projection.initially_expanded, |(_, expanded)| *expanded);
-            for index in (projection.start..projection.end).filter(|&index| {
-                projection.role(index, projected.metadata(index))
-                    == conversation_presentation::Role::User
-            }) {
-                body = body.child(self.projected_item(&projected, index, cx));
+                .filter(|(previous, _)| previous == &row.status)
+                .map_or(row.activity_initially_expanded, |(_, expanded)| *expanded);
+            if let Some(opening) = &row.opening_user_message {
+                body = body.child(self.projected_item(opening, turn, cx));
             }
-            if let Some(label) = &projection.label {
-                let header = if projection.collapsible {
+            for item in &row.user_messages {
+                body = body.child(self.projected_item(item, turn, cx));
+            }
+            if let Some(label) = &row.activity_summary {
+                let header = if row.activity_can_collapse {
                     let toggle = id.clone();
-                    let status = status.to_owned();
+                    let status = row.status.clone();
                     let turn_id = turn.id.clone();
                     self.button(
                         format!("work-{id}"),
@@ -1095,45 +1084,30 @@ impl Desktop {
                     h_flex()
                         .gap_2()
                         .child(header)
-                        .when(projection.last && status == "inProgress", |row| {
+                        .when(row.is_in_progress, |row| {
                             row.child(spinner::Spinner::new().small())
                         }),
                 );
             }
             if expanded {
-                for index in (projection.start..projection.end).filter(|&index| {
-                    projection.role(index, projected.metadata(index))
-                        == conversation_presentation::Role::Activity
-                }) {
-                    body = body.child(self.projected_item(&projected, index, cx));
+                for item in &row.activity_items {
+                    body = body.child(self.projected_item(item, turn, cx));
                 }
             }
-            if projection.last
-                && let Some(error) = turn.error.as_ref().filter(|error| !error.is_null())
-            {
-                body = body.child(
-                    div().text_color(rgb(0xff8e86)).child(
-                        error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| error.to_string()),
-                    ),
-                );
+            if let Some(error) = &row.error {
+                body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
             }
-            for index in (projection.start..projection.end).filter(|&index| {
-                projection.role(index, projected.metadata(index))
-                    == conversation_presentation::Role::Response
-            }) {
-                body = body.child(self.projected_item(&projected, index, cx));
-                if let Some(item) = items.get(projected.sources[index])
-                    && item.kind.as_deref() == Some("agentMessage")
-                    && extra(item, "phase") != "commentary"
+            for item in &row.responses {
+                body = body.child(self.projected_item(item, turn, cx));
+                if let conversation_presentation::presentation::ItemSource::Native(native) =
+                    &item.source
+                    && native.kind.as_deref() == Some("agentMessage")
+                    && extra(native, "phase") != "commentary"
                 {
-                    let item = item.clone();
+                    let native = native.clone();
                     body = body.child(
                         h_flex().child(
-                            Button::new(format!("copy-{}", item.id))
+                            Button::new(format!("copy-{}", native.id))
                                 .icon(IconName::Copy)
                                 .small()
                                 .ghost()
@@ -1141,7 +1115,7 @@ impl Desktop {
                                 .accessibility_label("回答をコピー")
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
-                                        item.text.clone().unwrap_or_default(),
+                                        native.text.clone().unwrap_or_default(),
                                     ));
                                 }),
                         ),
@@ -1159,17 +1133,17 @@ impl Desktop {
     }
     fn projected_item(
         &mut self,
-        projected: &ProjectedTurn,
-        index: usize,
+        item: &conversation_presentation::presentation::RenderedItem,
+        turn: &Arc<Turn>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let items = projected.turn.items.as_deref().unwrap_or_default();
-        let source = projected.sources[index];
-        if let Some(item) = items.get(source) {
-            self.item(item, Some(&projected.turn), cx)
-        } else {
-            let (id, pending) = &projected.pending[source - items.len()];
-            self.pending_item(id, &pending.draft, cx)
+        match &item.source {
+            conversation_presentation::presentation::ItemSource::Native(native) => {
+                self.item(item, native, Some(turn), cx)
+            }
+            conversation_presentation::presentation::ItemSource::Pending(id, pending) => {
+                self.pending_item(id, &pending.draft, cx)
+            }
         }
     }
     fn pending_item(&mut self, id: &str, draft: &Draft, cx: &mut Context<Self>) -> AnyElement {

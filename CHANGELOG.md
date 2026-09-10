@@ -4,7 +4,7 @@
 
 - Queue iOS list/activity snapshots immediately so completion badges are not lost to the text/stream debounce when the app closes after showing them.
 
-- Generate simple Store RPC dispatch, typed loaded responses and reducers from one operation table. Centralize mobile item bodies, approval association and request/error labels in Rust; reuse immutable render identities in Swift and Kotlin and format expanded details on demand. Separate notification classification and process/turn/item transitions while retaining ordering and stale-response guards.
+- Replace the Store operation macro DSL and loaded-response enum with ordinary typed `Operation` implementations and one generic executor. Replace per-operation freshness counters with a single Snapshot epoch checked atomically at completion. Preserve background sends, transcription and saved draft revisions after navigation; establish navigation before initial/reconnect reads on all clients. Move the full conversation projection into `conversation-presentation`; GPUI, Swift and Kotlin share its rows, item bodies and immutable identities. Remove desktop’s separate turn projection; retain on-demand activity details and explicit notification transitions.
 
 - Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Remove the obsolete iOS 15 single-line message-field fallback. Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
 

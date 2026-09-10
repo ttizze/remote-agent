@@ -172,11 +172,11 @@ final class BexAppViewModel: ObservableObject {
                 guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
                 publish(owner.snapshot())
                 isConnecting = false
-                refreshTaskList()
-                loadModels()
                 if let id = snapshot.navigation().threadId {
                     perform(.openThread(id: id))
                 }
+                refreshTaskList()
+                loadModels()
             } catch {
                 guard self?.selectedProfileId == profile.id else { return }
                 self?.isConnecting = false

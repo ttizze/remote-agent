@@ -114,33 +114,10 @@ struct DetailLoad {
     loading: bool,
     error: Option<String>,
 }
-struct ProjectedTurn {
-    turn: Arc<Turn>,
-    pending: Vec<(String, Arc<PendingSubmission>)>,
-    segments: Vec<conversation_presentation::Segment>,
-    sources: Vec<usize>,
-}
-impl ProjectedTurn {
-    fn metadata(&self, index: usize) -> conversation_presentation::ItemMetadata<'_> {
-        let source = self.sources[index];
-        let items = self.turn.items.as_deref().unwrap_or_default();
-        if let Some(item) = items.get(source) {
-            item.as_ref().into()
-        } else {
-            let id = &self.pending[source - items.len()].0;
-            conversation_presentation::ItemMetadata {
-                id,
-                client_id: Some(id),
-                kind: "userMessage",
-                ..Default::default()
-            }
-        }
-    }
-}
 #[derive(Clone)]
 enum ConversationRow {
     History,
-    Turn(Arc<Turn>),
+    Turn(Arc<conversation_presentation::presentation::RenderedTurn>),
     Pending(String, Arc<PendingSubmission>),
     Request(String, Arc<ServerRequest>),
 }
@@ -148,7 +125,7 @@ impl ConversationRow {
     fn same_identity(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::History, Self::History) => true,
-            (Self::Turn(a), Self::Turn(b)) => a.id == b.id,
+            (Self::Turn(a), Self::Turn(b)) => a.source.id == b.source.id,
             (Self::Pending(a, _), Self::Pending(b, _))
             | (Self::Request(a, _), Self::Request(b, _)) => a == b,
             _ => false,
@@ -220,7 +197,7 @@ pub(crate) struct Desktop {
     history_loading: bool,
     history_error: String,
     item_details: HashMap<(String, String), DetailLoad>,
-    projected_turns: HashMap<String, Rc<ProjectedTurn>>,
+    rendered: Option<Arc<conversation_presentation::presentation::RenderedConversation>>,
     diffs: HashMap<String, Entity<DiffView>>,
     images: HashMap<String, ImageState>,
     image_gallery: Option<ImageGallery>,
@@ -481,7 +458,7 @@ impl Desktop {
             history_loading: false,
             history_error: String::new(),
             item_details: HashMap::new(),
-            projected_turns: HashMap::new(),
+            rendered: None,
             diffs: HashMap::new(),
             images: HashMap::new(),
             image_gallery: None,
@@ -648,9 +625,6 @@ impl Desktop {
                             },
                             &self.runtime.handle,
                         ));
-                        self.dispatch(Intent::ListThreads((*self.snapshot.list_query).clone()));
-                        self.dispatch(Intent::LoadModels);
-                        self.dispatch(Intent::ReadWorktreeSettings);
                         if let Some(cwd) = self.initial_cwd.take() {
                             self.dispatch(Intent::NewChat(cwd));
                         } else if let Some(id) = self.snapshot.navigation.thread_id.clone() {
@@ -658,6 +632,9 @@ impl Desktop {
                         } else {
                             self.dispatch(Intent::NewChat(self.snapshot.navigation.cwd.clone()));
                         }
+                        self.dispatch(Intent::ListThreads((*self.snapshot.list_query).clone()));
+                        self.dispatch(Intent::LoadModels);
+                        self.dispatch(Intent::ReadWorktreeSettings);
                     }
                     Err(error) => self.error = error,
                 }
@@ -696,7 +673,7 @@ impl Desktop {
             self.history_loading = false;
             self.history_error.clear();
             self.item_details.clear();
-            self.projected_turns.clear();
+            self.rendered = None;
             self.diffs.clear();
             self.markdown_cache.clear();
         }
@@ -951,75 +928,26 @@ impl Desktop {
                 .is_none_or(|id| id == self.selected())
         })
     }
-    fn project_turn(&mut self, turn: &Arc<Turn>) -> Rc<ProjectedTurn> {
-        let mut pending = self
-            .snapshot
-            .pending_submissions
-            .iter()
-            .filter(|(_, pending)| {
-                pending.draft_key == self.draft_key()
-                    && pending.turn_id.as_deref() == Some(&turn.id)
-            });
-        if let Some(cached) = self.projected_turns.get(&turn.id)
-            && Arc::ptr_eq(&cached.turn, turn)
-            && cached.pending.iter().all(|(id, previous)| {
-                pending
-                    .next()
-                    .is_some_and(|(next, current)| id == next && Arc::ptr_eq(previous, current))
-            })
-            && pending.next().is_none()
-        {
-            return cached.clone();
-        }
-        let pending: Vec<_> = self
-            .snapshot
-            .pending_submissions
-            .iter()
-            .filter(|(_, pending)| {
-                pending.draft_key == self.draft_key()
-                    && pending.turn_id.as_deref() == Some(&turn.id)
-            })
-            .map(|(id, pending)| (id.clone(), pending.clone()))
-            .collect();
-        let items = turn.items.as_deref().unwrap_or_default();
-        let anchors: Vec<_> = pending
-            .iter()
-            .map(|(_, pending)| pending.after_item_id.as_deref())
-            .collect();
-        let sources = conversation_presentation::source_order(
-            items.len(),
-            |index| &items[index].id,
-            &anchors,
-        );
-        let mut projection = ProjectedTurn {
-            turn: turn.clone(),
-            pending,
-            segments: Vec::new(),
-            sources,
-        };
-        projection.segments =
-            conversation_presentation::project_items(turn, projection.sources.len(), |index| {
-                projection.metadata(index)
-            })
-            .collect();
-        let projection = Rc::new(projection);
-        self.projected_turns
-            .insert(turn.id.clone(), projection.clone());
-        projection
-    }
     fn sync_rows(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
         let mut rows = Vec::new();
-        if let Some(thread) = self.thread() {
+        self.rendered = self.thread().map(|thread| {
+            let pending = self
+                .snapshot
+                .pending_submissions
+                .iter()
+                .filter(|(_, p)| p.draft_key == self.draft_key())
+                .map(|(id, p)| (id.clone(), p.clone()))
+                .collect();
+            conversation_presentation::presentation::project_conversation(
+                thread.clone(),
+                &pending,
+                self.snapshot.requests.clone(),
+                self.rendered.as_ref(),
+            )
+        });
+        if let Some(rendered) = &self.rendered {
             rows.push(ConversationRow::History);
-            rows.extend(
-                thread
-                    .turns
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .cloned()
-                    .map(ConversationRow::Turn),
-            );
+            rows.extend(rendered.turns.iter().cloned().map(ConversationRow::Turn));
         }
         rows.extend(
             self.pending_rows()
@@ -1054,8 +982,8 @@ impl Desktop {
             .filter(|(a, b)| a.same_identity(b) && !a.unchanged(b))
             .and_then(|(a, b)| {
                 if let (ConversationRow::Turn(turn), ConversationRow::Turn(next)) = (a, b)
-                    && let Some(first) = turn.items.as_ref().and_then(|items| items.first())
-                    && next.items.as_ref().is_some_and(|items| {
+                    && let Some(first) = turn.source.items.as_ref().and_then(|items| items.first())
+                    && next.source.items.as_ref().is_some_and(|items| {
                         items
                             .iter()
                             .position(|item| item.id == first.id)
@@ -1063,7 +991,7 @@ impl Desktop {
                     })
                 {
                     Some((
-                        turn.id.clone(),
+                        turn.source.id.clone(),
                         self.list.bounds_for_item(anchor.item_ix)?.size.height,
                     ))
                 } else {
@@ -1089,10 +1017,10 @@ impl Desktop {
         if self.history_loading
             && let Some((id, old_height)) = preserve
         {
-            let generation = self.snapshot.navigation.generation;
+            let generation = self.snapshot.epoch;
             let owner = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| { let _ = owner.update(cx, |view, cx| {
-                if view.snapshot.navigation.generation == generation && matches!(view.rows.get(anchor.item_ix), Some(ConversationRow::Turn(turn)) if turn.id == id)
+                if view.snapshot.epoch == generation && matches!(view.rows.get(anchor.item_ix), Some(ConversationRow::Turn(turn)) if turn.source.id == id)
                     && let Some(bounds) = view.list.bounds_for_item(anchor.item_ix)
                 {
                     view.list.scroll_to(ListOffset { item_ix: anchor.item_ix, offset_in_item: anchor.offset_in_item + bounds.size.height - old_height }); cx.notify();
@@ -1110,8 +1038,9 @@ impl Desktop {
     fn remeasure_item(&self, id: &str) {
         for (index, row) in self.rows.iter().enumerate() {
             if let ConversationRow::Turn(turn) = row
-                && (turn.id == id
+                && (turn.source.id == id
                     || turn
+                        .source
                         .items
                         .as_deref()
                         .unwrap_or_default()
@@ -1146,7 +1075,7 @@ impl Desktop {
         let Some((turn_id, cursor)) = self.older_page() else {
             return;
         };
-        let generation = self.snapshot.navigation.generation;
+        let generation = self.snapshot.epoch;
         self.history_loading = true;
         self.history_error.clear();
         self.list.remeasure_items(0..1);
@@ -1157,7 +1086,7 @@ impl Desktop {
                 cursor,
             },
             move |view, result, window, cx| {
-                if view.snapshot.navigation.generation != generation {
+                if view.snapshot.epoch != generation {
                     return;
                 }
                 view.accept_snapshot(window, cx);
@@ -1195,7 +1124,7 @@ impl Desktop {
                 error: None,
             },
         );
-        let generation = self.snapshot.navigation.generation;
+        let generation = self.snapshot.epoch;
         self.perform(
             Intent::ReadItem {
                 thread_id: self.selected().into(),
@@ -1203,7 +1132,7 @@ impl Desktop {
                 item_id,
             },
             move |view, result, window, cx| {
-                if view.snapshot.navigation.generation != generation {
+                if view.snapshot.epoch != generation {
                     return;
                 }
                 view.item_details.insert(
@@ -1244,7 +1173,7 @@ impl Desktop {
         self.image_gallery = None;
         self.rows.clear();
         self.list.reset(0);
-        self.projected_turns.clear();
+        self.rendered = None;
         self.item_details.clear();
         self.requests.clear();
         self.diffs.clear();

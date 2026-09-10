@@ -278,8 +278,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 if (profileId != profile.id) return@launch
                 publish(store.snapshot())
                 busy = false
-                refresh()
                 snapshot.navigation().threadId?.let { perform(Intent.OpenThread(it)) }
+                refresh()
             } catch (error: AgentException) {
                 connectionFailed(profile.id, error)
             } catch (error: IOException) {

@@ -12,7 +12,7 @@ pub struct Navigation {
     pub thread_id: Option<String>,
     pub cwd: String,
     pub draft_key: String,
-    pub generation: u64,
+    pub epoch: u64,
 }
 #[derive(uniffi::Record)]
 pub struct Project {
@@ -207,7 +207,7 @@ impl Snapshot {
             thread_id: n.thread_id.clone(),
             cwd: n.cwd.clone(),
             draft_key: n.draft_key.clone(),
-            generation: n.generation,
+            epoch: self.0.epoch,
         }
     }
     pub fn draft(&self, key: String) -> Draft {

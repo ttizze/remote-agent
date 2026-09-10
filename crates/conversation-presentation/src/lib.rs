@@ -6,6 +6,7 @@ use agent_core::models::{Item, Turn};
 use serde::Serialize;
 use serde_json::Value;
 pub mod body;
+pub mod presentation;
 
 fn field<'a>(item: &'a Item, key: &str) -> &'a str {
     item.extra
