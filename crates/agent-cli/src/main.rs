@@ -3,14 +3,14 @@ use agent_core::{
     client::Answer,
     models::ListQuery,
     peer::RpcPeer,
-    state::{Draft, Intent, Snapshot},
+    state::{Draft, Intent, Navigation, Snapshot},
     store::{Outcome, Store},
     transport::{Endpoint, Identity, Relays, Ticket},
 };
 use clap::{Parser, Subcommand};
 use host_protocol::JsonlReader;
 use serde_json::Value;
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 #[derive(Parser)]
 #[command(about = "Headless agent client")]
@@ -39,9 +39,9 @@ struct Args {
 enum Command {
     List {
         #[arg(long, default_value_t = 5)]
-        project_limit: usize,
+        project_limit: u32,
         #[arg(long, default_value_t = 5)]
-        chat_limit: usize,
+        chat_limit: u32,
         #[arg(long, default_value = "")]
         search: String,
     },
@@ -72,6 +72,29 @@ fn parse_json(value: &str) -> Result<Value, serde_json::Error> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let mut snapshot = Snapshot::default();
+    match &args.command {
+        Command::List {
+            project_limit,
+            chat_limit,
+            search,
+        } => {
+            snapshot.list_query = Arc::new(ListQuery {
+                project_limit: *project_limit,
+                chat_limit: *chat_limit,
+                search_term: search.clone(),
+                ..Default::default()
+            })
+        }
+        Command::Send { thread_id, .. } => {
+            snapshot.navigation = Arc::new(Navigation {
+                thread_id: Some(thread_id.clone()),
+                draft_key: thread_id.clone(),
+                ..Default::default()
+            })
+        }
+        Command::Approve { .. } => {}
+    }
     let mut child = None;
     let store = if let Some(program) = args.stdio {
         let mut process = tokio::process::Command::new(program)
@@ -88,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             64,
         )?;
         child = Some(process);
-        Store::new(peer, Snapshot::default())
+        Store::new(peer, snapshot)
     } else {
         let secret =
             tokio::fs::read(args.identity_file.expect("identity required with ticket")).await?;
@@ -105,24 +128,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
         let ticket: Ticket = args.ticket.expect("connection required").parse()?;
-        Store::connect(&endpoint, &ticket, Snapshot::default(), args.invitation).await?
+        Store::connect(&endpoint, &ticket, snapshot, args.invitation).await?
     };
+    let mut updates = store.subscribe();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            {
+                let snapshot = updates.borrow_and_update();
+                let ready = match &args.command {
+                    Command::List { .. } => snapshot.threads.is_some(),
+                    Command::Send { thread_id, .. } => {
+                        snapshot.conversations.contains_key(thread_id)
+                    }
+                    Command::Approve { .. } => true,
+                };
+                if ready {
+                    return Ok::<_, Box<dyn std::error::Error>>(());
+                }
+                if let Some(error) = &snapshot.error {
+                    return Err(error.clone().into());
+                }
+            }
+            updates.changed().await?;
+        }
+    })
+    .await??;
     match args.command {
-        Command::List {
-            project_limit,
-            chat_limit,
-            search,
-        } => {
-            store
-                .dispatch(Intent::ListThreads(op::ListThreads {
-                    query: ListQuery {
-                        project_limit,
-                        chat_limit,
-                        search_term: search,
-                        ..Default::default()
-                    },
-                }))
-                .await?;
+        Command::List { .. } => {
             println!("{}", serde_json::to_string(&store.snapshot().threads)?);
         }
         Command::Send {
@@ -132,11 +164,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             model,
             effort,
         } => {
-            store
-                .dispatch(Intent::ReadThread(op::ReadThread {
-                    thread_id: thread_id.clone(),
-                }))
-                .await?;
             store
                 .dispatch(Intent::SetDraft {
                     thread_id: thread_id.clone(),
@@ -148,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 })
                 .await?;
-            let Outcome::Submitted(id) = store
+            let Outcome::Submitted { turn_id: id } = store
                 .dispatch(Intent::Submit {
                     thread_id: Some(thread_id),
                     client_user_message_id: client_message_id,

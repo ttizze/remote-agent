@@ -58,7 +58,7 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier) {
             item(key = "project:${project.id}") {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("📁 ${project.name}", style = MaterialTheme.typography.titleMedium)
-                    TextButton(onClick = { model.newChat(project.roots.firstOrNull().orEmpty()) }) { Text("新規") }
+                    TextButton(onClick = { model.newChat(project.roots.firstOrNull()?.path.orEmpty()) }) { Text("新規") }
                 }
             }
             items(threads.filter { it.projectId == project.id }, key = { it.id }) { SummaryRow(it, model) }
@@ -91,14 +91,7 @@ private fun SummaryRow(thread: ThreadSummary, model: AndroidAppModel) {
 }
 
 internal fun AndroidAppModel.refresh() {
-    val query =
-        snapshot.listQuery().let {
-            it.copy(
-                projectLimit = it.projectLimit.coerceAtLeast(THREAD_PAGE_SIZE),
-                chatLimit = it.chatLimit.coerceAtLeast(THREAD_PAGE_SIZE),
-            )
-        }
-    perform(Intent.ListThreads(query))
+    perform(Intent.ListThreads(snapshot.listQuery()))
 }
 
 internal fun AndroidAppModel.expand(projects: Boolean = false, projectId: String? = null) {

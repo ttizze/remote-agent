@@ -181,27 +181,6 @@ extension ThreadScreen {
         )
         .id(model.draftKey)
     }
-
-    func refreshReview() async {
-        let directory = model.cwd
-        let host = model.state.selectedProfileId
-        guard model.state.isConnected, !directory.isEmpty,
-              let threadId = conversation?.id else { review = nil; return }
-        let result: Result<Outcome, Error> = await withCheckedContinuation { continuation in
-            model.perform(.reviewWorkspace(cwd: directory)) { continuation.resume(returning: $0) }
-        }
-        guard !Task.isCancelled, model.cwd == directory, model.state.selectedThreadId == threadId,
-              model.state.selectedProfileId == host else { return }
-        if case .success = result, let value = model.snapshot.review() {
-            review = WorkspaceReviewSummary(
-                files: value.files.count,
-                additions: Int(value.additions),
-                deletions: Int(value.deletions)
-            )
-        } else {
-            review = nil
-        }
-    }
 }
 
 /// Keep native editing ahead of the Store notification triggered by each keystroke.

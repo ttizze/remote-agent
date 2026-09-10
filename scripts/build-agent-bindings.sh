@@ -8,4 +8,6 @@ case "$(uname -s)" in
     *) library=target/debug/agent_ffi.dll ;;
 esac
 cargo build -p agent-ffi --features bindgen --lib --bin agent-bindgen
+# A namespace change must not leave obsolete generated Kotlin beside its replacement.
+rm -rf target/agent-bindings
 target/debug/agent-bindgen generate "$library" --language swift --language kotlin --out-dir target/agent-bindings --no-format

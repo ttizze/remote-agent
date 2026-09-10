@@ -14,7 +14,6 @@ host-daemon = { path = "../../crates/host-daemon" }
 directories = "6"
 atomicwrites = "0.4.4"
 rfd = "0.17.2"
-conversation-presentation = { path = "../../crates/conversation-presentation" }
 gpui-kit = { version = "=0.6.0", features = ["tree-sitter-languages"] }
 gpui-http = { package = "gpui-pre-reqwest-client", version = "0.3.4" }
 gpui-wry = "=0.6.0"

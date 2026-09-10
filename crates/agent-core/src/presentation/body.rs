@@ -1,5 +1,5 @@
 //! Text and image sources are projected once in Rust; native views render them.
-use agent_core::{models::Item, state::Draft};
+use crate::{models::Item, state::Draft};
 use serde_json::Value;
 use std::{borrow::Cow, fmt::Write};
 

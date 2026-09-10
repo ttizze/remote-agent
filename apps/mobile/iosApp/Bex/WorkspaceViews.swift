@@ -162,7 +162,7 @@ private struct WorkspaceDirectoryScreen: View {
                 error = failure.localizedDescription; return
             }
             if let value = model.snapshot.review() {
-                diff = value.diff.components(separatedBy: "\n"); showingDiff = true
+                diff = value.diff().components(separatedBy: "\n"); showingDiff = true
             }
         }
     }

@@ -117,7 +117,8 @@ struct WorktreeSettingsSheet: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         let (result, failure) = await requestSettings(update: WorktreeSettings(
             createOnNewSession: createOnNewSession, copyOnCreate: copyOnCreate,
-            copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines)
+            copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines),
+            extra: model.snapshot.worktreeSettings()?.extra ?? [:]
         ))
         if result != nil, failure == nil {
             dismiss()

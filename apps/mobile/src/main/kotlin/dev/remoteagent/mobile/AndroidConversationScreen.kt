@@ -50,7 +50,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier) {
     val threadId = snapshot.navigation().threadId
     val thread = threadId?.let { snapshot.conversation(it) }
     val projection = remember(model.profileId, threadId) { ConversationProjection() }
-    val turns = projection.project(thread)
+    val turns = projection.project(snapshot, thread)
     val listState = rememberLazyListState()
     val activityExpansion = remember(threadId) { mutableStateMapOf<String, Pair<String, Boolean>>() }
     var following by remember(model.selectionKey) { mutableStateOf(true) }

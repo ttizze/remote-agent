@@ -16,11 +16,10 @@ pub enum Intent {
     ForkThread(ForkThread),
     StartTerminal(StartTerminal),
     CloseTerminal(CloseTerminal),
-    Transcribe(Transcribe),
+    Transcribe(Dictate),
     CreateInvitation(CreateInvitation),
     RemoveRemoteHost(RemoveRemoteHost),
     RevokeDevice(RevokeDevice),
-    OpenThread(OpenThread),
     ListFiles(ListFiles),
     ReadFile(ReadFile),
     SaveFile(SaveFile),
@@ -122,11 +121,17 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartTerminal {
-    pub handle: String,
-    pub cwd: String,
+pub struct StartTerminal<T = String> {
+    #[serde(rename = "processHandle")]
+    pub handle: T,
+    pub cwd: T,
     pub size: rpc::TerminalSize,
 }
+impl<T: Serialize> rpc::RpcMethod for StartTerminal<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/terminal/start";
+}
+
 impl Operation for StartTerminal {
     fn terminal_handle(&self) -> Option<&str> {
         Some(&self.handle)
@@ -149,13 +154,7 @@ impl Operation for StartTerminal {
     type Output = Map<String, Value>;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::StartTerminal {
-                process_handle: &self.handle,
-                cwd: &self.cwd,
-                size: self.size,
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let Self { handle, .. } = self;
@@ -177,9 +176,15 @@ impl Operation for StartTerminal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloseTerminal {
-    pub handle: String,
+pub struct CloseTerminal<T = String> {
+    #[serde(rename = "processHandle")]
+    pub handle: T,
 }
+impl<T: Serialize> rpc::RpcMethod for CloseTerminal<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "process/kill";
+}
+
 impl Operation for CloseTerminal {
     fn terminal_handle(&self) -> Option<&str> {
         Some(&self.handle)
@@ -187,11 +192,7 @@ impl Operation for CloseTerminal {
     type Output = Map<String, Value>;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::KillTerminal {
-                process_handle: &self.handle,
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let Self { handle, .. } = self;
@@ -211,11 +212,16 @@ impl Operation for CloseTerminal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateInvitation;
+pub struct CreateInvitation {}
+impl rpc::RpcMethod for CreateInvitation {
+    type Output = Invitation;
+    const METHOD: &'static str = "host/invite";
+}
+
 impl Operation for CreateInvitation {
     type Output = Invitation;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::CreateInvitation {}).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, invitation: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.management).invitation = Some(Arc::new(invitation));
@@ -224,13 +230,18 @@ impl Operation for CreateInvitation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoveRemoteHost {
-    pub id: String,
+pub struct RemoveRemoteHost<T = String> {
+    pub id: T,
 }
+impl<T: Serialize> rpc::RpcMethod for RemoveRemoteHost<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/removeRemote";
+}
+
 impl Operation for RemoveRemoteHost {
     type Output = Map<String, Value>;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::RemoveRemoteHost { id: &self.id }).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let Self { id } = self;
@@ -242,13 +253,19 @@ impl Operation for RemoveRemoteHost {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeDevice {
-    pub id: String,
+pub struct RevokeDevice<T = String> {
+    #[serde(rename = "node_id")]
+    pub id: T,
 }
+impl<T: Serialize> rpc::RpcMethod for RevokeDevice<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/revoke";
+}
+
 impl Operation for RevokeDevice {
     type Output = Map<String, Value>;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::RevokeDevice { node_id: &self.id }).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let Self { id } = self;
@@ -260,11 +277,16 @@ impl Operation for RevokeDevice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListAccounts;
+pub struct ListAccounts {}
+impl rpc::RpcMethod for ListAccounts {
+    type Output = rpc::Accounts;
+    const METHOD: &'static str = "host/account/list";
+}
+
 impl Operation for ListAccounts {
     type Output = rpc::Accounts;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::ListAccounts {}).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, accounts: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(accounts));
@@ -273,20 +295,22 @@ impl Operation for ListAccounts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelectAccount {
-    pub id: String,
+pub struct SelectAccount<T = String> {
+    #[serde(rename = "accountId")]
+    pub id: T,
 }
+impl<T: Serialize> rpc::RpcMethod for SelectAccount<T> {
+    type Output = rpc::AccountSelection;
+    const METHOD: &'static str = "host/account/select";
+}
+
 impl Operation for SelectAccount {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         true
     }
     type Output = rpc::AccountSelection;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::SelectAccount {
-                account_id: &self.id,
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let rpc::AccountSelection {
@@ -303,14 +327,19 @@ impl Operation for SelectAccount {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartAccountLogin;
+pub struct StartAccountLogin {}
+impl rpc::RpcMethod for StartAccountLogin {
+    type Output = rpc::AccountLogin;
+    const METHOD: &'static str = "host/account/login/start";
+}
+
 impl Operation for StartAccountLogin {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         true
     }
     type Output = rpc::AccountLogin;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::StartAccountLogin {}).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, login: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
@@ -321,15 +350,19 @@ impl Operation for StartAccountLogin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadAccountLogin {
-    pub id: String,
+pub struct ReadAccountLogin<T = String> {
+    #[serde(rename = "loginId")]
+    pub id: T,
 }
+impl<T: Serialize> rpc::RpcMethod for ReadAccountLogin<T> {
+    type Output = rpc::AccountLoginStatus;
+    const METHOD: &'static str = "host/account/login/status";
+}
+
 impl Operation for ReadAccountLogin {
     type Output = rpc::AccountLoginStatus;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::ReadAccountLogin { login_id: &self.id })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, status: Self::Output) -> Vec<Effect> {
         let completed = status.completed;
@@ -337,8 +370,10 @@ impl Operation for ReadAccountLogin {
         account.login_status = Some(Arc::new(status));
         if completed {
             account.login = None;
-            let (updated, mut effects) =
-                reduce(snapshot, Event::Intent(Intent::ListAccounts(ListAccounts)));
+            let (updated, mut effects) = reduce(
+                snapshot,
+                Event::Intent(Intent::ListAccounts(ListAccounts {})),
+            );
             *snapshot = updated;
             effects.push(Effect::execute(LoadModels));
             return effects;
@@ -348,18 +383,22 @@ impl Operation for ReadAccountLogin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelAccountLogin {
-    pub id: String,
+pub struct CancelAccountLogin<T = String> {
+    #[serde(rename = "loginId")]
+    pub id: T,
 }
+impl<T: Serialize> rpc::RpcMethod for CancelAccountLogin<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/account/login/cancel";
+}
+
 impl Operation for CancelAccountLogin {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         true
     }
     type Output = Map<String, Value>;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::CancelAccountLogin { login_id: &self.id })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
@@ -370,16 +409,21 @@ impl Operation for CancelAccountLogin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListFiles {
-    pub path: String,
+pub struct ListFiles<T = String> {
+    pub path: T,
 }
+impl<T: Serialize> rpc::RpcMethod for ListFiles<T> {
+    type Output = FileList;
+    const METHOD: &'static str = "host/file/list";
+}
+
 impl Operation for ListFiles {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         true
     }
     type Output = FileList;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::ListFiles { path: &self.path }).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, files: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.workspace).directory = Some(Arc::new(files));
@@ -388,10 +432,21 @@ impl Operation for ListFiles {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadFile {
-    pub path: String,
+pub struct ReadFile<T = String> {
+    pub path: T,
     pub discard_draft: bool,
 }
+impl<T: Serialize> rpc::RpcMethod for ReadFile<T> {
+    type Output = FileContent;
+    const METHOD: &'static str = "host/file/read";
+    fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut params = serializer.serialize_struct("ReadFile", 1)?;
+        params.serialize_field("path", &self.path)?;
+        params.end()
+    }
+}
+
 impl Operation for ReadFile {
     fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
         if self.discard_draft {
@@ -404,7 +459,7 @@ impl Operation for ReadFile {
     }
     type Output = FileContent;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::ReadFile { path: &self.path }).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, file: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.workspace).file = Some(Arc::new(file));
@@ -467,9 +522,29 @@ impl SaveFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReviewWorkspace {
-    pub cwd: String,
+pub struct ReviewWorkspace<T = String> {
+    pub cwd: T,
 }
+impl<T: Serialize> rpc::RpcMethod for ReviewWorkspace<T> {
+    type Output = WorkspaceReview;
+    const METHOD: &'static str = "host/workspace/review";
+}
+
+/// Navigation and notifications already belong to an epoch. Their review read
+/// shares it instead of dispatching a second intent that invalidates siblings.
+pub(super) fn review_workspace(snapshot: &mut Snapshot) -> Option<Effect> {
+    if !snapshot.connected || snapshot.navigation.cwd.is_empty() {
+        return None;
+    }
+    let operation = ReviewWorkspace {
+        cwd: snapshot.navigation.cwd.clone(),
+    };
+    operation
+        .prepare(snapshot)
+        .expect("selecting a review directory is infallible");
+    Some(Effect::execute(operation))
+}
+
 impl Operation for ReviewWorkspace {
     fn invalidates(&self, snapshot: &Snapshot) -> bool {
         snapshot.workspace.review_cwd.as_ref() != Some(&self.cwd)
@@ -484,7 +559,7 @@ impl Operation for ReviewWorkspace {
     }
     type Output = WorkspaceReview;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::ReviewWorkspace { cwd: &self.cwd }).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, review: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.workspace).review = Some(Arc::new(review));
@@ -493,11 +568,16 @@ impl Operation for ReviewWorkspace {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadWorktreeSettings;
+pub struct ReadWorktreeSettings {}
+impl rpc::RpcMethod for ReadWorktreeSettings {
+    type Output = super::WorktreeSettings;
+    const METHOD: &'static str = "host/worktree/settings/read";
+}
+
 impl Operation for ReadWorktreeSettings {
     type Output = super::WorktreeSettings;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(&rpc::ReadWorktreeSettings {}).await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, settings: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.workspace).settings = Some(Arc::new(settings));
@@ -506,15 +586,19 @@ impl Operation for ReadWorktreeSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateWorktreeSettings {
-    pub settings: super::WorktreeSettings,
+#[serde(transparent)]
+pub struct UpdateWorktreeSettings<T = WorktreeSettings> {
+    pub settings: T,
 }
+impl<T: Serialize> rpc::RpcMethod for UpdateWorktreeSettings<T> {
+    type Output = super::WorktreeSettings;
+    const METHOD: &'static str = "host/worktree/settings/update";
+}
+
 impl Operation for UpdateWorktreeSettings {
     type Output = super::WorktreeSettings;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::UpdateWorktreeSettings(&self.settings))
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, settings: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.workspace).settings = Some(Arc::new(settings));
@@ -523,9 +607,25 @@ impl Operation for UpdateWorktreeSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListThreads {
-    pub query: ListQuery,
+#[serde(rename_all = "camelCase")]
+pub struct ListThreads<Q = ListQuery> {
+    pub title_only: bool,
+    #[serde(flatten)]
+    pub query: Q,
 }
+impl<Q> ListThreads<Q> {
+    pub fn new(query: Q) -> Self {
+        Self {
+            title_only: true,
+            query,
+        }
+    }
+}
+impl<Q: Serialize> rpc::RpcMethod for ListThreads<Q> {
+    type Output = ThreadList;
+    const METHOD: &'static str = "host/thread/list";
+}
+
 impl Operation for ListThreads {
     fn invalidates(&self, snapshot: &Snapshot) -> bool {
         self.query != *snapshot.list_query
@@ -537,12 +637,7 @@ impl Operation for ListThreads {
     type Output = ThreadList;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::ListThreads {
-                title_only: true,
-                query: &self.query,
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
         snapshot.threads = Some(Arc::new(threads));
@@ -551,22 +646,29 @@ impl Operation for ListThreads {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadItem {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub item_id: String,
+#[serde(rename_all = "camelCase")]
+pub struct ReadItem<T = String> {
+    pub thread_id: T,
+    pub turn_id: T,
+    pub item_id: T,
 }
+impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadItem<T> {
+    type Output = rpc::ItemResponse;
+    const METHOD: &'static str = "host/thread/item/read";
+    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+        if output.item.id == self.item_id.as_ref() {
+            Ok(())
+        } else {
+            Err("item ID does not match")
+        }
+    }
+}
+
 impl Operation for ReadItem {
     type Output = rpc::ItemResponse;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::ReadItem {
-                thread_id: &self.thread_id,
-                turn_id: &self.turn_id,
-                item_id: &self.item_id,
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let Self {
@@ -580,24 +682,70 @@ impl Operation for ReadItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadThread {
-    pub thread_id: String,
+#[serde(rename_all = "camelCase")]
+pub struct ReadThread<T = String> {
+    pub thread_id: T,
+    pub include_turns: bool,
+    pub paginate_history: bool,
+    pub defer_item_details: bool,
+    pub open: bool,
 }
+impl<T> ReadThread<T> {
+    pub fn new(thread_id: T) -> Self {
+        Self {
+            thread_id,
+            include_turns: true,
+            paginate_history: true,
+            defer_item_details: true,
+            open: false,
+        }
+    }
+    pub fn open(thread_id: T) -> Self {
+        Self {
+            open: true,
+            ..Self::new(thread_id)
+        }
+    }
+}
+impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadThread<T> {
+    type Output = crate::models::ThreadResponse;
+    const METHOD: &'static str = "host/thread/read";
+    fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut params = serializer.serialize_struct("ReadThread", 4)?;
+        params.serialize_field("threadId", &self.thread_id)?;
+        params.serialize_field("includeTurns", &self.include_turns)?;
+        params.serialize_field("paginateHistory", &self.paginate_history)?;
+        params.serialize_field("deferItemDetails", &self.defer_item_details)?;
+        params.end()
+    }
+    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+        rpc::validate_thread(output, Some(self.thread_id.as_ref()))
+    }
+}
+
 impl Operation for ReadThread {
+    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
+        self.open
+    }
     type Output = crate::models::ThreadResponse;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::ReadThread {
-                thread_id: &self.thread_id,
-                include_turns: true,
-                paginate_history: true,
-                defer_item_details: true,
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        refresh_thread(snapshot, output.thread)
+        if self.open {
+            open_thread(snapshot, output.thread, output.model)
+        } else {
+            refresh_thread(snapshot, output.thread)
+        }
+    }
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        if self.open {
+            refresh_thread(snapshot, output.thread)
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -645,6 +793,7 @@ fn open_thread(snapshot: &mut Snapshot, thread: Thread, model: Option<String>) -
             *snapshot = updated;
         }
     }
+    effects.extend(review_workspace(snapshot));
     effects
 }
 
@@ -659,37 +808,20 @@ pub(super) fn add_attachment(next: &mut Snapshot, draft_key: String, attachment:
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenThread {
-    pub thread_id: String,
+#[serde(rename_all = "camelCase")]
+pub struct ForkThread<T = String> {
+    pub thread_id: T,
+    pub last_turn_id: T,
+    pub exclude_turns: bool,
 }
-impl Operation for OpenThread {
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        true
-    }
+impl<T: Serialize> rpc::RpcMethod for ForkThread<T> {
     type Output = crate::models::ThreadResponse;
-    const ORDERED: bool = true;
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::ReadThread {
-                thread_id: &self.thread_id,
-                include_turns: true,
-                paginate_history: true,
-                defer_item_details: true,
-            })
-            .await
-    }
-    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        open_thread(snapshot, output.thread, output.model)
-    }
-    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        refresh_thread(snapshot, output.thread)
+    const METHOD: &'static str = "thread/fork";
+    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+        rpc::validate_thread(output, None)
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForkThread {
-    pub thread_id: String,
-    pub last_turn_id: String,
-}
+
 impl Operation for ForkThread {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         true
@@ -697,20 +829,14 @@ impl Operation for ForkThread {
     type Output = crate::models::ThreadResponse;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::ForkThread {
-                thread_id: &self.thread_id,
-                last_turn_id: &self.last_turn_id,
-                exclude_turns: false,
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let mut effects = open_thread(snapshot, output.thread, output.model);
         if snapshot.threads.is_some() {
-            effects.push(Effect::execute(ListThreads {
-                query: (*snapshot.list_query).clone(),
-            }));
+            effects.push(Effect::execute(ListThreads::new(
+                (*snapshot.list_query).clone(),
+            )));
         }
         effects
     }
@@ -718,24 +844,36 @@ impl Operation for ForkThread {
         refresh_thread(snapshot, output.thread)
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
-        Outcome::StartedThread(output.thread.id.clone().expect("validated thread ID"))
+        Outcome::StartedThread {
+            id: output.thread.id.clone().expect("validated thread ID"),
+        }
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartThread {
-    pub cwd: Option<String>,
-    pub model: Option<String>,
+#[serde(bound(serialize = "T: Serialize + AsRef<str>"))]
+pub struct StartThread<T = String> {
+    #[serde(skip_serializing_if = "empty_cwd")]
+    pub cwd: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<T>,
 }
+fn empty_cwd<T: AsRef<str>>(cwd: &Option<T>) -> bool {
+    cwd.as_ref()
+        .is_none_or(|cwd| cwd.as_ref().trim().is_empty())
+}
+impl<T: Serialize + AsRef<str>> rpc::RpcMethod for StartThread<T> {
+    type Output = crate::models::ThreadResponse;
+    const METHOD: &'static str = "host/thread/start";
+    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+        rpc::validate_thread(output, None)
+    }
+}
+
 impl Operation for StartThread {
     type Output = crate::models::ThreadResponse;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::StartThread {
-                cwd: self.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()),
-                model: self.model.as_deref(),
-            })
-            .await
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         refresh_thread(snapshot, output.thread)
@@ -748,13 +886,13 @@ impl Operation for StartThread {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Transcribe {
+pub struct Dictate {
     pub draft_key: String,
-    pub audio: String,
+    pub request: rpc::Transcribe,
     pub send: bool,
     pub client_user_message_id: String,
 }
-impl Operation for Transcribe {
+impl Operation for Dictate {
     type Output = (Arc<Draft>, rpc::Transcription);
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let draft = context
@@ -763,12 +901,7 @@ impl Operation for Transcribe {
             .get(&self.draft_key)
             .cloned()
             .unwrap_or_default();
-        Ok((
-            draft,
-            context
-                .call(&rpc::Transcribe { audio: &self.audio })
-                .await?,
-        ))
+        Ok((draft, context.call(&self.request).await?))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         if !self.send {
@@ -811,10 +944,16 @@ impl Operation for Transcribe {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResizeTerminal {
-    pub handle: String,
+pub struct ResizeTerminal<T = String> {
+    #[serde(rename = "processHandle")]
+    pub handle: T,
     pub size: rpc::TerminalSize,
 }
+impl<T: Serialize> rpc::RpcMethod for ResizeTerminal<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "process/resizePty";
+}
+
 impl Operation for ResizeTerminal {
     fn terminal_handle(&self) -> Option<&str> {
         Some(&self.handle)
@@ -822,40 +961,43 @@ impl Operation for ResizeTerminal {
     type Output = Map<String, Value>;
 
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::ResizeTerminal {
-                process_handle: &self.handle,
-                size: self.size,
-            })
-            .await
+        context.call(self).await
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Interrupt {
-    pub thread_id: String,
-    pub turn_id: String,
+#[serde(rename_all = "camelCase")]
+pub struct Interrupt<T = String> {
+    pub thread_id: T,
+    pub turn_id: T,
 }
+impl<T: Serialize> rpc::RpcMethod for Interrupt<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "turn/interrupt";
+}
+
 impl Operation for Interrupt {
     type Output = Map<String, Value>;
 
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::InterruptTurn {
-                thread_id: &self.thread_id,
-                turn_id: &self.turn_id,
-            })
-            .await
+        context.call(self).await
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Watch {
-    pub thread_id: String,
+#[serde(rename_all = "camelCase")]
+pub struct Watch<T = String> {
+    pub thread_id: T,
     pub watch_key: u64,
     pub watch_id: u64,
-    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<T>,
 }
+impl<T: Serialize> rpc::RpcMethod for Watch<T> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/thread/watch";
+}
+
 impl Operation for Watch {
     type Output = Map<String, Value>;
     fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
@@ -865,22 +1007,21 @@ impl Operation for Watch {
         Ok(())
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::WatchThread {
-                thread_id: &self.thread_id,
-                watch_key: self.watch_key,
-                watch_id: self.watch_id,
-                path: self.path.as_deref(),
-            })
-            .await
+        context.call(self).await
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Unwatch {
     pub watch_key: u64,
     pub watch_id: u64,
 }
+impl rpc::RpcMethod for Unwatch {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "host/thread/unwatch";
+}
+
 impl Operation for Unwatch {
     fn disconnected_is_complete(&self) -> bool {
         true
@@ -895,44 +1036,38 @@ impl Operation for Unwatch {
         Ok(())
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&rpc::UnwatchThread {
-                watch_key: self.watch_key,
-                watch_id: self.watch_id,
-            })
-            .await
+        context.call(self).await
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadOlder {
-    pub thread_id: String,
-    pub turn_id: Option<String>,
-    pub cursor: Option<String>,
+#[serde(rename_all = "camelCase")]
+pub struct ReadOlder<T = String> {
+    pub thread_id: T,
+    pub turn_id: Option<T>,
+    pub cursor: Option<T>,
+    pub defer_item_details: bool,
 }
+impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadOlder<T> {
+    type Output = crate::models::ThreadResponse;
+    const METHOD: &'static str = "host/thread/turns/list";
+    fn method(&self) -> &'static str {
+        if self.turn_id.is_some() {
+            "host/thread/items/list"
+        } else {
+            Self::METHOD
+        }
+    }
+    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+        rpc::validate_thread(output, Some(self.thread_id.as_ref()))
+    }
+}
+
 impl Operation for ReadOlder {
     type Output = crate::models::ThreadResponse;
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        if let Some(turn_id) = &self.turn_id {
-            context
-                .call(&rpc::OlderItems {
-                    thread_id: &self.thread_id,
-                    turn_id,
-                    cursor: self.cursor.as_deref(),
-                    defer_item_details: true,
-                })
-                .await
-        } else {
-            context
-                .call(&rpc::OlderTurns {
-                    thread_id: &self.thread_id,
-                    turn_id: None,
-                    cursor: self.cursor.as_deref(),
-                    defer_item_details: true,
-                })
-                .await
-        }
+        context.call(self).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let id = &self.thread_id;
@@ -956,10 +1091,31 @@ impl Operation for ReadOlder {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteTerminal {
-    pub handle: String,
-    pub data: Vec<u8>,
+pub struct WriteTerminal<H = String, D = Vec<u8>> {
+    pub handle: H,
+    pub data: D,
 }
+struct Base64Bytes<'a>(&'a [u8]);
+impl Serialize for Base64Bytes<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&base64::display::Base64Display::new(
+            self.0,
+            &base64::engine::general_purpose::STANDARD,
+        ))
+    }
+}
+impl<H: Serialize, D: Serialize + AsRef<[u8]>> rpc::RpcMethod for WriteTerminal<H, D> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "process/writeStdin";
+    fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut params = serializer.serialize_struct("WriteTerminal", 2)?;
+        params.serialize_field("processHandle", &self.handle)?;
+        params.serialize_field("deltaBase64", &Base64Bytes(self.data.as_ref()))?;
+        params.end()
+    }
+}
+
 impl Operation for WriteTerminal {
     fn terminal_handle(&self) -> Option<&str> {
         Some(&self.handle)
@@ -967,13 +1123,12 @@ impl Operation for WriteTerminal {
     type Output = ();
 
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        use base64::Engine;
-        // The actor serializes terminal operations, including every chunk of one paste.
+        // The actor serializes every chunk of one paste; serialization encodes into the JSON buffer.
         for chunk in self.data.chunks(16 * 1024) {
             context
-                .call(&rpc::WriteTerminal {
-                    process_handle: &self.handle,
-                    delta_base64: &base64::engine::general_purpose::STANDARD.encode(chunk),
+                .call(&WriteTerminal {
+                    handle: self.handle.as_str(),
+                    data: chunk,
                 })
                 .await?;
         }
@@ -1011,7 +1166,9 @@ pub struct LoadSessionImages {
 impl Operation for LoadSessionImages {
     type Output = Vec<rpc::SessionImage>;
     fn outcome(output: &mut Self::Output) -> Outcome {
-        Outcome::SessionImages(std::mem::take(output))
+        Outcome::SessionImages {
+            images: std::mem::take(output),
+        }
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         context.client.session_images(&self.thread_id).await
@@ -1108,11 +1265,13 @@ impl Operation for StartSubmission {
         self.complete(snapshot, output.thread, false)
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
-        Outcome::StartedThread(output.thread.id.clone().expect("validated thread ID"))
+        Outcome::StartedThread {
+            id: output.thread.id.clone().expect("validated thread ID"),
+        }
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         context
-            .call(&rpc::StartThread {
+            .call(&StartThread {
                 cwd: self.cwd.as_deref(),
                 model: self.draft.model.as_deref(),
             })
@@ -1135,7 +1294,9 @@ impl Operation for SendSubmission {
         self.apply(snapshot, output)
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
-        Outcome::Submitted(output.clone())
+        Outcome::Submitted {
+            turn_id: output.clone(),
+        }
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let target = submission_target(
@@ -1322,9 +1483,9 @@ impl StartSubmission {
             draft,
         }));
         if snapshot.threads.is_some() {
-            effects.push(Effect::execute(ListThreads {
-                query: (*snapshot.list_query).clone(),
-            }));
+            effects.push(Effect::execute(ListThreads::new(
+                (*snapshot.list_query).clone(),
+            )));
         }
         effects
     }

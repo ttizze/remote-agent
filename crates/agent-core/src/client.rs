@@ -1,6 +1,7 @@
 //! Typed RPC operations. This module has no transport or UI dependencies.
+use crate::state::operations::{ReadOlder, ReadThread};
 use crate::{
-    models::{ListQuery, ThreadList, ThreadResponse},
+    models::ThreadResponse,
     peer::{PeerError, Reply, Request, RpcPeer},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -8,11 +9,24 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 
 /// The method, parameters and result are one contract.
-pub trait Operation: Serialize {
+pub trait RpcMethod: Serialize {
     type Output: DeserializeOwned + Serialize;
     const METHOD: &'static str;
+    fn method(&self) -> &'static str {
+        Self::METHOD
+    }
+    /// Serialize the RPC parameters without local Store policy fields.
+    fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.serialize(serializer)
+    }
     fn validate(&self, _output: &Self::Output) -> Result<(), &'static str> {
         Ok(())
+    }
+}
+struct Params<'a, O>(&'a O);
+impl<O: RpcMethod> Serialize for Params<'_, O> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize_params(serializer)
     }
 }
 
@@ -20,26 +34,21 @@ pub trait Operation: Serialize {
 pub struct Pair {
     pub invitation: uuid::Uuid,
 }
-impl Operation for Pair {
+impl RpcMethod for Pair {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "host/pair";
 }
 
 #[derive(Debug, Serialize)]
 pub struct ReadHostStatus {}
-impl Operation for ReadHostStatus {
+impl RpcMethod for ReadHostStatus {
     type Output = crate::models::HostStatus;
     const METHOD: &'static str = "host/status";
 }
-#[derive(Debug, Serialize)]
-pub struct CreateInvitation {}
-impl Operation for CreateInvitation {
-    type Output = crate::models::Invitation;
-    const METHOD: &'static str = "host/invite";
-}
+
 #[derive(Debug, Serialize)]
 pub struct ListRemoteHosts {}
-impl Operation for ListRemoteHosts {
+impl RpcMethod for ListRemoteHosts {
     type Output = Vec<crate::models::RemoteHost>;
     const METHOD: &'static str = "host/listRemotes";
 }
@@ -48,26 +57,9 @@ pub struct RegisterRemoteHost<'a> {
     pub ticket: &'a str,
     pub name: &'a str,
 }
-impl Operation for RegisterRemoteHost<'_> {
+impl RpcMethod for RegisterRemoteHost<'_> {
     type Output = crate::models::RemoteHost;
     const METHOD: &'static str = "host/registerRemote";
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevokeDevice<'a> {
-    pub node_id: &'a str,
-}
-impl Operation for RevokeDevice<'_> {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/revoke";
-}
-#[derive(Debug, Serialize)]
-pub struct RemoveRemoteHost<'a> {
-    pub id: &'a str,
-}
-impl Operation for RemoveRemoteHost<'_> {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/removeRemote";
 }
 
 pub struct Client {
@@ -77,12 +69,12 @@ impl Client {
     pub fn new(peer: Arc<RpcPeer>) -> Self {
         Self { peer }
     }
-    pub fn call<'a, O: Operation>(
+    pub fn call<'a, O: RpcMethod>(
         &'a self,
         operation: &'a O,
     ) -> Request<impl std::future::Future<Output = Result<Reply<O::Output>, PeerError>> + use<'a, O>>
     {
-        let request = self.peer.request(O::METHOD, operation);
+        let request = self.peer.request(operation.method(), &Params(operation));
         Request {
             wire_id: request.wire_id(),
             response: async move {
@@ -90,7 +82,7 @@ impl Client {
                 operation
                     .validate(&reply.value)
                     .map_err(|reason| PeerError::InvalidResponse {
-                        method: O::METHOD.into(),
+                        method: operation.method().into(),
                         reason: reason.into(),
                         sequence: Some(reply.sequence),
                         raw: serde_json::to_string(&reply.value).expect("wire output serializes"),
@@ -98,49 +90,6 @@ impl Client {
                 Ok(reply)
             },
         }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListThreads<'a> {
-    pub title_only: bool,
-    #[serde(flatten)]
-    pub query: &'a ListQuery,
-}
-impl Operation for ListThreads<'_> {
-    type Output = ThreadList;
-    const METHOD: &'static str = "host/thread/list";
-}
-
-#[derive(Debug, Serialize)]
-pub struct StartThread<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<&'a str>,
-}
-impl Operation for StartThread<'_> {
-    type Output = ThreadResponse;
-    const METHOD: &'static str = "host/thread/start";
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        validate_thread(output, None)
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadThread<'a> {
-    pub thread_id: &'a str,
-    pub include_turns: bool,
-    pub paginate_history: bool,
-    pub defer_item_details: bool,
-}
-impl Operation for ReadThread<'_> {
-    type Output = ThreadResponse;
-    const METHOD: &'static str = "host/thread/read";
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        validate_thread(output, Some(self.thread_id))
     }
 }
 
@@ -190,7 +139,7 @@ pub struct TurnIdentity {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-impl Operation for StartTurn<'_> {
+impl RpcMethod for StartTurn<'_> {
     type Output = StartedTurn;
     const METHOD: &'static str = "turn/start";
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
@@ -206,7 +155,10 @@ impl Operation for StartTurn<'_> {
     }
 }
 
-fn validate_thread(output: &ThreadResponse, expected: Option<&str>) -> Result<(), &'static str> {
+pub(crate) fn validate_thread(
+    output: &ThreadResponse,
+    expected: Option<&str>,
+) -> Result<(), &'static str> {
     let id = output
         .thread
         .id
@@ -222,67 +174,20 @@ fn validate_thread(output: &ThreadResponse, expected: Option<&str>) -> Result<()
 
 macro_rules! operation {
     ($name:ident, $output:ty, $method:literal) => {
-        impl Operation for $name<'_> {
+        impl RpcMethod for $name<'_> {
             type Output = $output;
             const METHOD: &'static str = $method;
         }
     };
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OlderTurns<'a> {
-    pub thread_id: &'a str,
-    pub cursor: Option<&'a str>,
-    pub turn_id: Option<&'a str>,
-    pub defer_item_details: bool,
-}
-impl Operation for OlderTurns<'_> {
-    type Output = ThreadResponse;
-    const METHOD: &'static str = "host/thread/turns/list";
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        validate_thread(output, Some(self.thread_id))
-    }
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OlderItems<'a> {
-    pub thread_id: &'a str,
-    pub turn_id: &'a str,
-    pub cursor: Option<&'a str>,
-    pub defer_item_details: bool,
-}
-impl Operation for OlderItems<'_> {
-    type Output = ThreadResponse;
-    const METHOD: &'static str = "host/thread/items/list";
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        validate_thread(output, Some(self.thread_id))
-    }
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadItem<'a> {
-    pub thread_id: &'a str,
-    pub turn_id: &'a str,
-    pub item_id: &'a str,
-}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ItemResponse {
     pub item: crate::models::Item,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-impl Operation for ReadItem<'_> {
-    type Output = ItemResponse;
-    const METHOD: &'static str = "host/thread/item/read";
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.item.id == self.item_id {
-            Ok(())
-        } else {
-            Err("item ID does not match")
-        }
-    }
-}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeThread<'a> {
@@ -314,7 +219,7 @@ pub struct QueuedTurn {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-impl Operation for QueueTurn<'_> {
+impl RpcMethod for QueueTurn<'_> {
     type Output = QueuedTurn;
     const METHOD: &'static str = "thread/queue/add";
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
@@ -325,13 +230,7 @@ impl Operation for QueueTurn<'_> {
         }
     }
 }
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InterruptTurn<'a> {
-    pub thread_id: &'a str,
-    pub turn_id: &'a str,
-}
-operation!(InterruptTurn, Map<String, Value>, "turn/interrupt");
+
 #[derive(Debug, Serialize)]
 pub struct ListModels<'a> {
     pub limit: usize,
@@ -348,29 +247,10 @@ pub struct ModelPage {
     pub extra: Map<String, Value>,
 }
 operation!(ListModels, ModelPage, "model/list");
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WatchThread<'a> {
-    pub thread_id: &'a str,
-    pub watch_key: u64,
-    pub watch_id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<&'a str>,
-}
-operation!(WatchThread, Map<String, Value>, "host/thread/watch");
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnwatchThread {
-    pub watch_key: u64,
-    pub watch_id: u64,
-}
-impl Operation for UnwatchThread {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/thread/unwatch";
-}
-#[derive(Debug, Serialize)]
-pub struct Transcribe<'a> {
-    pub audio: &'a str,
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transcribe<T = String> {
+    pub audio: T,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Transcription {
@@ -378,7 +258,7 @@ pub struct Transcription {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-impl Operation for Transcribe<'_> {
+impl<T: Serialize> RpcMethod for Transcribe<T> {
     type Output = Transcription;
     const METHOD: &'static str = "host/dictation/transcribe";
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
@@ -391,62 +271,16 @@ impl Operation for Transcribe<'_> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ListFiles<'a> {
-    pub path: &'a str,
-}
-operation!(ListFiles, crate::models::FileList, "host/file/list");
-#[derive(Debug, Serialize)]
-pub struct ReadFile<'a> {
-    pub path: &'a str,
-}
-operation!(ReadFile, crate::models::FileContent, "host/file/read");
-#[derive(Debug, Serialize)]
 pub struct WriteFile<'a> {
     pub path: &'a str,
     pub revision: &'a str,
     pub text: &'a str,
 }
 operation!(WriteFile, crate::models::FileContent, "host/file/write");
-#[derive(Debug, Serialize)]
-pub struct ReviewWorkspace<'a> {
-    pub cwd: &'a str,
-}
-operation!(
-    ReviewWorkspace,
-    crate::models::WorkspaceReview,
-    "host/workspace/review"
-);
-#[derive(Debug, Serialize)]
-pub struct ReadWorktreeSettings {}
-impl Operation for ReadWorktreeSettings {
-    type Output = crate::models::WorktreeSettings;
-    const METHOD: &'static str = "host/worktree/settings/read";
-}
-#[derive(Debug, Serialize)]
-#[serde(transparent)]
-pub struct UpdateWorktreeSettings<'a>(pub &'a crate::models::WorktreeSettings);
-operation!(
-    UpdateWorktreeSettings,
-    crate::models::WorktreeSettings,
-    "host/worktree/settings/update"
-);
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ForkThread<'a> {
-    pub thread_id: &'a str,
-    pub last_turn_id: &'a str,
-    pub exclude_turns: bool,
-}
-impl Operation for ForkThread<'_> {
-    type Output = ThreadResponse;
-    const METHOD: &'static str = "thread/fork";
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        validate_thread(output, None)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Account {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -458,6 +292,7 @@ pub struct Account {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Accounts {
     pub accounts: Vec<Account>,
     pub selected_id: Option<String>,
@@ -465,17 +300,7 @@ pub struct Accounts {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-#[derive(Debug, Serialize)]
-pub struct ListAccounts {}
-impl Operation for ListAccounts {
-    type Output = Accounts;
-    const METHOD: &'static str = "host/account/list";
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SelectAccount<'a> {
-    pub account_id: &'a str,
-}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSelection {
@@ -485,11 +310,10 @@ pub struct AccountSelection {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-operation!(SelectAccount, AccountSelection, "host/account/select");
-#[derive(Debug, Serialize)]
-pub struct StartAccountLogin {}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AccountLogin {
     pub login_id: String,
     pub user_code: String,
@@ -497,17 +321,10 @@ pub struct AccountLogin {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-impl Operation for StartAccountLogin {
-    type Output = AccountLogin;
-    const METHOD: &'static str = "host/account/login/start";
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadAccountLogin<'a> {
-    pub login_id: &'a str,
-}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AccountLoginStatus {
     pub completed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -515,17 +332,6 @@ pub struct AccountLoginStatus {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-operation!(
-    ReadAccountLogin,
-    AccountLoginStatus,
-    "host/account/login/status"
-);
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CancelAccountLogin<'a> {
-    pub login_id: &'a str,
-}
-operation!(CancelAccountLogin, Map<String, Value>, "host/account/login/cancel");
 
 #[derive(Debug, PartialEq)]
 pub enum SubmissionTarget<'a> {
@@ -778,22 +584,14 @@ impl Client {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SessionImage {
     pub source: String,
     pub encoded: bool,
 }
 impl Client {
     pub async fn session_images(&self, thread_id: &str) -> Result<Vec<SessionImage>, PeerError> {
-        let mut thread = self
-            .call(&ReadThread {
-                thread_id,
-                include_turns: true,
-                paginate_history: true,
-                defer_item_details: true,
-            })
-            .await?
-            .value
-            .thread;
+        let mut thread = self.call(&ReadThread::new(thread_id)).await?.value.thread;
         let mut visited = std::collections::HashSet::new();
         loop {
             let item_page = thread
@@ -822,27 +620,16 @@ impl Client {
                     "history cursor did not advance".into(),
                 ));
             }
-            let page = if let Some(turn_id) = &turn_id {
-                self.call(&OlderItems {
+            let page = self
+                .call(&ReadOlder {
                     thread_id,
-                    turn_id,
+                    turn_id: turn_id.as_deref(),
                     cursor: cursor.as_deref(),
                     defer_item_details: true,
                 })
                 .await?
                 .value
-                .thread
-            } else {
-                self.call(&OlderTurns {
-                    thread_id,
-                    turn_id: None,
-                    cursor: cursor.as_deref(),
-                    defer_item_details: true,
-                })
-                .await?
-                .value
-                .thread
-            };
+                .thread;
             thread = crate::state::older(&thread, &page, turn_id.as_deref(), cursor.as_deref())
                 .map_err(PeerError::InvalidMessage)?;
         }
@@ -890,31 +677,3 @@ pub struct TerminalSize {
     pub cols: u16,
     pub rows: u16,
 }
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StartTerminal<'a> {
-    pub process_handle: &'a str,
-    pub cwd: &'a str,
-    pub size: TerminalSize,
-}
-operation!(StartTerminal, Map<String, Value>, "host/terminal/start");
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteTerminal<'a> {
-    pub process_handle: &'a str,
-    pub delta_base64: &'a str,
-}
-operation!(WriteTerminal, Map<String, Value>, "process/writeStdin");
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResizeTerminal<'a> {
-    pub process_handle: &'a str,
-    pub size: TerminalSize,
-}
-operation!(ResizeTerminal, Map<String, Value>, "process/resizePty");
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KillTerminal<'a> {
-    pub process_handle: &'a str,
-}
-operation!(KillTerminal, Map<String, Value>, "process/kill");

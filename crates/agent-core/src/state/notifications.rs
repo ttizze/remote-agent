@@ -80,9 +80,7 @@ pub(super) fn notification(
     if kind == Kind::WatchChanged {
         return (
             previous.clone(),
-            vec![Effect::execute(op::ReadThread {
-                thread_id: params.thread_id,
-            })],
+            vec![Effect::execute(op::ReadThread::new(params.thread_id))],
         );
     }
     if kind == Kind::WatchFailed {
@@ -136,12 +134,19 @@ pub(super) fn notification(
             }
         }
     }
+    let mut effects = Vec::new();
+    if active == Some(false)
+        && previous.activity.active.get(&params.thread_id) == Some(&true)
+        && current.is_some_and(|thread| thread.cwd.as_deref() == Some(&next.navigation.cwd))
+    {
+        effects.extend(op::review_workspace(&mut next));
+    }
     let Some(current) = current else {
-        return (next, Vec::new());
+        return (next, effects);
     };
     if kind == Kind::ThreadStatus {
         if current.status == params.status {
-            return (next, Vec::new());
+            return (next, effects);
         }
         let thread = Arc::make_mut(
             Arc::make_mut(&mut next.conversations)
@@ -157,7 +162,7 @@ pub(super) fn notification(
         {
             thread.status = params.status;
         }
-        return (next, Vec::new());
+        return (next, effects);
     }
     let turn_id = params
         .turn
@@ -165,7 +170,7 @@ pub(super) fn notification(
         .map(|turn| turn.id.as_str())
         .or(params.turn_id.as_deref());
     let Some(turn_id) = turn_id.filter(|id| !id.is_empty()) else {
-        return (next, Vec::new());
+        return (next, effects);
     };
     let turn_index = current
         .turns
@@ -174,12 +179,27 @@ pub(super) fn notification(
         .iter()
         .rposition(|turn| turn.id == turn_id);
     if matches!(kind, Kind::TurnStarted | Kind::TurnCompleted) {
-        return turn(previous, next, kind, params, turn_index);
+        let (next, followup) = turn(previous, next, kind, params, turn_index);
+        effects.extend(followup);
+        return (next, effects);
     }
-    match turn_index {
+    let refresh_review = method == "item/completed"
+        && params.item.as_ref().is_some_and(|item| {
+            matches!(
+                item.kind.as_deref(),
+                Some("commandExecution" | "fileChange" | "mcpToolCall" | "dynamicToolCall")
+            )
+        })
+        && current.cwd.as_deref() == Some(&next.navigation.cwd);
+    let (mut next, followup) = match turn_index {
         Some(index) => item(previous, next, kind, params, index),
         None => (next, Vec::new()),
+    };
+    effects.extend(followup);
+    if refresh_review {
+        effects.extend(op::review_workspace(&mut next));
     }
+    (next, effects)
 }
 
 fn item(

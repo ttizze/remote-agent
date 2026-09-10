@@ -451,7 +451,7 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         .unwrap();
         use agent_core::{state::Intent, store::Outcome};
         manager_b
-            .dispatch(Intent::CreateInvitation(op::CreateInvitation))
+            .dispatch(Intent::CreateInvitation(op::CreateInvitation {}))
             .await
             .unwrap();
         let invitation = manager_b
@@ -473,7 +473,7 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
                 }))
                 .await
                 .unwrap(),
-            Outcome::RemoteHostPaired(id.clone())
+            Outcome::RemoteHostPaired { id: id.clone() }
         );
         let direct_session = endpoint_a.connect(&second.ticket).await.unwrap();
         let direct_peer = direct_session
@@ -892,9 +892,9 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
         let local = fixture.local().await;
         let store = Store::new(local.peer, Snapshot::default());
         store
-            .dispatch(Intent::ListThreads(op::ListThreads {
-                query: Default::default(),
-            }))
+            .dispatch(Intent::ListThreads(
+                op::ListThreads::new(Default::default()),
+            ))
             .await
             .unwrap();
         assert!(store.snapshot().connected);
@@ -902,9 +902,9 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
         assert!(
             store
-                .dispatch(Intent::ListThreads(op::ListThreads {
-                    query: Default::default()
-                }))
+                .dispatch(Intent::ListThreads(
+                    op::ListThreads::new(Default::default())
+                ))
                 .await
                 .is_err()
         );

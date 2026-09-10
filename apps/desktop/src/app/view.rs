@@ -526,7 +526,7 @@ impl Desktop {
                 };
                 gallery.loading = false;
                 match result {
-                    Ok(Outcome::SessionImages(images)) => {
+                    Ok(Outcome::SessionImages { images }) => {
                         let initial = gallery.current_image().clone();
                         let mut seen = HashSet::new();
                         let entries: Vec<_> = images
@@ -799,7 +799,7 @@ impl Desktop {
     }
     fn item(
         &mut self,
-        projected: &conversation_presentation::presentation::RenderedItem,
+        projected: &agent_core::presentation::conversation::RenderedItem,
         item: &Item,
         turn: Option<&Turn>,
         cx: &mut Context<Self>,
@@ -1041,7 +1041,7 @@ impl Desktop {
     }
     fn turn(
         &mut self,
-        projected: &Arc<conversation_presentation::presentation::RenderedTurn>,
+        projected: &Arc<agent_core::presentation::conversation::RenderedTurn>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let turn = &projected.source;
@@ -1102,7 +1102,7 @@ impl Desktop {
             }
             for item in &row.responses {
                 body = body.child(self.projected_item(item, turn, cx));
-                if let conversation_presentation::presentation::ItemSource::Native(native) =
+                if let agent_core::presentation::conversation::ItemSource::Native(native) =
                     &item.source
                     && native.kind.as_deref() == Some("agentMessage")
                     && extra(native, "phase") != "commentary"
@@ -1136,15 +1136,15 @@ impl Desktop {
     }
     fn projected_item(
         &mut self,
-        item: &conversation_presentation::presentation::RenderedItem,
+        item: &agent_core::presentation::conversation::RenderedItem,
         turn: &Arc<Turn>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match &item.source {
-            conversation_presentation::presentation::ItemSource::Native(native) => {
+            agent_core::presentation::conversation::ItemSource::Native(native) => {
                 self.item(item, native, Some(turn), cx)
             }
-            conversation_presentation::presentation::ItemSource::Pending(id, pending) => {
+            agent_core::presentation::conversation::ItemSource::Pending(id, pending) => {
                 self.pending_item(id, &pending.draft, cx)
             }
         }
@@ -1642,7 +1642,7 @@ impl Desktop {
                             let _ = target.update(cx, |s, cx| {
                                 let mut query = (*s.snapshot.list_query).clone();
                                 query.project_limit += 10;
-                                s.dispatch(Intent::ListThreads(op::ListThreads { query }));
+                                s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
                                 cx.notify();
                             });
                         },
@@ -1746,7 +1746,7 @@ impl Desktop {
                             .on_click(cx.listener(move |s, _, _, cx| {
                                 let mut query = (*s.snapshot.list_query).clone();
                                 *query.project_thread_limits.entry(id.clone()).or_insert(5) += 10;
-                                s.dispatch(Intent::ListThreads(op::ListThreads { query }));
+                                s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
                                 cx.notify();
                             })),
                     );
@@ -1763,7 +1763,7 @@ impl Desktop {
                 cx.listener(|s, _, _, cx| {
                     let mut query = (*s.snapshot.list_query).clone();
                     query.project_limit += 10;
-                    s.dispatch(Intent::ListThreads(op::ListThreads { query }));
+                    s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
                     cx.notify();
                 }),
             ));
@@ -1796,7 +1796,7 @@ impl Desktop {
                 |s, _, _, cx| {
                     let mut query = (*s.snapshot.list_query).clone();
                     query.chat_limit += 10;
-                    s.dispatch(Intent::ListThreads(op::ListThreads { query }));
+                    s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
                     cx.notify();
                 },
             )));
@@ -1879,7 +1879,7 @@ impl Desktop {
                                 |s, _, _| {
                                     s.tab = Tab::Settings;
                                     s.dispatch(Intent::ReadWorktreeSettings(
-                                        op::ReadWorktreeSettings,
+                                        op::ReadWorktreeSettings {},
                                     ));
                                 },
                             )

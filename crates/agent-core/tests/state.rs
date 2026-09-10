@@ -143,13 +143,7 @@ fn history_corpus() {
         let incoming = serde_json::from_value(case["incoming"].clone()).unwrap();
         let previous = initial(previous);
         let (next, effects) = if case["operation"] == "refresh" {
-            applied(
-                &previous,
-                op::ReadThread {
-                    thread_id: id.clone(),
-                },
-                reply(incoming),
-            )
+            applied(&previous, op::ReadThread::new(id.clone()), reply(incoming))
         } else {
             applied(
                 &previous,
@@ -157,6 +151,7 @@ fn history_corpus() {
                     thread_id: id.clone(),
                     turn_id: case["turnId"].as_str().map(str::to_owned),
                     cursor: case["cursor"].as_str().map(str::to_owned),
+                    defer_item_details: true,
                 },
                 reply(incoming),
             )
@@ -416,10 +411,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
         for open_thread in [false, true] {
             let next = if open_thread {
                 let mut next = previous.clone();
-                op::OpenThread {
-                    thread_id: "thread".into(),
-                }
-                .apply(
+                op::ReadThread::open("thread".into()).apply(
                     &mut next,
                     serde_json::from_value(json!({"thread":{"id":"thread", "cwd":cwd}})).unwrap(),
                 );
@@ -518,6 +510,7 @@ fn late_fork_preserves_new_navigation_and_stores_the_fork() {
         Event::Intent(Intent::ForkThread(op::ForkThread {
             thread_id: "old".into(),
             last_turn_id: "turn".into(),
+            exclude_turns: false,
         })),
     );
     let (navigated, _) = reduce(&forking, Event::Intent(Intent::NewChat("/new".into())));
@@ -525,6 +518,7 @@ fn late_fork_preserves_new_navigation_and_stores_the_fork() {
     op::ForkThread {
         thread_id: "old".into(),
         last_turn_id: "turn".into(),
+        exclude_turns: false,
     }
     .stale(
         &mut finished,
@@ -540,14 +534,14 @@ fn account_listing_does_not_invalidate_a_concurrent_login() {
     use agent_core::state::Intent;
     let (starting, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::StartAccountLogin(op::StartAccountLogin)),
+        Event::Intent(Intent::StartAccountLogin(op::StartAccountLogin {})),
     );
     let (listing, _) = reduce(
         &starting,
-        Event::Intent(Intent::ListAccounts(op::ListAccounts)),
+        Event::Intent(Intent::ListAccounts(op::ListAccounts {})),
     );
     let mut finished = listing;
-    op::StartAccountLogin.apply(&mut finished, serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap());
+    op::StartAccountLogin {}.apply(&mut finished, serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap());
     assert_eq!(
         finished.account.login.as_ref().map(|l| l.login_id.as_str()),
         Some("login")

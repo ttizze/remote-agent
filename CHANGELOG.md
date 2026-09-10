@@ -2,11 +2,13 @@
 
 ## Unreleased
 
+- Unify owned Store and borrowed RPC payloads in the same operation types. Move conversation projection into agent-core and export core records/shared objects through UniFFI directly, removing the FFI snapshot and projection wrappers. Store now owns connection list/model/conversation reloads and automatic workspace reviews; preserve query limits, draft state and effect epochs across reconnection. Native observers retain updates that arrive before their first wait. Regenerate native bindings without stale namespace files.
+
 - Make each remote intent own its operation payload and route it once. Move invalidation, preparation and stale application into the operation; remove Store intent repacking and response-event adapters. Keep events serializable, cover every Snapshot publication field, and verify fresh list/conversation loading through UniFFI after replacing a connected transport.
 
 - Queue iOS list/activity snapshots immediately so completion badges are not lost to the text/stream debounce when the app closes after showing them.
 
-- Replace the Store operation macro DSL and loaded-response enum with ordinary typed `Operation` implementations and one generic executor. Replace per-operation freshness counters with a single Snapshot epoch checked atomically at completion. Preserve background sends, transcription and saved draft revisions after navigation; establish navigation before initial/reconnect reads on all clients. Move the full conversation projection into `conversation-presentation`; GPUI, Swift and Kotlin share its rows, item bodies and immutable identities. Remove desktop’s separate turn projection; retain on-demand activity details and explicit notification transitions.
+- Replace the Store operation macro DSL and loaded-response enum with ordinary typed `Operation` implementations and one generic executor. Replace per-operation freshness counters with a single Snapshot epoch checked atomically at completion. Preserve background sends, transcription and saved draft revisions after navigation; establish navigation before initial/reconnect reads on all clients. Move the full conversation projection into `agent-core::presentation`; GPUI, Swift and Kotlin share its rows, item bodies and immutable identities. Remove desktop’s separate turn projection; retain on-demand activity details and explicit notification transitions.
 
 - Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Remove the obsolete iOS 15 single-line message-field fallback. Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
 

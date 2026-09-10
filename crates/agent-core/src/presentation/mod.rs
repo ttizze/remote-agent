@@ -2,11 +2,12 @@
 //! Grouping borrows item metadata; body formatting runs only for changed items
 //! or explicit expansion. Native views own rendering and local expansion state.
 
-use agent_core::models::{Item, Turn};
+use crate::models::{Item, Turn};
 use serde::Serialize;
 use serde_json::Value;
 pub mod body;
-pub mod presentation;
+pub mod conversation;
+pub mod list;
 
 fn field<'a>(item: &'a Item, key: &str) -> &'a str {
     item.extra

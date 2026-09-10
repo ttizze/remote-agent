@@ -1,14 +1,19 @@
 //! Immutable conversation projection shared by desktop, Swift and Kotlin.
-use crate::{
+use super::{
     ItemMetadata, Role, body, item_presentation, project_items, remaining_submissions, source_order,
 };
-use agent_core::{client::ServerRequest, models, state::PendingSubmission};
+use crate::{
+    client::ServerRequest,
+    models,
+    state::{PendingSubmission, Snapshot},
+};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedConversation {
     pub source: Arc<models::Thread>,
     pending: PendingItems,
@@ -17,6 +22,7 @@ pub struct RenderedConversation {
     pub queued: Vec<Arc<RenderedItem>>,
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedTurn {
     pub source: Arc<models::Turn>,
     pending: PendingItems,
@@ -26,6 +32,7 @@ pub struct RenderedTurn {
     pub rows: Vec<TurnPresentationData>,
 }
 #[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TurnPresentationData {
     pub id: String,
     pub turn_id: String,
@@ -43,6 +50,7 @@ pub struct TurnPresentationData {
     pub pending_requests: Vec<Request>,
 }
 #[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TurnErrorPresentation {
     pub title: String,
     pub message: String,
@@ -55,10 +63,12 @@ pub enum ItemSource {
     Pending(String, Arc<PendingSubmission>),
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedItem {
     pub source: ItemSource,
     pub data: ItemPresentation,
 }
+#[cfg_attr(feature = "bindings", uniffi::export)]
 impl RenderedItem {
     pub fn expanded_body(&self) -> String {
         match &self.source {
@@ -141,19 +151,33 @@ impl RenderedItem {
 }
 
 /// Pass the previous projection to retain native render identities across deltas.
+#[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn project_conversation(
+    snapshot: &Snapshot,
     source: Arc<models::Thread>,
-    pending: &PendingItems,
-    requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
-    previous: Option<&Arc<RenderedConversation>>,
+    previous: &Option<Arc<RenderedConversation>>,
 ) -> Arc<RenderedConversation> {
+    let pending = snapshot
+        .pending_submissions
+        .iter()
+        .filter(|(_, pending)| source.id.as_deref() == Some(pending.draft_key.as_str()));
+    let requests = &snapshot.requests;
     if let Some(previous) = previous
         && Arc::ptr_eq(&source, &previous.source)
-        && same_pending(pending, &previous.pending)
-        && Arc::ptr_eq(&requests, &previous.requests)
+        && pending
+            .clone()
+            .map(|(id, pending)| (id, Arc::as_ptr(pending)))
+            .eq(previous
+                .pending
+                .iter()
+                .map(|(id, pending)| (id, Arc::as_ptr(pending))))
+        && Arc::ptr_eq(requests, &previous.requests)
     {
         return previous.clone();
     }
+    let pending: PendingItems = pending
+        .map(|(id, pending)| (id.clone(), pending.clone()))
+        .collect();
     let previous = previous.as_ref().filter(|old| source.id == old.source.id);
     let cached: HashMap<_, _> = previous
         .into_iter()
@@ -209,8 +233,8 @@ pub fn project_conversation(
         .collect();
     Arc::new(RenderedConversation {
         source,
-        pending: pending.clone(),
-        requests,
+        pending,
+        requests: requests.clone(),
         turns,
         queued,
     })
@@ -343,7 +367,7 @@ pub fn request(key: &str, source: &ServerRequest) -> Request {
         "item/tool/call" => (RequestKind::Tool, "ツールの入力待ち"),
         _ => (RequestKind::Other, "Codexからの確認待ち"),
     };
-    let decisions = agent_core::client::approval_decisions(source);
+    let decisions = crate::client::approval_decisions(source);
     let decision_labels = decisions
         .iter()
         .map(|value| match value.as_str() {
@@ -432,14 +456,8 @@ fn turn_error(value: &Value) -> TurnErrorPresentation {
 }
 
 pub type PendingItems = Vec<(String, Arc<PendingSubmission>)>;
-fn same_pending(a: &PendingItems, b: &PendingItems) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|((a, p), (b, q))| a == b && Arc::ptr_eq(p, q))
-}
-
 #[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ItemPresentation {
     pub id: String,
     pub native_id: Option<String>,
@@ -452,6 +470,7 @@ pub struct ItemPresentation {
     pub visible: bool,
 }
 #[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Request {
     pub id: Value,
     pub key: String,
@@ -464,6 +483,7 @@ pub struct Request {
     pub params: serde_json::Map<String, Value>,
 }
 #[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum RequestKind {
     CommandApproval,
     FileApproval,
@@ -477,7 +497,7 @@ pub enum RequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::state::{Draft, Event, Snapshot, reduce};
+    use crate::state::{Draft, Event, Snapshot, reduce};
     use serde_json::json;
 
     fn fixture() -> Snapshot {
@@ -498,19 +518,13 @@ mod tests {
         snapshot: Snapshot,
         previous: Option<&Arc<RenderedConversation>>,
     ) -> Arc<RenderedConversation> {
-        let pending = snapshot
-            .pending_submissions
-            .iter()
-            .filter(|(_, p)| p.draft_key == "thread")
-            .map(|(id, p)| (id.clone(), p.clone()))
-            .collect();
         project_conversation(
+            &snapshot,
             snapshot.conversations["thread"].clone(),
-            &pending,
-            snapshot.requests.clone(),
-            previous,
+            &previous.cloned(),
         )
     }
+
     #[test]
     fn delta_reuses_untouched_turns_and_items_but_invalidates_deferred_details() {
         let snapshot = fixture();

@@ -80,7 +80,7 @@ struct ThreadsScreen: View {
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("tasks.project.\(project.id)")
                         .accessibilityValue(expandedProjectIds.contains(project.id) ? "開いています" : "閉じています")
-                        Button { model.openNewThread(cwd: project.roots.first ?? "") } label: {
+                        Button { model.openNewThread(cwd: project.roots.first?.path ?? "") } label: {
                             Image(systemName: "square.and.pencil").font(.title3)
                                 .foregroundColor(.secondary).frame(width: 44, height: 44)
                         }

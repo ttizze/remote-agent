@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Invitation {
     pub endpoint: String,
     pub invitation: uuid::Uuid,
@@ -39,6 +40,7 @@ pub struct HostStatus {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Thread {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -76,6 +78,7 @@ pub struct ThreadStatus {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Turn {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,6 +124,7 @@ pub struct Turn {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Item {
     pub id: String,
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +166,7 @@ pub struct ThreadList {
     pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -170,6 +175,7 @@ pub struct Project {
     pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ProjectRoot {
     pub path: String,
     #[serde(flatten)]
@@ -177,6 +183,7 @@ pub struct ProjectRoot {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Model {
     pub id: String,
     pub model: String,
@@ -193,6 +200,7 @@ pub struct Model {
     pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ServiceTier {
     pub id: String,
     #[serde(flatten)]
@@ -200,6 +208,7 @@ pub struct ServiceTier {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ReasoningEffort {
     pub reasoning_effort: String,
     #[serde(flatten)]
@@ -207,14 +216,16 @@ pub struct ReasoningEffort {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ListQuery {
-    pub project_limit: usize,
-    pub chat_limit: usize,
-    pub project_thread_limits: BTreeMap<String, usize>,
+    pub project_limit: u32,
+    pub chat_limit: u32,
+    pub project_thread_limits: BTreeMap<String, u32>,
     pub search_term: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FileList {
     pub path: String,
     pub entries: Vec<FileEntry>,
@@ -223,6 +234,7 @@ pub struct FileList {
     pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FileEntry {
     pub name: String,
     pub path: String,
@@ -233,6 +245,7 @@ pub struct FileEntry {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FileContent {
     pub path: String,
     pub revision: String,
@@ -245,6 +258,7 @@ pub struct FileContent {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorktreeSettings {
     pub create_on_new_session: bool,
     pub copy_on_create: bool,
@@ -254,6 +268,7 @@ pub struct WorktreeSettings {
     pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct WorkspaceReview {
     pub branch: String,
     pub additions: u64,

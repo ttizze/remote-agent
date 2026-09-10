@@ -10,7 +10,7 @@ use host_protocol::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-fn setup(
+fn connected(
     snapshot: Snapshot,
 ) -> (
     Arc<Store>,
@@ -33,6 +33,47 @@ fn setup(
         JsonlWriter::new(write),
     )
 }
+async fn setup(
+    snapshot: Snapshot,
+) -> (
+    Arc<Store>,
+    JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    JsonlWriter<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+) {
+    let (store, mut reader, mut writer) = connected(snapshot.clone());
+    let selected = snapshot
+        .navigation
+        .thread_id
+        .as_ref()
+        .map(|id| &snapshot.conversations[id]);
+    let cwd = selected.map_or(snapshot.navigation.cwd.as_str(), |thread| {
+        thread.cwd.as_deref().unwrap_or_default()
+    });
+    let watches = usize::from(selected.is_some_and(|thread| thread.path.is_some()));
+    for _ in 0..2 + usize::from(selected.is_some()) + usize::from(!cwd.is_empty()) + watches {
+        let request = read(&mut reader).await;
+        let result = match request["method"].as_str().unwrap() {
+            "host/thread/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
+                .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
+            "model/list" => json!({"data":snapshot.models,"nextCursor":null}),
+            "host/thread/read" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
+            "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
+            "host/thread/watch" => json!({}),
+            method => panic!("unexpected connection request: {method}"),
+        };
+        writer
+            .write_line(&json!({"id":request["id"], "result":result}).to_string())
+            .await
+            .unwrap();
+    }
+    wait_for(&store, |current| {
+        current.threads.is_some()
+            && !Arc::ptr_eq(&current.models, &snapshot.models)
+            && (cwd.is_empty() || current.workspace.review.is_some())
+    })
+    .await;
+    (store, reader, writer)
+}
 async fn read(reader: &mut JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>) -> Value {
     let line = tokio::time::timeout(Duration::from_secs(2), reader.read_line())
         .await
@@ -40,6 +81,41 @@ async fn read(reader: &mut JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStre
         .unwrap()
         .unwrap();
     serde_json::from_str(&line).unwrap()
+}
+fn review() -> Value {
+    json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":""})
+}
+async fn new_chat(
+    store: &Store,
+    reader: &mut JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    writer: &mut JsonlWriter<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+    cwd: &str,
+) {
+    let navigation = store.dispatch(Intent::NewChat(cwd.into()));
+    let request = read(reader).await;
+    assert_eq!(request["method"], "host/workspace/review");
+    assert_eq!(request["params"], json!({"cwd":cwd}));
+    writer
+        .write_line(&json!({"id":request["id"],"result":review()}).to_string())
+        .await
+        .unwrap();
+    navigation.await.unwrap();
+}
+async fn read_after_reviews(
+    reader: &mut JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+    writer: &mut JsonlWriter<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+) -> Value {
+    loop {
+        let request = read(reader).await;
+        if request["method"] != "host/workspace/review" {
+            return request;
+        }
+        assert_eq!(request["params"], json!({"cwd":"/fixture"}));
+        writer
+            .write_line(&json!({"id":request["id"],"result":review()}).to_string())
+            .await
+            .unwrap();
+    }
 }
 async fn wait_for(store: &Store, predicate: impl Fn(&Snapshot) -> bool) {
     let mut updates = store.subscribe();
@@ -79,7 +155,7 @@ fn loaded_text(snapshot: &Snapshot) -> Option<&str> {
 
 #[tokio::test]
 async fn intent_order_is_independent_of_receipt_polling_order() {
-    let (store, _, _writer) = setup(Snapshot::default());
+    let (store, _, _writer) = setup(Snapshot::default()).await;
     let first = store.dispatch(Intent::SetDraft {
         thread_id: "thread".into(),
         draft: Draft {
@@ -124,7 +200,7 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
             }))])),
             ..Default::default()
         };
-        let (store, _reader, _writer) = setup(previous.clone());
+        let (store, _reader, _writer) = setup(previous.clone()).await;
         let attachment = Intent::AddAttachment {
             draft_key: "thread".into(),
             attachment: Attachment {
@@ -192,7 +268,7 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_response_precedes_following_delta_even_when_server_closes() {
-    let (store, mut reader, mut writer) = setup(snapshot());
+    let (store, mut reader, mut writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" obsolete"}}).to_string()).await.unwrap();
@@ -204,9 +280,7 @@ async fn read_response_precedes_following_delta_even_when_server_closes() {
     });
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        store.dispatch(Intent::ReadThread(op::ReadThread {
-            thread_id: "thread".into(),
-        })),
+        store.dispatch(Intent::ReadThread(op::ReadThread::new("thread".into()))),
     )
     .await
     .unwrap();
@@ -219,7 +293,7 @@ async fn read_response_precedes_following_delta_even_when_server_closes() {
 }
 #[tokio::test]
 async fn approval_can_complete_while_another_request_is_waiting() {
-    let (store, mut reader, mut writer) = setup(snapshot());
+    let (store, mut reader, mut writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let pending = read(&mut reader).await;
         writer.write_line(&json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"thread"}}).to_string()).await.unwrap();
@@ -241,9 +315,7 @@ async fn approval_can_complete_while_another_request_is_waiting() {
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::ReadThread(op::ReadThread {
-                    thread_id: "thread".into(),
-                }))
+                .dispatch(Intent::ReadThread(op::ReadThread::new("thread".into())))
                 .await
         }
     });
@@ -265,7 +337,7 @@ async fn approval_can_complete_while_another_request_is_waiting() {
 }
 #[tokio::test]
 async fn invalid_typed_reply_does_not_block_later_wire_events() {
-    let (store, mut reader, mut writer) = setup(snapshot());
+    let (store, mut reader, mut writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         writer
@@ -284,9 +356,7 @@ async fn invalid_typed_reply_does_not_block_later_wire_events() {
         writer
     });
     let error = store
-        .dispatch(Intent::ReadThread(op::ReadThread {
-            thread_id: "thread".into(),
-        }))
+        .dispatch(Intent::ReadThread(op::ReadThread::new("thread".into())))
         .await
         .unwrap_err();
     assert!(matches!(
@@ -297,9 +367,7 @@ async fn invalid_typed_reply_does_not_block_later_wire_events() {
         }
     ));
     store
-        .dispatch(Intent::ReadThread(op::ReadThread {
-            thread_id: "thread".into(),
-        }))
+        .dispatch(Intent::ReadThread(op::ReadThread::new("thread".into())))
         .await
         .unwrap();
     let _writer = server.await.unwrap();
@@ -353,11 +421,8 @@ async fn snapshot_notification_can_reenter_store_synchronously() {
 
 #[tokio::test]
 async fn new_conversation_clears_sent_draft_after_native_echo() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
-    store
-        .dispatch(Intent::NewChat("/fixture".into()))
-        .await
-        .unwrap();
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();
     store
         .dispatch(Intent::SetDraftText {
@@ -370,10 +435,10 @@ async fn new_conversation_clears_sent_draft_after_native_echo() {
         thread_id: None,
         client_user_message_id: "client".into(),
     });
-    let request = read(&mut reader).await;
+    let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/thread/start");
     writer.write_line(&json!({"id": request["id"], "result": {"thread": {"id":"created", "cwd":"/fixture", "status":{"type":"idle"}, "turns":[]}}}).to_string()).await.unwrap();
-    let request = read(&mut reader).await;
+    let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "turn/start");
     assert_eq!(request["params"]["input"][0]["text"], "first message");
     writer.write_line(&json!({"method":"item/completed", "params":{"threadId":"created", "turnId":"turn", "item":{"id":"native", "type":"userMessage", "clientId":"client", "content":[{"type":"text", "text":"first message"}]}}}).to_string()).await.unwrap();
@@ -401,7 +466,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
             .unwrap(),
         ),
     );
-    let (store, mut reader, mut writer) = setup(initial);
+    let (store, mut reader, mut writer) = setup(initial).await;
     store
         .dispatch(Intent::SetDraft {
             thread_id: "thread".into(),
@@ -446,7 +511,9 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
         .unwrap();
     assert_eq!(
         sending.await.unwrap().unwrap(),
-        Outcome::Submitted(Some("turn-new".into()))
+        Outcome::Submitted {
+            turn_id: Some("turn-new".into())
+        }
     );
     assert_eq!(store.snapshot().drafts["thread"].text, "second");
 }
@@ -454,11 +521,8 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
 #[tokio::test]
 async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
     for navigate_away in [false, true] {
-        let (store, mut reader, mut writer) = setup(Snapshot::default());
-        store
-            .dispatch(Intent::NewChat("/fixture".into()))
-            .await
-            .unwrap();
+        let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+        new_chat(&store, &mut reader, &mut writer, "/fixture").await;
         store
             .dispatch(Intent::SetDraft {
                 thread_id: "new:/fixture".into(),
@@ -480,7 +544,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
                     .await
             }
         });
-        let create = read(&mut reader).await;
+        let create = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(create["method"], "host/thread/start");
         assert_eq!(create["params"]["cwd"], "/fixture");
         store
@@ -494,13 +558,10 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
             .await
             .unwrap();
         if navigate_away {
-            store
-                .dispatch(Intent::NewChat("/other".into()))
-                .await
-                .unwrap();
+            new_chat(&store, &mut reader, &mut writer, "/other").await;
         }
         writer.write_line(&json!({"id":create["id"],"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}}).to_string()).await.unwrap();
-        let submit = read(&mut reader).await;
+        let submit = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(submit["method"], "turn/start");
         assert_eq!(submit["params"]["threadId"], "created");
         assert_eq!(submit["params"]["input"][0]["text"], "sent");
@@ -514,7 +575,9 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
             .unwrap();
         assert_eq!(
             sending.await.unwrap().unwrap(),
-            Outcome::Submitted(Some("turn".into()))
+            Outcome::Submitted {
+                turn_id: Some("turn".into())
+            }
         );
         let state = store.snapshot();
         if navigate_away {
@@ -534,11 +597,8 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
 #[tokio::test]
 async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
     for fail_creation in [false, true] {
-        let (store, mut reader, mut writer) = setup(Snapshot::default());
-        store
-            .dispatch(Intent::NewChat("/fixture".into()))
-            .await
-            .unwrap();
+        let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+        new_chat(&store, &mut reader, &mut writer, "/fixture").await;
         store
             .dispatch(Intent::SetDraft {
                 thread_id: "new:/fixture".into(),
@@ -560,13 +620,13 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
                     .await
             }
         });
-        let create = read(&mut reader).await;
+        let create = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(create["method"], "host/thread/start");
         let failed = if fail_creation {
             create
         } else {
             writer.write_line(&json!({"id":create["id"],"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}}).to_string()).await.unwrap();
-            let submit = read(&mut reader).await;
+            let submit = read_after_reviews(&mut reader, &mut writer).await;
             assert_eq!(submit["method"], "turn/start");
             submit
         };
@@ -584,6 +644,11 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
         let state = store.snapshot();
         assert!(state.pending_submissions.is_empty());
         assert_eq!(state.drafts[&state.navigation.draft_key].text, "retry me");
+        if !fail_creation {
+            let list = read_after_reviews(&mut reader, &mut writer).await;
+            assert_eq!(list["method"], "host/thread/list");
+            writer.write_line(&json!({"id":list["id"],"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
+        }
         let retry = tokio::spawn({
             let store = store.clone();
             async move {
@@ -595,7 +660,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
                     .await
             }
         });
-        let request = read(&mut reader).await;
+        let request = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(
             request["method"],
             if fail_creation {
@@ -650,14 +715,16 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
                 ..Default::default()
             }),
         );
-        let (store, mut reader, mut writer) = setup(initial);
+        let (store, mut reader, mut writer) = setup(initial).await;
         let transcribing = tokio::spawn({
             let store = store.clone();
             async move {
                 store
-                    .dispatch(Intent::Transcribe(op::Transcribe {
+                    .dispatch(Intent::Transcribe(op::Dictate {
                         draft_key: "thread".into(),
-                        audio: "AAA=".into(),
+                        request: agent_core::client::Transcribe {
+                            audio: "AAA=".into(),
+                        },
                         send: true,
                         client_user_message_id: "dictation".into(),
                     }))
@@ -701,18 +768,17 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
 
 #[tokio::test]
 async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
-    store
-        .dispatch(Intent::NewChat("/fixture".into()))
-        .await
-        .unwrap();
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let transcribing = tokio::spawn({
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::Transcribe(op::Transcribe {
+                .dispatch(Intent::Transcribe(op::Dictate {
                     draft_key: "new:/fixture".into(),
-                    audio: "AAA=".into(),
+                    request: agent_core::client::Transcribe {
+                        audio: "AAA=".into(),
+                    },
                     send: true,
                     client_user_message_id: "dictation".into(),
                 }))
@@ -720,14 +786,8 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
         }
     });
     let request = read(&mut reader).await;
-    store
-        .dispatch(Intent::NewChat("/other".into()))
-        .await
-        .unwrap();
-    store
-        .dispatch(Intent::NewChat("/fixture".into()))
-        .await
-        .unwrap();
+    new_chat(&store, &mut reader, &mut writer, "/other").await;
+    new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     writer
         .write_line(&json!({"id":request["id"],"result":{"text":"spoken"}}).to_string())
         .await
@@ -740,7 +800,7 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
 
 #[tokio::test]
 async fn file_navigation_ignores_a_late_reply_from_the_previous_file() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let first = tokio::spawn({
         let store = store.clone();
         async move {
@@ -791,7 +851,7 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
     Arc::make_mut(&mut initial.workspace).file = Some(Arc::new(
         serde_json::from_value(file("/file", "base", "old")).unwrap(),
     ));
-    let (store, mut reader, mut writer) = setup(initial);
+    let (store, mut reader, mut writer) = setup(initial).await;
     store
         .dispatch(Intent::SetFileDraft {
             path: "/file".into(),
@@ -862,22 +922,17 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
 
 #[tokio::test]
 async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let opening = tokio::spawn({
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::OpenThread(op::OpenThread {
-                    thread_id: "thread".into(),
-                }))
+                .dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())))
                 .await
         }
     });
     let request = read(&mut reader).await;
-    store
-        .dispatch(Intent::NewChat("/new-project".into()))
-        .await
-        .unwrap();
+    new_chat(&store, &mut reader, &mut writer, "/new-project").await;
     writer
         .write_line(&json!({"id":request["id"],"result":{"thread":thread("loaded")}}).to_string())
         .await
@@ -903,7 +958,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
         ),
     );
     initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":"thread","cwd":"/fixture","status":{"type":"active"}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap()));
-    let (store, mut reader, mut writer) = setup(initial);
+    let (store, mut reader, mut writer) = setup(initial).await;
     writer.write_line(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"completed","status":"completed"}}}).to_string()).await.unwrap();
     wait_for(&store, |snapshot| {
         snapshot.activity.active.get("thread") == Some(&false)
@@ -938,24 +993,24 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
         .unwrap();
     assert_eq!(
         sending.await.unwrap().unwrap(),
-        Outcome::Submitted(Some("new-turn".into()))
+        Outcome::Submitted {
+            turn_id: Some("new-turn".into())
+        }
     );
 }
 
 #[tokio::test]
 async fn a_late_list_reply_cannot_replace_a_new_search() {
     use agent_core::models::ListQuery;
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let old = tokio::spawn({
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::ListThreads(op::ListThreads {
-                    query: ListQuery {
-                        search_term: "old".into(),
-                        ..Default::default()
-                    },
-                }))
+                .dispatch(Intent::ListThreads(op::ListThreads::new(ListQuery {
+                    search_term: "old".into(),
+                    ..Default::default()
+                })))
                 .await
         }
     });
@@ -964,12 +1019,10 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
         let store = store.clone();
         async move {
             store
-                .dispatch(Intent::ListThreads(op::ListThreads {
-                    query: ListQuery {
-                        search_term: "new".into(),
-                        ..Default::default()
-                    },
-                }))
+                .dispatch(Intent::ListThreads(op::ListThreads::new(ListQuery {
+                    search_term: "new".into(),
+                    ..Default::default()
+                })))
                 .await
         }
     });
@@ -996,7 +1049,7 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
 
 #[tokio::test]
 async fn gallery_history_reads_do_not_block_conversation_notifications() {
-    let (store, mut reader, mut writer) = setup(snapshot());
+    let (store, mut reader, mut writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/thread/read");
@@ -1010,7 +1063,7 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
         }))
         .await
         .unwrap();
-    let Outcome::SessionImages(images) = result else {
+    let Outcome::SessionImages { images } = result else {
         panic!("expected images")
     };
     assert_eq!(images[0].source, "/image.png");
@@ -1024,7 +1077,7 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
 #[tokio::test]
 async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
     use agent_core::{client::TerminalSize, state::TerminalPhase};
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let start = read(&mut reader).await;
         assert_eq!(start["method"], "host/terminal/start");
@@ -1115,7 +1168,7 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
 #[tokio::test]
 async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
     use agent_core::{client::TerminalSize, state::TerminalPhase};
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         writer.write_line(&json!({"method":"process/exited","params":{"processHandle":"terminal","exitCode":17,"stdout":"","stderr":"","stdoutCapReached":false,"stderrCapReached":false}}).to_string()).await.unwrap();
@@ -1144,7 +1197,7 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
 #[tokio::test]
 async fn closing_store_terminates_its_running_terminal() {
     use agent_core::client::TerminalSize;
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let start = read(&mut reader).await;
         writer
@@ -1178,7 +1231,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
         threads: Some(Arc::new(serde_json::from_value(json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap())),
         list_query: Arc::new(agent_core::models::ListQuery { search_term:"created".into(), ..Default::default() }),
         ..Default::default()
-    });
+    }).await;
     let server = tokio::spawn(async move {
         while let Some(line) = tokio::time::timeout(Duration::from_secs(2), reader.read_line())
             .await
@@ -1199,6 +1252,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
                     };
                     json!({"data":data,"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                 }
+                "host/workspace/review" => review(),
                 other => panic!("unexpected method {other}"),
             };
             writer
@@ -1253,7 +1307,7 @@ async fn malformed_file_change_delta_does_not_poison_store() {
             serde_json::from_value(json!({"id":"file", "type":"fileChange", "changes":[7]}))
                 .unwrap(),
         ));
-    let (store, _reader, mut writer) = setup(previous);
+    let (store, _reader, mut writer) = setup(previous).await;
     for (method, item) in [
         ("item/fileChange/outputDelta", "file"),
         ("item/agentMessage/delta", "item"),
@@ -1304,7 +1358,8 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
     let (store, mut reader, mut writer) = setup(Snapshot {
         conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(previous))])),
         ..Default::default()
-    });
+    })
+    .await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/thread/turns/list");
@@ -1324,6 +1379,7 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
             thread_id: "thread".into(),
             turn_id: None,
             cursor: Some("turn-page".into()),
+            defer_item_details: true,
         }))
         .await
         .unwrap();
@@ -1332,6 +1388,7 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
             thread_id: "thread".into(),
             turn_id: Some("old".into()),
             cursor: Some("item-page".into()),
+            defer_item_details: true,
         }))
         .await
         .unwrap();
@@ -1367,17 +1424,23 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
 
 #[tokio::test]
 async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
-    let (store, mut reader, mut writer) = setup(snapshot());
+    let (store, mut reader, mut writer) = setup(snapshot()).await;
     let fork = store.dispatch(Intent::ForkThread(op::ForkThread {
         thread_id: "thread".into(),
         last_turn_id: "turn".into(),
+        exclude_turns: false,
     }));
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "thread/fork");
     assert_eq!(request["params"]["lastTurnId"], "turn");
     writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"forked","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","type":"agentMessage","text":"copied"}]}]}}}).to_string()).await.unwrap();
     writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}}).to_string()).await.unwrap();
-    assert_eq!(fork.await.unwrap(), Outcome::StartedThread("forked".into()));
+    assert_eq!(
+        fork.await.unwrap(),
+        Outcome::StartedThread {
+            id: "forked".into()
+        }
+    );
     wait_for(&store, |s| {
         s.conversations
             .get("forked")
@@ -1397,8 +1460,8 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
 
 #[tokio::test]
 async fn account_selection_publishes_the_selected_account_and_persistence_warning() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
-    let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts));
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let request = read(&mut reader).await;
     writer.write_line(&json!({"id":request["id"],"result":{"accounts":[{"id":"a"},{"id":"b"}],"selectedId":"a","error":null}}).to_string()).await.unwrap();
     listing.await.unwrap();
@@ -1441,8 +1504,8 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 
 #[tokio::test]
 async fn cancelled_account_login_ignores_an_older_status_reply() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
-    let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin));
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {}));
     let request = read(&mut reader).await;
     writer.write_line(&json!({"id":request["id"],"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}}).to_string()).await.unwrap();
     starting.await.unwrap();
@@ -1476,7 +1539,7 @@ async fn cancelled_account_login_ignores_an_older_status_reply() {
 
 #[tokio::test]
 async fn disconnected_store_keeps_editing_and_persisting_drafts() {
-    let (store, reader, writer) = setup(Snapshot::default());
+    let (store, reader, writer) = setup(Snapshot::default()).await;
     wait_for(&store, |s| s.connected).await;
     drop((reader, writer));
     wait_for(&store, |s| !s.connected).await;
@@ -1591,7 +1654,7 @@ async fn dispatch_publishes_edits_before_returning_to_the_native_input_control()
 
 #[tokio::test]
 async fn close_ends_subscriptions_while_store_is_retained() {
-    let (store, _reader, _writer) = setup(Snapshot::default());
+    let (store, _reader, _writer) = setup(Snapshot::default()).await;
     wait_for(&store, |snapshot| snapshot.connected).await;
     let mut updates = store.subscribe();
     store.close().await.unwrap();
@@ -1642,7 +1705,7 @@ async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation(
         "id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread"}
     })).unwrap()))]));
     let bytes = serde_json::to_vec(&saved).unwrap();
-    let (store, _reader, _writer) = setup(serde_json::from_slice(&bytes).unwrap());
+    let (store, _reader, _writer) = connected(serde_json::from_slice(&bytes).unwrap());
     wait_for(&store, |snapshot| snapshot.connected).await;
     let current = store.snapshot();
     assert!(current.requests.is_empty());
@@ -1659,7 +1722,7 @@ async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation(
 
 #[tokio::test]
 async fn close_keeps_the_last_enqueued_draft_and_removes_unaccepted_send() {
-    let (store, mut reader, _writer) = setup(snapshot());
+    let (store, mut reader, _writer) = setup(snapshot()).await;
     store
         .dispatch(Intent::SetDraftText {
             thread_id: "thread".into(),
@@ -1751,27 +1814,22 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
             json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":"old"}),
         ),
         (
-            Intent::ReadWorktreeSettings(op::ReadWorktreeSettings),
+            Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}),
             json!({"createOnNewSession":false,"copyOnCreate":false,"copyPaths":[],"worktreeDirectory":"old"}),
         ),
         (
-            Intent::ListAccounts(op::ListAccounts),
+            Intent::ListAccounts(op::ListAccounts {}),
             json!({"accounts":[],"selectedId":null,"error":null}),
         ),
         (
-            Intent::ListThreads(op::ListThreads {
-                query: Default::default(),
-            }),
+            Intent::ListThreads(op::ListThreads::new(Default::default())),
             json!({"data":[{"id":"old"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
         ),
     ] {
-        let (store, mut reader, mut writer) = setup(Snapshot::default());
+        let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
         let loading = store.dispatch(intent);
         let request = read(&mut reader).await;
-        store
-            .dispatch(Intent::NewChat("/new".into()))
-            .await
-            .unwrap();
+        new_chat(&store, &mut reader, &mut writer, "/new").await;
         let navigated = store.snapshot();
         writer
             .write_line(&json!({"id":request["id"],"result":output}).to_string())
@@ -1786,15 +1844,12 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         );
         store.close().await.unwrap();
     }
-    let (store, mut reader, mut writer) = setup(Snapshot::default());
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let loading = store.dispatch(Intent::ListFiles(op::ListFiles {
         path: "/old".into(),
     }));
     let request = read(&mut reader).await;
-    store
-        .dispatch(Intent::NewChat("/new".into()))
-        .await
-        .unwrap();
+    new_chat(&store, &mut reader, &mut writer, "/new").await;
     writer
         .write_line(
             &json!({"id":request["id"],"error":{"code":-32000,"message":"old failure"}})
@@ -1813,7 +1868,7 @@ async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_f
     Arc::make_mut(&mut initial.workspace).file = Some(Arc::new(
         serde_json::from_value(file("/old/file", "base", "old")).unwrap(),
     ));
-    let (store, mut reader, mut writer) = setup(initial);
+    let (store, mut reader, mut writer) = setup(initial).await;
     store
         .dispatch(Intent::SetFileDraft {
             path: "/old/file".into(),
@@ -1832,10 +1887,7 @@ async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_f
         })
         .await
         .unwrap();
-    store
-        .dispatch(Intent::NewChat("/new".into()))
-        .await
-        .unwrap();
+    new_chat(&store, &mut reader, &mut writer, "/new").await;
     writer
         .write_line(
             &json!({"id":request["id"],"result":file("/old/file", "saved", "submitted")})
@@ -1848,5 +1900,74 @@ async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_f
     assert_eq!(saved.file_drafts["/old/file"].text, "newer");
     assert_eq!(saved.file_drafts["/old/file"].revision, "saved");
     assert!(saved.workspace.file.is_none());
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn connection_loads_workspace_and_lists_in_one_epoch() {
+    let initial = Snapshot {
+        navigation: Arc::new(agent_core::state::Navigation {
+            cwd: "/fixture".into(),
+            draft_key: "new:/fixture".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (store, mut reader, mut writer) = connected(initial);
+    let epoch = store.snapshot().epoch;
+    let mut requests = BTreeMap::new();
+    for _ in 0..3 {
+        let request = read(&mut reader).await;
+        assert!(
+            requests
+                .insert(request["method"].as_str().unwrap().to_owned(), request)
+                .is_none()
+        );
+    }
+    assert_eq!(
+        requests["host/workspace/review"]["params"],
+        json!({"cwd":"/fixture"})
+    );
+    assert_eq!(
+        requests["host/thread/list"]["params"],
+        json!({"titleOnly":true,"projectLimit":5,"chatLimit":5,"projectThreadLimits":{},"searchTerm":""})
+    );
+    // Review completes first; the other automatic reads must remain current.
+    for (method, result) in [
+        (
+            "host/workspace/review",
+            json!({"branch":"main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
+        ),
+        (
+            "model/list",
+            json!({"data":[{"id":"fresh","model":"fresh","displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
+        ),
+        (
+            "host/thread/list",
+            json!({"data":[{"id":"listed"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+        ),
+    ] {
+        writer
+            .write_line(&json!({"id":requests[method]["id"],"result":result}).to_string())
+            .await
+            .unwrap();
+    }
+    wait_for(&store, |snapshot| {
+        snapshot.workspace.review.is_some()
+            && !snapshot.models.is_empty()
+            && snapshot.threads.is_some()
+    })
+    .await;
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.epoch, epoch);
+    assert_eq!(
+        snapshot.workspace.review.as_ref().unwrap().diff,
+        "fixture diff"
+    );
+    assert_eq!(snapshot.models[0].model, "fresh");
+    assert_eq!(
+        snapshot.threads.as_ref().unwrap().data[0].id.as_deref(),
+        Some("listed")
+    );
     store.close().await.unwrap();
 }

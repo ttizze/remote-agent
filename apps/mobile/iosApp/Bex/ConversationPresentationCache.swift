@@ -14,12 +14,12 @@ actor ConversationPresentationCache {
     private var previous: ConversationPresentation?
     private var queued: [String: ConversationItem] = [:]
 
-    func project(_ source: AgentCore.Thread?) -> ConversationPresentation? {
+    func project(_ source: AgentCore.Thread?, snapshot: AgentCore.Snapshot) -> ConversationPresentation? {
         guard let source else {
             turns = [:]; projection = nil; previous = nil; queued = [:]
             return nil
         }
-        let rendered = AgentCore.projectConversation(source: source, previous: projection)
+        let rendered = AgentCore.projectConversation(snapshot: snapshot, source: source, previous: projection)
         if let projection, rendered.unchanged(other: projection) {
             return previous
         }

@@ -176,7 +176,9 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "uniffi",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -184,15 +186,7 @@ name = "agent-ffi"
 version = "0.1.0"
 dependencies = [
  "agent-core",
- "base64 0.23.1",
- "conversation-presentation",
- "host-protocol",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
  "uniffi",
- "uuid",
- "zeroize",
 ]
 
 [[package]]
@@ -987,7 +981,6 @@ dependencies = [
  "async-channel",
  "atomicwrites",
  "base64 0.23.1",
- "conversation-presentation",
  "cpal",
  "directories",
  "futures-util",
@@ -1739,15 +1732,6 @@ name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
-
-[[package]]
-name = "conversation-presentation"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "convert_case"

@@ -14,13 +14,22 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 #[derive(Debug, Default, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Outcome {
     #[default]
     Applied,
-    StartedThread(String),
-    Submitted(Option<String>),
-    RemoteHostPaired(String),
-    SessionImages(Vec<SessionImage>),
+    StartedThread {
+        id: String,
+    },
+    Submitted {
+        turn_id: Option<String>,
+    },
+    RemoteHostPaired {
+        id: String,
+    },
+    SessionImages {
+        images: Vec<SessionImage>,
+    },
 }
 enum Command {
     Dispatch(Dispatch),
@@ -63,7 +72,7 @@ struct Completed {
 }
 struct Scheduled {
     effect: Effect,
-    snapshot: Option<Arc<Snapshot>>,
+    snapshot: Arc<Snapshot>,
     complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
 }
 pub struct Store {
@@ -87,28 +96,30 @@ impl Store {
         snapshot: Snapshot,
         session: Option<crate::transport::Session>,
     ) -> Self {
-        let snapshot = if peer.is_some() {
-            reduce(&snapshot, Event::Connected).0
-        } else {
-            snapshot
-        };
         let (writer, updates) = watch::channel(Arc::new(snapshot));
+        let connection = peer.map(|peer| {
+            (
+                Connection { peer, session },
+                apply(&writer, Event::Connected),
+            )
+        });
         let (commands, mut incoming) = mpsc::unbounded_channel();
         let stop = CancellationToken::new();
         let (finished_tx, finished) = watch::channel(None);
         let publications = writer.clone();
         let shutdown = stop.clone();
         tokio::spawn(async move {
-            let mut connection = peer.map(|peer| Connection { peer, session });
+            let mut connection = connection;
             let mut result = Ok(());
             loop {
-                if let Some(Connection { peer, session }) = connection.take() {
+                if let Some((Connection { peer, session }, effects)) = connection.take() {
                     result = run(
                         peer,
                         publications.clone(),
                         &mut incoming,
                         shutdown.clone(),
                         session,
+                        effects,
                     )
                     .await;
                 }
@@ -153,7 +164,7 @@ impl Store {
                 .open_peer(std::time::Duration::from_secs(30), 64)
                 .await?;
             if let Some(invitation) = invitation {
-                peer.request::<_, <Pair as Operation>::Output>(Pair::METHOD, &Pair { invitation })
+                peer.request::<_, <Pair as RpcMethod>::Output>(Pair::METHOD, &Pair { invitation })
                     .await?;
             }
             Ok::<_, crate::transport::TransportError>(peer)
@@ -260,11 +271,18 @@ impl Store {
     }
 }
 
-fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Effect> {
+fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Scheduled> {
     let mut effects = Vec::new();
     updates.send_if_modified(|current| {
         let (produced, changed) = apply_locked(current, event);
-        effects = produced;
+        effects = produced
+            .into_iter()
+            .map(|effect| Scheduled {
+                effect,
+                snapshot: current.clone(),
+                complete: None,
+            })
+            .collect();
         changed
     });
     effects
@@ -345,6 +363,7 @@ fn finish(
         ordered.lock().unwrap().remove(&id);
     }
     let mut effects = Vec::new();
+    let mut scheduled = Vec::new();
     let mut result = Ok(Outcome::Applied);
     updates.send_if_modified(|snapshot| {
         // Dispatch and completion share this lock: navigation cannot change
@@ -378,11 +397,20 @@ fn finish(
                 Err(error)
             }
         };
-        publish_locked(snapshot, next, Vec::new()).1
+        let changed = publish_locked(snapshot, next, Vec::new()).1;
+        scheduled = effects
+            .drain(..)
+            .map(|effect| Scheduled {
+                effect,
+                snapshot: snapshot.clone(),
+                complete: None,
+            })
+            .collect();
+        changed
     });
-    let continuation = effects.iter().position(|effect| {
+    let continuation = scheduled.iter().position(|scheduled| {
         matches!(
-            effect,
+            scheduled.effect,
             Effect::StartSubmission(op::StartSubmission { .. })
                 | Effect::Submit(op::SendSubmission { .. })
         )
@@ -393,19 +421,10 @@ fn finish(
     {
         let _ = complete.send(result);
     }
-    effects
-        .into_iter()
-        .enumerate()
-        .map(|(index, effect)| Scheduled {
-            effect,
-            snapshot: None,
-            complete: if Some(index) == continuation {
-                complete.take()
-            } else {
-                None
-            },
-        })
-        .collect()
+    if let Some(index) = continuation {
+        scheduled[index].complete = complete;
+    }
+    scheduled
 }
 fn decode_message(line: &str) -> Result<Event, PeerError> {
     let message =
@@ -434,6 +453,7 @@ async fn run(
     commands: &mut mpsc::UnboundedReceiver<Command>,
     stop: CancellationToken,
     session: Option<crate::transport::Session>,
+    mut effects: Vec<Scheduled>,
 ) -> Result<(), PeerError> {
     let mut events = peer.subscribe();
     let peer = Arc::new(peer);
@@ -447,7 +467,6 @@ async fn run(
     let mut terminal_commands = VecDeque::new();
     let mut terminal_running = false;
     let mut disconnected = None;
-    let mut effects: Vec<Scheduled> = Vec::new();
     let reason = loop {
         for Scheduled {
             effect,
@@ -468,7 +487,7 @@ async fn run(
                 Some(&peer),
                 &ordered,
                 session.as_ref(),
-                captured.unwrap_or_else(|| updates.borrow().clone()),
+                captured,
                 effect,
                 complete,
             ));
@@ -486,7 +505,7 @@ async fn run(
                 Some(&peer),
                 &ordered,
                 session.as_ref(),
-                captured.unwrap_or_else(|| updates.borrow().clone()),
+                captured,
                 effect,
                 complete,
             ));
@@ -512,7 +531,7 @@ async fn run(
                 };
                 let mut complete = Some(command.complete);
                 for effect in command.effects {
-                    effects.push(Scheduled { effect, snapshot: Some(command.snapshot.clone()), complete: complete.take() });
+                    effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: complete.take() });
                 }
             }
             result = jobs.next(), if !jobs.is_empty() => {
@@ -546,11 +565,7 @@ async fn run(
                 PeerEvent::Message(frame) => {
                     let event = decode_message(&frame.value)
                         .unwrap_or_else(|error| Event::Failed(error.to_string()));
-                    effects.extend(apply(&updates, event).into_iter().map(|effect| Scheduled {
-                        effect,
-                        snapshot: None,
-                        complete: None,
-                    }));
+                    effects.extend(apply(&updates, event));
                 }
                 PeerEvent::Closed(reason) => {
                     terminal_reason = Some(reason);
@@ -581,8 +596,8 @@ async fn run(
         ) {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                client.call(&KillTerminal {
-                    process_handle: handle,
+                client.call(&op::CloseTerminal {
+                    handle: handle.as_str(),
                 }),
             )
             .await;
@@ -603,7 +618,7 @@ async fn run_offline(
     updates: &watch::Sender<Arc<Snapshot>>,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     stop: &CancellationToken,
-) -> Option<Connection> {
+) -> Option<(Connection, Vec<Scheduled>)> {
     let ordered = Mutex::new(BTreeSet::new());
     while !stop.is_cancelled() {
         let command = tokio::select! {
@@ -621,9 +636,9 @@ async fn run_offline(
                 connection,
                 complete,
             } => {
-                apply(updates, Event::Connected);
+                let effects = apply(updates, Event::Connected);
                 let _ = complete.send(Ok(()));
-                return Some(connection);
+                return Some((connection, effects));
             }
         };
         let mut complete = Some(command.complete);
@@ -763,7 +778,7 @@ async fn perform(
                         .open_peer(std::time::Duration::from_secs(20), 8)
                         .await
                         .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
-                    peer.request::<_, <Pair as Operation>::Output>(
+                    peer.request::<_, <Pair as RpcMethod>::Output>(
                         Pair::METHOD,
                         &Pair {
                             invitation: invitation.invitation,
@@ -781,7 +796,7 @@ async fn perform(
                 let id = reply.value.id.clone();
                 Applied {
                     application: Some(Box::new(Published(Event::RemoteHostPaired(reply.value)))),
-                    outcome: Outcome::RemoteHostPaired(id),
+                    outcome: Outcome::RemoteHostPaired { id },
                     ..Applied::default()
                 }
             }
@@ -884,7 +899,7 @@ pub struct Execution<'a> {
     ordered_call: bool,
 }
 impl Execution<'_> {
-    pub(crate) async fn call<O: Operation + Sync>(
+    pub(crate) async fn call<O: RpcMethod + Sync>(
         &mut self,
         operation: &O,
     ) -> Result<O::Output, PeerError> {

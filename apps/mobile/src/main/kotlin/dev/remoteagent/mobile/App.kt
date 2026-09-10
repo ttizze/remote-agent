@@ -211,13 +211,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             try {
                 val invitation =
                     parseInvitation(contents, System.currentTimeMillis().milliseconds.inWholeSeconds.toULong())
-                val id = ticketIdentity(invitation.ticket)
+                val id = ticketIdentity(invitation.endpoint)
                 val identity =
                     withContext(Dispatchers.IO) { AndroidCredentialStore(context, id).loadOrCreate(::generateIdentity) }
                 val store =
                     try {
                         AgentStore.connect(
-                            Connection(invitation.ticket, identity, invitation.token, true),
+                            Connection(invitation.endpoint, identity, invitation.invitation, true),
                             byteArrayOf(),
                         )
                     } finally {
@@ -227,7 +227,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 initialization?.cancel()
                 observation?.cancel()
                 owner?.shutdown()
-                profiles = profiles.filterNot { it.id == id } + HostProfile(id, "PC Host", invitation.ticket)
+                profiles = profiles.filterNot { it.id == id } + HostProfile(id, "PC Host", invitation.endpoint)
                 repository.saveProfiles(profiles)
                 repository.selected = id
                 profileId = id
@@ -236,7 +236,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 observe(store, id)
                 screen = Screen.Threads
                 busy = false
-                refresh()
             } catch (error: AgentException) {
                 busy = false
                 notice = error.message
@@ -278,8 +277,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 if (profileId != profile.id) return@launch
                 publish(store.snapshot())
                 busy = false
-                snapshot.navigation().threadId?.let { perform(Intent.OpenThread(it)) }
-                refresh()
             } catch (error: AgentException) {
                 connectionFailed(profile.id, error)
             } catch (error: IOException) {
@@ -300,8 +297,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun observe(store: AgentStore, id: String) {
+        val initial = snapshot
         observation = scope.launch {
-            var previous = store.snapshot()
+            var previous = initial
             while (isActive) {
                 store.nextSnapshot(previous)
                 if (profileId != id) return@launch
@@ -380,7 +378,7 @@ internal fun RemoteAgentApp(
     MaterialTheme {
         Scaffold(topBar = { TopAppBar(title = { Text("Remote Agent") }) }) { padding ->
             Column(Modifier.padding(padding)) {
-                model.notice?.let {
+                (model.notice ?: model.snapshot.error())?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
                 }
                 if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())

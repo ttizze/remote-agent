@@ -24,26 +24,18 @@ struct ThreadScreen: View {
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: (status: String, expanded: Bool)]()
     @State var opensDiff = false
-    @State var review: WorkspaceReviewSummary?
     @FocusState var composerFocused: Bool
 
-    private var reviewVersion: String {
-        var version = "\(state.selectedProfileId ?? ""):\(state.isConnected):\(model.cwd)"
-        version += ":\(conversation?.id ?? "")"
-        for turn in conversation?.turns ?? [] {
-            version += ":\(turn.id):\(turn.status)"
-            if turn.isInProgress {
-                // Commands and tools can edit files before the native turn finishes.
-                for item in turn.activityItems where item.kind != "reasoning" {
-                    version += ":\(item.id):\(item.contentVersion)"
-                }
-            }
-        }
-        return version
+    var review: WorkspaceReviewSummary? {
+        model.snapshot.review().map { WorkspaceReviewSummary(
+            files: Int($0.fileCount()),
+            additions: Int($0.additions()),
+            deletions: Int($0.deletions())
+        ) }
     }
 
     private var project: Project? {
-        state.projects.first { $0.roots.contains(model.cwd) }
+        state.projects.first { $0.roots.contains { $0.path == model.cwd } }
     }
 
     var body: some View {
@@ -182,7 +174,7 @@ struct ThreadScreen: View {
                 finishMediaImport(result)
             }.ignoresSafeArea()
         }
-        .sheet(isPresented: $showingFiles, onDismiss: { Task { await refreshReview() } }, content: {
+        .sheet(isPresented: $showingFiles, onDismiss: { model.perform(.reviewWorkspace(cwd: model.cwd)) }, content: {
             WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
         })
         .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
@@ -195,10 +187,6 @@ struct ThreadScreen: View {
             if $0 {
                 composerFocused = true
             }
-        }
-        .task(id: reviewVersion) {
-            do { try await Task.sleep(nanoseconds: 200_000_000) } catch { return }
-            await refreshReview()
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -254,7 +242,6 @@ extension ThreadScreen {
                     if let id = conversation?.id {
                         model.openThread(id)
                     }
-                    Task { await refreshReview() }
                 } label: { Label("更新", systemImage: "arrow.clockwise") }
             } label: {
                 Image(systemName: "ellipsis").font(.title2.weight(.semibold)).frame(width: 44, height: 44)
@@ -290,10 +277,10 @@ extension ThreadScreen {
                     Label("チャット", systemImage: "bubble.left.and.bubble.right")
                 }
                 ForEach(state.projects, id: \.id) { project in
-                    ForEach(project.roots, id: \.self) { root in
-                        Button { model.openNewThread(cwd: root) } label: {
-                            Label(project.roots.count == 1 ? project.name : root,
-                                  systemImage: root == model.cwd ? "checkmark" : "folder")
+                    ForEach(project.roots, id: \.path) { root in
+                        Button { model.openNewThread(cwd: root.path) } label: {
+                            Label(project.roots.count == 1 ? project.name : root.path,
+                                  systemImage: root.path == model.cwd ? "checkmark" : "folder")
                         }
                     }
                 }

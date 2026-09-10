@@ -118,7 +118,7 @@ struct DetailLoad {
 #[derive(Clone)]
 enum ConversationRow {
     History,
-    Turn(Arc<conversation_presentation::presentation::RenderedTurn>),
+    Turn(Arc<agent_core::presentation::conversation::RenderedTurn>),
     Pending(String, Arc<PendingSubmission>),
     Request(String, Arc<ServerRequest>),
 }
@@ -198,7 +198,7 @@ pub(crate) struct Desktop {
     history_loading: bool,
     history_error: String,
     item_details: HashMap<(String, String), DetailLoad>,
-    rendered: Option<Arc<conversation_presentation::presentation::RenderedConversation>>,
+    rendered: Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
     diffs: HashMap<String, Entity<DiffView>>,
     images: HashMap<String, ImageState>,
     image_gallery: Option<ImageGallery>,
@@ -335,7 +335,7 @@ impl Desktop {
                     if value.as_ref() != view.snapshot.list_query.search_term {
                         let mut query = (*view.snapshot.list_query).clone();
                         query.search_term = value.to_string();
-                        view.dispatch(Intent::ListThreads(op::ListThreads { query }));
+                        view.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
                     }
                 }
             }),
@@ -481,6 +481,7 @@ impl Desktop {
         let epoch = self.epoch;
         let remote = self.remote.clone();
         let side = self.side_chat_mode;
+        let initial_cwd = self.initial_cwd.take();
         let updates = self.updates.clone();
         let connections = self.runtime.connections.clone();
         self.runtime.handle.spawn(async move {
@@ -499,7 +500,7 @@ impl Desktop {
                     "desktop-{}-{host}.json",
                     if side { "side" } else { "main" }
                 ));
-                let snapshot = match tokio::fs::read(&path).await {
+                let mut snapshot: Snapshot = match tokio::fs::read(&path).await {
                     Ok(bytes) => serde_json::from_slice(&bytes)
                         .map_err(|error| format!("下書きを読み込めません: {error}"))?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -507,6 +508,19 @@ impl Desktop {
                     }
                     Err(error) => return Err(error.to_string()),
                 };
+                if let Some(cwd) = initial_cwd.or_else(|| {
+                    snapshot
+                        .navigation
+                        .thread_id
+                        .is_none()
+                        .then(|| snapshot.navigation.cwd.clone())
+                }) {
+                    snapshot = agent_core::state::reduce(
+                        &snapshot,
+                        agent_core::state::Event::Intent(Intent::NewChat(cwd)),
+                    )
+                    .0;
+                }
                 let store = connections
                     .connect(
                         remote.as_ref().map(|remote| remote.ticket.as_str()),
@@ -626,18 +640,7 @@ impl Desktop {
                             },
                             &self.runtime.handle,
                         ));
-                        if let Some(cwd) = self.initial_cwd.take() {
-                            self.dispatch(Intent::NewChat(cwd));
-                        } else if let Some(id) = self.snapshot.navigation.thread_id.clone() {
-                            self.dispatch(Intent::OpenThread(op::OpenThread { thread_id: id }));
-                        } else {
-                            self.dispatch(Intent::NewChat(self.snapshot.navigation.cwd.clone()));
-                        }
-                        self.dispatch(Intent::ListThreads(op::ListThreads {
-                            query: (*self.snapshot.list_query).clone(),
-                        }));
-                        self.dispatch(Intent::LoadModels(op::LoadModels));
-                        self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings));
+                        self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
                     }
                     Err(error) => self.error = error,
                 }
@@ -800,23 +803,6 @@ impl Desktop {
             }
         }
         let cwd_changed = previous.navigation.cwd != self.snapshot.navigation.cwd;
-        let turn_completed = !Arc::ptr_eq(&previous.activity, &self.snapshot.activity)
-            && previous.activity.active.iter().any(|(id, active)| {
-                *active
-                    && !self
-                        .snapshot
-                        .activity
-                        .active
-                        .get(id)
-                        .copied()
-                        .unwrap_or(false)
-                    && self.snapshot.conversations.get(id).is_some_and(|thread| {
-                        thread.cwd.as_deref() == Some(&self.snapshot.navigation.cwd)
-                    })
-            });
-        if self.snapshot.connected && (cwd_changed || !previous.connected || turn_completed) {
-            self.refresh_review();
-        }
         if cwd_changed {
             let cwd = self.snapshot.navigation.cwd.clone();
             self.path
@@ -934,18 +920,10 @@ impl Desktop {
     fn sync_rows(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
         let mut rows = Vec::new();
         self.rendered = self.thread().map(|thread| {
-            let pending = self
-                .snapshot
-                .pending_submissions
-                .iter()
-                .filter(|(_, p)| p.draft_key == self.draft_key())
-                .map(|(id, p)| (id.clone(), p.clone()))
-                .collect();
-            conversation_presentation::presentation::project_conversation(
+            agent_core::presentation::conversation::project_conversation(
+                &self.snapshot,
                 thread.clone(),
-                &pending,
-                self.snapshot.requests.clone(),
-                self.rendered.as_ref(),
+                &self.rendered,
             )
         });
         if let Some(rendered) = &self.rendered {
@@ -1064,7 +1042,7 @@ impl Desktop {
         self.cancel_recording();
         self.busy += 1;
         self.perform(
-            Intent::OpenThread(op::OpenThread { thread_id: id }),
+            Intent::ReadThread(op::ReadThread::open(id)),
             |view, result, window, cx| {
                 view.busy = view.busy.saturating_sub(1);
                 if let Err(error) = result {
@@ -1090,6 +1068,7 @@ impl Desktop {
                 thread_id: self.selected().into(),
                 turn_id,
                 cursor,
+                defer_item_details: true,
             }),
             move |view, result, window, cx| {
                 if view.snapshot.epoch != generation {
@@ -1225,9 +1204,9 @@ impl Desktop {
         );
     }
     fn refresh_threads(&self) {
-        self.dispatch(Intent::ListThreads(op::ListThreads {
-            query: (*self.snapshot.list_query).clone(),
-        }));
+        self.dispatch(Intent::ListThreads(op::ListThreads::new(
+            (*self.snapshot.list_query).clone(),
+        )));
     }
     fn refresh_review(&self) {
         if !self.snapshot.navigation.cwd.is_empty() {

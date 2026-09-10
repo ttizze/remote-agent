@@ -15,6 +15,7 @@ use std::{
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
     pub text: String,
     pub attachments: Vec<Attachment>,
@@ -25,12 +26,14 @@ pub struct Draft {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Attachment {
     pub path: String,
     pub name: String,
     pub is_image: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FileDraft {
     pub revision: String,
     pub text: String,
@@ -44,6 +47,7 @@ pub struct Workspace {
     pub settings: Option<Arc<WorktreeSettings>>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Navigation {
     pub thread_id: Option<String>,
     pub cwd: String,
@@ -108,6 +112,7 @@ pub struct Terminal {
     pub sequence: u64,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     #[serde(default)]
     pub account: Arc<AccountState>,
@@ -304,18 +309,17 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             navigation.thread_id = None;
             navigation.draft_key = key;
             navigation.cwd = cwd;
-            return (
-                next,
-                watch
-                    .into_iter()
-                    .map(|watch_id| {
-                        Effect::execute(op::Unwatch {
-                            watch_key: 1,
-                            watch_id,
-                        })
+            let mut effects: Vec<_> = watch
+                .into_iter()
+                .map(|watch_id| {
+                    Effect::execute(op::Unwatch {
+                        watch_key: 1,
+                        watch_id,
                     })
-                    .collect(),
-            );
+                })
+                .collect();
+            effects.extend(op::review_workspace(&mut next));
+            return (next, effects);
         }
 
         Intent::SetFileDraft { path, text } => {
@@ -424,7 +428,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::CreateInvitation(operation) => return prepare(previous, next, operation),
         Intent::RemoveRemoteHost(operation) => return prepare(previous, next, operation),
         Intent::RevokeDevice(operation) => return prepare(previous, next, operation),
-        Intent::OpenThread(operation) => return prepare(previous, next, operation),
         Intent::ListFiles(operation) => return prepare(previous, next, operation),
         Intent::ReadFile(operation) => return prepare(previous, next, operation),
         Intent::SaveFile(operation) => return prepare(previous, next, operation),
@@ -520,6 +523,23 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             reset_session(&mut next);
             next.connected = true;
             next.error = None;
+            let query = Arc::make_mut(&mut next.list_query);
+            if query.project_limit == 0 {
+                query.project_limit = 5;
+            }
+            if query.chat_limit == 0 {
+                query.chat_limit = 5;
+            }
+            let mut effects = vec![
+                Effect::execute(op::ListThreads::new(query.clone())),
+                Effect::execute(op::LoadModels),
+            ];
+            if let Some(thread_id) = &next.navigation.thread_id {
+                effects.push(Effect::execute(op::ReadThread::open(thread_id.clone())));
+            } else {
+                effects.extend(op::review_workspace(&mut next));
+            }
+            return (next, effects);
         }
         Event::Disconnected(reason) => {
             reset_session(&mut next);

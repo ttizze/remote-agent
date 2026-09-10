@@ -224,7 +224,7 @@ impl Hosts {
                         Action::Pair => {
                             self.pairing
                                 .update(cx, |input, cx| input.set_value("", window, cx));
-                            if let Outcome::RemoteHostPaired(id) = outcome
+                            if let Outcome::RemoteHostPaired { id } = outcome
                                 && let Some(host) = self
                                     .snapshot
                                     .management
@@ -327,7 +327,7 @@ impl Render for Hosts {
                 .disabled(disabled)
                 .on_click(cx.listener(|view, _, _, cx| {
                     view.dispatch(
-                        Intent::CreateInvitation(op::CreateInvitation),
+                        Intent::CreateInvitation(op::CreateInvitation {}),
                         Action::Invite,
                     );
                     cx.notify();

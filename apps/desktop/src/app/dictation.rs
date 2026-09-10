@@ -87,9 +87,11 @@ impl Desktop {
             }
             platform::RecordingEvent::Finished(Ok(audio)) => {
                 state.control = None;
-                let intent = Intent::Transcribe(op::Transcribe {
+                let intent = Intent::Transcribe(op::Dictate {
                     draft_key: state.key.clone(),
-                    audio: base64::engine::general_purpose::STANDARD.encode(audio),
+                    request: agent_core::client::Transcribe {
+                        audio: base64::engine::general_purpose::STANDARD.encode(audio),
+                    },
                     send: state.send && state.generation == self.snapshot.epoch,
                     client_user_message_id: uuid::Uuid::new_v4().to_string(),
                 });

@@ -15,7 +15,7 @@ extension BexAppViewModel {
     }
 
     var modelError: String? {
-        notice
+        notice ?? snapshot.error()
     }
 
     var selectedModel: String {
@@ -44,10 +44,6 @@ extension BexAppViewModel {
 
     func chooseServiceTier(_ value: String) {
         perform(.selectServiceTier(key: coreDraftKey, serviceTier: value))
-    }
-
-    func loadModels() {
-        perform(.loadModels)
     }
 
     func loadAccounts(selecting id: String? = nil) {

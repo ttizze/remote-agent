@@ -232,12 +232,12 @@ impl CodexRpcService {
             }
             "host/terminal/start" => {
                 let raw = parse_params(&line)?;
-                let result: Result<agent_core::client::StartTerminal<'_>, _> =
+                let result: Result<agent_core::state::operations::StartTerminal<&str>, _> =
                     serde::Deserialize::deserialize(&raw);
                 match result {
                     Ok(params) => {
                         let upstream_params = json!({
-                            "processHandle": params.process_handle,
+                            "processHandle": params.handle,
                             "cwd": params.cwd,
                             "size": params.size,
                             "command": crate::platform::terminal_command(),

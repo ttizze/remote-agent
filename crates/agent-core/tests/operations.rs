@@ -1,3 +1,9 @@
+use agent_core::state::operations::{
+    CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
+    ReadAccountLogin, ReadFile, ReadItem, ReadOlder, ReadThread, ReadWorktreeSettings,
+    ReviewWorkspace, SelectAccount, StartAccountLogin, StartThread, Unwatch,
+    UpdateWorktreeSettings, Watch,
+};
 use agent_core::{
     client::*,
     models::{ListQuery, Thread, WorktreeSettings},
@@ -35,25 +41,15 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             thread_id: text(command, "threadId"),
             include_turns: true,
             paginate_history: true,
-            defer_item_details: command["deferItemDetails"].as_bool().unwrap()
+            defer_item_details: command["deferItemDetails"].as_bool().unwrap(),
+            open: false
         }),
-        "readOlder" => {
-            if let Some(turn_id) = optional(command, "turnId") {
-                call!(OlderItems {
-                    thread_id: text(command, "threadId"),
-                    turn_id,
-                    cursor: optional(command, "cursor"),
-                    defer_item_details: true
-                })
-            } else {
-                call!(OlderTurns {
-                    thread_id: text(command, "threadId"),
-                    turn_id: None,
-                    cursor: optional(command, "cursor"),
-                    defer_item_details: true
-                })
-            }
-        }
+        "readOlder" => call!(ReadOlder {
+            thread_id: text(command, "threadId"),
+            turn_id: optional(command, "turnId"),
+            cursor: optional(command, "cursor"),
+            defer_item_details: true,
+        }),
         "readItem" => call!(ReadItem {
             thread_id: text(command, "threadId"),
             turn_id: text(command, "turnId"),
@@ -100,7 +96,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             json!(reply.value)
         }
         "interruptTurn" => {
-            call!(InterruptTurn {
+            call!(Interrupt {
                 thread_id: text(command, "threadId"),
                 turn_id: text(command, "turnId")
             });
@@ -109,7 +105,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "models" => json!(client.models().await?),
         "sessionImages" => json!(client.session_images(text(command, "threadId")).await?),
         "watchThread" => {
-            call!(WatchThread {
+            call!(Watch {
                 thread_id: text(command, "threadId"),
                 watch_key: command["watchKey"].as_u64().unwrap(),
                 watch_id: command["watchId"].as_u64().unwrap(),
@@ -118,7 +114,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             Value::Null
         }
         "unwatchThread" => {
-            call!(UnwatchThread {
+            call!(Unwatch {
                 watch_key: command["watchKey"].as_u64().unwrap(),
                 watch_id: command["watchId"].as_u64().unwrap()
             });
@@ -164,7 +160,8 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             path: text(command, "path")
         }),
         "readFile" => call!(ReadFile {
-            path: text(command, "path")
+            path: text(command, "path"),
+            discard_draft: false
         }),
         "writeFile" => call!(WriteFile {
             path: text(command, "path"),
@@ -178,19 +175,21 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "updateWorktreeSettings" => {
             let settings: WorktreeSettings =
                 serde_json::from_value(command["settings"].clone()).unwrap();
-            call!(UpdateWorktreeSettings(&settings))
+            call!(UpdateWorktreeSettings {
+                settings: &settings
+            })
         }
         "accounts" => call!(ListAccounts {}),
         "selectAccount" => call!(SelectAccount {
-            account_id: text(command, "accountId")
+            id: text(command, "accountId")
         }),
         "startAccountLogin" => call!(StartAccountLogin {}),
         "accountLoginStatus" => call!(ReadAccountLogin {
-            login_id: text(command, "loginId")
+            id: text(command, "loginId")
         }),
         "cancelAccountLogin" => {
             call!(CancelAccountLogin {
-                login_id: text(command, "loginId")
+                id: text(command, "loginId")
             });
             Value::Null
         }

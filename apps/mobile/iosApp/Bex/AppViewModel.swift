@@ -115,7 +115,7 @@ final class BexAppViewModel: ObservableObject {
     func pair(_ contents: String) {
         do {
             let invitation = try parseInvitation(contents: contents, now: UInt64(Date().timeIntervalSince1970))
-            let id = try ticketIdentity(ticket: invitation.ticket)
+            let id = try ticketIdentity(ticket: invitation.endpoint)
             pairingError = nil
             isConnecting = true
             connection?.cancel()
@@ -123,9 +123,9 @@ final class BexAppViewModel: ObservableObject {
                 do {
                     let identity = try DeviceIdentity.loadOrGenerate(id)
                     let owner = try await AgentStore.connect(connection: Connection(
-                        ticket: invitation.ticket,
+                        ticket: invitation.endpoint,
                         identity: identity,
-                        invitation: invitation.token,
+                        invitation: invitation.invitation,
                         useRelays: true
                     ), persisted: Data())
                     guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
@@ -136,7 +136,7 @@ final class BexAppViewModel: ObservableObject {
                         try? await old.shutdown()
                     }
                     profiles.removeAll { $0.id == id }
-                    profiles.append(HostProfile(id: id, name: "PC Host", ticket: invitation.ticket))
+                    profiles.append(HostProfile(id: id, name: "PC Host", ticket: invitation.endpoint))
                     try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
                     UserDefaults.standard.set(id, forKey: "bex.selected-host")
                     selectedProfileId = id
@@ -145,8 +145,6 @@ final class BexAppViewModel: ObservableObject {
                     screen = .threads
                     isConnecting = false
                     observe(owner, host: id)
-                    refreshTaskList()
-                    loadModels()
                 } catch { self?.isConnecting = false; self?.pairingError = error.localizedDescription }
             }
         } catch { pairingError = error.localizedDescription }
@@ -172,11 +170,6 @@ final class BexAppViewModel: ObservableObject {
                 guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
                 publish(owner.snapshot())
                 isConnecting = false
-                if let id = snapshot.navigation().threadId {
-                    perform(.openThread(id: id))
-                }
-                refreshTaskList()
-                loadModels()
             } catch {
                 guard self?.selectedProfileId == profile.id else { return }
                 self?.isConnecting = false
@@ -219,8 +212,9 @@ final class BexAppViewModel: ObservableObject {
 /// Snapshot observation, persistence and foreground recovery.
 extension BexAppViewModel {
     private func observe(_ owner: AgentStore, host: String) {
+        let initial = snapshot
         observation = Task { [weak self] in
-            var previous = owner.snapshot()
+            var previous = initial
             while !Task.isCancelled {
                 do {
                     _ = try await owner.nextSnapshot(previous: previous)
@@ -241,16 +235,10 @@ extension BexAppViewModel {
         if !next.modelsUnchanged(other: snapshot) {
             models = next.models()
         }
-        let requestsChanged = !next.requestsUnchanged(other: snapshot)
-        let previous = snapshot.navigation().threadId.flatMap { snapshot.conversation(id: $0) }
+        let changed = !next.conversationUnchanged(other: snapshot)
         let source = next.navigation().threadId.flatMap { next.conversation(id: $0) }
-        let changed: Bool = switch (previous, source) {
-        case let (.some(previous), .some(source)): !source.unchanged(other: previous)
-        case (nil, nil): false
-        default: true
-        }
         snapshot = next
-        if changed || requestsChanged {
+        if changed {
             projectConversation(source)
         }
         persistence?.cancel()
@@ -274,7 +262,7 @@ extension BexAppViewModel {
         presentationTask = Task { [weak self] in
             while let self, let input = pendingPresentation {
                 pendingPresentation = nil
-                let rendered = await presentation.project(input.source)
+                let rendered = await presentation.project(input.source, snapshot: input.snapshot)
                 if selectedProfileId == input.host, snapshot.requestsUnchanged(other: input.snapshot),
                    snapshot.navigation().threadId == input.source?.id() {
                     conversation = rendered

@@ -4,6 +4,7 @@ import dev.remoteagent.core.JsonValue
 import dev.remoteagent.core.RenderedConversation
 import dev.remoteagent.core.RenderedItem
 import dev.remoteagent.core.RenderedTurn
+import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.Thread
 import dev.remoteagent.core.TurnPresentationData
 import dev.remoteagent.core.formatJsonValue
@@ -28,12 +29,12 @@ internal class ConversationProjection {
     var queued = emptyList<RenderedItem>()
         private set
 
-    fun project(thread: Thread?): List<TurnPresentationData> {
+    fun project(snapshot: Snapshot, thread: Thread?): List<TurnPresentationData> {
         if (thread == null) {
             previous = null; turns = emptyMap(); rows = emptyList(); queued = emptyList()
             return rows
         }
-        val next = projectConversation(thread, previous)
+        val next = projectConversation(snapshot, thread, previous)
         if (previous?.let(next::unchanged) != true) {
             val cached = mutableMapOf<String, Pair<RenderedTurn, List<TurnPresentationData>>>()
             rows = next.turns().flatMap { turn ->

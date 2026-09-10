@@ -10,7 +10,7 @@ extension BexAppViewModel {
             screen: profiles.isEmpty ? .pairing : screen, isConnected: snapshot.connected(),
             isConnecting: isConnecting, profiles: profiles, selectedProfileId: selectedProfileId,
             selectedProfileName: selected?.name, pairingError: pairingError,
-            connectionError: connectionError ?? (snapshot.connected() ? nil : snapshot.error()),
+            connectionError: connectionError ?? snapshot.error(),
             workingDirectory: nav.cwd, projects: list?.projects ?? [],
             threadLoadState: loadingThreads ? .loading : list != nil ? .ready : notice != nil ? .failed : .idle,
             threadLoadError: notice, threads: list?.threads ?? [], hasMoreProjects: list?.hasMoreProjects ?? false,
@@ -65,14 +65,7 @@ extension BexAppViewModel {
         guard !loadingThreads else { return }
         loadingThreads = true
         notice = nil
-        var query = snapshot.listQuery()
-        if query.projectLimit == 0 {
-            query.projectLimit = 5
-        }
-        if query.chatLimit == 0 {
-            query.chatLimit = 5
-        }
-        perform(.listThreads(query: query)) { [weak self] _ in self?.loadingThreads = false }
+        perform(.listThreads(query: snapshot.listQuery())) { [weak self] _ in self?.loadingThreads = false }
     }
 
     func expandTaskList(projects: Bool = false, projectId: String? = nil) {

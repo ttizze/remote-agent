@@ -25,10 +25,10 @@ val generateAgentBindings by
     tasks.registering(Exec::class) {
         workingDir(rootProject.projectDir)
         commandLine("scripts/build-agent-bindings.sh")
+        inputs.file(rootProject.file("scripts/build-agent-bindings.sh"))
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
-        inputs.dir(rootProject.file("crates/conversation-presentation"))
         outputs.dir(rootProject.file("target/agent-bindings"))
     }
 val buildAgentAndroid by
@@ -52,7 +52,6 @@ val buildAgentAndroid by
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/host-protocol"))
-        inputs.dir(rootProject.file("crates/conversation-presentation"))
         outputs.dir(layout.buildDirectory.dir("generated/jniLibs"))
     }
 

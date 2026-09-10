@@ -67,27 +67,29 @@ struct ModelSettingsSheet: View {
                 if loadingModels || changingAccount {
                     ProgressView()
                 }
-                if let current = model.currentModel, !current.efforts.isEmpty {
+                if let current = model.currentModel, !current.supportedReasoningEfforts.isEmpty {
                     Section("推論の強度") {
                         Picker("推論の強度", selection: Binding(
                             get: { model.selectedEffort.isEmpty ? current.defaultReasoningEffort : model.selectedEffort
                             },
                             set: model.chooseEffort
                         )) {
-                            ForEach(current.efforts, id: \.self) { Text($0).tag($0) }
+                            ForEach(current.supportedReasoningEfforts, id: \.reasoningEffort) {
+                                Text($0.reasoningEffort).tag($0.reasoningEffort)
+                            }
                         }
                         .pickerStyle(.segmented)
                         .accessibilityIdentifier("model.quick.effort")
                     }
                 }
-                if let current = model.currentModel, !current.serviceTiers.isEmpty {
+                if let tiers = model.currentModel?.serviceTiers, !tiers.isEmpty {
                     Section("サービス階層") {
                         Picker(
                             "サービス階層",
                             selection: Binding(get: { model.selectedServiceTier }, set: model.chooseServiceTier)
                         ) {
                             Text("既定").tag("")
-                            ForEach(current.serviceTiers, id: \.self) { Text($0).tag($0) }
+                            ForEach(tiers, id: \.id) { Text($0.id).tag($0.id) }
                         }.accessibilityIdentifier("model.service-tier")
                     }
                 }

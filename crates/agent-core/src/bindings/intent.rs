@@ -1,7 +1,12 @@
-use crate::{AgentError, Attachment, JsonValue, ListQuery, WorktreeSettings, error};
-use agent_core::state::Intent as Core;
-use agent_core::state::operations as op;
+use super::{AgentError, error};
+use crate::state::Intent as Core;
+use crate::state::operations as op;
+use crate::{
+    models::{ListQuery, WorktreeSettings},
+    state::Attachment,
+};
 use base64::Engine;
+use serde_json::Value;
 use std::collections::HashMap;
 
 #[derive(uniffi::Enum)]
@@ -9,7 +14,7 @@ pub enum Answer {
     Decision { index: u32 },
     Permissions { allow: bool },
     Questions { answers: HashMap<String, String> },
-    Raw { value: JsonValue },
+    Raw { value: Value },
 }
 #[derive(uniffi::Enum)]
 pub enum Intent {
@@ -66,7 +71,7 @@ pub enum Intent {
         turn_id: String,
     },
     Respond {
-        request_id: JsonValue,
+        request_id: Value,
         answer: Answer,
     },
     AddAttachment {
@@ -134,11 +139,9 @@ impl TryFrom<Intent> for Core {
         Ok(match i {
             Intent::ShowThreadList => Core::ShowThreadList,
             Intent::NewChat { cwd } => Core::NewChat(cwd),
-            Intent::OpenThread { id } => Core::OpenThread(op::OpenThread { thread_id: id }),
-            Intent::ListThreads { query } => Core::ListThreads(op::ListThreads {
-                query: query.into(),
-            }),
-            Intent::ReadThread { id } => Core::ReadThread(op::ReadThread { thread_id: id }),
+            Intent::OpenThread { id } => Core::ReadThread(op::ReadThread::open(id)),
+            Intent::ListThreads { query } => Core::ListThreads(op::ListThreads::new(query)),
+            Intent::ReadThread { id } => Core::ReadThread(op::ReadThread::new(id)),
             Intent::ReadOlder {
                 thread_id,
                 turn_id,
@@ -147,6 +150,7 @@ impl TryFrom<Intent> for Core {
                 thread_id,
                 turn_id,
                 cursor,
+                defer_item_details: true,
             }),
             Intent::ReadItem {
                 thread_id,
@@ -163,6 +167,7 @@ impl TryFrom<Intent> for Core {
             } => Core::ForkThread(op::ForkThread {
                 thread_id,
                 last_turn_id,
+                exclude_turns: false,
             }),
             Intent::SetDraftText { key, text } => Core::SetDraftText {
                 thread_id: key,
@@ -192,24 +197,21 @@ impl TryFrom<Intent> for Core {
                 Core::Interrupt(op::Interrupt { thread_id, turn_id })
             }
             Intent::Respond { request_id, answer } => Core::Respond(op::Respond {
-                request_id: request_id.try_into()?,
+                request_id,
                 answer: match answer {
-                    Answer::Decision { index } => {
-                        agent_core::client::Answer::Decision(index as usize)
-                    }
-                    Answer::Permissions { allow } => agent_core::client::Answer::Permissions(allow),
+                    Answer::Decision { index } => crate::client::Answer::Decision(index as usize),
+                    Answer::Permissions { allow } => crate::client::Answer::Permissions(allow),
                     Answer::Questions { answers } => {
-                        agent_core::client::Answer::Questions(answers.into_iter().collect())
+                        crate::client::Answer::Questions(answers.into_iter().collect())
                     }
-                    Answer::Raw { value } => agent_core::client::Answer::Raw(
-                        serde_json::value::to_raw_value(&serde_json::Value::try_from(value)?)
-                            .map_err(error)?,
+                    Answer::Raw { value } => crate::client::Answer::Raw(
+                        serde_json::value::to_raw_value(&value).map_err(error)?,
                     ),
                 },
             }),
             Intent::AddAttachment { key, attachment } => Core::AddAttachment {
                 draft_key: key,
-                attachment: attachment.into(),
+                attachment,
             },
             Intent::RemoveAttachment { key, index } => Core::RemoveAttachment {
                 draft_key: key,
@@ -221,7 +223,7 @@ impl TryFrom<Intent> for Core {
                 directory,
             } => Core::UploadAttachment(op::UploadAttachment {
                 draft_key: key,
-                attachment: attachment.into(),
+                attachment,
                 directory,
             }),
             Intent::DownloadFile {
@@ -239,9 +241,11 @@ impl TryFrom<Intent> for Core {
                 audio,
                 send,
                 client_user_message_id,
-            } => Core::Transcribe(op::Transcribe {
+            } => Core::Transcribe(op::Dictate {
                 draft_key: key,
-                audio: base64::engine::general_purpose::STANDARD.encode(audio),
+                request: crate::client::Transcribe {
+                    audio: base64::engine::general_purpose::STANDARD.encode(audio),
+                },
                 send,
                 client_user_message_id,
             }),
@@ -256,15 +260,13 @@ impl TryFrom<Intent> for Core {
             Intent::SetFileDraft { path, text } => Core::SetFileDraft { path, text },
             Intent::SaveFile { path } => Core::SaveFile(op::SaveFile { path }),
             Intent::ReviewWorkspace { cwd } => Core::ReviewWorkspace(op::ReviewWorkspace { cwd }),
-            Intent::ReadWorktreeSettings => Core::ReadWorktreeSettings(op::ReadWorktreeSettings),
+            Intent::ReadWorktreeSettings => Core::ReadWorktreeSettings(op::ReadWorktreeSettings {}),
             Intent::UpdateWorktreeSettings { settings } => {
-                Core::UpdateWorktreeSettings(op::UpdateWorktreeSettings {
-                    settings: settings.into(),
-                })
+                Core::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings })
             }
-            Intent::ListAccounts => Core::ListAccounts(op::ListAccounts),
+            Intent::ListAccounts => Core::ListAccounts(op::ListAccounts {}),
             Intent::SelectAccount { id } => Core::SelectAccount(op::SelectAccount { id }),
-            Intent::StartAccountLogin => Core::StartAccountLogin(op::StartAccountLogin),
+            Intent::StartAccountLogin => Core::StartAccountLogin(op::StartAccountLogin {}),
             Intent::ReadAccountLogin { id } => Core::ReadAccountLogin(op::ReadAccountLogin { id }),
             Intent::CancelAccountLogin { id } => {
                 Core::CancelAccountLogin(op::CancelAccountLogin { id })
