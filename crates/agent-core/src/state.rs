@@ -147,186 +147,20 @@ pub struct Snapshot {
     #[serde(skip)]
     pub error: Option<String>,
 }
-#[derive(Debug)]
-pub enum Intent {
-    ShowThreadList,
-    ListAccounts,
-    SelectAccount(String),
-    StartAccountLogin,
-    ReadAccountLogin(String),
-    CancelAccountLogin(String),
-    ForkThread {
-        thread_id: String,
-        last_turn_id: String,
-    },
-    StartTerminal {
-        handle: String,
-        cwd: String,
-        size: crate::client::TerminalSize,
-    },
-    WriteTerminal {
-        handle: String,
-        data: Vec<u8>,
-    },
-    ResizeTerminal {
-        handle: String,
-        size: crate::client::TerminalSize,
-    },
-    CloseTerminal(String),
-    AcknowledgeTerminal {
-        handle: String,
-        sequence: u64,
-    },
-    Transcribe {
-        draft_key: String,
-        audio: String,
-        send: bool,
-        client_user_message_id: String,
-    },
-    AddAttachment {
-        draft_key: String,
-        attachment: Attachment,
-    },
-    RemoveAttachment {
-        draft_key: String,
-        index: usize,
-    },
-    UploadAttachment {
-        draft_key: String,
-        attachment: Attachment,
-        directory: String,
-    },
-    DownloadFile {
-        source: std::path::PathBuf,
-        destination: std::path::PathBuf,
-    },
-    LoadSessionImages(String),
-    LoadHostManagement,
-    CreateInvitation,
-    PairRemoteHost {
-        invitation: Invitation,
-        name: String,
-    },
-    RemoveRemoteHost(String),
-    RevokeDevice(String),
-    NewChat(String),
-    OpenThread(String),
-    ListFiles(String),
-    ReadFile {
-        path: String,
-        discard_draft: bool,
-    },
-    SetFileDraft {
-        path: String,
-        text: String,
-    },
-    SaveFile(String),
-    ReviewWorkspace(String),
-    ReadWorktreeSettings,
-    UpdateWorktreeSettings(WorktreeSettings),
-    ListThreads(ListQuery),
-    StartThread {
-        cwd: Option<String>,
-        model: Option<String>,
-    },
-    ReadThread(String),
-    ReadOlder {
-        thread_id: String,
-        turn_id: Option<String>,
-        cursor: Option<String>,
-    },
-    ReadItem {
-        thread_id: String,
-        turn_id: String,
-        item_id: String,
-    },
-    LoadModels,
-    SetDraft {
-        thread_id: String,
-        draft: Draft,
-    },
-    SetDraftText {
-        thread_id: String,
-        text: String,
-    },
-    SelectModel {
-        thread_id: String,
-        model: String,
-    },
-    SelectEffort {
-        thread_id: String,
-        effort: String,
-    },
-    SelectServiceTier {
-        thread_id: String,
-        service_tier: String,
-    },
-    Submit {
-        /// None submits the current navigation target, creating its thread if needed.
-        thread_id: Option<String>,
-        client_user_message_id: String,
-    },
-    Interrupt {
-        thread_id: String,
-        turn_id: String,
-    },
-    Respond {
-        request_id: Value,
-        answer: Answer,
-    },
-    Watch {
-        thread_id: String,
-        watch_key: u64,
-        watch_id: u64,
-        path: Option<String>,
-    },
-    Unwatch {
-        watch_key: u64,
-        watch_id: u64,
-    },
-}
+mod notifications;
+use notifications::notification;
+pub(crate) mod operations;
+use operations::add_attachment;
+pub use operations::{Intent, Loaded};
+
 #[derive(Debug)]
 pub enum Event {
-    AccountsLoaded {
-        generation: u64,
-        accounts: crate::client::Accounts,
-    },
-    AccountSelected {
-        generation: u64,
-        selected_id: String,
-        persistence_error: Option<String>,
-    },
-    AccountLoginStarted {
-        generation: u64,
-        login: crate::client::AccountLogin,
-    },
-    AccountLoginUpdated {
-        generation: u64,
-        status: crate::client::AccountLoginStatus,
-    },
-    AccountLoginCancelled {
-        generation: u64,
-    },
-    ThreadForked {
-        generation: u64,
-        thread: Thread,
-        model: Option<String>,
-    },
-    TerminalStarted(String),
-    TerminalClosed(String),
+    Loaded(Loaded),
     TerminalFailed {
         handle: String,
         reason: String,
     },
     Intent(Intent),
-    Transcribed {
-        draft_key: String,
-        generation: u64,
-        draft: Arc<Draft>,
-        text: String,
-        send: bool,
-        client_user_message_id: String,
-    },
     AttachmentUploaded {
         draft_key: String,
         attachment: Attachment,
@@ -336,40 +170,7 @@ pub enum Event {
         status: HostStatus,
         remotes: Vec<RemoteHost>,
     },
-    InvitationCreated(Invitation),
     RemoteHostPaired(RemoteHost),
-    RemoteHostRemoved(String),
-    DeviceRevoked(String),
-    ThreadOpened {
-        generation: u64,
-        thread: Thread,
-        model: Option<String>,
-    },
-    FilesLoaded {
-        request: u64,
-        files: FileList,
-    },
-    FileLoaded {
-        request: u64,
-        file: FileContent,
-    },
-    FileSaved {
-        submitted: FileDraft,
-        file: FileContent,
-    },
-    ReviewLoaded {
-        request: u64,
-        review: WorkspaceReview,
-    },
-    WorktreeSettingsLoaded {
-        request: u64,
-        settings: WorktreeSettings,
-    },
-    ItemLoaded {
-        thread_id: String,
-        turn_id: String,
-        item: Item,
-    },
     Submitted {
         thread_id: String,
         client_user_message_id: String,
@@ -390,10 +191,6 @@ pub enum Event {
         thread: Thread,
         turn_id: Option<String>,
         cursor: Option<String>,
-    },
-    ThreadsLoaded {
-        request: u64,
-        threads: ThreadList,
     },
     ModelsLoaded(Vec<Model>),
     ServerRequest(ServerRequest),
@@ -436,9 +233,17 @@ fn clear_workspace_location(workspace: &mut Workspace) {
 }
 
 pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
-    let mut next = previous.clone();
     match event {
-        Event::Intent(intent @ Intent::StartTerminal { .. }) => {
+        Event::Intent(intent) => reduce_intent(previous, intent),
+        Event::Loaded(loaded) => loaded.reduce(previous),
+        Event::Notification { method, params } => notification(previous, &method, params),
+        event => reduce_event(previous, event),
+    }
+}
+fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
+    let mut next = previous.clone();
+    match intent {
+        intent @ Intent::StartTerminal { .. } => {
             let Intent::StartTerminal { handle, cwd, .. } = &intent else {
                 unreachable!()
             };
@@ -459,7 +264,7 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             );
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::Intent(Intent::AcknowledgeTerminal { handle, sequence }) => {
+        Intent::AcknowledgeTerminal { handle, sequence } => {
             if let Some(terminal) = next.terminals.get(&handle)
                 && terminal
                     .output
@@ -477,30 +282,10 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 }
             }
         }
-        Event::TerminalStarted(handle) => {
-            if let Some(terminal) = next.terminals.get(&handle)
-                && terminal.phase == TerminalPhase::Starting
-            {
-                Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap()).phase =
-                    TerminalPhase::Running;
-            }
-        }
-        Event::TerminalClosed(handle) => {
-            if next.terminals.contains_key(&handle) {
-                Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap()).phase =
-                    TerminalPhase::Closed;
-            }
-        }
-        Event::TerminalFailed { handle, reason } => {
-            if next.terminals.contains_key(&handle) {
-                Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap()).phase =
-                    TerminalPhase::Failed(reason);
-            }
-        }
-        Event::Intent(Intent::Submit {
+        Intent::Submit {
             thread_id,
             client_user_message_id,
-        }) => {
+        } => {
             let thread_id = thread_id.or_else(|| previous.navigation.thread_id.clone());
             let draft_key = thread_id
                 .clone()
@@ -515,128 +300,13 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 None,
             );
         }
-        Event::Transcribed {
-            draft_key,
-            generation,
-            mut draft,
-            text,
-            send,
-            client_user_message_id,
-        } => {
-            if send
-                && previous.navigation.generation == generation
-                && previous.navigation.draft_key == draft_key
-            {
-                let clear_draft = draft.clone();
-                append_transcript(&mut Arc::make_mut(&mut draft).text, &text);
-                let (mut next, effects) = submission(
-                    previous,
-                    previous.navigation.thread_id.clone(),
-                    draft_key,
-                    draft,
-                    client_user_message_id.clone(),
-                    Some(text),
-                );
-                Arc::make_mut(
-                    Arc::make_mut(&mut next.pending_submissions)
-                        .get_mut(&client_user_message_id)
-                        .unwrap(),
-                )
-                .clear_draft = Some(clear_draft);
-                return (next, effects);
-            }
-            let draft = Arc::make_mut(
-                Arc::make_mut(&mut next.drafts)
-                    .entry(draft_key)
-                    .or_default(),
-            );
-            append_transcript(&mut draft.text, &text);
-        }
-        Event::DraftThreadCreated {
-            thread,
-            draft_key,
-            generation,
-            client_user_message_id,
-            draft,
-        } => {
-            let Some(id) = thread.id.clone() else {
-                return reduce(previous, Event::Failed("thread ID is missing".into()));
-            };
-            let same_view = previous.navigation.generation == generation
-                && previous.navigation.draft_key == draft_key;
-            let (mut next, mut effects) = reduce(
-                previous,
-                Event::ThreadOpened {
-                    generation,
-                    thread,
-                    model: None,
-                },
-            );
-            let current = previous.drafts.get(&draft_key);
-            let original = previous
-                .pending_submissions
-                .get(&client_user_message_id)
-                .and_then(|pending| pending.clear_draft.as_ref())
-                .unwrap_or(&draft);
-            let target = if same_view {
-                current.cloned().unwrap_or_else(|| original.clone())
-            } else {
-                original.clone()
-            };
-            let drafts = Arc::make_mut(&mut next.drafts);
-            if same_view || current == Some(original) {
-                drafts.remove(&draft_key);
-            }
-            drafts.insert(id.clone(), target);
-            if let Some(pending) =
-                Arc::make_mut(&mut next.pending_submissions).get_mut(&client_user_message_id)
-            {
-                Arc::make_mut(pending).draft_key = id.clone();
-            }
-            effects.push(Effect::Submit {
-                thread_id: id,
-                client_user_message_id,
-                draft,
-            });
-            if previous.threads.is_some() {
-                let (updated, refresh) = reduce(
-                    &next,
-                    Event::Intent(Intent::ListThreads((*previous.list_query).clone())),
-                );
-                next = updated;
-                effects.extend(refresh);
-            }
-            return (next, effects);
-        }
-        Event::SubmissionFailed(id) => {
-            if let Some(pending) = Arc::make_mut(&mut next.pending_submissions).remove(&id)
-                && let Some(text) = &pending.recovery_text
-            {
-                let draft = Arc::make_mut(
-                    Arc::make_mut(&mut next.drafts)
-                        .entry(pending.draft_key.clone())
-                        .or_default(),
-                );
-                append_transcript(&mut draft.text, text);
-            }
-        }
-        Event::Intent(Intent::AddAttachment {
-            draft_key,
-            attachment,
-        })
-        | Event::AttachmentUploaded {
+        Intent::AddAttachment {
             draft_key,
             attachment,
         } => {
-            Arc::make_mut(
-                Arc::make_mut(&mut next.drafts)
-                    .entry(draft_key)
-                    .or_default(),
-            )
-            .attachments
-            .push(attachment);
+            add_attachment(&mut next, draft_key, attachment);
         }
-        Event::Intent(Intent::RemoveAttachment { draft_key, index }) => {
+        Intent::RemoveAttachment { draft_key, index } => {
             if previous
                 .drafts
                 .get(&draft_key)
@@ -647,57 +317,19 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     .remove(index);
             }
         }
-        Event::Intent(
-            intent @ (Intent::LoadHostManagement
-            | Intent::PairRemoteHost { .. }
-            | Intent::RemoveRemoteHost(_)
-            | Intent::RevokeDevice(_)),
-        ) => {
+        intent @ (Intent::LoadHostManagement
+        | Intent::PairRemoteHost { .. }
+        | Intent::RemoveRemoteHost(_)
+        | Intent::RevokeDevice(_)) => {
             Arc::make_mut(&mut next.management).generation += 1;
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::HostManagementLoaded {
-            generation,
-            status,
-            remotes,
-        } => {
-            if generation == previous.management.generation {
-                let management = Arc::make_mut(&mut next.management);
-                management.status = Some(Arc::new(status));
-                management.remotes = remotes;
-            }
-        }
-        Event::InvitationCreated(invitation) => {
-            Arc::make_mut(&mut next.management).invitation = Some(Arc::new(invitation));
-        }
-        Event::RemoteHostPaired(host) => {
-            let management = Arc::make_mut(&mut next.management);
-            if let Some(current) = management
-                .remotes
-                .iter_mut()
-                .find(|current| current.id == host.id)
-            {
-                *current = host;
-            } else {
-                management.remotes.push(host);
-            }
-        }
-        Event::RemoteHostRemoved(id) => {
-            Arc::make_mut(&mut next.management)
-                .remotes
-                .retain(|host| host.id != id);
-        }
-        Event::DeviceRevoked(id) => {
-            if let Some(status) = Arc::make_mut(&mut next.management).status.as_mut() {
-                Arc::make_mut(status).devices.retain(|device| device != &id);
-            }
-        }
-        Event::Intent(Intent::ListThreads(query)) => {
+        Intent::ListThreads(query) => {
             next.list_query = Arc::new(query.clone());
             next.list_request += 1;
             return (next, vec![Effect::Execute(Intent::ListThreads(query))]);
         }
-        Event::Intent(Intent::ShowThreadList) => {
+        Intent::ShowThreadList => {
             let watch = previous.navigation.watch_id;
             next.navigation = Arc::new(Navigation {
                 generation: previous.navigation.generation + 1,
@@ -717,7 +349,7 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     .collect(),
             );
         }
-        Event::Intent(Intent::NewChat(cwd)) => {
+        Intent::NewChat(cwd) => {
             let key = format!("new:{cwd}");
             if !previous.drafts.contains_key(&key) {
                 let draft = Draft::default();
@@ -753,147 +385,21 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     .collect(),
             );
         }
-        Event::Intent(intent @ (Intent::OpenThread(_) | Intent::ForkThread { .. })) => {
+        intent @ (Intent::OpenThread(_) | Intent::ForkThread { .. }) => {
             Arc::make_mut(&mut next.navigation).generation += 1;
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::ThreadForked {
-            generation,
-            thread,
-            model,
-        } => {
-            let (mut next, mut effects) = reduce(
-                previous,
-                Event::ThreadOpened {
-                    generation,
-                    thread,
-                    model,
-                },
-            );
-            if previous.threads.is_some() {
-                let (updated, refresh) = reduce(
-                    &next,
-                    Event::Intent(Intent::ListThreads((*previous.list_query).clone())),
-                );
-                next = updated;
-                effects.extend(refresh);
-            }
-            return (next, effects);
-        }
-        Event::Intent(intent @ (Intent::ListAccounts | Intent::SelectAccount(_))) => {
+        intent @ (Intent::ListAccounts | Intent::SelectAccount(_)) => {
             Arc::make_mut(&mut next.account).accounts_generation += 1;
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::Intent(
-            intent @ (Intent::StartAccountLogin
-            | Intent::ReadAccountLogin(_)
-            | Intent::CancelAccountLogin(_)),
-        ) => {
+        intent @ (Intent::StartAccountLogin
+        | Intent::ReadAccountLogin(_)
+        | Intent::CancelAccountLogin(_)) => {
             Arc::make_mut(&mut next.account).login_generation += 1;
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::AccountsLoaded {
-            generation,
-            accounts,
-        } if generation == previous.account.accounts_generation => {
-            Arc::make_mut(&mut next.account).accounts = Some(Arc::new(accounts));
-        }
-        Event::AccountSelected {
-            generation,
-            selected_id,
-            persistence_error,
-        } if generation == previous.account.accounts_generation => {
-            if let Some(accounts) = &mut Arc::make_mut(&mut next.account).accounts {
-                Arc::make_mut(accounts).selected_id = Some(selected_id);
-            }
-            next.error = persistence_error;
-            return (next, vec![Effect::Execute(Intent::LoadModels)]);
-        }
-        Event::AccountLoginStarted { generation, login }
-            if generation == previous.account.login_generation =>
-        {
-            let account = Arc::make_mut(&mut next.account);
-            account.login = Some(Arc::new(login));
-            account.login_status = None;
-        }
-        Event::AccountLoginUpdated { generation, status }
-            if generation == previous.account.login_generation =>
-        {
-            let completed = status.completed;
-            let account = Arc::make_mut(&mut next.account);
-            account.login_status = Some(Arc::new(status));
-            if completed {
-                account.login = None;
-                let (next, mut effects) = reduce(&next, Event::Intent(Intent::ListAccounts));
-                effects.push(Effect::Execute(Intent::LoadModels));
-                return (next, effects);
-            }
-        }
-        Event::AccountLoginCancelled { generation }
-            if generation == previous.account.login_generation =>
-        {
-            let account = Arc::make_mut(&mut next.account);
-            account.login = None;
-            account.login_status = None;
-        }
-        Event::AccountsLoaded { .. }
-        | Event::AccountSelected { .. }
-        | Event::AccountLoginStarted { .. }
-        | Event::AccountLoginUpdated { .. }
-        | Event::AccountLoginCancelled { .. } => {}
-        Event::ThreadOpened {
-            generation,
-            thread,
-            model,
-        } => {
-            let id = thread.id.clone();
-            let cwd = thread.cwd.clone().unwrap_or_default();
-            let path = thread.path.clone();
-            let (mut next, mut effects) = reduce(previous, Event::ThreadRefreshed(thread));
-            if generation == previous.navigation.generation
-                && let Some(id) = id
-            {
-                if previous.navigation.cwd != cwd {
-                    clear_workspace_location(Arc::make_mut(&mut next.workspace));
-                }
-                let navigation = Arc::make_mut(&mut next.navigation);
-                if let Some(watch_id) = navigation.watch_id.take() {
-                    effects.push(Effect::Execute(Intent::Unwatch {
-                        watch_key: 1,
-                        watch_id,
-                    }));
-                }
-                navigation.watch_thread_id = None;
-                navigation.thread_id = Some(id.clone());
-                if previous.activity.unread.contains(&id) {
-                    Arc::make_mut(&mut next.activity).unread.remove(&id);
-                }
-                navigation.draft_key = id.clone();
-                navigation.cwd = cwd;
-                if path.is_some() {
-                    navigation.watch_id = Some(generation);
-                    navigation.watch_thread_id = Some(id.clone());
-                    effects.push(Effect::Execute(Intent::Watch {
-                        thread_id: id.clone(),
-                        watch_key: 1,
-                        watch_id: generation,
-                        path,
-                    }));
-                }
-                if let Some(model) = model {
-                    let (updated, _) = reduce(
-                        &next,
-                        Event::Intent(Intent::SelectModel {
-                            thread_id: id,
-                            model,
-                        }),
-                    );
-                    next = updated;
-                }
-            }
-            return (next, effects);
-        }
-        Event::Intent(intent @ Intent::Watch { .. }) => {
+        intent @ Intent::Watch { .. } => {
             if let Intent::Watch {
                 thread_id,
                 watch_id,
@@ -906,7 +412,7 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::Intent(intent @ Intent::Unwatch { .. }) => {
+        intent @ Intent::Unwatch { .. } => {
             if let Intent::Unwatch { watch_id, .. } = &intent
                 && previous.navigation.watch_id == Some(*watch_id)
             {
@@ -916,20 +422,18 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::Intent(
-            intent @ (Intent::ReadWorktreeSettings | Intent::UpdateWorktreeSettings(_)),
-        ) => {
+        intent @ (Intent::ReadWorktreeSettings | Intent::UpdateWorktreeSettings(_)) => {
             Arc::make_mut(&mut next.workspace).settings_request += 1;
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::Intent(intent @ Intent::ListFiles(_)) => {
+        intent @ Intent::ListFiles(_) => {
             Arc::make_mut(&mut next.workspace).directory_request += 1;
             return (next, vec![Effect::Execute(intent)]);
         }
-        Event::Intent(Intent::ReadFile {
+        Intent::ReadFile {
             path,
             discard_draft,
-        }) => {
+        } => {
             if discard_draft {
                 Arc::make_mut(&mut next.file_drafts).remove(&path);
             }
@@ -942,7 +446,7 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 })],
             );
         }
-        Event::Intent(Intent::SetFileDraft { path, text }) => {
+        Intent::SetFileDraft { path, text } => {
             let revision = previous
                 .file_drafts
                 .get(&path)
@@ -967,7 +471,7 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 next.error = Some("file has not been loaded".into());
             }
         }
-        Event::Intent(Intent::ReviewWorkspace(cwd)) => {
+        Intent::ReviewWorkspace(cwd) => {
             let workspace = Arc::make_mut(&mut next.workspace);
             workspace.review_request += 1;
             if workspace.review_cwd.as_deref() != Some(&cwd) {
@@ -976,50 +480,10 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             workspace.review_cwd = Some(cwd.clone());
             return (next, vec![Effect::Execute(Intent::ReviewWorkspace(cwd))]);
         }
-        Event::FilesLoaded { request, files } => {
-            if request == previous.workspace.directory_request {
-                Arc::make_mut(&mut next.workspace).directory = Some(Arc::new(files));
-            }
-        }
-        Event::FileLoaded { request, file } => {
-            if request == previous.workspace.file_request {
-                Arc::make_mut(&mut next.workspace).file = Some(Arc::new(file));
-            }
-        }
-        Event::FileSaved { submitted, file } => {
-            if let Some(current) = previous.file_drafts.get(&file.path) {
-                if current == &submitted {
-                    Arc::make_mut(&mut next.file_drafts).remove(&file.path);
-                } else if current.revision == submitted.revision {
-                    Arc::make_mut(&mut next.file_drafts)
-                        .get_mut(&file.path)
-                        .unwrap()
-                        .revision = file.revision.clone();
-                }
-            }
-            if previous
-                .workspace
-                .file
-                .as_ref()
-                .is_some_and(|current| current.path == file.path)
-            {
-                Arc::make_mut(&mut next.workspace).file = Some(Arc::new(file));
-            }
-        }
-        Event::ReviewLoaded { request, review } => {
-            if request == previous.workspace.review_request {
-                Arc::make_mut(&mut next.workspace).review = Some(Arc::new(review));
-            }
-        }
-        Event::WorktreeSettingsLoaded { request, settings } => {
-            if request == previous.workspace.settings_request {
-                Arc::make_mut(&mut next.workspace).settings = Some(Arc::new(settings));
-            }
-        }
-        Event::Intent(Intent::SetDraft { thread_id, draft }) => {
+        Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
         }
-        Event::Intent(Intent::SetDraftText { thread_id, text }) => {
+        Intent::SetDraftText { thread_id, text } => {
             if previous
                 .drafts
                 .get(&thread_id)
@@ -1031,11 +495,9 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 Arc::make_mut(draft).text = text;
             }
         }
-        Event::Intent(
-            intent @ (Intent::SelectModel { .. }
-            | Intent::SelectEffort { .. }
-            | Intent::SelectServiceTier { .. }),
-        ) => {
+        intent @ (Intent::SelectModel { .. }
+        | Intent::SelectEffort { .. }
+        | Intent::SelectServiceTier { .. }) => {
             let thread_id = match &intent {
                 Intent::SelectModel { thread_id, .. }
                 | Intent::SelectEffort { thread_id, .. }
@@ -1086,15 +548,109 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
             }
         }
-        Event::Intent(intent) => return (next, vec![Effect::Execute(intent)]),
-        Event::ItemLoaded {
-            thread_id,
-            turn_id,
-            item,
+        intent => return (next, vec![Effect::Execute(intent)]),
+    }
+    (next, Vec::new())
+}
+fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
+    let mut next = previous.clone();
+    match event {
+        Event::TerminalFailed { handle, reason } => {
+            if next.terminals.contains_key(&handle) {
+                Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap()).phase =
+                    TerminalPhase::Failed(reason);
+            }
+        }
+        Event::DraftThreadCreated {
+            thread,
+            draft_key,
+            generation,
+            client_user_message_id,
+            draft,
         } => {
-            next = upsert_item(previous, &thread_id, &turn_id, item);
-            reconcile_pending(&mut next, &thread_id);
-            return (next, Vec::new());
+            let Some(id) = thread.id.clone() else {
+                return reduce(previous, Event::Failed("thread ID is missing".into()));
+            };
+            let same_view = previous.navigation.generation == generation
+                && previous.navigation.draft_key == draft_key;
+            let (mut next, mut effects) =
+                operations::open_thread(previous, thread, None, generation);
+            let current = previous.drafts.get(&draft_key);
+            let original = previous
+                .pending_submissions
+                .get(&client_user_message_id)
+                .and_then(|pending| pending.clear_draft.as_ref())
+                .unwrap_or(&draft);
+            let target = if same_view {
+                current.cloned().unwrap_or_else(|| original.clone())
+            } else {
+                original.clone()
+            };
+            let drafts = Arc::make_mut(&mut next.drafts);
+            if same_view || current == Some(original) {
+                drafts.remove(&draft_key);
+            }
+            drafts.insert(id.clone(), target);
+            if let Some(pending) =
+                Arc::make_mut(&mut next.pending_submissions).get_mut(&client_user_message_id)
+            {
+                Arc::make_mut(pending).draft_key = id.clone();
+            }
+            effects.push(Effect::Submit {
+                thread_id: id,
+                client_user_message_id,
+                draft,
+            });
+            if previous.threads.is_some() {
+                let (updated, refresh) = reduce(
+                    &next,
+                    Event::Intent(Intent::ListThreads((*previous.list_query).clone())),
+                );
+                next = updated;
+                effects.extend(refresh);
+            }
+            return (next, effects);
+        }
+        Event::SubmissionFailed(id) => {
+            if let Some(pending) = Arc::make_mut(&mut next.pending_submissions).remove(&id)
+                && let Some(text) = &pending.recovery_text
+            {
+                let draft = Arc::make_mut(
+                    Arc::make_mut(&mut next.drafts)
+                        .entry(pending.draft_key.clone())
+                        .or_default(),
+                );
+                append_transcript(&mut draft.text, text);
+            }
+        }
+        Event::AttachmentUploaded {
+            draft_key,
+            attachment,
+        } => {
+            add_attachment(&mut next, draft_key, attachment);
+        }
+        Event::HostManagementLoaded {
+            generation,
+            status,
+            remotes,
+        } => {
+            if generation == previous.management.generation {
+                let management = Arc::make_mut(&mut next.management);
+                management.status = Some(Arc::new(status));
+                management.remotes = remotes;
+            }
+        }
+        Event::RemoteHostPaired(host) => {
+            let management = Arc::make_mut(&mut next.management);
+            if let Some(current) = management
+                .remotes
+                .iter_mut()
+                .find(|current| current.id == host.id)
+            {
+                *current = host;
+            } else {
+                management.remotes.push(host);
+            }
         }
         Event::Submitted {
             thread_id,
@@ -1175,11 +731,6 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 }
             }
         }
-        Event::ThreadsLoaded { request, threads } => {
-            if request == previous.list_request {
-                next.threads = Some(Arc::new(threads));
-            }
-        }
         Event::ModelsLoaded(models) => {
             for (id, previous_draft) in previous.drafts.iter() {
                 let settings = supported_settings(previous_draft, &models);
@@ -1204,7 +755,6 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Event::RequestResolved(id) => {
             Arc::make_mut(&mut next.requests).remove(&id.to_string());
         }
-        Event::Notification { method, params } => return notification(previous, &method, params),
         Event::Connected => {
             reset_session(&mut next);
             next.connected = true;
@@ -1228,6 +778,9 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.error = Some(reason);
         }
         Event::Failed(error) => next.error = Some(error),
+        Event::Intent(_) | Event::Loaded(_) | Event::Notification { .. } => {
+            unreachable!("handled by the reducer router")
+        }
     }
     (next, Vec::new())
 }
@@ -1583,428 +1136,6 @@ fn refresh_turn(previous: &Turn, incoming: &Turn) -> Turn {
     merged
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NotificationParams {
-    thread_id: String,
-    watch_id: Option<u64>,
-    turn_id: Option<String>,
-    turn: Option<Turn>,
-    item: Option<Item>,
-    item_id: Option<String>,
-    status: Option<ThreadStatus>,
-    delta: Option<String>,
-    error: Option<Value>,
-    #[serde(default)]
-    will_retry: bool,
-    review_id: Option<String>,
-    review: Option<Value>,
-    #[serde(flatten)]
-    extra: Map<String, Value>,
-}
-fn notification(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, Vec<Effect>) {
-    if matches!(method, "process/outputDelta" | "process/exited") {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ProcessEvent {
-            process_handle: String,
-            delta_base64: Option<String>,
-            cap_reached: Option<bool>,
-            exit_code: Option<i32>,
-        }
-        let params: ProcessEvent = match serde_json::from_value(params) {
-            Ok(params) => params,
-            Err(error) => {
-                return reduce(
-                    previous,
-                    Event::Failed(format!("invalid {method} notification: {error}")),
-                );
-            }
-        };
-        let Some(current) = previous.terminals.get(&params.process_handle) else {
-            return (previous.clone(), Vec::new());
-        };
-        if matches!(
-            current.phase,
-            TerminalPhase::Closed | TerminalPhase::Exited(_)
-        ) {
-            return (previous.clone(), Vec::new());
-        }
-        let mut next = previous.clone();
-        let terminal = Arc::make_mut(
-            Arc::make_mut(&mut next.terminals)
-                .get_mut(&params.process_handle)
-                .unwrap(),
-        );
-        if method == "process/exited" {
-            let Some(code) = params.exit_code else {
-                return reduce(
-                    previous,
-                    Event::Failed("process exit code is missing".into()),
-                );
-            };
-            terminal.phase = TerminalPhase::Exited(code);
-        } else {
-            let Some(data) = params.delta_base64 else {
-                return reduce(previous, Event::Failed("process output is missing".into()));
-            };
-            terminal.sequence += 1;
-            terminal.output.push_back(Arc::new(TerminalOutput {
-                sequence: terminal.sequence,
-                data,
-                cap_reached: params.cap_reached.unwrap_or(false),
-            }));
-        }
-        return (next, Vec::new());
-    }
-    if method == "serverRequest/resolved" {
-        return reduce(
-            previous,
-            Event::RequestResolved(params["requestId"].clone()),
-        );
-    }
-    let known = matches!(
-        method,
-        "host/thread/changed"
-            | "host/thread/watchFailed"
-            | "thread/status/changed"
-            | "turn/started"
-            | "turn/completed"
-            | "item/started"
-            | "item/completed"
-            | "item/agentMessage/delta"
-            | "item/reasoning/textDelta"
-            | "item/reasoning/summaryTextDelta"
-            | "item/commandExecution/outputDelta"
-            | "item/fileChange/outputDelta"
-            | "error"
-            | "item/autoApprovalReview/started"
-            | "item/autoApprovalReview/completed"
-    );
-    if !known {
-        return (previous.clone(), Vec::new());
-    }
-    let params: NotificationParams = match serde_json::from_value(params) {
-        Ok(params) => params,
-        Err(error) => {
-            return reduce(
-                previous,
-                Event::Failed(format!("invalid {method} notification: {error}")),
-            );
-        }
-    };
-    if matches!(method, "host/thread/changed" | "host/thread/watchFailed")
-        && (previous.navigation.watch_id != params.watch_id
-            || previous.navigation.watch_thread_id.as_deref() != Some(&params.thread_id))
-    {
-        return (previous.clone(), Vec::new());
-    }
-    if method == "host/thread/changed" {
-        return (
-            previous.clone(),
-            vec![Effect::Execute(Intent::ReadThread(params.thread_id))],
-        );
-    }
-    if method == "host/thread/watchFailed" {
-        return reduce(previous, Event::Failed("thread watch failed".into()));
-    }
-    let mut next = previous.clone();
-    let current = previous.conversations.get(&params.thread_id);
-    let late_start = method == "turn/started"
-        && params.turn.as_ref().is_some_and(|incoming| {
-            current
-                .and_then(|thread| thread.turns.as_ref())
-                .is_some_and(|turns| {
-                    turns.iter().any(|turn| {
-                        turn.id == incoming.id
-                            && turn
-                                .status
-                                .as_deref()
-                                .is_some_and(|status| status != "inProgress")
-                    })
-                })
-        });
-    let active = match method {
-        "thread/status/changed" => params.status.as_ref().map(|status| status.kind == "active"),
-        "turn/started" if !late_start => Some(true),
-        "turn/completed" => Some(false),
-        _ => None,
-    };
-    if let Some(active) = active {
-        let unread = if active {
-            false
-        } else if method == "turn/completed"
-            && params
-                .turn
-                .as_ref()
-                .is_some_and(|turn| turn.status.as_deref() == Some("completed"))
-            && previous.navigation.thread_id.as_deref() != Some(&params.thread_id)
-        {
-            true
-        } else {
-            previous.activity.unread.contains(&params.thread_id)
-        };
-        if previous.activity.active.get(&params.thread_id) != Some(&active)
-            || previous.activity.unread.contains(&params.thread_id) != unread
-        {
-            let activity = Arc::make_mut(&mut next.activity);
-            activity.active.insert(params.thread_id.clone(), active);
-            if unread {
-                activity.unread.insert(params.thread_id.clone());
-            } else {
-                activity.unread.remove(&params.thread_id);
-            }
-        }
-    }
-    let Some(current) = current else {
-        return (next, Vec::new());
-    };
-    if method == "thread/status/changed" {
-        if current.status == params.status {
-            return (next, Vec::new());
-        }
-        let thread = Arc::make_mut(
-            Arc::make_mut(&mut next.conversations)
-                .get_mut(&params.thread_id)
-                .unwrap(),
-        );
-        thread.status = params.status.clone();
-        if let Some(list) = next.threads.as_mut().map(Arc::make_mut)
-            && let Some(thread) = list
-                .data
-                .iter_mut()
-                .find(|thread| thread.id.as_ref() == Some(&params.thread_id))
-        {
-            thread.status = params.status;
-        }
-        return (next, Vec::new());
-    }
-    let turn_id = params
-        .turn
-        .as_ref()
-        .map(|turn| turn.id.as_str())
-        .or(params.turn_id.as_deref());
-    let Some(turn_id) = turn_id.filter(|id| !id.is_empty()) else {
-        return (next, Vec::new());
-    };
-    let turn_index = current
-        .turns
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .rposition(|turn| turn.id == turn_id);
-    if matches!(method, "turn/started" | "turn/completed") {
-        let Some(incoming) = params.turn else {
-            return (next, Vec::new());
-        };
-        let old = turn_index.map(|index| &current.turns.as_ref().unwrap()[index]);
-        if method == "turn/started"
-            && old.is_some_and(|old| {
-                old.status
-                    .as_deref()
-                    .is_some_and(|status| status != "inProgress")
-            })
-        {
-            return (next, Vec::new());
-        }
-        let mut merged = old.map_or_else(|| incoming.clone(), |old| merge_fields(old, &incoming));
-        merged.status = Some(if method == "turn/started" {
-            "inProgress".into()
-        } else {
-            incoming
-                .status
-                .clone()
-                .unwrap_or_else(|| "completed".into())
-        });
-        if let Some(old) = old {
-            if incoming.started_at == Some(None) {
-                merged.started_at = old.started_at.clone();
-            }
-            if incoming.completed_at == Some(None) {
-                merged.completed_at = old.completed_at.clone();
-            }
-            if incoming.duration_ms == Some(None) {
-                merged.duration_ms = old.duration_ms;
-            }
-        }
-        if let Some(items) = &incoming.items {
-            let preserve = items.is_empty()
-                || matches!(
-                    incoming.items_view.as_deref(),
-                    Some("summary" | "notLoaded")
-                );
-            merged.items = Some(if preserve {
-                append_items(
-                    old.and_then(|old| old.items.as_deref()).unwrap_or_default(),
-                    items,
-                )
-            } else {
-                items.clone()
-            });
-            if let Some(deferred) = &mut merged.deferred_item_ids {
-                deferred.retain(|id| !items.iter().any(|item| &item.id == id));
-            }
-        }
-        if incoming.error.is_none()
-            && (merged.status.as_deref() == Some("completed")
-                || old.is_some_and(|old| {
-                    old.error
-                        .as_ref()
-                        .is_some_and(|error| error["willRetry"] == true)
-                }) && merged.status.as_deref() != Some("inProgress"))
-        {
-            merged.error = None;
-        }
-        let thread = Arc::make_mut(
-            Arc::make_mut(&mut next.conversations)
-                .get_mut(&params.thread_id)
-                .unwrap(),
-        );
-        let turns = thread.turns.get_or_insert_with(Vec::new);
-        if let Some(index) = turn_index {
-            turns[index] = Arc::new(merged);
-        } else {
-            turns.push(Arc::new(merged));
-        }
-        reconcile_pending(&mut next, &params.thread_id);
-        return (next, Vec::new());
-    }
-    let Some(turn_index) = turn_index else {
-        return (next, Vec::new());
-    };
-    let old = &current.turns.as_ref().unwrap()[turn_index];
-    let mut item = params.item;
-    let review = matches!(
-        method,
-        "item/autoApprovalReview/started" | "item/autoApprovalReview/completed"
-    );
-    let remove_review = review
-        && params
-            .review
-            .as_ref()
-            .is_some_and(|review| review["status"] == "approved");
-    if review {
-        let Some(id) = params.review_id else {
-            return (next, Vec::new());
-        };
-        let mut extra = params.extra;
-        extra.insert("threadId".into(), Value::String(params.thread_id.clone()));
-        extra.insert("turnId".into(), Value::String(turn_id.into()));
-        if let Some(value) = params.review {
-            extra.insert("review".into(), value);
-        }
-        item = Some(Item {
-            id,
-            kind: Some("automaticApprovalReview".into()),
-            extra,
-            ..Default::default()
-        });
-    }
-    let item_id = item
-        .as_ref()
-        .map(|item| item.id.as_str())
-        .or(params.item_id.as_deref());
-    let item_index = item_id.and_then(|id| {
-        old.items
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .position(|item| item.id == id)
-    });
-    if method == "error" {
-        if params.will_retry && old.status.as_deref() != Some("inProgress") {
-            return (next, Vec::new());
-        }
-        let mut error = match params.error.unwrap_or(Value::Null) {
-            Value::Object(error) => error,
-            message => Map::from_iter([("message".into(), message)]),
-        };
-        error.insert("willRetry".into(), Value::Bool(params.will_retry));
-        let turn = mutable_turn(&mut next, &params.thread_id, turn_index);
-        turn.error = Some(Value::Object(error));
-    } else if matches!(method, "item/started" | "item/completed") || review {
-        if remove_review && item_index.is_none() {
-            return (next, Vec::new());
-        }
-        let Some(item) = item else {
-            return (next, Vec::new());
-        };
-        let turn = mutable_turn(&mut next, &params.thread_id, turn_index);
-        if let Some(deferred) = &mut turn.deferred_item_ids {
-            deferred.retain(|id| id != &item.id);
-        }
-        let items = turn.items.get_or_insert_with(Vec::new);
-        if remove_review {
-            items.remove(item_index.unwrap());
-        } else if let Some(index) = item_index {
-            items[index] = Arc::new(item);
-        } else {
-            items.push(Arc::new(item));
-        }
-    } else {
-        let Some(index) = item_index else {
-            return (next, Vec::new());
-        };
-        let Some(delta) = params.delta.filter(|delta| !delta.is_empty()) else {
-            return (next, Vec::new());
-        };
-        let expected = match method {
-            "item/agentMessage/delta" => "agentMessage",
-            "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => "reasoning",
-            "item/commandExecution/outputDelta" => "commandExecution",
-            "item/fileChange/outputDelta" => "fileChange",
-            _ => return (next, Vec::new()),
-        };
-        if old.items.as_ref().unwrap()[index].kind.as_deref() != Some(expected) {
-            return (next, Vec::new());
-        }
-        if expected == "fileChange"
-            && old.items.as_ref().unwrap()[index]
-                .extra
-                .get("changes")
-                .is_some_and(|changes| {
-                    changes.as_array().is_none_or(|changes| {
-                        changes.last().is_some_and(|change| !change.is_object())
-                    })
-                })
-        {
-            next.error = Some("invalid file change delta target".into());
-            return (next, Vec::new());
-        }
-        let item = Arc::make_mut(
-            &mut mutable_turn(&mut next, &params.thread_id, turn_index)
-                .items
-                .as_mut()
-                .unwrap()[index],
-        );
-        match expected {
-            "agentMessage" => item.text.get_or_insert_with(String::new).push_str(&delta),
-            "commandExecution" => item
-                .aggregated_output
-                .get_or_insert_with(String::new)
-                .push_str(&delta),
-            "reasoning" => append_text(item.extra.entry("summary").or_insert(Value::Null), &delta),
-            "fileChange" => {
-                let changes = item
-                    .extra
-                    .entry("changes")
-                    .or_insert_with(|| Value::Array(Vec::new()));
-                let changes = changes.as_array_mut().unwrap();
-                if changes.is_empty() {
-                    changes.push(serde_json::json!({"path":"","kind":"update","diff":""}));
-                }
-                if let Some(change) = changes.last_mut().and_then(Value::as_object_mut) {
-                    append_text(change.entry("diff").or_insert(Value::Null), &delta);
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-    if matches!(method, "item/started" | "item/completed") {
-        reconcile_pending(&mut next, &params.thread_id);
-    }
-    (next, Vec::new())
-}
 fn mutable_turn<'a>(snapshot: &'a mut Snapshot, thread_id: &str, index: usize) -> &'a mut Turn {
     let thread = Arc::make_mut(
         Arc::make_mut(&mut snapshot.conversations)
@@ -2012,28 +1143,6 @@ fn mutable_turn<'a>(snapshot: &'a mut Snapshot, thread_id: &str, index: usize) -
             .unwrap(),
     );
     Arc::make_mut(&mut thread.turns.as_mut().unwrap()[index])
-}
-fn append_text(value: &mut Value, delta: &str) {
-    if !value.is_string() {
-        let text = match value.take() {
-            Value::Array(parts) => parts
-                .into_iter()
-                .filter_map(|part| match part {
-                    Value::String(text) => Some(text),
-                    Value::Object(mut object) => object
-                        .remove("text")
-                        .and_then(|text| text.as_str().map(str::to_owned)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
-        *value = Value::String(text);
-    }
-    if let Value::String(text) = value {
-        text.push_str(delta);
-    }
 }
 
 fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) -> Snapshot {

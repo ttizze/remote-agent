@@ -86,9 +86,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var list by mutableStateOf<ThreadList?>(null)
         private set
 
-    var requests: List<dev.remoteagent.core.Request> = emptyList()
-        private set
-
     private var owner: AgentStore? = null
     private var initialization: Job? = null
     private var connection: Job? = null
@@ -317,7 +314,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun publish(next: Snapshot) {
         if (!next.listUnchanged(snapshot)) list = next.threadList()
-        if (!next.requestsUnchanged(snapshot)) requests = next.requests()
         snapshot = next
         persistence?.cancel()
         persistence = scope.launch {

@@ -1,6 +1,9 @@
 use crate::{AgentError, Draft, JsonValue, ListQuery, WorktreeSettings, error};
 use agent_core::{models, state::PendingSubmission as Pending};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 #[derive(uniffi::Object)]
 pub struct Snapshot(pub(crate) Arc<agent_core::state::Snapshot>);
@@ -46,16 +49,19 @@ pub struct Model {
     pub default_service_tier: Option<String>,
     pub is_default: bool,
 }
-#[derive(uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct Request {
     pub id: JsonValue,
     pub key: String,
     pub method: String,
     pub kind: RequestKind,
+    pub title: String,
+    pub body: String,
+    pub decision_labels: Vec<String>,
     pub decisions: Vec<JsonValue>,
     pub params: HashMap<String, JsonValue>,
 }
-#[derive(uniffi::Enum)]
+#[derive(Clone, uniffi::Enum)]
 pub enum RequestKind {
     CommandApproval,
     FileApproval,
@@ -65,8 +71,8 @@ pub enum RequestKind {
     Tool,
     Other,
 }
-type PendingItems = Vec<(String, Arc<Pending>)>;
-fn same_pending(a: &PendingItems, b: &PendingItems) -> bool {
+pub(crate) type PendingItems = Vec<(String, Arc<Pending>)>;
+pub(crate) fn same_pending(a: &PendingItems, b: &PendingItems) -> bool {
     a.len() == b.len()
         && a.iter()
             .zip(b)
@@ -302,6 +308,7 @@ impl Snapshot {
                     .filter(|(_, p)| p.draft_key == id)
                     .map(|(id, p)| (id.clone(), p.clone()))
                     .collect(),
+                self.0.requests.clone(),
             ))
         })
     }
@@ -309,29 +316,7 @@ impl Snapshot {
         self.0
             .requests
             .iter()
-            .map(|(key, r)| Request {
-                id: (&r.id).into(),
-                key: key.clone(),
-                method: r.method.clone(),
-                decisions: agent_core::client::approval_decisions(r)
-                    .iter()
-                    .map(Into::into)
-                    .collect(),
-                kind: match r.method.as_str() {
-                    "item/commandExecution/requestApproval" => RequestKind::CommandApproval,
-                    "item/fileChange/requestApproval" => RequestKind::FileApproval,
-                    "item/permissions/requestApproval" => RequestKind::Permissions,
-                    "item/tool/requestUserInput" => RequestKind::Questions,
-                    "mcpServer/elicitation/request" => RequestKind::Elicitation,
-                    "item/tool/call" => RequestKind::Tool,
-                    _ => RequestKind::Other,
-                },
-                params: r
-                    .params
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.into()))
-                    .collect(),
-            })
+            .map(|(key, r)| crate::presentation::request(key, r))
             .collect()
     }
     pub fn pending_submissions(&self) -> Vec<PendingSubmission> {
@@ -445,11 +430,17 @@ impl Snapshot {
 }
 
 #[derive(uniffi::Object)]
-pub struct Thread(Arc<models::Thread>, PendingItems);
+pub struct Thread(
+    pub(crate) Arc<models::Thread>,
+    pub(crate) PendingItems,
+    pub(crate) Arc<BTreeMap<String, Arc<agent_core::client::ServerRequest>>>,
+);
 #[uniffi::export]
 impl Thread {
     pub fn unchanged(&self, other: Arc<Thread>) -> bool {
-        Arc::ptr_eq(&self.0, &other.0) && same_pending(&self.1, &other.1)
+        Arc::ptr_eq(&self.0, &other.0)
+            && same_pending(&self.1, &other.1)
+            && Arc::ptr_eq(&self.2, &other.2)
     }
     pub fn id(&self) -> String {
         self.0.id.clone().unwrap_or_default()
@@ -490,35 +481,6 @@ impl Thread {
 }
 #[derive(uniffi::Object)]
 pub struct Turn(Arc<models::Turn>, PendingItems);
-#[derive(uniffi::Enum)]
-pub enum DisplayItem {
-    Native { item: Arc<Item> },
-    Submitted { submission: Box<PendingSubmission> },
-}
-#[derive(uniffi::Record)]
-pub struct TurnContent {
-    pub items: Vec<DisplayItem>,
-    pub segments: Vec<Segment>,
-}
-#[derive(uniffi::Record)]
-pub struct Segment {
-    pub id: String,
-    pub start: u32,
-    pub end: u32,
-    pub answer: Option<u32>,
-    pub last: bool,
-    pub collapsible: bool,
-    pub initially_expanded: bool,
-    pub label: Option<String>,
-    pub roles: Vec<Role>,
-}
-#[derive(uniffi::Enum)]
-pub enum Role {
-    Hidden,
-    User,
-    Activity,
-    Response,
-}
 #[uniffi::export]
 impl Turn {
     pub fn unchanged(&self, other: Arc<Turn>) -> bool {
@@ -556,78 +518,16 @@ impl Turn {
             .map(|i| Arc::new(Item(i.clone())))
             .collect()
     }
-    pub fn content(&self) -> TurnContent {
-        use conversation_presentation::{
-            ItemMetadata, project_items, remaining_submissions, source_order,
-        };
-        let native = self.0.items.as_deref().unwrap_or_default();
-        let ids: Vec<_> = self.1.iter().map(|(id, _)| id.as_str()).collect();
-        let retained =
-            remaining_submissions(&ids, native.iter().filter_map(|i| i.client_id.as_deref()));
-        let anchors: Vec<_> = retained
-            .iter()
-            .map(|&index| self.1[index].1.after_item_id.as_deref())
-            .collect();
-        let sources = source_order(native.len(), |index| native[index].id.as_str(), &anchors);
-        let metadata = |index: usize| {
-            let source = sources[index];
-            if source < native.len() {
-                ItemMetadata::from(native[source].as_ref())
-            } else {
-                let id = self.1[retained[source - native.len()]].0.as_str();
-                ItemMetadata {
-                    id,
-                    client_id: Some(id),
-                    kind: "userMessage",
-                    ..Default::default()
-                }
-            }
-        };
-        let segments = project_items(&self.0, sources.len(), metadata)
-            .map(|s| {
-                let roles = (s.start..s.end)
-                    .map(|index| match s.role(index, metadata(index)) {
-                        conversation_presentation::Role::Hidden => Role::Hidden,
-                        conversation_presentation::Role::User => Role::User,
-                        conversation_presentation::Role::Activity => Role::Activity,
-                        conversation_presentation::Role::Response => Role::Response,
-                    })
-                    .collect();
-                Segment {
-                    id: s.id,
-                    start: s.start as u32,
-                    end: s.end as u32,
-                    answer: s.answer.map(|a| a as u32),
-                    last: s.last,
-                    collapsible: s.collapsible,
-                    initially_expanded: s.initially_expanded,
-                    label: s.label,
-                    roles,
-                }
-            })
-            .collect();
-        let items = sources
-            .into_iter()
-            .map(|source| {
-                if let Some(item) = native.get(source) {
-                    DisplayItem::Native {
-                        item: Arc::new(Item(item.clone())),
-                    }
-                } else {
-                    let (id, p) = &self.1[retained[source - native.len()]];
-                    DisplayItem::Submitted {
-                        submission: Box::new(pending(id, p)),
-                    }
-                }
-            })
-            .collect();
-        TurnContent { items, segments }
-    }
 }
 #[derive(uniffi::Object)]
 pub struct Item(Arc<models::Item>);
-#[derive(uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct ItemPresentation {
+    pub id: String,
+    pub native_id: Option<String>,
+    pub body: String,
+    pub image_sources: Vec<String>,
+    pub deferred: bool,
     pub kind: String,
     pub title: String,
     pub collapsible: bool,
@@ -700,13 +600,7 @@ impl Item {
         }
         fields
     }
-    pub fn presentation(&self) -> ItemPresentation {
-        let p = conversation_presentation::item_presentation(&self.0);
-        ItemPresentation {
-            kind: p.kind.into(),
-            title: p.title,
-            collapsible: p.collapsible,
-            visible: p.visible,
-        }
+    pub fn expanded_body(&self) -> String {
+        conversation_presentation::body::expanded_body(&self.0)
     }
 }

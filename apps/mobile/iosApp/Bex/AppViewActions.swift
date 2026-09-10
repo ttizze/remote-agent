@@ -185,8 +185,8 @@ extension BexAppViewModel {
         }
     }
 
-    func respond(_ request: RequestPresentation, answer: Answer, completion: @escaping (String?) -> Void) {
-        perform(.respond(requestId: request.source.id, answer: answer)) { result in
+    func respond(_ request: Request, answer: Answer, completion: @escaping (String?) -> Void) {
+        perform(.respond(requestId: request.id, answer: answer)) { result in
             if case let .failure(error) = result {
                 completion(error.localizedDescription)
             } else {
@@ -216,7 +216,7 @@ extension BexAppViewModel {
                 }
                 let source = self?.snapshot.conversation(id: threadId)?.turns().first { $0.id() == turnId }?
                     .items().first { $0.id() == itemId || $0.clientId() == itemId }
-                continuation.resume(returning: (source.map { ConversationItem($0).expandedBody() }, nil))
+                continuation.resume(returning: (source.map { $0.expandedBody() }, nil))
             }
         }
     }

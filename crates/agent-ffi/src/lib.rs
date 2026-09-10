@@ -1,11 +1,13 @@
 //! Native binding boundary. Core owns all conversation state and effects.
 mod data;
 mod intent;
+mod presentation;
 mod snapshot;
 
 use agent_core::transport::{Endpoint, Identity, Relays, Ticket};
 pub use data::*;
 pub use intent::*;
+pub use presentation::*;
 pub use snapshot::*;
 use std::{
     future::Future,

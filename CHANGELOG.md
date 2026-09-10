@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Queue iOS list/activity snapshots immediately so completion badges are not lost to the text/stream debounce when the app closes after showing them.
+
+- Generate simple Store RPC dispatch, typed loaded responses and reducers from one operation table. Centralize mobile item bodies, approval association and request/error labels in Rust; reuse immutable render identities in Swift and Kotlin and format expanded details on demand. Separate notification classification and process/turn/item transitions while retaining ordering and stale-response guards.
+
 - Raise the mobile minimum versions to iOS 17 and Android 9 (API 28). Remove the obsolete iOS 15 single-line message-field fallback. Upgrade to AGP 9.3.2 and Gradle 9.5.0, use AGP built-in Kotlin, and retain generated UniFFI source and native library inputs.
 
 - Kill the entire quality process group or Windows job on timeout before removing its checkout. Derive the Windows CI Rust version from the pinned Nix shell, declare one inherited Rust 1.98 minimum for every workspace crate, and cache native Cargo dependencies and build artifacts.

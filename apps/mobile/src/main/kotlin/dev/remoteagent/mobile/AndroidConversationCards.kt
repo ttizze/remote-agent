@@ -16,33 +16,36 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.RenderedItem
 
 @Composable
-internal fun ThreadMessageCard(item: ConversationItem, isUser: Boolean) {
+internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean) {
+    val content = remember(item) { item.presentation() }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Card {
             Column(Modifier.padding(12.dp)) {
-                Text(item.body)
-                item.images.forEach { Text("画像: $it", style = MaterialTheme.typography.bodySmall) }
+                Text(content.body)
+                content.imageSources.forEach { Text("画像: $it", style = MaterialTheme.typography.bodySmall) }
             }
         }
     }
 }
 
 @Composable
-internal fun ThreadActivityCard(item: ConversationItem, model: AndroidAppModel, turnId: String) {
-    var expanded by remember(item.id) { mutableStateOf(false) }
+internal fun ThreadActivityCard(item: RenderedItem, model: AndroidAppModel, turnId: String) {
+    val content = remember(item) { item.presentation() }
+    var expanded by remember(content.id) { mutableStateOf(false) }
     var detail by remember(item) { mutableStateOf<String?>(null) }
     Card(
         Modifier.fillMaxWidth()
             .then(
-                if (item.collapsible)
+                if (content.collapsible)
                     Modifier.clickable {
                         expanded = !expanded
-                        if (expanded && item.deferred) {
+                        if (expanded && content.deferred) {
                             val threadId = model.snapshot.navigation().threadId ?: return@clickable
                             model.perform(
-                                dev.remoteagent.core.Intent.ReadItem(threadId, turnId, item.source?.id() ?: item.id)
+                                dev.remoteagent.core.Intent.ReadItem(threadId, turnId, content.nativeId ?: content.id)
                             )
                         }
                     }
@@ -51,11 +54,11 @@ internal fun ThreadActivityCard(item: ConversationItem, model: AndroidAppModel, 
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                (if (item.collapsible) if (expanded) "⌄ " else "› " else "") + item.title,
+                (if (content.collapsible) if (expanded) "⌄ " else "› " else "") + content.title,
                 style = MaterialTheme.typography.labelLarge,
             )
-            if (expanded && detail == null) detail = item.expanded()
-            Text(if (expanded) detail.orEmpty() else item.body, maxLines = if (expanded) Int.MAX_VALUE else 1)
+            if (expanded && detail == null) detail = item.expandedBody()
+            Text(if (expanded) detail.orEmpty() else content.body, maxLines = if (expanded) Int.MAX_VALUE else 1)
         }
     }
 }

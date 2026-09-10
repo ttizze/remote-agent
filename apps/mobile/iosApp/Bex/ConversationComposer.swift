@@ -248,6 +248,6 @@ struct ThreadConversationRow: Identifiable {
         case olderTurns, olderItems(String)
         case user(ConversationItem), response(ConversationItem, String?), queued(ConversationItem)
         case activityHeader(TurnPresentation), activity(ConversationItem, String)
-        case request(RequestPresentation), error(TurnErrorPresentation)
+        case request(Request), error(TurnErrorPresentation)
     }
 }

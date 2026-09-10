@@ -1,6 +1,6 @@
 use agent_core::{
     models::{Item, Thread, Turn},
-    state::{Event, Snapshot, reduce},
+    state::{Event, Loaded, Snapshot, reduce},
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
@@ -387,11 +387,11 @@ fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
     for cwd in ["/old", "/new"] {
         for open_thread in [false, true] {
             let event = if open_thread {
-                Event::ThreadOpened {
+                Event::Loaded(Loaded::OpenThread {
                     generation: 0,
-                    thread: serde_json::from_value(json!({"id":"thread", "cwd":cwd})).unwrap(),
-                    model: None,
-                }
+                    output: serde_json::from_value(json!({"thread":{"id":"thread", "cwd":cwd}}))
+                        .unwrap(),
+                })
             } else {
                 Event::Intent(Intent::NewChat(cwd.into()))
             };
@@ -410,18 +410,18 @@ fn changing_workspace_rejects_old_reads_and_preserves_file_drafts() {
             assert!(next.workspace.review.is_none());
             assert!(next.workspace.review_cwd.is_none());
             for response in [
-                Event::FileLoaded {
+                Event::Loaded(Loaded::ReadFile {
                     request: 0,
-                    file: (*file).clone(),
-                },
-                Event::FilesLoaded {
+                    output: (*file).clone(),
+                }),
+                Event::Loaded(Loaded::ListFiles {
                     request: 0,
-                    files: (*directory).clone(),
-                },
-                Event::ReviewLoaded {
+                    output: (*directory).clone(),
+                }),
+                Event::Loaded(Loaded::ReviewWorkspace {
                     request: 0,
-                    review: (*review).clone(),
-                },
+                    output: (*review).clone(),
+                }),
             ] {
                 assert_eq!(reduce(&next, response).0.workspace, next.workspace);
             }
@@ -509,11 +509,10 @@ fn late_fork_preserves_new_navigation_and_stores_the_fork() {
     let (navigated, _) = reduce(&forking, Event::Intent(Intent::NewChat("/new".into())));
     let (finished, _) = reduce(
         &navigated,
-        Event::ThreadForked {
+        Event::Loaded(Loaded::ForkThread {
             generation,
-            thread: serde_json::from_value(json!({"id":"forked","cwd":"/old"})).unwrap(),
-            model: None,
-        },
+            output: serde_json::from_value(json!({"thread":{"id":"forked","cwd":"/old"}})).unwrap(),
+        }),
     );
     assert!(finished.navigation.thread_id.is_none());
     assert_eq!(finished.navigation.cwd, "/new");
@@ -529,7 +528,7 @@ fn account_listing_does_not_invalidate_a_concurrent_login() {
     );
     let generation = starting.account.login_generation;
     let (listing, _) = reduce(&starting, Event::Intent(Intent::ListAccounts));
-    let (finished, _)=reduce(&listing,Event::AccountLoginStarted { generation,login:serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap() });
+    let (finished, _)=reduce(&listing,Event::Loaded(Loaded::StartAccountLogin { generation,output:serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap() }));
     assert_eq!(
         finished.account.login.as_ref().map(|l| l.login_id.as_str()),
         Some("login")

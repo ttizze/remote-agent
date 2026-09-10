@@ -115,51 +115,19 @@ struct TurnPresentation: Sendable {
     let activityInitiallyExpanded: Bool
     let activityCanCollapse: Bool
     let error: TurnErrorPresentation?
-    let pendingRequests: [RequestPresentation]
+    let pendingRequests: [Request]
 }
 
-struct TurnErrorPresentation: Sendable {
-    let title: String
-    let message: String
-    let details: String?
-    let isReconnecting: Bool
-}
-
-struct RequestPresentation: Sendable {
-    let source: Request
-    var id: String {
-        source.key
-    }
-
-    var params: [String: JsonValue] {
-        source.params
-    }
-
+extension Request {
     var paramsJson: String {
         JsonValue.object(fields: params).formatted
-    }
-
-    var title: String {
-        switch source.kind {
-        case .commandApproval: "コマンドの承認待ち"
-        case .fileApproval: "ファイル変更の承認待ち"
-        case .permissions: "権限の承認待ち"
-        case .questions: "回答待ち"
-        case .elicitation: "MCPからの入力待ち"
-        case .tool: "ツールの入力待ち"
-        case .other: "Codexからの確認待ち"
-        }
-    }
-
-    var body: String {
-        params["questions"]?.array.first?["question"]?.string ?? params["reason"]?.string
-            ?? params["message"]?.string ?? params["prompt"]?.string ?? "操作を続けるには応答が必要です"
     }
 }
 
 final class ConversationItem: Sendable {
-    let source: AgentCore.Item?
+    let source: RenderedItem
     let id: String
+    let nativeId: String?
     let kind: String
     let title: String
     let collapsedBody: String
@@ -171,75 +139,17 @@ final class ConversationItem: Sendable {
         String(describing: ObjectIdentifier(self))
     }
 
-    init(_ source: AgentCore.Item, deferred: Bool = false) {
+    init(_ source: RenderedItem) {
         self.source = source
-        id = source.clientId() ?? source.id()
-        let presentation = source.presentation()
-        kind = presentation.kind
-        title = presentation.title
-        isCollapsible = presentation.collapsible
-        isDeferred = deferred
-        let content = source.field(name: "content")?.array ?? []
-        switch kind {
-        case "user", "agent", "commentary":
-            var text = source.text() ?? content.compactMap { $0["text"]?.string ?? $0.string }.joined()
-            for part in content where part["type"]?.string == "mention" {
-                if !text.isEmpty {
-                    text += "\n"
-                }
-                text += "添付: \(part["name"]?.string ?? "") (\(part["path"]?.string ?? ""))"
-            }
-            collapsedBody = text
-        case "reasoning": collapsedBody = "詳細を表示"
-        case "imageGeneration": collapsedBody = title
-        default: collapsedBody = source.status() ?? "詳細を表示"
-        }
+        let value = source.presentation()
+        id = value.id; nativeId = value.nativeId; kind = value.kind; title = value.title
+        collapsedBody = value.body; isCollapsible = value.collapsible; isDeferred = value.deferred
+        imageSources = value.imageSources
         markdown = kind != "user" && !isCollapsible ? ConversationMarkdown.parse(collapsedBody) : []
-        if kind == "imageGeneration" {
-            imageSources = [source.savedPath() ?? source.result()?.string.map { "data:image/png;base64," + $0 }]
-                .compactMap(\.self).filter { !$0.isEmpty }
-        } else {
-            imageSources = content.compactMap {
-                switch $0["type"]?.string {
-                case "localImage": $0["path"]?.string
-                case "image": $0["url"]?.string
-                default: nil
-                }
-            }
-        }
-    }
-
-    init(_ pending: PendingSubmission) {
-        source = nil
-        id = pending.id
-        kind = "user"
-        title = "You"
-        isCollapsible = false
-        isDeferred = false
-        let files = pending.draft.attachments.filter { !$0.isImage }.map { "添付: \($0.name) (\($0.path))" }
-        collapsedBody = ([pending.draft.text] + files).filter { !$0.isEmpty }.joined(separator: "\n")
-        imageSources = pending.draft.attachments.filter(\.isImage).map(\.path)
-        markdown = []
     }
 
     func expandedBody() -> String {
-        guard let source else { return collapsedBody }
-        switch kind {
-        case "user", "agent", "commentary": return collapsedBody
-        case "reasoning":
-            let summary = source.field(name: "summary")
-            return summary?.string ?? summary?.array.compactMap { $0["text"]?.string ?? $0.string }
-                .joined(separator: "\n") ?? ""
-        case "command":
-            let cwd = source.field(name: "cwd")?.string
-            return [cwd.map { "cwd: " + $0 }, source.aggregatedOutput()].compactMap(\.self).joined(separator: "\n")
-        case "fileChange":
-            return (source.field(name: "changes")?.array ?? []).map {
-                let kind = $0["kind"]?.string ?? $0["kind"]?["type"]?.string ?? ""
-                return "\(kind): \($0["path"]?.string ?? "")\n\($0["diff"]?.string ?? "")"
-            }.joined(separator: "\n\n")
-        default: return JsonValue.object(fields: source.fields()).formatted
-        }
+        source.expandedBody()
     }
 }
 

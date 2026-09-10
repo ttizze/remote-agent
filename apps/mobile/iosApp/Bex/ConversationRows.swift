@@ -23,7 +23,7 @@ struct ThreadActivityHeader: View {
 }
 
 struct ThreadRequestRow: View {
-    let request: RequestPresentation
+    let request: Request
     let model: BexAppViewModel
     @State private var answers: [String: String] = [:]
     @State private var rawResponse = "{}"
@@ -43,26 +43,26 @@ struct ThreadRequestRow: View {
         if !resolved {
             VStack(alignment: .leading, spacing: 10) {
                 Text(request.title).font(.subheadline.weight(.semibold))
-                    .accessibilityIdentifier("request.\(request.id)")
+                    .accessibilityIdentifier("request.\(request.key)")
                 Text(request.body).textSelection(.enabled)
                 DisclosureGroup("詳細") {
                     Text(request.paramsJson).font(.caption.monospaced()).textSelection(.enabled)
                 }
-                if request.source.kind == .questions {
+                if request.kind == .questions {
                     ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
                         questionView(question)
                     }
                     Button("回答を送信") {
                         submit(.questions(answers: answers))
                     }.disabled(questions.contains { (answers[$0["id"]?.string ?? ""] ?? "").isEmpty })
-                } else if request.source.kind == .permissions {
+                } else if request.kind == .permissions {
                     HStack {
                         Button("このターンで許可") { submit(.permissions(allow: true)) }
                         Button("拒否") { submit(.permissions(allow: false)) }
                     }
-                } else if request.source.kind == .commandApproval || request.source.kind == .fileApproval {
-                    ForEach(Array(request.source.decisions.enumerated()), id: \.offset) { index, decision in
-                        Button(decisionLabel(decision)) { submit(.decision(index: UInt32(index))) }
+                } else if request.kind == .commandApproval || request.kind == .fileApproval {
+                    ForEach(Array(request.decisions.enumerated()), id: \.offset) { index, decision in
+                        Button(request.decisionLabels[index]) { submit(.decision(index: UInt32(index))) }
                             .accessibilityIdentifier(decision
                                 .string == "accept" ? "request.accept" : "request.decision.\(index)")
                     }
@@ -106,16 +106,6 @@ struct ThreadRequestRow: View {
             SecureField("回答", text: binding)
         } else {
             TextField("回答", text: binding).textFieldStyle(.roundedBorder).accessibilityIdentifier("request.answer")
-        }
-    }
-
-    private func decisionLabel(_ value: JsonValue) -> String {
-        switch value.string {
-        case "accept": "承認"
-        case "acceptForSession": "このセッションで承認"
-        case "decline": "拒否"
-        case "cancel": "キャンセル"
-        default: value.formatted
         }
     }
 

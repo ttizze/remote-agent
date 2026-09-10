@@ -36,6 +36,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.Attachment
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.TurnPresentationData
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -49,7 +50,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier) {
     val threadId = snapshot.navigation().threadId
     val thread = threadId?.let { snapshot.conversation(it) }
     val projection = remember(model.profileId, threadId) { ConversationProjection() }
-    val turns = projection.project(thread, model.requests)
+    val turns = projection.project(thread)
     val listState = rememberLazyListState()
     val activityExpansion = remember(threadId) { mutableStateMapOf<String, Pair<String, Boolean>>() }
     var following by remember(model.selectionKey) { mutableStateOf(true) }
@@ -94,9 +95,9 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier) {
                     model.older(id)
                 }
             }
-            items(thread?.queuedSubmissions().orEmpty(), key = { "queued:${it.id}" }) {
+            items(projection.queued, key = { "queued:${it.id()}" }) {
                 Text("順番待ち")
-                ThreadMessageCard(ConversationItem.submitted(it), true)
+                ThreadMessageCard(it, true)
             }
         }
         ThreadComposer(model) { following = true }
@@ -188,53 +189,53 @@ private fun AttachmentButton(model: AndroidAppModel) {
 }
 
 private fun LazyListScope.conversationTurn(
-    turn: ConversationTurn,
+    turn: TurnPresentationData,
     model: AndroidAppModel,
     threadId: String?,
     activityExpansion: MutableMap<String, Pair<String, Boolean>>,
     older: (String) -> Unit,
 ) {
-    val segment = turn.segment
-    val id = segment.id
-    if (segment.start == 0u) {
-        turn.opening?.let { item(key = "opening:$id") { ThreadMessageCard(it, true) } }
-        if (turn.source.hasOlderItems())
-            item(key = "history:$id") {
-                Button(onClick = { older(turn.source.id()) }, enabled = !model.loadingHistory) { Text("途中の履歴を読み込む") }
-            }
-    }
-    items(turn.users, key = { "$id:user:${it.id}" }) { ThreadMessageCard(it, true) }
+    val id = turn.id
+    turn.openingUserMessage?.let { item(key = "opening:$id") { ThreadMessageCard(it, true) } }
+    if (turn.hasOlderItems)
+        item(key = "history:$id") {
+            Button(onClick = { older(turn.turnId) }, enabled = !model.loadingHistory) { Text("途中の履歴を読み込む") }
+        }
+    items(turn.userMessages, key = { "$id:user:${it.id()}" }) { ThreadMessageCard(it, true) }
     conversationActivity(turn, model, activityExpansion)
-    items(turn.requests, key = { "$id:request:${it.key}" }) { RequestCard(it, model) }
+    items(turn.pendingRequests, key = { "$id:request:${it.key}" }) { RequestCard(it, model) }
     turn.error?.let { error ->
         item(key = "$id:error") {
-            Text(error["message"]?.text ?: error.pretty(), color = MaterialTheme.colorScheme.error)
+            Text(error.title, style = MaterialTheme.typography.labelLarge)
+            Text(error.message, color = MaterialTheme.colorScheme.error)
+            error.details?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
     }
-    items(turn.responses, key = { "$id:response:${it.id}" }) { ThreadMessageCard(it, false) }
-    if (segment.last && turn.source.status() == "inProgress")
+    items(turn.responses, key = { "$id:response:${it.id()}" }) { ThreadMessageCard(it, false) }
+    if (turn.isInProgress)
         item(key = "$id:stop") {
-            Button(onClick = { threadId?.let { model.perform(Intent.Interrupt(it, turn.source.id())) } }) { Text("停止") }
+            Button(onClick = { threadId?.let { model.perform(Intent.Interrupt(it, turn.turnId)) } }) { Text("停止") }
         }
 }
 
 private fun LazyListScope.conversationActivity(
-    turn: ConversationTurn,
+    turn: TurnPresentationData,
     model: AndroidAppModel,
     activityExpansion: MutableMap<String, Pair<String, Boolean>>,
 ) {
-    val segment = turn.segment
-    val id = segment.id
-    val status = turn.source.status()
-    if (segment.label != null) {
-        val expanded = activityExpansion[id]?.takeIf { it.first == status }?.second ?: segment.initiallyExpanded
+    val id = turn.id
+    if (turn.activitySummary != null) {
+        val expanded =
+            activityExpansion[id]?.takeIf { it.first == turn.status }?.second ?: turn.activityInitiallyExpanded
         item(key = "$id:activity") {
-            TextButton(onClick = { if (segment.collapsible) activityExpansion[id] = status to !expanded }) {
-                Text(segment.label + if (segment.collapsible) if (expanded) " ⌄" else " ›" else "")
+            TextButton(onClick = { if (turn.activityCanCollapse) activityExpansion[id] = turn.status to !expanded }) {
+                Text(turn.activitySummary + if (turn.activityCanCollapse) if (expanded) " ⌄" else " ›" else "")
             }
         }
         if (expanded)
-            items(turn.activity, key = { "$id:activity:${it.id}" }) { ThreadActivityCard(it, model, turn.source.id()) }
+            items(turn.activityItems, key = { "$id:activity:${it.id()}" }) {
+                ThreadActivityCard(it, model, turn.turnId)
+            }
     }
 }
 

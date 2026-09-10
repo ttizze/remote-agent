@@ -58,7 +58,7 @@ extension ThreadScreen {
         }
         for request in turn.pendingRequests {
             rows.append(.init(
-                id: "history-request:" + request.id,
+                id: "history-request:" + request.key,
                 content: .request(request)
             ))
         }
@@ -93,7 +93,7 @@ extension ThreadScreen {
                           loadDetails: { await model.readItemDetails(
                               threadId: conversation?.id ?? "",
                               turnId: turnId,
-                              itemId: item.id
+                              itemId: item.nativeId ?? item.id
                           ) })
         case let .request(request): ThreadRequestRow(request: request, model: model)
         case let .error(error): ThreadErrorRow(error: error)

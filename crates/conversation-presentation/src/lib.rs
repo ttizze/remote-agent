@@ -1,12 +1,11 @@
 //! Conversation display policy shared by native desktop and mobile clients.
-//! Projections borrow typed turns and item metadata. Message bodies
-//! are never read; projections identify source items by index, including when
-//! native IDs repeat. Rendering and local expansion state belong to each UI.
+//! Grouping borrows item metadata; body formatting runs only for changed items
+//! or explicit expansion. Native views own rendering and local expansion state.
 
 use agent_core::models::{Item, Turn};
 use serde::Serialize;
 use serde_json::Value;
-pub mod state;
+pub mod body;
 
 fn field<'a>(item: &'a Item, key: &str) -> &'a str {
     item.extra

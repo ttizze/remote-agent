@@ -1,8 +1,8 @@
 //! The single state owner. RPC work runs concurrently; publication follows wire order.
 use crate::{
-    client::*,
+    client::{self as rpc, *},
     peer::{PeerError, PeerEvent, RpcPeer},
-    state::{Effect, Event, Intent, Snapshot, reduce},
+    state::{Effect, Event, Intent, Loaded, Snapshot, reduce},
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use host_protocol::{RpcMessageKind, classify_message};
@@ -13,8 +13,9 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub enum Outcome {
+    #[default]
     Applied,
     StartedThread(String),
     Submitted(Option<String>),
@@ -46,6 +47,7 @@ struct Dispatch {
     snapshot: Arc<Snapshot>,
     complete: oneshot::Sender<Result<Outcome, PeerError>>,
 }
+#[derive(Default)]
 struct Applied {
     sequence: Option<u64>,
     event: Option<Event>,
@@ -621,6 +623,54 @@ fn terminal_handle(effect: &Effect) -> Option<&str> {
     }
 }
 
+macro_rules! operation_outcome {
+    ($output:expr) => {
+        Outcome::Applied
+    };
+    ($output:expr, $value:ident => $outcome:expr) => {{
+        let $value = $output;
+        $outcome
+    }};
+}
+macro_rules! execute_operations {
+    ($snapshot:ident;
+     loaded { $(
+        $variant:ident $(($($arg:ident: $ty:ty),* $(,)?))? $({$($field:ident: $field_ty:ty),* $(,)?})?
+        $(prepare { $($prepare:tt)* })?
+        => $operation:ty, $params:expr, $is_ordered:literal;
+        ($($context:ident: $context_ty:ty = $capture:expr),* $(,)?) => $apply:ident
+        $([$value:ident => $outcome:expr])?;
+     )* }
+     ignored { $(
+        $ignored:ident $(($($iarg:ident: $ity:ty),* $(,)?))? $({$($ifield:ident: $ifield_ty:ty),* $(,)?})?
+        => $ignore_params:expr;
+     )* }
+     other { $($other:tt)* }
+     ($client:expr, $ordered:expr, $request_id:expr, $intent:expr)
+     { $($compound:tt)* }
+    ) => {
+        match $intent {
+            $(Intent::$variant $(($($arg),*))? $({$($field),*})? => {
+                $($($prepare)*)?
+                let reply = if $is_ordered {
+                    call_ordered($client, $ordered, $request_id, &$params).await?
+                } else { $client.call(&$params).await? };
+                let outcome = operation_outcome!(&reply.value $(, $value => $outcome)?);
+                Applied {
+                    sequence: $is_ordered.then_some(reply.sequence),
+                    outcome,
+                    event: Some(Event::Loaded(Loaded::$variant { $($context: $capture,)* output: reply.value })),
+                }
+            },)*
+            $(Intent::$ignored $(($($iarg),*))? $({$($ifield),*})? => {
+                $client.call(&$ignore_params).await?;
+                Applied::default()
+            },)*
+            $($compound)*
+        }
+    };
+}
+
 async fn perform(
     client: Option<&Client>,
     peer: Option<&RpcPeer>,
@@ -737,641 +787,215 @@ async fn perform(
                     outcome: Outcome::Submitted(reply.value),
                 }
             }
-            Effect::Execute(intent) => match intent {
-                Intent::ListAccounts => {
-                    let reply = client.call(&ListAccounts {}).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::AccountsLoaded {
-                            generation: snapshot.account.accounts_generation,
-                            accounts: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
+            Effect::Execute(intent) => crate::state::operations::operation_table!(execute_operations, snapshot, (client, ordered, &mut request_id, intent), {
+                    Intent::WriteTerminal { handle, data } => {
+                        use base64::Engine;
+                        // Requests are serialized by the Store actor, including chunks
+                        // from a single paste, so shell bytes cannot overtake each other.
+                        for chunk in data.chunks(16 * 1024) {
+                            client
+                                .call(&WriteTerminal {
+                                    process_handle: &handle,
+                                    delta_base64: &base64::engine::general_purpose::STANDARD.encode(chunk),
+                                })
+                                .await?;
+                        }
+                        Applied::default()
                     }
-                }
-                Intent::SelectAccount(id) => {
-                    let reply = client.call(&SelectAccount { account_id: &id }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::AccountSelected {
-                            generation: snapshot.account.accounts_generation,
-                            selected_id: reply.value.selected_id,
-                            persistence_error: reply.value.persistence_error,
-                        }),
-                        outcome: Outcome::Applied,
+                    Intent::UploadAttachment {
+                        draft_key,
+                        mut attachment,
+                        directory,
+                    } => {
+                        let session = session.ok_or_else(|| {
+                            PeerError::InvalidMessage("binary transfers require an iroh session".into())
+                        })?;
+                        let uploaded = crate::transfers::upload_file(
+                            peer,
+                            || async { session.open_stream().await.map_err(std::io::Error::other) },
+                            std::path::Path::new(&attachment.path),
+                            std::path::Path::new(&directory),
+                            &attachment.name,
+                        )
+                        .await
+                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                        #[derive(serde::Deserialize)]
+                        struct Uploaded {
+                            path: String,
+                        }
+                        let uploaded: Uploaded = serde_json::from_value(uploaded)
+                            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                        attachment.path = uploaded.path;
+                        Applied {
+                            event: Some(Event::AttachmentUploaded {
+                                draft_key,
+                                attachment,
+                            }),
+                            ..Applied::default()
+                        }
                     }
-                }
-                Intent::StartAccountLogin => {
-                    let reply = client.call(&StartAccountLogin {}).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::AccountLoginStarted {
-                            generation: snapshot.account.login_generation,
-                            login: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
+                    Intent::DownloadFile {
+                        source,
+                        destination,
+                    } => {
+                        let session = session.ok_or_else(|| {
+                            PeerError::InvalidMessage("binary transfers require an iroh session".into())
+                        })?;
+                        crate::transfers::download_file(
+                            peer,
+                            || async { session.open_stream().await.map_err(std::io::Error::other) },
+                            &source,
+                            &destination,
+                        )
+                        .await
+                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+                        Applied::default()
                     }
-                }
-                Intent::ReadAccountLogin(id) => {
-                    let reply = client.call(&ReadAccountLogin { login_id: &id }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::AccountLoginUpdated {
-                            generation: snapshot.account.login_generation,
-                            status: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
+                    Intent::LoadSessionImages(thread_id) => Applied {
+                        event: None,
+                        outcome: Outcome::SessionImages(client.session_images(&thread_id).await?),
+                        ..Applied::default()
+                    },
+                    Intent::LoadHostManagement => {
+                        let (status, remotes) = tokio::try_join!(
+                            client.call(&ReadHostStatus {}),
+                            client.call(&ListRemoteHosts {})
+                        )?;
+                        Applied {
+                            event: Some(Event::HostManagementLoaded {
+                                generation: snapshot.management.generation,
+                                status: status.value,
+                                remotes: remotes.value,
+                            }),
+                            ..Applied::default()
+                        }
                     }
-                }
-                Intent::CancelAccountLogin(id) => {
-                    client.call(&CancelAccountLogin { login_id: &id }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::AccountLoginCancelled {
-                            generation: snapshot.account.login_generation,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ForkThread {
-                    thread_id,
-                    last_turn_id,
-                } => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &ForkThread {
-                            thread_id: &thread_id,
-                            last_turn_id: &last_turn_id,
-                            exclude_turns: false,
-                        },
-                    )
-                    .await?;
-                    let id = reply
-                        .value
-                        .thread
-                        .id
-                        .clone()
-                        .expect("validated fork thread ID");
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::ThreadForked {
-                            generation: snapshot.navigation.generation,
-                            thread: reply.value.thread,
-                            model: reply.value.model,
-                        }),
-                        outcome: Outcome::StartedThread(id),
-                    }
-                }
-                Intent::StartTerminal { handle, cwd, size } => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &StartTerminal {
-                            process_handle: &handle,
-                            cwd: &cwd,
-                            size,
-                        },
-                    )
-                    .await?;
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::TerminalStarted(handle)),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::WriteTerminal { handle, data } => {
-                    use base64::Engine;
-                    // Requests are serialized by the Store actor, including chunks
-                    // from a single paste, so shell bytes cannot overtake each other.
-                    for chunk in data.chunks(16 * 1024) {
-                        client
-                            .call(&WriteTerminal {
-                                process_handle: &handle,
-                                delta_base64: &base64::engine::general_purpose::STANDARD
-                                    .encode(chunk),
+                    Intent::PairRemoteHost { invitation, name } => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        if now >= invitation.expires_at {
+                            return Err(PeerError::InvalidMessage("invitation expired".into()));
+                        }
+                        let local = session.ok_or_else(|| {
+                            PeerError::InvalidMessage("pairing requires an iroh session".into())
+                        })?;
+                        let ticket = invitation.endpoint.parse().map_err(
+                            |error: crate::transport::TransportError| {
+                                PeerError::InvalidMessage(error.to_string())
+                            },
+                        )?;
+                        {
+                            let remote = scopeguard::guard(
+                                local
+                                    .connect(&ticket)
+                                    .await
+                                    .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
+                                |session| session.close(),
+                            );
+                            let peer = remote
+                                .open_peer(std::time::Duration::from_secs(20), 8)
+                                .await
+                                .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
+                            peer.request::<_, <Pair as Operation>::Output>(
+                                Pair::METHOD,
+                                &Pair {
+                                    invitation: invitation.invitation,
+                                },
+                            )
+                            .await?;
+                            peer.close().await?;
+                        }
+                        let reply = client
+                            .call(&RegisterRemoteHost {
+                                ticket: &invitation.endpoint,
+                                name: &name,
                             })
                             .await?;
+                        let id = reply.value.id.clone();
+                        Applied {
+                            event: Some(Event::RemoteHostPaired(reply.value)),
+                            outcome: Outcome::RemoteHostPaired(id),
+                            ..Applied::default()
+                        }
                     }
-                    Applied {
-                        sequence: None,
-                        event: None,
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ResizeTerminal { handle, size } => {
-                    client
-                        .call(&ResizeTerminal {
-                            process_handle: &handle,
-                            size,
-                        })
-                        .await?;
-                    Applied {
-                        sequence: None,
-                        event: None,
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::CloseTerminal(handle) => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &KillTerminal {
-                            process_handle: &handle,
-                        },
-                    )
-                    .await?;
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::TerminalClosed(handle)),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::Transcribe {
-                    draft_key,
-                    audio,
-                    send,
-                    client_user_message_id,
-                } => {
-                    let draft = snapshot.drafts.get(&draft_key).cloned().unwrap_or_default();
-                    let reply = client.call(&Transcribe { audio: &audio }).await?;
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::Transcribed {
-                            draft_key,
-                            generation: snapshot.navigation.generation,
-                            draft,
-                            text: reply.value.text,
-                            send,
-                            client_user_message_id,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::UploadAttachment {
-                    draft_key,
-                    mut attachment,
-                    directory,
-                } => {
-                    let session = session.ok_or_else(|| {
-                        PeerError::InvalidMessage("binary transfers require an iroh session".into())
-                    })?;
-                    let uploaded = crate::transfers::upload_file(
-                        peer,
-                        || async { session.open_stream().await.map_err(std::io::Error::other) },
-                        std::path::Path::new(&attachment.path),
-                        std::path::Path::new(&directory),
-                        &attachment.name,
-                    )
-                    .await
-                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                    #[derive(serde::Deserialize)]
-                    struct Uploaded {
-                        path: String,
-                    }
-                    let uploaded: Uploaded = serde_json::from_value(uploaded)
-                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                    attachment.path = uploaded.path;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::AttachmentUploaded {
-                            draft_key,
-                            attachment,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::DownloadFile {
-                    source,
-                    destination,
-                } => {
-                    let session = session.ok_or_else(|| {
-                        PeerError::InvalidMessage("binary transfers require an iroh session".into())
-                    })?;
-                    crate::transfers::download_file(
-                        peer,
-                        || async { session.open_stream().await.map_err(std::io::Error::other) },
-                        &source,
-                        &destination,
-                    )
-                    .await
-                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                    Applied {
-                        sequence: None,
-                        event: None,
-                        outcome: Outcome::Applied,
-                    }
-                }
-
-                Intent::LoadSessionImages(thread_id) => Applied {
-                    sequence: None,
-                    event: None,
-                    outcome: Outcome::SessionImages(client.session_images(&thread_id).await?),
-                },
-                Intent::LoadHostManagement => {
-                    let (status, remotes) = tokio::try_join!(
-                        client.call(&ReadHostStatus {}),
-                        client.call(&ListRemoteHosts {})
-                    )?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::HostManagementLoaded {
-                            generation: snapshot.management.generation,
-                            status: status.value,
-                            remotes: remotes.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::CreateInvitation => {
-                    let reply = client.call(&CreateInvitation {}).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::InvitationCreated(reply.value)),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::PairRemoteHost { invitation, name } => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    if now >= invitation.expires_at {
-                        return Err(PeerError::InvalidMessage("invitation expired".into()));
-                    }
-                    let local = session.ok_or_else(|| {
-                        PeerError::InvalidMessage("pairing requires an iroh session".into())
-                    })?;
-                    let ticket = invitation.endpoint.parse().map_err(
-                        |error: crate::transport::TransportError| {
-                            PeerError::InvalidMessage(error.to_string())
-                        },
-                    )?;
-                    {
-                        let remote = scopeguard::guard(
-                            local
-                                .connect(&ticket)
-                                .await
-                                .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
-                            |session| session.close(),
-                        );
-                        let peer = remote
-                            .open_peer(std::time::Duration::from_secs(20), 8)
-                            .await
-                            .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
-                        peer.request::<_, <Pair as Operation>::Output>(
-                            Pair::METHOD,
-                            &Pair {
-                                invitation: invitation.invitation,
-                            },
-                        )
-                        .await?;
-                        peer.close().await?;
-                    }
-                    let reply = client
-                        .call(&RegisterRemoteHost {
-                            ticket: &invitation.endpoint,
-                            name: &name,
-                        })
-                        .await?;
-                    let id = reply.value.id.clone();
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::RemoteHostPaired(reply.value)),
-                        outcome: Outcome::RemoteHostPaired(id),
-                    }
-                }
-                Intent::RemoveRemoteHost(id) => {
-                    client.call(&RemoveRemoteHost { id: &id }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::RemoteHostRemoved(id)),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::RevokeDevice(id) => {
-                    client.call(&RevokeDevice { node_id: &id }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::DeviceRevoked(id)),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::OpenThread(thread_id) => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &ReadThread {
-                            thread_id: &thread_id,
-                            include_turns: true,
-                            paginate_history: true,
-                            defer_item_details: true,
-                        },
-                    )
-                    .await?;
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::ThreadOpened {
-                            generation: snapshot.navigation.generation,
-                            thread: reply.value.thread,
-                            model: reply.value.model,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ListFiles(path) => {
-                    let reply = client.call(&ListFiles { path: &path }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::FilesLoaded {
-                            request: snapshot.workspace.directory_request,
-                            files: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ReadFile { path, .. } => {
-                    let reply = client.call(&ReadFile { path: &path }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::FileLoaded {
-                            request: snapshot.workspace.file_request,
-                            file: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::SaveFile(path) => {
-                    let submitted = snapshot.file_drafts.get(&path).ok_or_else(|| {
-                        PeerError::InvalidMessage("file has no draft to save".into())
-                    })?;
-                    let reply = client
-                        .call(&WriteFile {
-                            path: &path,
-                            revision: &submitted.revision,
-                            text: &submitted.text,
-                        })
-                        .await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::FileSaved {
-                            submitted: submitted.clone(),
-                            file: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ReviewWorkspace(cwd) => {
-                    let reply = client.call(&ReviewWorkspace { cwd: &cwd }).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::ReviewLoaded {
-                            request: snapshot.workspace.review_request,
-                            review: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ReadWorktreeSettings => {
-                    let reply = client.call(&ReadWorktreeSettings {}).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::WorktreeSettingsLoaded {
-                            request: snapshot.workspace.settings_request,
-                            settings: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::UpdateWorktreeSettings(settings) => {
-                    let reply = client.call(&UpdateWorktreeSettings(&settings)).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::WorktreeSettingsLoaded {
-                            request: snapshot.workspace.settings_request,
-                            settings: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ListThreads(query) => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &ListThreads {
-                            title_only: true,
-                            query: &query,
-                        },
-                    )
-                    .await?;
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::ThreadsLoaded {
-                            request: snapshot.list_request,
-                            threads: reply.value,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::StartThread { cwd, model } => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &StartThread {
-                            cwd: cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()),
-                            model: model.as_deref(),
-                        },
-                    )
-                    .await?;
-                    let id = reply.value.thread.id.clone().expect("validated thread ID");
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::ThreadRefreshed(reply.value.thread)),
-                        outcome: Outcome::StartedThread(id),
-                    }
-                }
-                Intent::ReadThread(thread_id) => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &ReadThread {
-                            thread_id: &thread_id,
-                            include_turns: true,
-                            paginate_history: true,
-                            defer_item_details: true,
-                        },
-                    )
-                    .await?;
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::ThreadRefreshed(reply.value.thread)),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::ReadOlder {
-                    thread_id,
-                    turn_id,
-                    cursor,
-                } => {
-                    let reply = if let Some(turn_id) = &turn_id {
-                        call_ordered(
-                            client,
-                            ordered,
-                            &mut request_id,
-                            &OlderItems {
-                                thread_id: &thread_id,
+                    Intent::ReadOlder {
+                        thread_id,
+                        turn_id,
+                        cursor,
+                    } => {
+                        let reply = if let Some(turn_id) = &turn_id {
+                            call_ordered(
+                                client,
+                                ordered,
+                                &mut request_id,
+                                &OlderItems {
+                                    thread_id: &thread_id,
+                                    turn_id,
+                                    cursor: cursor.as_deref(),
+                                    defer_item_details: true,
+                                },
+                            )
+                            .await?
+                        } else {
+                            call_ordered(
+                                client,
+                                ordered,
+                                &mut request_id,
+                                &OlderTurns {
+                                    thread_id: &thread_id,
+                                    turn_id: None,
+                                    cursor: cursor.as_deref(),
+                                    defer_item_details: true,
+                                },
+                            )
+                            .await?
+                        };
+                        Applied {
+                            sequence: Some(reply.sequence),
+                            event: Some(Event::OlderLoaded {
+                                thread_id,
+                                thread: reply.value.thread,
                                 turn_id,
-                                cursor: cursor.as_deref(),
-                                defer_item_details: true,
-                            },
-                        )
-                        .await?
-                    } else {
-                        call_ordered(
-                            client,
-                            ordered,
-                            &mut request_id,
-                            &OlderTurns {
-                                thread_id: &thread_id,
-                                turn_id: None,
-                                cursor: cursor.as_deref(),
-                                defer_item_details: true,
-                            },
-                        )
-                        .await?
-                    };
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::OlderLoaded {
-                            thread_id,
-                            thread: reply.value.thread,
-                            turn_id,
-                            cursor,
-                        }),
-                        outcome: Outcome::Applied,
+                                cursor,
+                            }),
+                            ..Applied::default()
+                        }
                     }
-                }
-                Intent::ReadItem {
-                    thread_id,
-                    turn_id,
-                    item_id,
-                } => {
-                    let reply = call_ordered(
-                        client,
-                        ordered,
-                        &mut request_id,
-                        &ReadItem {
-                            thread_id: &thread_id,
-                            turn_id: &turn_id,
-                            item_id: &item_id,
-                        },
-                    )
-                    .await?;
-                    Applied {
-                        sequence: Some(reply.sequence),
-                        event: Some(Event::ItemLoaded {
-                            thread_id,
-                            turn_id,
-                            item: reply.value.item,
-                        }),
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::LoadModels => Applied {
-                    sequence: None,
-                    event: Some(Event::ModelsLoaded(client.models().await?)),
-                    outcome: Outcome::Applied,
-                },
-                Intent::Interrupt { thread_id, turn_id } => {
-                    client
-                        .call(&InterruptTurn {
-                            thread_id: &thread_id,
-                            turn_id: &turn_id,
-                        })
-                        .await?;
-                    Applied {
-                        sequence: None,
-                        event: None,
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::Respond { request_id, answer } => {
-                    let request =
-                        snapshot
+                    Intent::LoadModels => Applied {
+                        event: Some(Event::ModelsLoaded(client.models().await?)),
+                        ..Applied::default()
+                    },
+                    Intent::Respond { request_id, answer } => {
+                        let request = snapshot
                             .requests
                             .get(&request_id.to_string())
                             .ok_or_else(|| {
-                                PeerError::InvalidMessage(
-                                    "server request is no longer pending".into(),
-                                )
+                                PeerError::InvalidMessage("server request is no longer pending".into())
                             })?;
-                    client.respond(request, &answer).await?;
-                    Applied {
-                        sequence: None,
-                        event: Some(Event::RequestResolved(request_id)),
-                        outcome: Outcome::Applied,
+                        client.respond(request, &answer).await?;
+                        Applied {
+                            event: Some(Event::RequestResolved(request_id)),
+                            ..Applied::default()
+                        }
                     }
-                }
-                Intent::Watch {
-                    thread_id,
-                    watch_key,
-                    watch_id,
-                    path,
-                } => {
-                    client
-                        .call(&WatchThread {
-                            thread_id: &thread_id,
-                            watch_key,
-                            watch_id,
-                            path: path.as_deref(),
-                        })
-                        .await?;
-                    Applied {
-                        sequence: None,
-                        event: None,
-                        outcome: Outcome::Applied,
-                    }
-                }
-                Intent::Unwatch {
-                    watch_key,
-                    watch_id,
-                } => {
-                    client
-                        .call(&UnwatchThread {
-                            watch_key,
-                            watch_id,
-                        })
-                        .await?;
-                    Applied {
-                        sequence: None,
-                        event: None,
-                        outcome: Outcome::Applied,
-                    }
-                }
-                intent @ (Intent::AcknowledgeTerminal { .. }
-                | Intent::Submit { .. }
-                | Intent::AddAttachment { .. }
-                | Intent::RemoveAttachment { .. }
-                | Intent::NewChat(_)
-                | Intent::ShowThreadList
-                | Intent::SetDraft { .. }
-                | Intent::SetDraftText { .. }
-                | Intent::SelectModel { .. }
-                | Intent::SelectEffort { .. }
-                | Intent::SelectServiceTier { .. }
-                | Intent::SetFileDraft { .. }) => Applied {
-                    sequence: None,
-                    event: Some(Event::Intent(intent)),
-                    outcome: Outcome::Applied,
-                },
-            },
+                    intent @ (Intent::AcknowledgeTerminal { .. }
+                    | Intent::Submit { .. }
+                    | Intent::AddAttachment { .. }
+                    | Intent::RemoveAttachment { .. }
+                    | Intent::NewChat(_)
+                    | Intent::ShowThreadList
+                    | Intent::SetDraft { .. }
+                    | Intent::SetDraftText { .. }
+                    | Intent::SelectModel { .. }
+                    | Intent::SelectEffort { .. }
+                    | Intent::SelectServiceTier { .. }
+                    | Intent::SetFileDraft { .. }) => Applied {
+                        event: Some(Event::Intent(intent)),
+                        ..Applied::default()
+                    },
+            }),
         };
         Ok(applied)
     }

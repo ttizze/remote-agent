@@ -23,13 +23,12 @@ final class BexAppViewModel: ObservableObject {
     @Published private(set) var conversation: ConversationPresentation?
     private(set) var list: ThreadList?
     private(set) var models: [Model] = []
-    private var requests: [Request] = []
     private let presentation = ConversationPresentationCache()
     private var presentationTask: Task<Void, Never>?
     private var pendingPresentation: PresentationInput?
     private struct PresentationInput {
         let source: AgentCore.Thread?
-        let requests: [Request]
+        let snapshot: AgentCore.Snapshot
         let host: String?
     }
 
@@ -235,16 +234,14 @@ extension BexAppViewModel {
     }
 
     private func publish(_ next: AgentCore.Snapshot) {
-        if !next.listUnchanged(other: snapshot) {
+        let listChanged = !next.listUnchanged(other: snapshot)
+        if listChanged {
             list = next.threadList()
         }
         if !next.modelsUnchanged(other: snapshot) {
             models = next.models()
         }
         let requestsChanged = !next.requestsUnchanged(other: snapshot)
-        if requestsChanged {
-            requests = next.requests()
-        }
         let previous = snapshot.navigation().threadId.flatMap { snapshot.conversation(id: $0) }
         let source = next.navigation().threadId.flatMap { next.conversation(id: $0) }
         let changed: Bool = switch (previous, source) {
@@ -257,9 +254,14 @@ extension BexAppViewModel {
             projectConversation(source)
         }
         persistence?.cancel()
-        persistence = Task { [weak self] in
-            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
-            self?.persist()
+        if listChanged {
+            // Completion badges can outlive the process; do not debounce their write.
+            persist()
+        } else {
+            persistence = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
+                self?.persist()
+            }
         }
     }
 
@@ -267,13 +269,13 @@ extension BexAppViewModel {
         if conversation?.id != source?.id() {
             conversation = nil
         }
-        pendingPresentation = PresentationInput(source: source, requests: requests, host: selectedProfileId)
+        pendingPresentation = PresentationInput(source: source, snapshot: snapshot, host: selectedProfileId)
         guard presentationTask == nil else { return }
         presentationTask = Task { [weak self] in
             while let self, let input = pendingPresentation {
                 pendingPresentation = nil
-                let rendered = await presentation.project(input.source, requests: input.requests)
-                if selectedProfileId == input.host, requests == input.requests,
+                let rendered = await presentation.project(input.source)
+                if selectedProfileId == input.host, snapshot.requestsUnchanged(other: input.snapshot),
                    snapshot.navigation().threadId == input.source?.id() {
                     conversation = rendered
                 }

@@ -41,27 +41,14 @@ internal fun RequestCard(request: Request, model: AndroidAppModel) {
     }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                when (request.kind) {
-                    RequestKind.COMMAND_APPROVAL -> "コマンドの承認待ち"
-                    RequestKind.FILE_APPROVAL -> "ファイル変更の承認待ち"
-                    RequestKind.PERMISSIONS -> "権限の承認待ち"
-                    RequestKind.QUESTIONS -> "回答待ち"
-                    else -> "Codexからの確認待ち"
-                },
-                style = MaterialTheme.typography.labelLarge,
-            )
-            Text(
-                request.params["reason"]?.text
-                    ?: request.params["message"]?.text
-                    ?: request.params["prompt"]?.text.orEmpty()
-            )
+            Text(request.title, style = MaterialTheme.typography.labelLarge)
+            Text(request.body)
             when (request.kind) {
                 RequestKind.COMMAND_APPROVAL,
                 RequestKind.FILE_APPROVAL ->
-                    request.decisions.forEachIndexed { index, choice ->
+                    request.decisionLabels.forEachIndexed { index, label ->
                         Button(onClick = { respond(Answer.Decision(index.toUInt())) }, enabled = !busy) {
-                            Text(decisionLabel(choice))
+                            Text(label)
                         }
                     }
                 RequestKind.PERMISSIONS ->
@@ -123,11 +110,3 @@ private fun RawAnswer(busy: Boolean, respond: (Answer) -> Unit, onError: (String
     }
 }
 
-private fun decisionLabel(choice: JsonValue): String =
-    when (choice.text) {
-        "accept" -> "承認"
-        "acceptForSession" -> "このセッションで承認"
-        "decline" -> "拒否"
-        "cancel" -> "キャンセル"
-        else -> choice.pretty()
-    }
