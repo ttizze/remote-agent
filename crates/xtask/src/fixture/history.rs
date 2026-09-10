@@ -125,6 +125,14 @@ pub(super) fn page(
 ) -> Result<()> {
     let persisted = persisted(thread);
     let thread = persisted.as_ref().unwrap_or(thread);
+    if thread.turns.is_empty()
+        || thread
+            .turns
+            .iter()
+            .all(|turn| turn.borrow()["items"].as_array().is_some_and(Vec::is_empty))
+    {
+        return context.error(id, -32601, "list_turns is not supported yet");
+    }
     let turns: Vec<_> = thread.turns.iter().map(|turn| turn.borrow()).collect();
     let offset = offset(params);
     let count = limit(params, 10);

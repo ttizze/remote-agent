@@ -162,6 +162,7 @@ final class BexAppViewModel: ObservableObject {
         }
         isConnecting = true
         connectionError = nil
+        notice = nil
         connection = Task { [weak self] in
             do {
                 try await owner.reconnect(connection: Connection(ticket: profile.ticket,
@@ -221,6 +222,11 @@ extension BexAppViewModel {
                     guard let self, selectedProfileId == host, !Task.isCancelled else { return }
                     let latest = owner.snapshot()
                     publish(latest)
+                    if previous.connected(), !latest.connected(), !isConnecting {
+                        // Recover a lost established connection once. If it
+                        // fails, retain the error and the explicit retry action.
+                        connect()
+                    }
                     previous = latest
                 } catch { return }
             }

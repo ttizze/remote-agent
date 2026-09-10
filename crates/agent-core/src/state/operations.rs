@@ -780,6 +780,10 @@ fn open_thread(snapshot: &mut Snapshot, thread: Thread, model: Option<String>) -
     let id = thread.id.clone();
     let cwd = thread.cwd.clone().unwrap_or_default();
     let path = thread.path.clone();
+    let external = thread
+        .status
+        .as_ref()
+        .is_some_and(|status| status.kind == "notLoaded");
     let mut effects = refresh_thread(snapshot, thread);
     if let Some(id) = id {
         if snapshot.navigation.cwd != cwd {
@@ -799,7 +803,9 @@ fn open_thread(snapshot: &mut Snapshot, thread: Thread, model: Option<String>) -
         }
         navigation.draft_key = id.clone();
         navigation.cwd = cwd;
-        if path.is_some() {
+        // Loaded threads stream native events. Their advertised rollout may
+        // not be materialized yet, so file changes must not trigger hydration.
+        if external && path.is_some() {
             navigation.watch_id = Some(snapshot.epoch);
             navigation.watch_thread_id = Some(id.clone());
             effects.push(Effect::execute(Watch {

@@ -124,7 +124,10 @@
           "status": "completed"
         }
       ],
-      "updatedAt": 1
+      "updatedAt": 1,
+      "path": "/fixture/workspace/fixture-thread-1.jsonl",
+      "historyMode": "paginated",
+      "historyCursor": null
     }
   },
   "list": {

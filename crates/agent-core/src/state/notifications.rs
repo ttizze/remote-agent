@@ -146,6 +146,21 @@ pub(super) fn notification(
         return (next, effects);
     };
     if kind == Kind::ThreadStatus {
+        if params
+            .status
+            .as_ref()
+            .is_some_and(|status| status.kind != "notLoaded")
+            && next.navigation.watch_thread_id.as_deref() == Some(&params.thread_id)
+        {
+            let navigation = Arc::make_mut(&mut next.navigation);
+            if let Some(watch_id) = navigation.watch_id.take() {
+                effects.push(Effect::execute(op::Unwatch {
+                    watch_key: 1,
+                    watch_id,
+                }));
+            }
+            navigation.watch_thread_id = None;
+        }
         if current.status == params.status {
             return (next, effects);
         }

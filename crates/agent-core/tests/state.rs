@@ -303,6 +303,67 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
 }
 
 #[test]
+fn only_external_conversations_watch_persisted_history() {
+    for status in ["idle", "active", "notLoaded"] {
+        let thread: Thread = serde_json::from_value(json!({
+            "id":"thread", "path":"/isolated/rollout.jsonl",
+            "status":{"type":status}, "turns":[]
+        }))
+        .unwrap();
+        let (snapshot, effects) = applied(
+            &Snapshot::default(),
+            op::ReadThread::open("thread".into()),
+            reply(thread),
+        );
+        assert_eq!(
+            snapshot.navigation.watch_id.is_some(),
+            status == "notLoaded",
+            "{status}"
+        );
+        assert_eq!(
+            effects.len(),
+            usize::from(status == "notLoaded"),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn resuming_an_external_conversation_stops_rollout_refreshes() {
+    let thread = serde_json::from_value(json!({
+        "id":"thread", "path":"/isolated/rollout.jsonl", "status":{"type":"notLoaded"}
+    }))
+    .unwrap();
+    let (watching, _) = applied(
+        &Snapshot::default(),
+        op::ReadThread::open("thread".into()),
+        reply(thread),
+    );
+    let watch_id = watching.navigation.watch_id;
+    let (loaded, effects) = reduce(
+        &watching,
+        Event::Notification {
+            method: "thread/status/changed".into(),
+            params: json!({"threadId":"thread", "status":{"type":"active", "activeFlags":[]}}),
+        },
+    );
+    assert!(loaded.navigation.watch_id.is_none());
+    assert!(loaded.navigation.watch_thread_id.is_none());
+    assert_eq!(effects.len(), 1);
+    assert!(
+        reduce(
+            &loaded,
+            Event::Notification {
+                method: "host/thread/changed".into(),
+                params: json!({"threadId":"thread", "watchId":watch_id}),
+            }
+        )
+        .1
+        .is_empty()
+    );
+}
+
+#[test]
 fn stopped_history_watch_cannot_reload_a_conversation() {
     use agent_core::state::Intent;
     let (watching, _) = reduce(

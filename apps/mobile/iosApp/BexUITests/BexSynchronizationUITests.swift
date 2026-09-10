@@ -3,6 +3,47 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorReconnectClearsHistoryFailureAndPreservesDraft() throws {
+        #if !targetEnvironment(simulator)
+            throw XCTSkip("This test uses the isolated Simulator fixture")
+        #endif
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[success] Establish a conversation before retry")
+        let firstAnswer = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(firstAnswer.waitForExistence(timeout: 25))
+        let firstAnswerID = firstAnswer.identifier
+        let secondAnswerID = String(firstAnswerID.dropLast()) + "2"
+        let composer = app.textFields["task.message"]
+        composer.tap(); composer.typeText("Keep this retry draft")
+        XCUIDevice.shared.press(.home)
+        try simulatorFixture("fail-next-history-read")
+        app.activate()
+        let banner = app.descendants(matching: .any)["connection.error"]
+        XCTAssertTrue(banner.waitForExistence(timeout: 20))
+        XCTAssertEqual(composer.value as? String, "Keep this retry draft")
+        app.buttons["再接続"].tap()
+        let recovered = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: banner)
+        wait(for: [recovered], timeout: 20)
+        XCTAssertEqual(composer.value as? String, "Keep this retry draft")
+        let send = app.buttons["task.send"]
+        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: send)
+        wait(for: [ready], timeout: 15)
+        send.tap()
+        XCTAssertTrue(app.descendants(matching: .any)[secondAnswerID].waitForExistence(timeout: 25))
+        XCTAssertTrue(app.staticTexts["Keep this retry draft"].exists)
+        XCTAssertFalse(banner.exists)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        XCTAssertNotEqual(composer.value as? String, "Keep this retry draft")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let number = firstAnswerID.replacingOccurrences(of: "item.fixture-final-", with: "")
+            .split(separator: "-")[0]
+        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)[secondAnswerID].waitForExistence(timeout: 20))
+        XCTAssertFalse(banner.exists)
+        captureScreen(app, named: "Reconnect clears history error and preserves submission")
+    }
+
     func testSimulatorUpdatesAnOpenConversationFromAnotherClient() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This test uses the isolated Simulator fixture")

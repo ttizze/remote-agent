@@ -469,6 +469,128 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconnect() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = Fixture::start(directory.path()).await;
+        let endpoint = Endpoint::bind(
+            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
+            Relays::Disabled,
+        )
+        .await
+        .unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let prompt = "[delayed-input] Preserve this input through reconnect";
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: "new:".into(),
+                text: prompt.into(),
+            })
+            .await
+            .unwrap();
+        store.disconnect().await.unwrap();
+        assert!(
+            store
+                .dispatch(Intent::Submit {
+                    thread_id: None,
+                    client_user_message_id: "offline".into()
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(store.snapshot().drafts["new:"].text, prompt);
+        let restored =
+            serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap()).unwrap();
+        store.close().await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, restored, None)
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "sent".into(),
+            })
+            .await
+            .unwrap();
+        let id = store.snapshot().navigation.thread_id.clone().unwrap();
+        assert!(
+            store.snapshot().navigation.watch_id.is_none(),
+            "a live thread must not read its unmaterialized rollout"
+        );
+        let client = fixture.local().await;
+        let error = client
+            .peer
+            .request::<_, Value>(
+                "host/thread/read",
+                &json!({"threadId":id,"includeTurns":true}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("list_turns is not supported yet"),
+            "{error}"
+        );
+        std::fs::write(directory.path().join("release-inputs"), "").unwrap();
+        let mut updates = store.subscribe();
+        loop {
+            let current = updates.borrow_and_update().clone();
+            assert!(current.error.is_none(), "{:?}", current.error);
+            if current.conversations[&id]
+                .turns
+                .as_ref()
+                .is_some_and(|turns| {
+                    turns
+                        .iter()
+                        .any(|turn| turn.status.as_deref() == Some("completed"))
+                })
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+        store.dispatch(Intent::ShowThreadList).await.unwrap();
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+            .await
+            .unwrap();
+        let current = store.snapshot();
+        assert!(current.error.is_none());
+        assert!(current.pending_submissions.is_empty());
+        assert!(current.drafts[&id].text.is_empty() && current.drafts[&id].attachments.is_empty());
+        let turn = &current.conversations[&id].turns.as_ref().unwrap()[0];
+        assert_eq!(turn.status.as_deref(), Some("completed"));
+        let items = turn.items.as_ref().unwrap();
+        assert!(
+            items
+                .iter()
+                .any(|item| item.text.as_deref() == Some(prompt))
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| item.kind.as_deref() == Some("agentMessage")
+                    && item.extra.get("phase") == Some(&json!("final_answer")))
+        );
+        store.close().await.unwrap();
+        client.peer.close().await.unwrap();
+        drop(client);
+        endpoint.close().await;
+        fixture.close().await;
+    })
+    .await
+    .expect("live conversation recovery exceeded deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
     use agent_core::{
         state::{Attachment, Intent},
@@ -993,6 +1115,7 @@ async fn daemon_model_wire_fixture() {
         assert_eq!(list["projects"][0]["roots"][0]["path"], directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["result"].is_object()));
         let capture = serde_json::to_string_pretty(&json!({"list":list,"history":history})).unwrap()
+            .replace(directory.path().canonicalize().unwrap().to_str().unwrap(), "/fixture/workspace")
             .replace(directory.path().to_str().unwrap(), "/fixture/workspace");
         assert_eq!(serde_json::from_str::<Value>(&capture).unwrap(), serde_json::from_str::<Value>(include_str!("../../agent-core/tests/fixtures/daemon-wire.json")).unwrap());
         local.close().await;

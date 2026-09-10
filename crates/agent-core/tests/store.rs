@@ -49,7 +49,13 @@ async fn setup(
     let cwd = selected.map_or(snapshot.navigation.cwd.as_str(), |thread| {
         thread.cwd.as_deref().unwrap_or_default()
     });
-    let watches = usize::from(selected.is_some_and(|thread| thread.path.is_some()));
+    let watches = usize::from(selected.is_some_and(|thread| {
+        thread.path.is_some()
+            && thread
+                .status
+                .as_ref()
+                .is_some_and(|status| status.kind == "notLoaded")
+    }));
     for _ in 0..2 + usize::from(selected.is_some()) + usize::from(!cwd.is_empty()) + watches {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {

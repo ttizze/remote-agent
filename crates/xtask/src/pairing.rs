@@ -180,6 +180,9 @@ fn route(
                     .write_all(b"external reply persisted\n")?;
             }
         }
+        "/fail-next-history-read" => {
+            fs::write(root.join("fail-next-history-read"), "")?;
+        }
         _ => return Ok((404, Vec::new())),
     }
     Ok((204, Vec::new()))

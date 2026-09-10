@@ -314,6 +314,8 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     next_thread += 1;
                     let thread_id = format!("fixture-thread-{next_thread}");
                     let mut thread = Thread::new(thread_id.clone(), cwd);
+                    thread.metadata.insert("path".into(), context.home.join(format!("{thread_id}.jsonl")).into_os_string().into_string().unwrap().into());
+                    thread.metadata.insert("historyMode".into(), "paginated".into());
                     thread.metadata.insert("model".into(), params["model"].take());
                     thread.metadata.insert("createdAt".into(), next_thread.into());
                     thread.metadata.insert("updatedAt".into(), next_thread.into());
@@ -419,6 +421,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     history::page(&context, id, &thread.borrow(), method, params)?;
                 }
                 "thread/read" | "thread/resume" => {
+                    let failure = context.home.join("fail-next-history-read");
+                    if method == "thread/read" && failure.exists() {
+                        fs::remove_file(failure)?;
+                        context.error(id, -32601, "list_turns is not supported yet")?;
+                        continue;
+                    }
                     let external = context.home.join("background-reply");
                     if external.exists()
                         && let Some(latest) = threads.values().max_by_key(|thread| thread.borrow().metadata["createdAt"].as_i64().unwrap_or(0)) {

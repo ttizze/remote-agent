@@ -92,6 +92,11 @@ pub(super) async fn run(
     }
 
     context.turn_event("turn/started", &thread_id, &turn.borrow())?;
+    // Native Codex advertises a rollout path before history is materialized.
+    // A file event is not evidence that thread/turns/list can hydrate it yet.
+    if let Some(path) = thread.borrow().metadata.get("path").and_then(Value::as_str) {
+        fs::write(path, "fixture rollout initializing\n")?;
+    }
     if prompt.contains("[delayed-input]") && !wait_for_release(&context.home, &stop).await {
         return Ok(());
     }
