@@ -178,6 +178,8 @@ nix develop . --command just iroh-e2e
 
 Native Linux development uses the smaller `nix develop .#native` shell, which includes the Rust toolchain, GTK/WebKit, audio, font and display libraries. Run `cargo build --locked -p bex-desktop -p host-daemon -p agent-cli` there. Native Windows CI is the Nix exception: `.github/workflows/native.yml` installs the Rust version resolved by the pinned Rust overlay and uses the runner's Windows SDK. A metadata job evaluates `devShells.x86_64-linux.native.RUST_TOOLCHAIN_VERSION`; Windows consumes that value instead of a second version pin. Both native jobs cache Cargo dependencies and build artifacts, keyed by the toolchain and dependency manifests; Linux also keys by `flake.lock`. A successful build does not verify GUI interaction or production keyring access.
 
+Linux CI and the toolchain lookup use the repository-scoped `remote-agent-ci-1` runner on the shared Hetzner host, selected by `[self-hosted, linux, x64, nix-ci]`. [nix-config](https://github.com/ttizze/nix-config/blob/main/hosts/ci-1/default.nix) owns its NixOS service, isolated user and work directory; this repository owns the workflow and pinned build environment. Linux Cargo builds use two jobs. Fork pull requests do not execute on the shared runner. Windows continues on `windows-2025`; its result is independent of Linux coverage.
+
 Code quality runs locally on macOS with Xcode installed. Install the Nix-pinned Lefthook once per clone to run checks asynchronously after each commit:
 
 ```sh

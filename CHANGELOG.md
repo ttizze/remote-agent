@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Run native Linux builds, Core and isolated Host tests, and Rust toolchain lookup on the repository-scoped shared Hetzner runner managed by `nix-config`. Keep native Windows CI, restrict shared-runner execution to same-repository changes, and bound Linux Cargo builds to two jobs.
+
 - Apply automatic worktree creation only when a new session has an explicitly selected checkout. Global chats can send with the setting enabled. Cover saved settings on/off, global/project scope, text/photo input, first/follow-up turns, and reopened history through the real Store and isolated Host; exercise native photo/video submission after saving and reloading the enabled setting.
 
 - Store uploads from chats without a project in the Host's private `$CODEX_HOME/bex-attachments` directory. Preserve explicit absolute destinations and reject other relative paths. Return an empty review for folders without a Git worktree while preserving real Git errors. Verify complete photo/video submission without an error notice; keep unscoped fixture threads inside their isolated directory instead of inheriting the developer's checkout.
