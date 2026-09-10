@@ -100,7 +100,9 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
         let thread = started["result"]["thread"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;
-        let before = call(&service, &mut session, "thread/read", json!({"threadId":thread,"includeTurns":true})).await;
+        let before = call(&service, &mut session, "host/thread/read", json!({"threadId":thread,"includeTurns":true})).await;
+        assert!(before.get("error").is_none(), "{before}");
+        assert_eq!(before["result"]["thread"]["turns"].as_array().unwrap().len(), 1);
         let canceled = call(&service, &mut session, "host/account/login/start", json!({})).await;
         assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
@@ -120,10 +122,10 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
         let refreshed = call(&service, &mut session, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
         assert_eq!(refreshed["result"], json!({"accountId":"desktop","hasToken":true}));
-        let after = call(&service, &mut session, "thread/read", json!({"threadId":thread,"includeTurns":true})).await;
+        let after = call(&service, &mut session, "host/thread/read", json!({"threadId":thread,"includeTurns":true})).await;
         assert_eq!(before["result"]["thread"], after["result"]["thread"]);
         completed_turn(&service, &mut session, thread, "after switch").await;
-        let after = call(&service, &mut session, "thread/read", json!({"threadId":thread,"includeTurns":true})).await;
+        let after = call(&service, &mut session, "host/thread/read", json!({"threadId":thread,"includeTurns":true})).await;
         assert_eq!(after["result"]["thread"]["turns"].as_array().unwrap().len(), 2);
         let invalid = call(&service, &mut session, "host/account/select", json!({"accountId":"missing"})).await;
         assert!(invalid.get("error").is_some());
@@ -200,7 +202,7 @@ async fn fork_inherits_only_through_selected_completed_turn_and_preserves_origin
         let original = call(
             &service,
             &mut session,
-            "thread/read",
+            "host/thread/read",
             json!({"threadId":thread,"includeTurns":true}),
         )
         .await;
@@ -211,24 +213,30 @@ async fn fork_inherits_only_through_selected_completed_turn_and_preserves_origin
             json!({"threadId":thread,"lastTurnId":first,"excludeTurns":true}),
         )
         .await;
+        assert!(fork.get("error").is_none(), "{fork}");
         let fork_id = fork["result"]["thread"]["id"].as_str().unwrap();
         assert_ne!(thread, fork_id);
         let fork = call(
             &service,
             &mut session,
-            "thread/read",
+            "host/thread/read",
             json!({"threadId":fork_id,"includeTurns":true}),
         )
         .await;
+        assert!(original.get("error").is_none(), "{original}");
+        assert!(fork.get("error").is_none(), "{fork}");
+        let original_turns = original["result"]["thread"]["turns"].as_array().unwrap();
+        assert_eq!(original_turns.len(), 2);
+        assert_eq!(original_turns[0]["id"], first);
         assert_eq!(
             fork["result"]["thread"]["turns"],
-            json!([original["result"]["thread"]["turns"][0]])
+            json!([original_turns[0]])
         );
         completed_turn(&service, &mut session, fork_id, "fork continuation").await;
         let unchanged = call(
             &service,
             &mut session,
-            "thread/read",
+            "host/thread/read",
             json!({"threadId":thread,"includeTurns":true}),
         )
         .await;
