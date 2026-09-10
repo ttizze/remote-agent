@@ -15,7 +15,7 @@ extension BexAppViewModel {
     }
 
     var modelError: String? {
-        notice ?? snapshot.error()
+        notice ?? connectionError ?? snapshot.error()
     }
 
     var selectedModel: String {

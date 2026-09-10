@@ -21,7 +21,6 @@ struct AppPresentation {
     let selectedProfileId: String?
     let selectedProfileName: String?
     let pairingError: String?
-    let connectionError: String?
     let workingDirectory: String
     let projects: [Project]
     let threadLoadState: LoadState

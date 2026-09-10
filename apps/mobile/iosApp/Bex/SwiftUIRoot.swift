@@ -68,24 +68,8 @@ private struct BexScreen: View {
                     }
                 )) {
                     ThreadScreen(state: state, model: model, conversation: model.conversation)
-                        .safeAreaInset(edge: .top, spacing: 0) { connectionErrorBanner }
                 } label: { EmptyView() }
             )
-            .safeAreaInset(edge: .top, spacing: 0) { connectionErrorBanner }
-    }
-
-    @ViewBuilder private var connectionErrorBanner: some View {
-        if state.selectedProfileId != nil, state.screen != .pairing,
-           let error = state.connectionError {
-            HStack(spacing: 8) {
-                Text(error).font(.caption).lineLimit(2)
-                Spacer()
-                Button("再接続") { model.connect(force: true) }
-                    .disabled(state.isConnecting)
-            }
-            .padding(10).background(.ultraThinMaterial)
-            .accessibilityIdentifier("connection.error")
-        }
     }
 }
 

@@ -224,7 +224,7 @@ extension BexAppViewModel {
                     publish(latest)
                     if previous.connected(), !latest.connected(), !isConnecting {
                         // Recover a lost established connection once. If it
-                        // fails, retain the error and the explicit retry action.
+                        // fails, the next foreground activation retries it.
                         connect()
                     }
                     previous = latest

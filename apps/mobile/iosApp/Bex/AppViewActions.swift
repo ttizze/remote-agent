@@ -10,7 +10,6 @@ extension BexAppViewModel {
             screen: profiles.isEmpty ? .pairing : screen, isConnected: snapshot.connected(),
             isConnecting: isConnecting, profiles: profiles, selectedProfileId: selectedProfileId,
             selectedProfileName: selected?.name, pairingError: pairingError,
-            connectionError: connectionError ?? snapshot.error(),
             workingDirectory: nav.cwd, projects: list?.projects ?? [],
             threadLoadState: loadingThreads ? .loading : list != nil ? .ready : notice != nil ? .failed : .idle,
             threadLoadError: notice, threads: list?.threads ?? [], hasMoreProjects: list?.hasMoreProjects ?? false,

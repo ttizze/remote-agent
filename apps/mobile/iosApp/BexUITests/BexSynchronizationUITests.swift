@@ -19,11 +19,13 @@ extension BexLaunchUITests {
         try simulatorFixture("fail-next-history-read")
         app.activate()
         let banner = app.descendants(matching: .any)["connection.error"]
-        XCTAssertTrue(banner.waitForExistence(timeout: 20))
+        let progress = app.descendants(matching: .any)["connection.progress"]
+        let settled = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: progress)
+        wait(for: [settled], timeout: 20)
+        XCTAssertFalse(banner.exists)
         XCTAssertEqual(composer.value as? String, "Keep this retry draft")
-        app.buttons["再接続"].tap()
-        let recovered = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: banner)
-        wait(for: [recovered], timeout: 20)
+        XCUIDevice.shared.press(.home)
+        app.activate()
         XCTAssertEqual(composer.value as? String, "Keep this retry draft")
         let send = app.buttons["task.send"]
         let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: send)

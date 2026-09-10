@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Remove the iPhone connection error subheader from task lists and conversations; keep connection progress in the navigation header.
+
 - Exercise account-switch and fork history through the Host hydration API in integration tests, and compare startup diagnostics against native OS errors without assuming English Unix messages.
 
 - Persist rotating private JSONL error logs for desktop and Host, including RPC causes and turn errors, startup failures, timeouts, and panic diagnostics. Retain records across restarts and redact common credentials and structured payloads. Preserve string-valued errors and watch failures, distinguish intentional closes from failures, report the caller's application version, and recover from rotation failures without recursive logging deadlocks or panics on closed stderr.
