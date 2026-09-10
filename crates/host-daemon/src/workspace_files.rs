@@ -23,8 +23,9 @@ const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct WorkspaceFiles {
+    upload_directory: Arc<Path>,
     // Serialize our compare-and-replace writes across all authenticated peers.
     writes: Arc<Mutex<()>>,
     grants: Arc<Mutex<HashMap<String, Grant>>>,
@@ -87,6 +88,14 @@ pub(crate) enum FileResponse {
 }
 
 impl WorkspaceFiles {
+    pub(crate) fn new(upload_directory: PathBuf) -> Self {
+        Self {
+            upload_directory: upload_directory.into(),
+            writes: Default::default(),
+            grants: Default::default(),
+        }
+    }
+
     pub(crate) async fn request(
         &self,
         session: SessionId,
@@ -191,9 +200,16 @@ impl WorkspaceFiles {
                 read_editable(&path).map(FileResponse::Content)
             }
             FileRequest::Upload(params) => {
-                let directory = absolute_path(&params.directory)?
-                    .canonicalize()
-                    .map_err(io_error)?;
+                // New chats have no workspace yet. Keep their attachments in
+                // Host-owned storage; explicit destinations remain absolute.
+                let directory = if params.directory.as_os_str().is_empty() {
+                    let directory = absolute_path(&self.upload_directory)?;
+                    crate::platform::create_state_directory(directory).map_err(io_error)?;
+                    directory
+                } else {
+                    absolute_path(&params.directory)?
+                };
+                let directory = directory.canonicalize().map_err(io_error)?;
                 if !directory.is_dir() {
                     return Err("upload directory is unavailable".into());
                 }
@@ -484,7 +500,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("content");
             fs::write(&path, b"private").unwrap();
-            let files = WorkspaceFiles::default();
+            let files = WorkspaceFiles::new(dir.path().join("attachments"));
             let grant = files
                 .dispatch(1, FileRequest::Download(PathParams { path: path.clone() }))
                 .unwrap();
@@ -539,7 +555,7 @@ mod tests {
     async fn corrupt_or_overlong_uploads_leave_no_destination_or_temporary_file() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let directory = tempfile::tempdir().unwrap();
-            let files = WorkspaceFiles::default();
+            let files = WorkspaceFiles::new(directory.path().join("attachments"));
             for bytes in [&b"wrong"[..], &b"longer"[..]] {
                 let grant = files
                     .dispatch(
@@ -572,6 +588,18 @@ mod tests {
                     )
                     .is_err()
             );
+            for path in ["relative", ".", ".."] {
+                assert!(matches!(
+                    files.dispatch(1, FileRequest::Upload(Upload {
+                        directory: path.into(),
+                        file_name: "safe.txt".into(),
+                        size: 0,
+                        sha256: hash(b""),
+                    })),
+                    Err(error) if error == "an absolute filesystem path is required"
+                ));
+            }
+            assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
         })
         .await
         .unwrap();

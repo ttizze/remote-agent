@@ -1,3 +1,4 @@
+use agent_core::state::operations as op;
 use agent_core::{
     models::Invitation,
     peer::{PeerEvent, RpcPeer},
@@ -367,7 +368,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
             .await
             .unwrap();
         store
-            .dispatch(Intent::UploadAttachment {
+            .dispatch(Intent::UploadAttachment(op::UploadAttachment {
                 draft_key: "transfer-draft".into(),
                 attachment: Attachment {
                     path: source.to_str().unwrap().into(),
@@ -375,7 +376,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
                     is_image: false,
                 },
                 directory: directory.path().to_str().unwrap().into(),
-            })
+            }))
             .await
             .unwrap();
         let uploaded =
@@ -406,13 +407,58 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         other.close().await;
         let destination = directory.path().join("download.bin");
         store
-            .dispatch(Intent::DownloadFile {
+            .dispatch(Intent::DownloadFile(op::DownloadFile {
                 source: uploaded.to_str().unwrap().into(),
                 destination: destination.to_str().unwrap().into(),
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(std::fs::read(destination).unwrap(), content);
+        // A new chat has no project or working directory yet. Its attachment
+        // must still reach Host storage, without changing the selected draft.
+        assert!(store.snapshot().navigation.cwd.is_empty());
+        store
+            .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                draft_key: "unscoped-draft".into(),
+                attachment: Attachment {
+                    path: source.to_str().unwrap().into(),
+                    name: "unscoped.bin".into(),
+                    is_image: false,
+                },
+                directory: store.snapshot().navigation.cwd.clone(),
+            }))
+            .await
+            .unwrap();
+        let uploaded =
+            PathBuf::from(&store.snapshot().drafts["unscoped-draft"].attachments[0].path);
+        assert!(
+            uploaded.starts_with(
+                directory
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join("bex-attachments")
+            )
+        );
+        let destination = directory.path().join("unscoped-download.bin");
+        store
+            .dispatch(Intent::DownloadFile(op::DownloadFile {
+                source: uploaded.to_str().unwrap().into(),
+                destination: destination.to_str().unwrap().into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), content);
+        assert!(store.snapshot().connected);
+        store
+            .dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+                cwd: directory.path().to_str().unwrap().into(),
+            }))
+            .await
+            .unwrap();
+        let snapshot = store.snapshot();
+        assert!(snapshot.workspace.review.as_ref().unwrap().files.is_empty());
+        assert!(snapshot.error.is_none());
         store.close().await.unwrap();
         assert!(!store.snapshot().connected);
         client.close().await;
@@ -420,6 +466,109 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
     })
     .await
     .expect("binary transfer deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
+    use agent_core::{
+        state::{Attachment, Intent},
+        store::{Outcome, Store},
+    };
+    tokio::time::timeout(Duration::from_secs(60), async {
+        for automatic in [true, false] {
+            for project in [false, true] {
+                for photo in [true, false] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let root = directory.path().canonicalize().unwrap();
+                    let workspace = root.join("project");
+                    std::fs::create_dir(&workspace).unwrap();
+                    let git = |args: &[&str]| {
+                        let output = std::process::Command::new("git").current_dir(&workspace).args(args).output().unwrap();
+                        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                        output.stdout
+                    };
+                    git(&["init", "--quiet"]);
+                    std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
+                    git(&["add", "tracked.txt"]);
+                    git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
+                    let destination = root.join("worktrees");
+                    // Load persisted preferences before connecting, as a configured
+                    // installation does. No test depends on default/off settings.
+                    std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({
+                        "settings":{"createOnNewSession":automatic,"worktreeDirectory":destination}
+                    })).unwrap()).unwrap();
+                    let source = root.join("photo.png");
+                    let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
+                    std::fs::write(&source, bytes).unwrap();
+                    let fixture = Fixture::start(&root).await;
+                    let endpoint = Endpoint::bind(host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(), Relays::Disabled).await.unwrap();
+                    let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+                    store.dispatch(Intent::NewChat { cwd: if project { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                    let mut thread_id = None;
+                    let mut session_cwd = None;
+                    for number in 0..2 {
+                        let key = store.snapshot().navigation.draft_key.clone();
+                        let prompt = format!("[success] automatic={automatic}, project={project}, photo={photo}, message={number}");
+                        store.dispatch(Intent::SetDraftText { thread_id: key.clone(), text: prompt.clone() }).await.unwrap();
+                        let uploaded = if photo {
+                            store.dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                                draft_key: key,
+                                attachment: Attachment { path: source.to_str().unwrap().into(), name: "photo.png".into(), is_image: true },
+                                directory: store.snapshot().navigation.cwd.clone(),
+                            })).await.unwrap();
+                            let current = store.snapshot();
+                            Some(current.drafts[&current.navigation.draft_key].attachments[0].path.clone())
+                        } else { None };
+                        let sent = store.dispatch(Intent::Submit { thread_id: thread_id.clone(), client_user_message_id: format!("client-{number}") }).await;
+                        assert!(matches!(sent.unwrap_or_else(|error| panic!("{prompt}: {error}")), Outcome::Submitted { .. }));
+                        let id = store.snapshot().navigation.thread_id.clone().unwrap();
+                        if let Some(previous) = &thread_id { assert_eq!(&id, previous); }
+                        let mut updates = store.subscribe();
+                        loop {
+                            let completed = updates.borrow_and_update().conversations.get(&id).is_some_and(|thread| {
+                                thread.turns.as_ref().is_some_and(|turns| turns.len() == number + 1 && turns[number].status.as_deref() == Some("completed"))
+                            });
+                            if completed { break; }
+                            updates.changed().await.unwrap();
+                        }
+                        let cwd = store.snapshot().navigation.cwd.clone();
+                        if let Some(previous) = &session_cwd { assert_eq!(&cwd, previous); }
+                        if automatic && project { assert_eq!(Path::new(&cwd).parent().unwrap(), destination); }
+                        else { assert_eq!(Path::new(&cwd), if project { &workspace } else { &root }); }
+                        store.dispatch(Intent::ShowThreadList).await.unwrap();
+                        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+                        store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: cwd.clone() })).await.unwrap();
+                        let snapshot = store.snapshot();
+                        assert!(snapshot.connected);
+                        assert!(snapshot.error.is_none(), "{prompt}: {:?}", snapshot.error);
+                        assert!(snapshot.pending_submissions.is_empty());
+                        let draft = &snapshot.drafts[&id];
+                        assert!(draft.text.is_empty() && draft.attachments.is_empty());
+                        let turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[number];
+                        assert!(turn.error.is_none());
+                        let items = turn.items.as_ref().unwrap();
+                        let user = items.iter().find(|item| item.kind.as_deref() == Some("userMessage")).unwrap();
+                        assert_eq!(user.text.as_deref(), Some(prompt.as_str()));
+                        let mut images = user.extra["content"].as_array().unwrap().iter().filter(|input| input["type"] == "localImage");
+                        if let Some(path) = uploaded {
+                            assert_eq!(images.next().unwrap()["path"], path);
+                            assert_eq!(std::fs::read(path).unwrap(), bytes);
+                        }
+                        assert!(images.next().is_none());
+                        assert!(items.iter().any(|item| item.extra.get("phase").and_then(Value::as_str) == Some("final_answer") && item.text.as_ref().is_some_and(|text| !text.is_empty())));
+                        thread_id = Some(id);
+                        session_cwd = Some(cwd);
+                    }
+                    let worktrees = String::from_utf8(git(&["worktree", "list", "--porcelain"])).unwrap();
+                    assert_eq!(worktrees.lines().filter(|line| line.starts_with("worktree ")).count(), if automatic && project { 2 } else { 1 });
+                    store.close().await.unwrap();
+                    drop(store);
+                    endpoint.close().await;
+                    fixture.close().await;
+                }
+            }
+        }
+    }).await.expect("submission matrix exceeded 60 seconds");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -449,7 +598,10 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         .await
         .unwrap();
         use agent_core::{state::Intent, store::Outcome};
-        manager_b.dispatch(Intent::CreateInvitation).await.unwrap();
+        manager_b
+            .dispatch(Intent::CreateInvitation(op::CreateInvitation {}))
+            .await
+            .unwrap();
         let invitation = manager_b
             .snapshot()
             .management
@@ -463,10 +615,10 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         let id = second.ticket.node_id().to_string();
         assert_eq!(
             manager_a
-                .dispatch(Intent::PairRemoteHost {
+                .dispatch(Intent::PairRemoteHost(op::PairRemoteHost {
                     invitation,
                     name: "remote fixture".into()
-                })
+                }))
                 .await
                 .unwrap(),
             Outcome::RemoteHostPaired { id: id.clone() }
@@ -487,7 +639,7 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
                 .is_err()
         );
         manager_a
-            .dispatch(Intent::LoadHostManagement)
+            .dispatch(Intent::LoadHostManagement(op::LoadHostManagement {}))
             .await
             .unwrap();
         let snapshot = manager_a.snapshot();
@@ -502,12 +654,12 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
             second.ticket.node_id()
         );
         manager_a
-            .dispatch(Intent::RemoveRemoteHost { id })
+            .dispatch(Intent::RemoveRemoteHost(op::RemoveRemoteHost { id }))
             .await
             .unwrap();
         assert!(manager_a.snapshot().management.remotes.is_empty());
         manager_a
-            .dispatch(Intent::LoadHostManagement)
+            .dispatch(Intent::LoadHostManagement(op::LoadHostManagement {}))
             .await
             .unwrap();
         assert!(manager_a.snapshot().management.remotes.is_empty());
@@ -759,6 +911,10 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         let restarted = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
         let mut restarted_session = restarted.open_session(64);
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
+        for method in ["thread/start", "host/thread/start"] {
+            let global = request(&restarted, &mut restarted_session, method, json!({})).await;
+            assert_eq!(global["thread"]["cwd"], root.to_str().unwrap());
+        }
         let listed = request(&restarted, &mut restarted_session, "host/thread/list", json!({"titleOnly":true})).await;
         for id in &ids {
             let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("worktree task must remain in the project list after restart");
@@ -888,9 +1044,9 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
         let local = fixture.local().await;
         let store = Store::new(local.peer, Snapshot::default());
         store
-            .dispatch(Intent::ListThreads {
-                query: Default::default(),
-            })
+            .dispatch(Intent::ListThreads(
+                op::ListThreads::new(Default::default()),
+            ))
             .await
             .unwrap();
         assert!(store.snapshot().connected);
@@ -898,9 +1054,9 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
         assert!(
             store
-                .dispatch(Intent::ListThreads {
-                    query: Default::default()
-                })
+                .dispatch(Intent::ListThreads(
+                    op::ListThreads::new(Default::default())
+                ))
                 .await
                 .is_err()
         );

@@ -49,8 +49,10 @@ extension BexLaunchUITests {
 
     func testSimulatorCanAttachPhotosAndVideos() throws {
         let app = try connectedSimulatorApp()
-        let compose = app.buttons["tasks.new.project.simulator-project"]
+        try useAutomaticWorktrees(app)
+        let compose = app.buttons["tasks.new.chat"]
         XCTAssertTrue(compose.waitForExistence(timeout: 10)); compose.tap()
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
         app.buttons["task.attach"].tap()
         XCTAssertTrue(app.buttons["task.attach.photos"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["task.attach.camera"].exists)
@@ -78,6 +80,14 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "添付:")).firstMatch
             .waitForExistence(timeout: 20))
         XCTAssertEqual(removals.count, 0)
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
+        let completed = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "作業しました"),
+            evaluatedWith: prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        )
+        wait(for: [completed], timeout: 10)
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertFalse(app.staticTexts["notice"].exists, "Completed attachment send must not leave a Host error")
         captureScreen(app, named: "Uploaded photo and video in chat history")
     }
 

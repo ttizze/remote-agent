@@ -135,7 +135,7 @@ struct ModelSettingsSheet: View {
     private func startLogin() {
         startingLogin = true
         loginError = nil
-        model.perform(.startAccountLogin) { result in
+        model.perform(.startAccountLogin(StartAccountLogin())) { result in
             startingLogin = false
             if case let .failure(error) = result {
                 loginError = error.localizedDescription; return
@@ -148,7 +148,7 @@ struct ModelSettingsSheet: View {
 
     private func chooseAccount(_ id: String) {
         changingAccount = true
-        model.perform(.selectAccount(id: id)) { _ in changingAccount = false }
+        model.perform(.selectAccount(SelectAccount(id: id))) { _ in changingAccount = false }
     }
 
     private func refresh() {
@@ -157,7 +157,7 @@ struct ModelSettingsSheet: View {
         } else {
             model.loadAccounts()
             loadingModels = true
-            model.perform(.loadModels) { _ in loadingModels = false }
+            model.perform(.loadModels(LoadModels())) { _ in loadingModels = false }
         }
     }
 
@@ -169,7 +169,7 @@ struct ModelSettingsSheet: View {
             while !Task.isCancelled, login?.loginId == id {
                 do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
                 let result: Result<Outcome, Error> = await withCheckedContinuation { continuation in
-                    model.perform(.readAccountLogin(id: id)) { continuation.resume(returning: $0) }
+                    model.perform(.readAccountLogin(ReadAccountLogin(id: id))) { continuation.resume(returning: $0) }
                 }
                 guard !Task.isCancelled else { return }
                 if case let .failure(error) = result {
@@ -188,7 +188,7 @@ struct ModelSettingsSheet: View {
     private func cancelLogin() {
         guard let id = login?.loginId else { return }
         pollingLogin?.cancel()
-        model.perform(.cancelAccountLogin(id: id)) { result in
+        model.perform(.cancelAccountLogin(CancelAccountLogin(id: id))) { result in
             if case let .failure(error) = result {
                 loginError = error.localizedDescription
             }

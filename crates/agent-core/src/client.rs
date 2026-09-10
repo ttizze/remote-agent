@@ -599,7 +599,11 @@ pub struct SessionImage {
 }
 impl Client {
     pub async fn session_images(&self, thread_id: &str) -> Result<Vec<SessionImage>, PeerError> {
-        let mut thread = self.call(&ReadThread::new(thread_id)).await?.value.thread;
+        let mut thread = self
+            .call(&ReadThread::new(thread_id.to_owned()))
+            .await?
+            .value
+            .thread;
         let mut visited = std::collections::HashSet::new();
         loop {
             let item_page = thread
@@ -628,18 +632,15 @@ impl Client {
                     "history cursor did not advance".into(),
                 ));
             }
-            let page = self
-                .call(&ReadOlder {
-                    thread_id,
-                    turn_id: turn_id.as_deref(),
-                    cursor: cursor.as_deref(),
-                    defer_item_details: true,
-                })
-                .await?
-                .value
-                .thread;
-            thread = crate::state::older(&thread, &page, turn_id.as_deref(), cursor.as_deref())
-                .map_err(PeerError::InvalidMessage)?;
+            let operation = ReadOlder::new(thread_id.to_owned(), turn_id, cursor);
+            let page = self.call(&operation).await?.value.thread;
+            thread = crate::state::older(
+                &thread,
+                &page,
+                operation.turn_id.as_deref(),
+                operation.cursor.as_deref(),
+            )
+            .map_err(PeerError::InvalidMessage)?;
         }
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();

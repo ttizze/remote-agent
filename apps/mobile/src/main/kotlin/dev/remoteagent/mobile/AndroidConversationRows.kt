@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.Respond
 import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.Answer
 import dev.remoteagent.core.Intent
@@ -34,7 +35,7 @@ internal fun RequestCard(request: Request, model: AndroidAppModel) {
     var error by remember(request.key) { mutableStateOf<String?>(null) }
     fun respond(answer: Answer) {
         busy = true
-        model.perform(Intent.Respond(request.id, answer)) {
+        model.perform(Intent.Respond(Respond(request.id, answer))) {
             busy = false
             error = it.exceptionOrNull()?.message
         }

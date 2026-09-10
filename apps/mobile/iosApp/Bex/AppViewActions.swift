@@ -65,7 +65,9 @@ extension BexAppViewModel {
         guard !loadingThreads else { return }
         loadingThreads = true
         notice = nil
-        perform(.listThreads(query: snapshot.listQuery())) { [weak self] _ in self?.loadingThreads = false }
+        perform(.listThreads(ListThreads(query: snapshot.listQuery()))) { [weak self] _ in
+            self?.loadingThreads = false
+        }
     }
 
     func expandTaskList(projects: Bool = false, projectId: String? = nil) {
@@ -78,14 +80,14 @@ extension BexAppViewModel {
             query.chatLimit += 10
         }
         loadingThreads = true
-        perform(.listThreads(query: query)) { [weak self] _ in self?.loadingThreads = false }
+        perform(.listThreads(ListThreads(query: query))) { [weak self] _ in self?.loadingThreads = false }
     }
 
     func searchTaskList(_ term: String) {
         var query = snapshot.listQuery()
         guard query.searchTerm != term else { return }
         query.searchTerm = term
-        perform(.listThreads(query: query))
+        perform(.listThreads(ListThreads(query: query)))
     }
 
     func openNewThread(cwd: String) {
@@ -99,7 +101,7 @@ extension BexAppViewModel {
     func openThread(_ id: String) {
         let host = selectedProfileId
         let previousScreen = screen
-        perform(.openThread(id: id)) { [weak self] result in
+        perform(.readThread(ReadThread(threadId: id, open: true))) { [weak self] result in
             guard let self, case .success = result, selectedProfileId == host,
                   screen == previousScreen, snapshot.navigation().threadId == id else { return }
             screen = .thread
@@ -111,7 +113,7 @@ extension BexAppViewModel {
         let cursor = turnId.flatMap { id in thread.source.turns().first { $0.id() == id }?.itemsCursor() } ?? thread
             .source.historyCursor()
         loadingHistory = true
-        perform(.readOlder(threadId: thread.id, turnId: turnId, cursor: cursor)) { [weak self] _ in
+        perform(.readOlder(ReadOlder(threadId: thread.id, turnId: turnId, cursor: cursor))) { [weak self] _ in
             self?.loadingHistory = false
         }
     }
@@ -134,12 +136,12 @@ extension BexAppViewModel {
     func transcribe(_ audio: Data, draftKey key: String, sendImmediately: Bool) {
         guard !transcribing, key == draftKey else { return }
         transcribing = true
-        perform(.transcribe(
+        perform(.transcribe(Dictate(
             draftKey: coreDraftKey,
             audio: audio,
             send: sendImmediately,
             clientUserMessageId: UUID().uuidString
-        )) { [weak self] _ in
+        ))) { [weak self] _ in
             self?.persist()
             self?.transcribing = false
         }
@@ -148,7 +150,9 @@ extension BexAppViewModel {
     func interrupt(_ turnId: String) {
         guard let threadId = snapshot.navigation().threadId else { return }
         interruptingTurnId = turnId
-        perform(.interrupt(threadId: threadId, turnId: turnId)) { [weak self] _ in self?.interruptingTurnId = nil }
+        perform(.interrupt(Interrupt(threadId: threadId, turnId: turnId))) { [weak self] _ in
+            self?.interruptingTurnId = nil
+        }
     }
 
     func scanned(_ contents: String?) {
@@ -165,7 +169,11 @@ extension BexAppViewModel {
         transferError = nil
         let attachment = Attachment(path: url.path, name: url.lastPathComponent,
                                     isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true)
-        perform(.uploadAttachment(draftKey: coreDraftKey, attachment: attachment, directory: cwd)) { [weak self] _ in
+        perform(.uploadAttachment(UploadAttachment(
+            draftKey: coreDraftKey,
+            attachment: attachment,
+            directory: cwd
+        ))) { [weak self] _ in
             self?.persist()
             if access {
                 url.stopAccessingSecurityScopedResource()
@@ -179,7 +187,7 @@ extension BexAppViewModel {
     }
 
     func respond(_ request: Request, answer: Answer, completion: @escaping (String?) -> Void) {
-        perform(.respond(requestId: request.id, answer: answer)) { result in
+        perform(.respond(Respond(requestId: request.id, answer: answer))) { result in
             if case let .failure(error) = result {
                 completion(error.localizedDescription)
             } else {
@@ -189,7 +197,7 @@ extension BexAppViewModel {
     }
 
     func forkThread(_ threadId: String, through turnId: String, completion: @escaping (String?, String?) -> Void) {
-        perform(.forkThread(threadId: threadId, lastTurnId: turnId)) { result in
+        perform(.forkThread(ForkThread(threadId: threadId, lastTurnId: turnId))) { result in
             switch result {
             case let .success(.startedThread(id)): completion(id, nil)
             case let .failure(error): completion(nil, error.localizedDescription)
@@ -200,7 +208,7 @@ extension BexAppViewModel {
 
     func readItemDetails(threadId: String, turnId: String, itemId: String) async -> (String?, String?) {
         await withCheckedContinuation { continuation in
-            perform(.readItem(threadId: threadId, turnId: turnId, itemId: itemId)) { [weak self] result in
+            perform(.readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId))) { [weak self] result in
                 if case let .failure(error) = result {
                     continuation.resume(returning: (
                         nil,
@@ -215,7 +223,7 @@ extension BexAppViewModel {
     }
 
     func readSessionImages(_ threadId: String, completion: @escaping ([String]?, String?) -> Void) {
-        perform(.loadSessionImages(threadId: threadId)) { result in
+        perform(.loadSessionImages(LoadSessionImages(threadId: threadId))) { result in
             switch result {
             case let .success(.sessionImages(images)): completion(
                     images.map { $0.encoded ? "data:image/png;base64," + $0.source : $0.source },
@@ -236,7 +244,7 @@ extension BexAppViewModel {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch { completion(nil, error.localizedDescription); return }
         let target = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
-        perform(.downloadFile(source: path, destination: target.path)) { result in
+        perform(.downloadFile(DownloadFile(source: path, destination: target.path))) { result in
             switch result {
             case .success: completion(target, nil)
             case let .failure(error):

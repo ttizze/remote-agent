@@ -301,7 +301,9 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                 "thread/start" => {
                     let cwd = match params.get_mut("cwd") {
                         Some(cwd) => cwd.take(),
-                        None => serde_json::to_value(std::env::current_dir()?)?,
+                        // Unscoped chats must never inherit the developer's
+                        // checkout through the fixture process environment.
+                        None => serde_json::to_value(&context.home)?,
                     };
                     let matches = context.config.expected_cwd.as_ref().is_none_or(|expected| cwd.as_str().is_some_and(|cwd| std::path::Path::new(cwd) == expected));
                     context.trace(method, json!({"hasProjectId":params.get("projectId").is_some(),"cwdMatchesFixture":matches}))?;

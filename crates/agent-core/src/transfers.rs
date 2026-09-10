@@ -42,7 +42,8 @@ impl TransferGrant {
     }
 }
 
-/// Uploads a picked local file to an explicit directory on the paired Host.
+/// Uploads a picked local file to a directory on the paired Host. An empty
+/// directory selects Host-owned attachment storage for chats without a workspace.
 /// The Host assigns the actual filename and never trusts the display name
 /// as a destination path. No file payload is embedded in JSON-RPC.
 pub async fn upload_file<S, F, Fut>(

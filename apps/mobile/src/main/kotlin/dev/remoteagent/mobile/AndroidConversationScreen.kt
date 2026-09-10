@@ -34,6 +34,8 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.Interrupt
+import dev.remoteagent.core.UploadAttachment
 import dev.remoteagent.core.Attachment
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.TurnPresentationData
@@ -161,7 +163,7 @@ private fun AttachmentButton(model: AndroidAppModel) {
                             transferring = false
                             return@launch
                         }
-                        model.perform(Intent.UploadAttachment(key, attachment, directory)) {
+                        model.perform(Intent.UploadAttachment(UploadAttachment(key, attachment, directory))) {
                             local.parentFile?.deleteRecursively()
                             transferring = false
                         }
@@ -214,7 +216,11 @@ private fun LazyListScope.conversationTurn(
     items(turn.responses, key = { "$id:response:${it.id()}" }) { ThreadMessageCard(it, false) }
     if (turn.isInProgress)
         item(key = "$id:stop") {
-            Button(onClick = { threadId?.let { model.perform(Intent.Interrupt(it, turn.turnId)) } }) { Text("停止") }
+            Button(onClick = {
+                if (threadId != null) model.perform(Intent.Interrupt(Interrupt(threadId, turn.turnId)))
+            }) {
+                Text("停止")
+            }
         }
 }
 

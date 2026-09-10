@@ -119,6 +119,12 @@ struct ServiceInner {
 
 impl CodexRpcService {
     pub fn new(app_server: Arc<CodexAppServer>, desktop_projects: DesktopProjectStore) -> Self {
+        let files = crate::workspace_files::WorkspaceFiles::new(
+            app_server
+                .initialize_response()
+                .codex_home
+                .join("bex-attachments"),
+        );
         Self {
             inner: Arc::new(ServiceInner {
                 accounts: tokio::sync::Mutex::new(None),
@@ -128,7 +134,7 @@ impl CodexRpcService {
                 router: SessionRouter::new(),
                 event_pump_started: OnceLock::new(),
                 stopped: tokio_util::sync::CancellationToken::new(),
-                files: crate::workspace_files::WorkspaceFiles::default(),
+                files,
                 thread_watches: super::thread_watch::ThreadWatches::default(),
             }),
         }
@@ -284,11 +290,11 @@ impl CodexRpcService {
                     self.host_thread_request(&request, "thread/start", false)
                         .await,
                 )?,
-                "host/terminal/start" => match request.params::<op::StartTerminal<&str>>() {
+                "host/terminal/start" => match request.params::<op::StartTerminal>() {
                     Ok(params) => {
                         let params = TerminalParams {
-                            process_handle: params.handle,
-                            cwd: params.cwd,
+                            process_handle: &params.handle,
+                            cwd: &params.cwd,
                             size: params.size,
                             command: crate::platform::terminal_command(),
                             env: TerminalEnvironment {
@@ -723,18 +729,18 @@ impl CodexRpcService {
 
     async fn host_thread_history_page(
         &self,
-        params: op::ReadOlder<&str>,
+        params: op::ReadOlder,
         items: bool,
     ) -> Result<ThreadResponse, Failure> {
-        let thread_id = params.thread_id;
+        let thread_id = params.thread_id.as_str();
         if thread_id.is_empty() {
             return Err(Failure::new("invalid_params", "threadId is required"));
         }
-        let cursor = params.cursor.filter(|cursor| !cursor.is_empty());
+        let cursor = params.cursor.as_deref().filter(|cursor| !cursor.is_empty());
         if !items && cursor.is_none() {
             return Err(Failure::new("invalid_params", "cursor is required"));
         }
-        let turn_id = params.turn_id.filter(|id| !id.is_empty());
+        let turn_id = params.turn_id.as_deref().filter(|id| !id.is_empty());
         if items && turn_id.is_none() {
             return Err(Failure::new("invalid_params", "turnId is required"));
         }
@@ -799,9 +805,9 @@ impl CodexRpcService {
 
     async fn host_thread_item_read(
         &self,
-        params: op::ReadItem<&str>,
+        params: op::ReadItem,
     ) -> Result<agent_core::client::ItemResponse, Failure> {
-        if [params.thread_id, params.turn_id, params.item_id]
+        if [&params.thread_id, &params.turn_id, &params.item_id]
             .iter()
             .any(|id| id.is_empty())
         {
@@ -814,8 +820,8 @@ impl CodexRpcService {
         let mut cursors = std::collections::HashSet::new();
         loop {
             let query = HistoryParams {
-                thread_id: params.thread_id,
-                turn_id: Some(params.turn_id),
+                thread_id: &params.thread_id,
+                turn_id: Some(&params.turn_id),
                 limit: 100,
                 sort_direction: "asc",
                 cursor: cursor.as_deref(),
@@ -829,7 +835,8 @@ impl CodexRpcService {
                 .map_err(|error| Failure::new("codex_unavailable", error))?;
             let page = response.outcome.map_err(Failure::Upstream)?;
             if let Some(entry) = page.data.into_iter().find(|entry| {
-                entry.turn_id.as_deref() == Some(params.turn_id) && entry.item.id == params.item_id
+                entry.turn_id.as_deref() == Some(params.turn_id.as_str())
+                    && entry.item.id == params.item_id
             }) {
                 return Ok(agent_core::client::ItemResponse {
                     item: Arc::unwrap_or_clone(entry.item),

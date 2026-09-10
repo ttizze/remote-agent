@@ -86,13 +86,16 @@ struct WorktreeSettingsSheet: View {
 
     private func requestSettings(update: WorktreeSettings? = nil) async -> (WorktreeSettings?, String?) {
         await withCheckedContinuation { continuation in
-            model.perform(update.map { .updateWorktreeSettings(settings: $0) } ?? .readWorktreeSettings) { result in
-                if case let .failure(error) = result {
-                    continuation.resume(returning: (nil, error.localizedDescription))
-                } else {
-                    continuation.resume(returning: (model.snapshot.worktreeSettings(), nil))
+            model
+                .perform(update
+                    .map { .updateWorktreeSettings(UpdateWorktreeSettings(settings: $0)) } ??
+                    .readWorktreeSettings(ReadWorktreeSettings())) { result in
+                        if case let .failure(error) = result {
+                            continuation.resume(returning: (nil, error.localizedDescription))
+                        } else {
+                            continuation.resume(returning: (model.snapshot.worktreeSettings(), nil))
+                        }
                 }
-            }
         }
     }
 

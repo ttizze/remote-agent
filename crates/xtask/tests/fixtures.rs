@@ -10,7 +10,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
         let fixture = tempfile::tempdir().unwrap();
         let ambient = tempfile::tempdir().unwrap();
         let root = fixture.path().canonicalize().unwrap();
-        let expected = root.join("project");
+        let expected = root.clone();
         let program = Config {
             trace: true,
             expected_cwd: Some(expected.clone()),
@@ -20,6 +20,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
         .unwrap();
         let mut child = Command::new(program)
             .arg("app-server")
+            .current_dir(ambient.path())
             .env("CODEX_HOME", ambient.path())
             .env(
                 "BEX_FAKE_CODEX_TRACE",
@@ -37,6 +38,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
             (1, "initialize", json!({})),
             (2, "thread/start", json!({"cwd":expected})),
             (3, "thread/start", json!({"cwd":ambient.path()})),
+            (4, "thread/start", json!({})),
         ] {
             writer
                 .write_line(&json!({"id":id,"method":method,"params":params}).to_string())
@@ -47,7 +49,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
             assert_eq!(response["id"], id);
             match id {
                 1 => assert_eq!(response["result"]["codexHome"], json!(root)),
-                2 => assert_eq!(response["result"]["thread"]["cwd"], json!(expected)),
+                2 | 4 => assert_eq!(response["result"]["thread"]["cwd"], json!(expected)),
                 3 => assert_eq!(response["error"]["message"], "invalid cwd"),
                 _ => unreachable!(),
             }

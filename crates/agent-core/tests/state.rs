@@ -123,7 +123,7 @@ fn model_settings_corpus() {
                 }),
             )
         } else {
-            applied(&previous, op::LoadModels, models)
+            applied(&previous, op::LoadModels {}, models)
         };
         assert!(effects.is_empty());
         let expected: Draft = serde_json::from_value(case["expected"].clone()).unwrap();
@@ -307,12 +307,12 @@ fn stopped_history_watch_cannot_reload_a_conversation() {
     use agent_core::state::Intent;
     let (watching, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::Watch {
+        Event::Intent(Intent::Watch(op::Watch {
             thread_id: "thread".into(),
             watch_key: 1,
             watch_id: 3,
             path: Some("/rollout".into()),
-        }),
+        })),
     );
     let changed = || Event::Notification {
         method: "host/thread/changed".into(),
@@ -321,10 +321,10 @@ fn stopped_history_watch_cannot_reload_a_conversation() {
     assert_eq!(reduce(&watching, changed()).1.len(), 1);
     let (stopped, _) = reduce(
         &watching,
-        Event::Intent(Intent::Unwatch {
+        Event::Intent(Intent::Unwatch(op::Unwatch {
             watch_key: 1,
             watch_id: 3,
-        }),
+        })),
     );
     assert!(reduce(&stopped, changed()).1.is_empty());
 }
@@ -342,7 +342,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
         let mut current = Snapshot::default();
         for load_catalog in [catalog_first, !catalog_first] {
             if load_catalog {
-                op::LoadModels.apply(&mut current, models.clone());
+                op::LoadModels {}.apply(&mut current, models.clone());
             } else {
                 current = reduce(
                     &current,
@@ -525,10 +525,10 @@ fn late_fork_preserves_new_navigation_and_stores_the_fork() {
     use agent_core::state::Intent;
     let (forking, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::ForkThread {
-            thread_id: "old".into(),
-            last_turn_id: "turn".into(),
-        }),
+        Event::Intent(Intent::ForkThread(op::ForkThread::new(
+            "old".into(),
+            "turn".into(),
+        ))),
     );
     let (navigated, _) = reduce(
         &forking,
@@ -554,9 +554,12 @@ fn account_listing_does_not_invalidate_a_concurrent_login() {
     use agent_core::state::Intent;
     let (starting, _) = reduce(
         &Snapshot::default(),
-        Event::Intent(Intent::StartAccountLogin),
+        Event::Intent(Intent::StartAccountLogin(op::StartAccountLogin {})),
     );
-    let (listing, _) = reduce(&starting, Event::Intent(Intent::ListAccounts));
+    let (listing, _) = reduce(
+        &starting,
+        Event::Intent(Intent::ListAccounts(op::ListAccounts {})),
+    );
     let mut finished = listing;
     op::StartAccountLogin {}.apply(&mut finished, serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap());
     assert_eq!(
@@ -609,9 +612,9 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
         Event::Connected,
         Event::Intent(op::Intent::NewChat { cwd: "/fixture".into() }),
         Event::Intent(op::Intent::SetDraftText { thread_id: "new:/fixture".into(), text: "再生する下書き".into() }),
-        Event::Intent(op::Intent::ReadFile { path: "/fixture/file".into(), discard_draft: true }),
+        Event::Intent(op::Intent::ReadFile(op::ReadFile { path: "/fixture/file".into(), discard_draft: true })),
         Event::ServerRequest(serde_json::from_value(json!({"id":"request","method":"item/commandExecution/requestApproval","params":{"futureField":[1,2]},"unknown":true})).unwrap()),
-        Event::Intent(op::Intent::Respond { request_id: json!("request"), answer: agent_core::client::Answer::Raw { value: json!({"decision":"accept","futureField":true}) } }),
+        Event::Intent(op::Intent::Respond(op::Respond { request_id: json!("request"), answer: agent_core::client::Answer::Raw { value: json!({"decision":"accept","futureField":true}) } })),
         Event::Disconnected("fixture disconnect".into()),
     ];
     let encoded = serde_json::to_vec(&events).unwrap();

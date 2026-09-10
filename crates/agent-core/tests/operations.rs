@@ -30,30 +30,32 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             let query: ListQuery = serde_json::from_value(command["query"].clone()).unwrap();
             call!(ListThreads {
                 title_only: true,
-                query: &query
+                query
             })
         }
         "startThread" => call!(StartThread {
-            cwd: optional(command, "cwd").filter(|cwd| !cwd.trim().is_empty()),
-            model: optional(command, "model")
+            cwd: optional(command, "cwd")
+                .filter(|cwd| !cwd.trim().is_empty())
+                .map(str::to_owned),
+            model: optional(command, "model").map(str::to_owned)
         }),
         "readThread" => call!(ReadThread {
-            thread_id: text(command, "threadId"),
+            thread_id: text(command, "threadId").to_owned(),
             include_turns: true,
             paginate_history: true,
             defer_item_details: command["deferItemDetails"].as_bool().unwrap(),
             open: false
         }),
         "readOlder" => call!(ReadOlder {
-            thread_id: text(command, "threadId"),
-            turn_id: optional(command, "turnId"),
-            cursor: optional(command, "cursor"),
+            thread_id: text(command, "threadId").to_owned(),
+            turn_id: optional(command, "turnId").map(str::to_owned),
+            cursor: optional(command, "cursor").map(str::to_owned),
             defer_item_details: true,
         }),
         "readItem" => call!(ReadItem {
-            thread_id: text(command, "threadId"),
-            turn_id: text(command, "turnId"),
-            item_id: text(command, "itemId")
+            thread_id: text(command, "threadId").to_owned(),
+            turn_id: text(command, "turnId").to_owned(),
+            item_id: text(command, "itemId").to_owned()
         }),
         "sendTurn" => {
             let snapshot: Option<Thread> =
@@ -97,8 +99,8 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         }
         "interruptTurn" => {
             call!(Interrupt {
-                thread_id: text(command, "threadId"),
-                turn_id: text(command, "turnId")
+                thread_id: text(command, "threadId").to_owned(),
+                turn_id: text(command, "turnId").to_owned()
             });
             Value::Null
         }
@@ -106,10 +108,10 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "sessionImages" => json!(client.session_images(text(command, "threadId")).await?),
         "watchThread" => {
             call!(Watch {
-                thread_id: text(command, "threadId"),
+                thread_id: text(command, "threadId").to_owned(),
                 watch_key: command["watchKey"].as_u64().unwrap(),
                 watch_id: command["watchId"].as_u64().unwrap(),
-                path: optional(command, "path")
+                path: optional(command, "path").map(str::to_owned)
             });
             Value::Null
         }
@@ -163,10 +165,10 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             Value::Null
         }
         "listFiles" => call!(ListFiles {
-            path: text(command, "path")
+            path: text(command, "path").to_owned()
         }),
         "readFile" => call!(ReadFile {
-            path: text(command, "path"),
+            path: text(command, "path").to_owned(),
             discard_draft: false
         }),
         "writeFile" => call!(WriteFile {
@@ -175,33 +177,31 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             text: text(command, "text")
         }),
         "reviewWorkspace" => call!(ReviewWorkspace {
-            cwd: text(command, "cwd")
+            cwd: text(command, "cwd").to_owned()
         }),
         "worktreeSettings" => call!(ReadWorktreeSettings {}),
         "updateWorktreeSettings" => {
             let settings: WorktreeSettings =
                 serde_json::from_value(command["settings"].clone()).unwrap();
-            call!(UpdateWorktreeSettings {
-                settings: &settings
-            })
+            call!(UpdateWorktreeSettings { settings })
         }
         "accounts" => call!(ListAccounts {}),
         "selectAccount" => call!(SelectAccount {
-            id: text(command, "accountId")
+            id: text(command, "accountId").to_owned()
         }),
         "startAccountLogin" => call!(StartAccountLogin {}),
         "accountLoginStatus" => call!(ReadAccountLogin {
-            id: text(command, "loginId")
+            id: text(command, "loginId").to_owned()
         }),
         "cancelAccountLogin" => {
             call!(CancelAccountLogin {
-                id: text(command, "loginId")
+                id: text(command, "loginId").to_owned()
             });
             Value::Null
         }
         "forkThread" => call!(ForkThread {
-            thread_id: text(command, "threadId"),
-            last_turn_id: text(command, "lastTurnId"),
+            thread_id: text(command, "threadId").to_owned(),
+            last_turn_id: text(command, "lastTurnId").to_owned(),
             exclude_turns: true
         }),
         kind => panic!("unknown operation {kind}"),

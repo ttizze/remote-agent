@@ -52,18 +52,20 @@ impl Worktrees {
     }
 
     pub(crate) async fn prepare(&self, cwd: Option<&str>) -> Result<Option<PathBuf>, String> {
+        // Automatic worktrees need an explicitly selected checkout. Global
+        // chats have no source repository and retain the App Server's default cwd.
+        let Some(cwd) = cwd else {
+            return Ok(None);
+        };
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
-        let cwd = cwd.map(PathBuf::from);
+        let cwd = PathBuf::from(cwd);
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
             if !state.settings.create_on_new_session {
                 return Ok(None);
             }
-            let cwd = cwd
-                .ok_or("worktree creation requires a working directory")?
-                .canonicalize()
-                .map_err(|e| e.to_string())?;
+            let cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
             let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?)
                 .canonicalize()
                 .map_err(|e| e.to_string())?;

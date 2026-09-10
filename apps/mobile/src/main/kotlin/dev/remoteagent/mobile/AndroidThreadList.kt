@@ -24,6 +24,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.ListThreads
+import dev.remoteagent.core.ReadOlder
+import dev.remoteagent.core.ReadThread
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.ThreadSummary
@@ -39,7 +42,7 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier) {
     LaunchedEffect(search) {
         kotlinx.coroutines.delay(SEARCH_DEBOUNCE_MILLIS)
         if (model.snapshot.listQuery().searchTerm != search)
-            model.perform(Intent.ListThreads(model.snapshot.listQuery().copy(searchTerm = search)))
+            model.perform(Intent.ListThreads(ListThreads(query = model.snapshot.listQuery().copy(searchTerm = search))))
     }
     LazyColumn(
         modifier.fillMaxSize(),
@@ -91,7 +94,7 @@ private fun SummaryRow(thread: ThreadSummary, model: AndroidAppModel) {
 }
 
 internal fun AndroidAppModel.refresh() {
-    perform(Intent.ListThreads(snapshot.listQuery()))
+    perform(Intent.ListThreads(ListThreads(query = snapshot.listQuery())))
 }
 
 internal fun AndroidAppModel.expand(projects: Boolean = false, projectId: String? = null) {
@@ -108,7 +111,7 @@ internal fun AndroidAppModel.expand(projects: Boolean = false, projectId: String
             projects -> query.copy(projectLimit = query.projectLimit + THREAD_PAGE_INCREMENT)
             else -> query.copy(chatLimit = query.chatLimit + THREAD_PAGE_INCREMENT)
         }
-    perform(Intent.ListThreads(expanded))
+    perform(Intent.ListThreads(ListThreads(query = expanded)))
 }
 
 internal fun AndroidAppModel.showThreads() {
@@ -124,7 +127,7 @@ internal fun AndroidAppModel.showHosts() {
 
 internal fun AndroidAppModel.openThread(id: String) {
     screen = Screen.Conversation
-    perform(Intent.OpenThread(id))
+    perform(Intent.ReadThread(ReadThread(id, open = true)))
 }
 
 internal fun AndroidAppModel.newChat(cwd: String) {
@@ -138,7 +141,7 @@ internal fun AndroidAppModel.older(turnId: String?) {
     val cursor =
         if (turnId == null) thread.historyCursor() else thread.turns().firstOrNull { it.id() == turnId }?.itemsCursor()
     loadingHistory = true
-    perform(Intent.ReadOlder(id, turnId, cursor)) { loadingHistory = false }
+    perform(Intent.ReadOlder(ReadOlder(id, turnId, cursor))) { loadingHistory = false }
 }
 
 internal fun AndroidAppModel.send(complete: (Result<Outcome>) -> Unit) {

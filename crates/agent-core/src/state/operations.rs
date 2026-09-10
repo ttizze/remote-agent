@@ -9,100 +9,34 @@ use rpc::{Input, Submission, submission_target};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
-    ListAccounts,
-    SelectAccount {
-        id: String,
-    },
-    StartAccountLogin,
-    ReadAccountLogin {
-        id: String,
-    },
-    CancelAccountLogin {
-        id: String,
-    },
-    ForkThread {
-        thread_id: String,
-        last_turn_id: String,
-    },
-    StartTerminal {
-        handle: String,
-        cwd: String,
-        size: rpc::TerminalSize,
-    },
-    CloseTerminal {
-        handle: String,
-    },
-    Transcribe {
-        draft_key: String,
-        audio: Vec<u8>,
-        send: bool,
-        client_user_message_id: String,
-    },
-    CreateInvitation,
-    RemoveRemoteHost {
-        id: String,
-    },
-    RevokeDevice {
-        id: String,
-    },
-    ListFiles {
-        path: String,
-    },
-    ReadFile {
-        path: String,
-        discard_draft: bool,
-    },
-    SaveFile {
-        path: String,
-    },
-    ReviewWorkspace {
-        cwd: String,
-    },
-    ReadWorktreeSettings,
-    UpdateWorktreeSettings {
-        settings: WorktreeSettings,
-    },
-    ListThreads {
-        query: ListQuery,
-    },
-    StartThread {
-        cwd: Option<String>,
-        model: Option<String>,
-    },
-    OpenThread {
-        id: String,
-    },
-    ReadThread {
-        id: String,
-    },
-    ReadItem {
-        thread_id: String,
-        turn_id: String,
-        item_id: String,
-    },
-    ResizeTerminal {
-        handle: String,
-        size: rpc::TerminalSize,
-    },
-    Interrupt {
-        thread_id: String,
-        turn_id: String,
-    },
-    Watch {
-        thread_id: String,
-        watch_key: u64,
-        watch_id: u64,
-        path: Option<String>,
-    },
-    Unwatch {
-        watch_key: u64,
-        watch_id: u64,
-    },
+    ListAccounts(ListAccounts),
+    SelectAccount(SelectAccount),
+    StartAccountLogin(StartAccountLogin),
+    ReadAccountLogin(ReadAccountLogin),
+    CancelAccountLogin(CancelAccountLogin),
+    ForkThread(ForkThread),
+    StartTerminal(StartTerminal),
+    CloseTerminal(CloseTerminal),
+    Transcribe(Dictate),
+    CreateInvitation(CreateInvitation),
+    RemoveRemoteHost(RemoveRemoteHost),
+    RevokeDevice(RevokeDevice),
+    ListFiles(ListFiles),
+    ReadFile(ReadFile),
+    SaveFile(SaveFile),
+    ReviewWorkspace(ReviewWorkspace),
+    ReadWorktreeSettings(ReadWorktreeSettings),
+    UpdateWorktreeSettings(UpdateWorktreeSettings),
+    ListThreads(ListThreads),
+    StartThread(StartThread),
+    ReadThread(ReadThread),
+    ReadItem(ReadItem),
+    ResizeTerminal(ResizeTerminal),
+    Interrupt(Interrupt),
+    Watch(Watch),
+    Unwatch(Unwatch),
     ShowThreadList,
-    WriteTerminal {
-        handle: String,
-        data: Vec<u8>,
-    },
+    WriteTerminal(WriteTerminal),
     AcknowledgeTerminal {
         handle: String,
         sequence: u64,
@@ -115,23 +49,11 @@ pub enum Intent {
         draft_key: String,
         index: u32,
     },
-    UploadAttachment {
-        draft_key: String,
-        attachment: Attachment,
-        directory: String,
-    },
-    DownloadFile {
-        source: String,
-        destination: String,
-    },
-    LoadSessionImages {
-        thread_id: String,
-    },
-    LoadHostManagement,
-    PairRemoteHost {
-        invitation: Invitation,
-        name: String,
-    },
+    UploadAttachment(UploadAttachment),
+    DownloadFile(DownloadFile),
+    LoadSessionImages(LoadSessionImages),
+    LoadHostManagement(LoadHostManagement),
+    PairRemoteHost(PairRemoteHost),
     NewChat {
         cwd: String,
     },
@@ -139,12 +61,8 @@ pub enum Intent {
         path: String,
         text: String,
     },
-    ReadOlder {
-        thread_id: String,
-        turn_id: Option<String>,
-        cursor: Option<String>,
-    },
-    LoadModels,
+    ReadOlder(ReadOlder),
+    LoadModels(LoadModels),
     SetDraft {
         thread_id: String,
         draft: Draft,
@@ -169,10 +87,7 @@ pub enum Intent {
         thread_id: Option<String>,
         client_user_message_id: String,
     },
-    Respond {
-        request_id: Value,
-        answer: Answer,
-    },
+    Respond(Respond),
 }
 
 /// Typed state application after the Store has checked its single epoch.
@@ -207,14 +122,15 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartTerminal<T = String> {
+pub struct StartTerminal {
     #[serde(rename = "processHandle")]
-    pub handle: T,
-    pub cwd: T,
+    pub handle: String,
+    pub cwd: String,
     pub size: rpc::TerminalSize,
 }
-impl<T: Serialize> rpc::RpcMethod for StartTerminal<T> {
+impl rpc::RpcMethod for StartTerminal {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "host/terminal/start";
 }
@@ -262,12 +178,13 @@ impl Operation for StartTerminal {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloseTerminal<T = String> {
+pub struct CloseTerminal {
     #[serde(rename = "processHandle")]
-    pub handle: T,
+    pub handle: String,
 }
-impl<T: Serialize> rpc::RpcMethod for CloseTerminal<T> {
+impl rpc::RpcMethod for CloseTerminal {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "process/kill";
 }
@@ -298,6 +215,7 @@ impl Operation for CloseTerminal {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInvitation {}
 impl rpc::RpcMethod for CreateInvitation {
@@ -316,11 +234,12 @@ impl Operation for CreateInvitation {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoveRemoteHost<T = String> {
-    pub id: T,
+pub struct RemoveRemoteHost {
+    pub id: String,
 }
-impl<T: Serialize> rpc::RpcMethod for RemoveRemoteHost<T> {
+impl rpc::RpcMethod for RemoveRemoteHost {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "host/removeRemote";
 }
@@ -339,12 +258,13 @@ impl Operation for RemoveRemoteHost {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeDevice<T = String> {
+pub struct RevokeDevice {
     #[serde(rename = "node_id")]
-    pub id: T,
+    pub id: String,
 }
-impl<T: Serialize> rpc::RpcMethod for RevokeDevice<T> {
+impl rpc::RpcMethod for RevokeDevice {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "host/revoke";
 }
@@ -363,6 +283,7 @@ impl Operation for RevokeDevice {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAccounts {}
 impl rpc::RpcMethod for ListAccounts {
@@ -381,12 +302,13 @@ impl Operation for ListAccounts {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelectAccount<T = String> {
+pub struct SelectAccount {
     #[serde(rename = "accountId")]
-    pub id: T,
+    pub id: String,
 }
-impl<T: Serialize> rpc::RpcMethod for SelectAccount<T> {
+impl rpc::RpcMethod for SelectAccount {
     type Output = rpc::AccountSelection;
     const METHOD: &'static str = "host/account/select";
 }
@@ -409,10 +331,11 @@ impl Operation for SelectAccount {
             Arc::make_mut(accounts).selected_id = Some(selected_id);
         }
         snapshot.error = persistence_error;
-        vec![Effect::execute(LoadModels)]
+        vec![Effect::execute(LoadModels {})]
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartAccountLogin {}
 impl rpc::RpcMethod for StartAccountLogin {
@@ -436,12 +359,13 @@ impl Operation for StartAccountLogin {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadAccountLogin<T = String> {
+pub struct ReadAccountLogin {
     #[serde(rename = "loginId")]
-    pub id: T,
+    pub id: String,
 }
-impl<T: Serialize> rpc::RpcMethod for ReadAccountLogin<T> {
+impl rpc::RpcMethod for ReadAccountLogin {
     type Output = rpc::AccountLoginStatus;
     const METHOD: &'static str = "host/account/login/status";
 }
@@ -457,21 +381,25 @@ impl Operation for ReadAccountLogin {
         account.login_status = Some(Arc::new(status));
         if completed {
             account.login = None;
-            let (updated, mut effects) = reduce(snapshot, Event::Intent(Intent::ListAccounts));
+            let (updated, mut effects) = reduce(
+                snapshot,
+                Event::Intent(Intent::ListAccounts(ListAccounts {})),
+            );
             *snapshot = updated;
-            effects.push(Effect::execute(LoadModels));
+            effects.push(Effect::execute(LoadModels {}));
             return effects;
         }
         Vec::new()
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelAccountLogin<T = String> {
+pub struct CancelAccountLogin {
     #[serde(rename = "loginId")]
-    pub id: T,
+    pub id: String,
 }
-impl<T: Serialize> rpc::RpcMethod for CancelAccountLogin<T> {
+impl rpc::RpcMethod for CancelAccountLogin {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "host/account/login/cancel";
 }
@@ -492,11 +420,12 @@ impl Operation for CancelAccountLogin {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListFiles<T = String> {
-    pub path: T,
+pub struct ListFiles {
+    pub path: String,
 }
-impl<T: Serialize> rpc::RpcMethod for ListFiles<T> {
+impl rpc::RpcMethod for ListFiles {
     type Output = FileList;
     const METHOD: &'static str = "host/file/list";
 }
@@ -515,12 +444,13 @@ impl Operation for ListFiles {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadFile<T = String> {
-    pub path: T,
+pub struct ReadFile {
+    pub path: String,
     pub discard_draft: bool,
 }
-impl<T: Serialize> rpc::RpcMethod for ReadFile<T> {
+impl rpc::RpcMethod for ReadFile {
     type Output = FileContent;
     const METHOD: &'static str = "host/file/read";
     fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -551,6 +481,7 @@ impl Operation for ReadFile {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveFile {
     pub path: String,
@@ -605,11 +536,12 @@ impl SaveFile {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReviewWorkspace<T = String> {
-    pub cwd: T,
+pub struct ReviewWorkspace {
+    pub cwd: String,
 }
-impl<T: Serialize> rpc::RpcMethod for ReviewWorkspace<T> {
+impl rpc::RpcMethod for ReviewWorkspace {
     type Output = WorkspaceReview;
     const METHOD: &'static str = "host/workspace/review";
 }
@@ -651,6 +583,7 @@ impl Operation for ReviewWorkspace {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadWorktreeSettings {}
 impl rpc::RpcMethod for ReadWorktreeSettings {
@@ -669,12 +602,13 @@ impl Operation for ReadWorktreeSettings {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct UpdateWorktreeSettings<T = WorktreeSettings> {
-    pub settings: T,
+pub struct UpdateWorktreeSettings {
+    pub settings: WorktreeSettings,
 }
-impl<T: Serialize> rpc::RpcMethod for UpdateWorktreeSettings<T> {
+impl rpc::RpcMethod for UpdateWorktreeSettings {
     type Output = super::WorktreeSettings;
     const METHOD: &'static str = "host/worktree/settings/update";
 }
@@ -690,23 +624,25 @@ impl Operation for UpdateWorktreeSettings {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListThreads<Q = ListQuery> {
+pub struct ListThreads {
     #[serde(default)]
+    #[cfg_attr(feature = "bindings", uniffi(default = true))]
     pub title_only: bool,
     #[serde(flatten)]
-    pub query: Q,
+    pub query: ListQuery,
 }
-impl<Q> ListThreads<Q> {
-    pub fn new(query: Q) -> Self {
+impl ListThreads {
+    pub fn new(query: ListQuery) -> Self {
         Self {
             title_only: true,
             query,
         }
     }
 }
-impl<Q: Serialize> rpc::RpcMethod for ListThreads<Q> {
+impl rpc::RpcMethod for ListThreads {
     type Output = ThreadList;
     const METHOD: &'static str = "host/thread/list";
 }
@@ -730,18 +666,19 @@ impl Operation for ListThreads {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReadItem<T = String> {
-    pub thread_id: T,
-    pub turn_id: T,
-    pub item_id: T,
+pub struct ReadItem {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
 }
-impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadItem<T> {
+impl rpc::RpcMethod for ReadItem {
     type Output = rpc::ItemResponse;
     const METHOD: &'static str = "host/thread/item/read";
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.item.id == self.item_id.as_ref() {
+        if output.item.id == self.item_id.as_str() {
             Ok(())
         } else {
             Err("item ID does not match")
@@ -766,17 +703,22 @@ impl Operation for ReadItem {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReadThread<T = String> {
-    pub thread_id: T,
+pub struct ReadThread {
+    pub thread_id: String,
+    #[cfg_attr(feature = "bindings", uniffi(default = true))]
     pub include_turns: bool,
+    #[cfg_attr(feature = "bindings", uniffi(default = true))]
     pub paginate_history: bool,
+    #[cfg_attr(feature = "bindings", uniffi(default = true))]
     pub defer_item_details: bool,
+    #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub open: bool,
 }
-impl<T> ReadThread<T> {
-    pub fn new(thread_id: T) -> Self {
+impl ReadThread {
+    pub fn new(thread_id: String) -> Self {
         Self {
             thread_id,
             include_turns: true,
@@ -785,14 +727,14 @@ impl<T> ReadThread<T> {
             open: false,
         }
     }
-    pub fn open(thread_id: T) -> Self {
+    pub fn open(thread_id: String) -> Self {
         Self {
             open: true,
             ..Self::new(thread_id)
         }
     }
 }
-impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadThread<T> {
+impl rpc::RpcMethod for ReadThread {
     type Output = crate::models::ThreadResponse;
     const METHOD: &'static str = "host/thread/read";
     fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -805,7 +747,7 @@ impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadThread<T> {
         params.end()
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        rpc::validate_thread(output, Some(self.thread_id.as_ref()))
+        rpc::validate_thread(output, Some(self.thread_id.as_str()))
     }
 }
 
@@ -892,15 +834,17 @@ pub(super) fn add_attachment(next: &mut Snapshot, draft_key: String, attachment:
     .push(attachment);
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ForkThread<T = String> {
-    pub thread_id: T,
-    pub last_turn_id: T,
+pub struct ForkThread {
+    pub thread_id: String,
+    pub last_turn_id: String,
+    #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub exclude_turns: bool,
 }
-impl<T> ForkThread<T> {
-    pub fn new(thread_id: T, last_turn_id: T) -> Self {
+impl ForkThread {
+    pub fn new(thread_id: String, last_turn_id: String) -> Self {
         Self {
             thread_id,
             last_turn_id,
@@ -908,7 +852,7 @@ impl<T> ForkThread<T> {
         }
     }
 }
-impl<T: Serialize> rpc::RpcMethod for ForkThread<T> {
+impl rpc::RpcMethod for ForkThread {
     type Output = crate::models::ThreadResponse;
     const METHOD: &'static str = "thread/fork";
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
@@ -943,19 +887,18 @@ impl Operation for ForkThread {
         }
     }
 }
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(bound(serialize = "T: Serialize + AsRef<str>"))]
-pub struct StartThread<T = String> {
+pub struct StartThread {
     #[serde(skip_serializing_if = "empty_cwd")]
-    pub cwd: Option<T>,
+    pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<T>,
+    pub model: Option<String>,
 }
-fn empty_cwd<T: AsRef<str>>(cwd: &Option<T>) -> bool {
-    cwd.as_ref()
-        .is_none_or(|cwd| cwd.as_ref().trim().is_empty())
+fn empty_cwd(cwd: &Option<String>) -> bool {
+    cwd.as_deref().is_none_or(|cwd| cwd.trim().is_empty())
 }
-impl<T: Serialize + AsRef<str>> rpc::RpcMethod for StartThread<T> {
+impl rpc::RpcMethod for StartThread {
     type Output = crate::models::ThreadResponse;
     const METHOD: &'static str = "host/thread/start";
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
@@ -979,6 +922,7 @@ impl Operation for StartThread {
         ForkThread::outcome(output)
     }
 }
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dictate {
     pub draft_key: String,
@@ -986,21 +930,7 @@ pub struct Dictate {
     pub send: bool,
     pub client_user_message_id: String,
 }
-impl Dictate {
-    pub fn new(
-        draft_key: String,
-        audio: Vec<u8>,
-        send: bool,
-        client_user_message_id: String,
-    ) -> Self {
-        Self {
-            draft_key,
-            audio,
-            send,
-            client_user_message_id,
-        }
-    }
-}
+
 impl Operation for Dictate {
     type Output = (Arc<Draft>, rpc::Transcription);
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
@@ -1059,13 +989,14 @@ impl Operation for Dictate {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResizeTerminal<T = String> {
+pub struct ResizeTerminal {
     #[serde(rename = "processHandle")]
-    pub handle: T,
+    pub handle: String,
     pub size: rpc::TerminalSize,
 }
-impl<T: Serialize> rpc::RpcMethod for ResizeTerminal<T> {
+impl rpc::RpcMethod for ResizeTerminal {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "process/resizePty";
 }
@@ -1081,13 +1012,14 @@ impl Operation for ResizeTerminal {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Interrupt<T = String> {
-    pub thread_id: T,
-    pub turn_id: T,
+pub struct Interrupt {
+    pub thread_id: String,
+    pub turn_id: String,
 }
-impl<T: Serialize> rpc::RpcMethod for Interrupt<T> {
+impl rpc::RpcMethod for Interrupt {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "turn/interrupt";
 }
@@ -1100,16 +1032,17 @@ impl Operation for Interrupt {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Watch<T = String> {
-    pub thread_id: T,
+pub struct Watch {
+    pub thread_id: String,
     pub watch_key: u64,
     pub watch_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<T>,
+    pub path: Option<String>,
 }
-impl<T: Serialize> rpc::RpcMethod for Watch<T> {
+impl rpc::RpcMethod for Watch {
     type Output = Map<String, Value>;
     const METHOD: &'static str = "host/thread/watch";
 }
@@ -1127,6 +1060,7 @@ impl Operation for Watch {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Unwatch {
@@ -1156,17 +1090,19 @@ impl Operation for Unwatch {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReadOlder<T = String> {
-    pub thread_id: T,
-    pub turn_id: Option<T>,
-    pub cursor: Option<T>,
+pub struct ReadOlder {
+    pub thread_id: String,
+    pub turn_id: Option<String>,
+    pub cursor: Option<String>,
     #[serde(default)]
+    #[cfg_attr(feature = "bindings", uniffi(default = true))]
     pub defer_item_details: bool,
 }
-impl<T> ReadOlder<T> {
-    pub fn new(thread_id: T, turn_id: Option<T>, cursor: Option<T>) -> Self {
+impl ReadOlder {
+    pub fn new(thread_id: String, turn_id: Option<String>, cursor: Option<String>) -> Self {
         Self {
             thread_id,
             turn_id,
@@ -1175,7 +1111,7 @@ impl<T> ReadOlder<T> {
         }
     }
 }
-impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadOlder<T> {
+impl rpc::RpcMethod for ReadOlder {
     type Output = crate::models::ThreadResponse;
     const METHOD: &'static str = "host/thread/turns/list";
     fn method(&self) -> &'static str {
@@ -1186,7 +1122,7 @@ impl<T: Serialize + AsRef<str>> rpc::RpcMethod for ReadOlder<T> {
         }
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        rpc::validate_thread(output, Some(self.thread_id.as_ref()))
+        rpc::validate_thread(output, Some(self.thread_id.as_str()))
     }
 }
 
@@ -1217,10 +1153,11 @@ impl Operation for ReadOlder {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteTerminal<H = String, D = Vec<u8>> {
-    pub handle: H,
-    pub data: D,
+pub struct WriteTerminal {
+    pub handle: String,
+    pub data: Vec<u8>,
 }
 struct Base64Bytes<'a>(&'a [u8]);
 impl Serialize for Base64Bytes<'_> {
@@ -1231,16 +1168,26 @@ impl Serialize for Base64Bytes<'_> {
         ))
     }
 }
-impl<H: Serialize, D: Serialize + AsRef<[u8]>> rpc::RpcMethod for WriteTerminal<H, D> {
+impl rpc::RpcMethod for WriteTerminal {
     type Output = Map<String, Value>;
-    const METHOD: &'static str = "process/writeStdin";
+    const METHOD: &'static str = TerminalInput::METHOD;
     fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TerminalInput(&self.handle, &self.data).serialize(serializer)
+    }
+}
+struct TerminalInput<'a>(&'a str, &'a [u8]);
+impl Serialize for TerminalInput<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut params = serializer.serialize_struct("WriteTerminal", 2)?;
-        params.serialize_field("processHandle", &self.handle)?;
-        params.serialize_field("deltaBase64", &Base64Bytes(self.data.as_ref()))?;
+        params.serialize_field("processHandle", self.0)?;
+        params.serialize_field("deltaBase64", &Base64Bytes(self.1))?;
         params.end()
     }
+}
+impl rpc::RpcMethod for TerminalInput<'_> {
+    type Output = Map<String, Value>;
+    const METHOD: &'static str = "process/writeStdin";
 }
 
 impl Operation for WriteTerminal {
@@ -1252,21 +1199,17 @@ impl Operation for WriteTerminal {
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         // The actor serializes every chunk of one paste; serialization encodes into the JSON buffer.
         for chunk in self.data.chunks(16 * 1024) {
-            context
-                .call(&WriteTerminal {
-                    handle: self.handle.as_str(),
-                    data: chunk,
-                })
-                .await?;
+            context.call(&TerminalInput(&self.handle, chunk)).await?;
         }
         Ok(())
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadFile {
-    pub source: std::path::PathBuf,
-    pub destination: std::path::PathBuf,
+    pub source: String,
+    pub destination: String,
 }
 impl Operation for DownloadFile {
     type Output = ();
@@ -1278,14 +1221,15 @@ impl Operation for DownloadFile {
         crate::transfers::download_file(
             context.peer,
             || async { session.open_stream().await.map_err(std::io::Error::other) },
-            &self.source,
-            &self.destination,
+            std::path::Path::new(&self.source),
+            std::path::Path::new(&self.destination),
         )
         .await
         .map_err(|error| PeerError::InvalidMessage(error.to_string()))
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadSessionImages {
     pub thread_id: String,
@@ -1302,8 +1246,9 @@ impl Operation for LoadSessionImages {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadHostManagement;
+pub struct LoadHostManagement {}
 impl Operation for LoadHostManagement {
     type Output = (HostStatus, Vec<RemoteHost>);
 
@@ -1322,8 +1267,9 @@ impl Operation for LoadHostManagement {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadModels;
+pub struct LoadModels {}
 impl Operation for LoadModels {
     type Output = Vec<Model>;
 
@@ -1352,6 +1298,7 @@ impl Operation for LoadModels {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Respond {
     pub request_id: Value,
@@ -1399,8 +1346,8 @@ impl Operation for StartSubmission {
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         context
             .call(&StartThread {
-                cwd: self.cwd.as_deref(),
-                model: self.draft.model.as_deref(),
+                cwd: self.cwd.clone(),
+                model: self.draft.model.clone(),
             })
             .await
     }
@@ -1537,6 +1484,7 @@ impl Operation for SendSubmission {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadAttachment {
     pub draft_key: String,
@@ -1544,6 +1492,7 @@ pub struct UploadAttachment {
     pub directory: String,
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRemoteHost {
     pub invitation: Invitation,

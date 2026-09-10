@@ -47,7 +47,7 @@ extension BexAppViewModel {
     }
 
     func loadAccounts(selecting id: String? = nil) {
-        perform(.listAccounts) { [weak self] result in
+        perform(.listAccounts(ListAccounts())) { [weak self] result in
             if case .success = result, let id {
                 self?.chooseAccount(id)
             }
@@ -55,6 +55,6 @@ extension BexAppViewModel {
     }
 
     func chooseAccount(_ id: String) {
-        perform(.selectAccount(id: id))
+        perform(.selectAccount(SelectAccount(id: id)))
     }
 }

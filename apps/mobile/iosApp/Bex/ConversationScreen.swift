@@ -174,9 +174,13 @@ struct ThreadScreen: View {
                 finishMediaImport(result)
             }.ignoresSafeArea()
         }
-        .sheet(isPresented: $showingFiles, onDismiss: { model.perform(.reviewWorkspace(cwd: model.cwd)) }, content: {
-            WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
-        })
+        .sheet(
+            isPresented: $showingFiles,
+            onDismiss: { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd))) },
+            content: {
+                WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
+            }
+        )
         .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
         .onAppear {
             if state.isNewThread {

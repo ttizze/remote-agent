@@ -38,7 +38,31 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
     if !cwd.is_dir() {
         return Err("working directory is not a directory".to_owned());
     }
-    run_git(&cwd, &["rev-parse", "--is-inside-work-tree"])?;
+    let membership = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .env("LC_ALL", "C")
+        .current_dir(&cwd)
+        .output()
+        .map_err(|error| format!("failed to run git: {error}"))?;
+    // Git has no distinct exit code for discovery failure. Recognize only its
+    // ordinary parent-directory/mount-boundary result in a fixed locale;
+    // broken metadata, permissions and ownership errors must still surface.
+    let no_repository = membership.status.code() == Some(128)
+        && membership
+            .stderr
+            .starts_with(b"fatal: not a git repository (or any ");
+    if !membership.status.success() && !no_repository {
+        return Err(git_failure(&membership));
+    }
+    if no_repository || membership.stdout.trim_ascii() == b"false" {
+        return Ok(WorkspaceReview {
+            branch: String::new(),
+            additions: 0,
+            deletions: 0,
+            files: Vec::new(),
+            diff: String::new(),
+        });
+    }
     let branch = run_git(&cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .or_else(|_| run_git(&cwd, &["rev-parse", "--short", "HEAD"]))?
         .trim()
@@ -125,12 +149,16 @@ fn run_git_output(cwd: &Path, args: &[&str]) -> Result<Output, String> {
     if output.status.success() {
         return Ok(output);
     }
+    Err(git_failure(&output))
+}
+
+fn git_failure(output: &Output) -> String {
     let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(if message.is_empty() {
+    if message.is_empty() {
         "git command failed".to_owned()
     } else {
         message
-    })
+    }
 }
 
 fn parse_git_status(output: &[u8]) -> Vec<WorkspaceFileChange> {
@@ -202,6 +230,37 @@ fn parse_numstat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folders_without_a_git_worktree_have_no_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("photo.png"), b"untracked outside Git").unwrap();
+        for bare in [false, true] {
+            if bare {
+                run_git(
+                    directory.path(),
+                    &["init", "--bare", "--initial-branch=main"],
+                )
+                .unwrap();
+            }
+            let review = collect_workspace_review(directory.path().into()).unwrap();
+            assert!(review.branch.is_empty());
+            assert_eq!((review.additions, review.deletions), (0, 0));
+            assert!(review.files.is_empty());
+            assert!(review.diff.is_empty());
+        }
+    }
+
+    #[test]
+    fn unavailable_paths_and_broken_git_metadata_remain_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(collect_workspace_review(directory.path().join("missing")).is_err());
+        let file = directory.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(collect_workspace_review(file).is_err());
+        std::fs::write(directory.path().join(".git"), b"gitdir: missing\n").unwrap();
+        assert!(collect_workspace_review(directory.path().into()).is_err());
+    }
 
     #[test]
     fn untracked_files_contribute_to_patch_and_line_counts() {

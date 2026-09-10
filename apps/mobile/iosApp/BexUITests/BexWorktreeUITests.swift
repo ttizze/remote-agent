@@ -1,6 +1,36 @@
 import XCTest
 
 extension BexLaunchUITests {
+    func useAutomaticWorktrees(_ app: XCUIApplication) throws {
+        openWorktreeSettings(app)
+        let create = app.switches["worktree.create"]
+        let original = try XCTUnwrap(create.value as? String)
+        if original != "1" {
+            toggle(create)
+        }
+        app.buttons["worktree.save"].tap()
+        let saved = expectation(for: NSPredicate(format: "exists == false"),
+                                evaluatedWith: app.buttons["worktree.save"])
+        wait(for: [saved], timeout: 10)
+        addTeardownBlock {
+            let app = try self.connectedSimulatorApp(expandProject: false)
+            self.openWorktreeSettings(app)
+            let create = app.switches["worktree.create"]
+            if create.value as? String != original {
+                self.toggle(create)
+            }
+            app.buttons["worktree.save"].tap()
+            let restored = self.expectation(for: NSPredicate(format: "exists == false"),
+                                            evaluatedWith: app.buttons["worktree.save"])
+            self.wait(for: [restored], timeout: 10)
+        }
+        app.terminate()
+        _ = try connectedSimulatorApp()
+        openWorktreeSettings(app)
+        XCTAssertEqual(create.value as? String, "1", "The saved setting must survive app restart")
+        app.buttons["worktree.cancel"].tap()
+    }
+
     func testSimulatorEditsHostWorktreeSettingsFromTaskMenu() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This test uses the isolated Simulator fixture")

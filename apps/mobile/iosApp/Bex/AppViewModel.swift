@@ -156,7 +156,7 @@ final class BexAppViewModel: ObservableObject {
         if !force, snapshot.connected() {
             refreshTaskList()
             if let id = snapshot.navigation().threadId {
-                perform(.readThread(id: id))
+                perform(.readThread(ReadThread(threadId: id)))
             }
             return
         }

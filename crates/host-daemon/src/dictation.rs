@@ -84,6 +84,12 @@ async fn transcribe_authenticated(
     stream_url: &str,
     recording_url: &str,
 ) -> Result<String, String> {
+    // The desktop build enables both Rustls backends. Choose before the first
+    // WebSocket handshake; iroh configures its own provider without installing
+    // a process default. Preserve a provider already selected by another caller.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
     // The desktop retains a recording alongside its stream and submits that
     // recording to /transcribe when streaming cannot produce a transcript.
     let stream_result = tokio::time::timeout(
@@ -158,11 +164,6 @@ async fn transcribe_recording(
     static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
     let client = CLIENT
         .get_or_init(|| {
-            // Use the same ring backend as iroh. Another transport
-            // may already have installed it; keep that process-wide choice.
-            if rustls::crypto::CryptoProvider::get_default().is_none() {
-                let _ = rustls::crypto::ring::default_provider().install_default();
-            }
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(25))
@@ -485,6 +486,7 @@ mod tests {
     async fn recording_fallback(
         response_status: &str,
         response_body: &str,
+        secure_stream: bool,
     ) -> Result<String, String> {
         tokio::time::timeout(Duration::from_secs(3), async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -494,6 +496,13 @@ mod tests {
             let provider = async {
                 for streaming in [true, false] {
                     let (mut socket, _) = listener.accept().await.unwrap();
+                    if streaming && secure_stream {
+                        // Reject TLS after ClientHello, before any credentials
+                        // can reach the isolated provider.
+                        assert_eq!(socket.read_u8().await.unwrap(), 0x16);
+                        socket.shutdown().await.unwrap();
+                        continue;
+                    }
                     let mut request = Vec::new();
                     let mut buffer = [0_u8; 1024];
                     let header_end = loop {
@@ -535,7 +544,8 @@ mod tests {
                     socket.write_all(response.as_bytes()).await.unwrap();
                 }
             };
-            let stream_url = format!("ws://{address}/stream");
+            let scheme = if secure_stream { "wss" } else { "ws" };
+            let stream_url = format!("{scheme}://{address}/stream");
             let recording_url = format!("http://{address}/transcribe");
             let operation = transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url);
             let (result, ()) = tokio::join!(operation, provider);
@@ -546,7 +556,7 @@ mod tests {
     #[tokio::test]
     async fn submits_the_original_recording_when_streaming_is_rejected() {
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"文字起こし成功"}"#)
+            recording_fallback("200 OK", r#"{"text":"文字起こし成功"}"#, false)
                 .await
                 .unwrap(),
             "文字起こし成功"
@@ -558,11 +568,50 @@ mod tests {
         let error = recording_fallback(
             "500 Internal Server Error",
             r#"{"error":"private provider payload"}"#,
+            false,
         )
         .await
         .unwrap_err();
         assert!(error.contains("HTTP 403"));
         assert!(error.contains("HTTP 500"));
         assert!(!error.contains("private provider payload"));
+    }
+
+    #[tokio::test]
+    async fn first_secure_dictation_falls_back_after_tls_failure() {
+        const CHILD: &str = "BEX_TEST_COLD_DICTATION_TLS";
+        if std::env::var_os(CHILD).is_none() {
+            // A separate process prevents another test from installing the
+            // global TLS provider first and hiding cold-start failures.
+            let output = tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "dictation::tests::first_secure_dictation_falls_back_after_tls_failure",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("cold dictation process stalled")
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "cold dictation failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        assert!(rustls::crypto::CryptoProvider::get_default().is_none());
+        assert_eq!(
+            recording_fallback("200 OK", r#"{"text":"TLS後も文字起こし成功"}"#, true)
+                .await
+                .unwrap(),
+            "TLS後も文字起こし成功"
+        );
     }
 }

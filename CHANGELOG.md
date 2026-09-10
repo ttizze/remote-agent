@@ -2,9 +2,17 @@
 
 ## Unreleased
 
+- Apply automatic worktree creation only when a new session has an explicitly selected checkout. Global chats can send with the setting enabled. Cover saved settings on/off, global/project scope, text/photo input, first/follow-up turns, and reopened history through the real Store and isolated Host; exercise native photo/video submission after saving and reloading the enabled setting.
+
+- Store uploads from chats without a project in the Host's private `$CODEX_HOME/bex-attachments` directory. Preserve explicit absolute destinations and reject other relative paths. Return an empty review for folders without a Git worktree while preserving real Git errors. Verify complete photo/video submission without an error notice; keep unscoped fixture threads inside their isolated directory instead of inheriting the developer's checkout.
+
+- Initialize the Host's Rustls provider before the first dictation WebSocket handshake. Prevent voice submission from closing the iPhone's JSONL session when desktop builds enable both TLS backends; cover cold-process TLS failure followed by recording-upload recovery.
+
+- Make remote `Intent` variants hold owned operation records directly. Derive UniFFI records on the same concrete payloads, remove generic borrowed operation variants and reducer field repacking, and migrate Rust, Swift and Kotlin callers. Keep terminal input chunks borrowed during wire serialization.
+
 - Export core `Intent` and `Answer` through UniFFI directly and fill internal flags in operation constructors. Remove the FFI intent mirror and `host-protocol`; consolidate JSONL framing, classification and response envelopes in `agent-core::peer`. Type Host parameters/results, history detail deferral and Desktop project/title models while preserving upstream extensions, errors, opaque cursors and complete image output. Capture each iOS test row identifier once when recording a moving list.
 
-- Unify owned Store and borrowed RPC payloads in the same operation types. Move conversation projection into agent-core and export core records/shared objects through UniFFI directly, removing the FFI snapshot and projection wrappers. Store now owns connection list/model/conversation reloads and automatic workspace reviews; preserve query limits, draft state and effect epochs across reconnection. Native observers retain updates that arrive before their first wait. Regenerate native bindings without stale namespace files.
+- Unify Store and RPC payloads in the same operation types. Move conversation projection into agent-core and export core records/shared objects through UniFFI directly, removing the FFI snapshot and projection wrappers. Store now owns connection list/model/conversation reloads and automatic workspace reviews; preserve query limits, draft state and effect epochs across reconnection. Native observers retain updates that arrive before their first wait. Regenerate native bindings without stale namespace files.
 
 - Make each remote intent own its operation payload and route it once. Move invalidation, preparation and stale application into the operation; remove Store intent repacking and response-event adapters. Keep events serializable, cover every Snapshot publication field, and verify fresh list/conversation loading through UniFFI after replacing a connected transport.
 

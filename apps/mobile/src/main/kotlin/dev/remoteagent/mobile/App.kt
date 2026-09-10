@@ -29,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
+import dev.remoteagent.core.ReadThread
 import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.Connection
@@ -259,7 +260,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         notice = null
         if (!force && snapshot.connected()) {
             refresh()
-            snapshot.navigation().threadId?.let { perform(Intent.ReadThread(it)) }
+            snapshot.navigation().threadId?.let { perform(Intent.ReadThread(ReadThread(it))) }
             return
         }
         busy = true

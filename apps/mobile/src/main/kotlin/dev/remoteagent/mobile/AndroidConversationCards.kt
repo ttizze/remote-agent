@@ -16,6 +16,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.RenderedItem
 
 @Composable
@@ -45,7 +47,7 @@ internal fun ThreadActivityCard(item: RenderedItem, model: AndroidAppModel, turn
                         if (expanded && content.deferred) {
                             val threadId = model.snapshot.navigation().threadId ?: return@clickable
                             model.perform(
-                                dev.remoteagent.core.Intent.ReadItem(threadId, turnId, content.nativeId ?: content.id)
+                                Intent.ReadItem(ReadItem(threadId, turnId, content.nativeId ?: content.id))
                             )
                         }
                     }

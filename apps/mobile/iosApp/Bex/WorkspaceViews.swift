@@ -156,7 +156,7 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func loadDiff() {
         busy = true; error = nil
-        model.perform(.reviewWorkspace(cwd: root)) { result in
+        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) { result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
@@ -169,7 +169,7 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func load(_ directory: String) {
         busy = true; error = nil
-        model.perform(.listFiles(path: directory)) { result in
+        model.perform(.listFiles(ListFiles(path: directory))) { result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
@@ -265,7 +265,7 @@ private struct FileEditorSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
                         busy = true; error = nil
-                        model.perform(.saveFile(path: entry.path)) { result in
+                        model.perform(.saveFile(SaveFile(path: entry.path))) { result in
                             busy = false
                             if case let .failure(failure) = result {
                                 error = failure.localizedDescription
@@ -289,7 +289,7 @@ private struct FileEditorSheet: View {
 
     private func load(restoreDraft: Bool) {
         busy = true; error = nil
-        model.perform(.readFile(path: entry.path, discardDraft: !restoreDraft)) { result in
+        model.perform(.readFile(ReadFile(path: entry.path, discardDraft: !restoreDraft))) { result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return

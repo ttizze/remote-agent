@@ -1,4 +1,5 @@
 use agent_core::peer::JsonlReader;
+use agent_core::state::operations as op;
 use agent_core::{
     client::Answer,
     models::ListQuery,
@@ -204,10 +205,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .await??;
             store
-                .dispatch(Intent::Respond {
+                .dispatch(Intent::Respond(op::Respond {
                     request_id,
                     answer: Answer::Decision { index: decision },
-                })
+                }))
                 .await?;
             println!("null");
         }

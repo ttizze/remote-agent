@@ -597,7 +597,7 @@ async fn run(
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 client.call(&op::CloseTerminal {
-                    handle: handle.as_str(),
+                    handle: handle.clone(),
                 }),
             )
             .await;
