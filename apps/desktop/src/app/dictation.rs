@@ -42,7 +42,7 @@ impl Desktop {
                 });
                 self.error.clear();
             }
-            Err(error) => self.error = error,
+            Err(error) => self.set_error(error),
         }
     }
     pub(super) fn finish_dictation(&mut self, send: bool, _: &Context<Self>) {
@@ -54,7 +54,7 @@ impl Desktop {
             return;
         };
         if let Err(error) = state.control.as_mut().expect("recording control").finish() {
-            self.error = error;
+            self.set_error(error);
             self.dictation = None;
             return;
         }
@@ -83,7 +83,7 @@ impl Desktop {
             platform::RecordingEvent::Started => state.phase = Phase::Recording,
             platform::RecordingEvent::Finished(Err(error)) => {
                 self.dictation = None;
-                self.error = error;
+                self.set_error(error);
             }
             platform::RecordingEvent::Finished(Ok(audio)) => {
                 state.control = None;
@@ -98,7 +98,7 @@ impl Desktop {
                         view.dictation = None;
                     }
                     if let Err(error) = result {
-                        view.error = error;
+                        view.set_error(error);
                     }
                     view.accept_snapshot(window, cx);
                 });

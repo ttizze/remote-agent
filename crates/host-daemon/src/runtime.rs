@@ -20,6 +20,12 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     };
     host_daemon::platform::create_state_directory(&directory).map_err(|e| e.to_string())?;
     let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+    agent_core::diagnostics::initialize(
+        &directory,
+        agent_core::diagnostics::Component::Host,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|error| format!("cannot initialize Host error log: {error}"))?;
     // The standard library lock is held before loading or creating credentials.
     let lock: File = OpenOptions::new()
         .read(true)

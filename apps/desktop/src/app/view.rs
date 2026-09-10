@@ -30,6 +30,26 @@ fn file_name(path: &str) -> String {
 
 const CHAT_WIDTH: f32 = 780.;
 
+fn fitted_image(source: ImageSource, height: f32) -> Img {
+    img(source)
+        .w_full()
+        .min_w_0()
+        .h(px(height))
+        .min_h(px(height))
+        .max_h(px(height))
+        .object_fit(ObjectFit::Contain)
+}
+
+fn user_message_bubble() -> Div {
+    v_flex()
+        .gap_3()
+        .min_w_0()
+        .max_w(px(560.))
+        .p_4()
+        .rounded(px(18.))
+        .bg(rgb(0x303030))
+}
+
 fn review_counts(additions: Option<u64>, deletions: Option<u64>) -> AnyElement {
     let counts = h_flex().gap_1().text_xs();
     match (additions, deletions) {
@@ -336,7 +356,10 @@ impl Desktop {
                                     ImageSource::from(path)
                                 })
                             }
-                            Err(error) => image.error = Some(error),
+                            Err(error) => {
+                                agent_core::diagnostics::error("image.load", &error);
+                                image.error = Some(error);
+                            }
                         }
                     }
                     view.list.remeasure();
@@ -345,12 +368,7 @@ impl Desktop {
         }
         let state = &self.images[&key];
         if let Some(path) = &state.path {
-            let image = img(path.clone())
-                .w_full()
-                .h(px(height))
-                .min_h(px(height))
-                .max_h(px(height))
-                .object_fit(ObjectFit::Contain);
+            let image = fitted_image(path.clone(), height);
             if clickable {
                 let source = state.source.clone();
                 div()
@@ -455,7 +473,7 @@ impl Desktop {
         let path = match conversation_file_path(source, &self.snapshot.navigation.cwd) {
             Ok(path) => path,
             Err(error) => {
-                self.error = error;
+                self.set_error(error);
                 cx.notify();
                 return;
             }
@@ -507,7 +525,7 @@ impl Desktop {
             },
             |view, result, _, cx| match result {
                 Ok(url) => cx.open_url(url.as_str()),
-                Err(error) => view.error = error,
+                Err(error) => view.set_error(error),
             },
         );
     }
@@ -558,7 +576,10 @@ impl Desktop {
                             gallery.list.scroll_to_reveal_item(index);
                         }
                     }
-                    Err(error) => gallery.error = error,
+                    Err(error) => {
+                        agent_core::diagnostics::error("gallery.load", &error);
+                        gallery.error = error;
+                    }
                     _ => unreachable!("session image outcome"),
                 }
             },
@@ -776,7 +797,10 @@ impl Desktop {
                     gallery.saving = false;
                     match result {
                         Ok(saved) => gallery.saved = saved,
-                        Err(error) => gallery.error = error,
+                        Err(error) => {
+                            agent_core::diagnostics::error("gallery.save", &error);
+                            gallery.error = error;
+                        }
                     }
                     cx.notify();
                 }
@@ -890,12 +914,7 @@ impl Desktop {
                 body.into_any_element()
             }
             "userMessage" => {
-                let mut body = v_flex()
-                    .gap_3()
-                    .max_w(px(560.))
-                    .p_4()
-                    .rounded(px(18.))
-                    .bg(rgb(0x303030));
+                let mut body = user_message_bubble();
                 if extra(item, "content").is_array() {
                     for (i, part) in array(extra(item, "content")).iter().enumerate() {
                         body = body.child(match text(part, "type") {
@@ -943,32 +962,32 @@ impl Desktop {
                     .child(body)
                     .into_any_element()
             }
-            "commandExecution" | "reasoning" => {
+            "commandExecution" => {
                 let label = projected.data.title.clone();
                 let toggle = id.clone();
-                let mut body = v_flex().gap_2().child(self.button(
-                    format!("expand-{id}"),
-                    format!("{} {label}", if expanded { "⌄" } else { "›" }),
-                    cx,
-                    move |s, _, _| {
-                        toggle_set(&mut s.expanded_items, &toggle);
-                        if s.expanded_items.contains(&toggle) {
-                            s.detail(turn_id.clone(), toggle.clone());
-                        }
-                        s.pause_tail();
-                        s.remeasure_item(&toggle);
-                    },
-                ));
+                let mut body = v_flex().gap_2().child(
+                    self.button(
+                        format!("expand-{id}"),
+                        format!("{label} {}", if expanded { "⌄" } else { "›" }),
+                        cx,
+                        move |s, _, _| {
+                            toggle_set(&mut s.expanded_items, &toggle);
+                            if s.expanded_items.contains(&toggle) {
+                                s.detail(turn_id.clone(), toggle.clone());
+                            }
+                            s.pause_tail();
+                            s.remeasure_item(&toggle);
+                        },
+                    )
+                    .icon(IconName::SquareTerminal)
+                    .text_color(rgb(0xa0a0a0)),
+                );
                 if expanded {
                     let output = projected.expanded_body();
-                    let content = if kind == "commandExecution" {
-                        format!(
-                            "$ {}\n\n{output}",
-                            item.command.as_deref().unwrap_or_default()
-                        )
-                    } else {
-                        output
-                    };
+                    let content = format!(
+                        "$ {}\n\n{output}",
+                        item.command.as_deref().unwrap_or_default()
+                    );
                     body = body
                         .child(Self::activity_text(format!("output-{id}"), &content, ""))
                         .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
@@ -1346,7 +1365,7 @@ impl Desktop {
                             Ok(value) => {
                                 view.respond(key.clone(), id.clone(), Answer::Raw { value })
                             }
-                            Err(error) => view.error = error.to_string(),
+                            Err(error) => view.set_error(error.to_string()),
                         }
                     },
                 ));
@@ -3076,5 +3095,67 @@ impl Render for Desktop {
                 body.child(self.sidebar(window, cx))
             })
             .child(main)
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::{fitted_image, h_flex, user_message_bubble};
+    use gpui_kit as gpui;
+    use gpui_kit::{
+        Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage, Styled,
+        TestAppContext, Window, div, px, size,
+    };
+    use std::sync::Arc;
+
+    struct ImageBubble(Arc<RenderImage>);
+    impl Render for ImageBubble {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            h_flex().w_full().justify_end().child(
+                user_message_bubble().child(
+                    div()
+                        .w_full()
+                        .h(px(320.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            fitted_image(self.0.clone().into(), 320.)
+                                .debug_selector(|| "chat-image".into()),
+                        ),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn chat_images_stay_inside_the_bubble_at_different_window_sizes(cx: &mut TestAppContext) {
+        for (width, height) in [(1156, 78), (78, 1156), (400, 400)] {
+            let frame = image::Frame::new(image::RgbaImage::new(width, height));
+            let image = Arc::new(RenderImage::new(vec![frame]));
+            let (view, window) = cx.add_window_view(|_, _| ImageBubble(image));
+            for viewport_width in [780_f32, 360.] {
+                window.simulate_resize(size(px(viewport_width), px(600.)));
+                window.run_until_parked();
+                view.update(window, |_, cx| cx.notify());
+                window.run_until_parked();
+                let bounds = window
+                    .debug_bounds("chat-image")
+                    .expect("image must render");
+                assert!(
+                    bounds.size.width > px(0.),
+                    "image must remain visible: {bounds:?}"
+                );
+                assert!(
+                    bounds.size.width <= px(528_f32.min(viewport_width - 32.)),
+                    "image exceeds bubble: {bounds:?}"
+                );
+                assert!(
+                    bounds.left() >= px(0.) && bounds.right() <= px(viewport_width),
+                    "image overflows conversation: {bounds:?}"
+                );
+            }
+        }
     }
 }
