@@ -6,12 +6,12 @@
 
 凡例: **観察** は実際に画面で確認したもの。**文書** は README の記述にもとづくもの。
 
-比較画像は `docs/codex-comparison/` にある。各画像は左が Codex、右が Bex。
+比較画像は調査時に `docs/codex-comparison/` へローカル生成したもので、リポジトリには含めていない（合計 12MB）。各画像は左が Codex、右が Bex。必要なら同じ手順で再生成できる。
 
 ## 1. ウィンドウとメニュー
 
-![新規チャット画面](codex-comparison/01-new-chat.png)
-![会話画面](codex-comparison/02-conversation.png)
+- 画像: 新規チャット画面（`docs/codex-comparison/01-new-chat.png`）
+- 画像: 会話画面（`docs/codex-comparison/02-conversation.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -25,9 +25,9 @@
 
 ## 2. サイドバー
 
-![検索](codex-comparison/06-search.png)
-![会話の右クリック](codex-comparison/07-context-menu.png)
-![サイドバー全展開](codex-comparison/23-sidebar-expanded.png)
+- 画像: 検索（`docs/codex-comparison/06-search.png`）
+- 画像: 会話の右クリック（`docs/codex-comparison/07-context-menu.png`）
+- 画像: サイドバー全展開（`docs/codex-comparison/23-sidebar-expanded.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -52,9 +52,9 @@
 
 ## 4. 入力欄
 
-![「+」ボタン](codex-comparison/03-plus-menu.png)
-![権限モードとモデル設定](codex-comparison/04-access-mode.png)
-![モデル選択](codex-comparison/05-model-picker.png)
+- 画像: 「+」ボタン（`docs/codex-comparison/03-plus-menu.png`）
+- 画像: 権限モードとモデル設定（`docs/codex-comparison/04-access-mode.png`）
+- 画像: モデル選択（`docs/codex-comparison/05-model-picker.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -68,7 +68,7 @@
 
 ## 5. 会話画面
 
-![会話ヘッダのメニュー](codex-comparison/08-header-menu.png)
+- 画像: 会話ヘッダのメニュー（`docs/codex-comparison/08-header-menu.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -82,10 +82,10 @@
 
 ## 6. 右パネルとツール
 
-![差分ビュー](codex-comparison/09-diff.png)
-![ターミナル](codex-comparison/10-terminal.png)
-![ファイラ](codex-comparison/11-file-browser.png)
-![ブラウザ](codex-comparison/12-browser.png)
+- 画像: 差分ビュー（`docs/codex-comparison/09-diff.png`）
+- 画像: ターミナル（`docs/codex-comparison/10-terminal.png`）
+- 画像: ファイラ（`docs/codex-comparison/11-file-browser.png`）
+- 画像: ブラウザ（`docs/codex-comparison/12-browser.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -99,8 +99,8 @@
 
 ## 7. 設定
 
-![設定画面](codex-comparison/13-settings.png)
-![Worktree 設定](codex-comparison/14-settings-worktree.png)
+- 画像: 設定画面（`docs/codex-comparison/13-settings.png`）
+- 画像: Worktree 設定（`docs/codex-comparison/14-settings-worktree.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -142,9 +142,9 @@
 
 ### 10.1 送信から完了まで
 
-![送信直後](codex-comparison/15-sent.png)
-![実行中](codex-comparison/16-running.png)
-![完了後](codex-comparison/17-finished.png)
+- 画像: 送信直後（`docs/codex-comparison/15-sent.png`）
+- 画像: 実行中（`docs/codex-comparison/16-running.png`）
+- 画像: 完了後（`docs/codex-comparison/17-finished.png`）
 
 | 段階 | Codex | Bex |
 | --- | --- | --- |
@@ -160,7 +160,7 @@
 
 ### 10.2 停止
 
-![停止後](codex-comparison/18-stopped.png)
+- 画像: 停止後（`docs/codex-comparison/18-stopped.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -170,7 +170,7 @@
 
 ### 10.3 音声入力
 
-![録音中](codex-comparison/19-voice.png)
+- 画像: 録音中（`docs/codex-comparison/19-voice.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -181,8 +181,8 @@
 
 ### 10.4 画像添付（クリップボードから ⌘V）
 
-![画像を貼り付けた入力欄](codex-comparison/20-image-attached.png)
-![会話内の画像表示](codex-comparison/21-image-in-chat.png)
+- 画像: 画像を貼り付けた入力欄（`docs/codex-comparison/20-image-attached.png`）
+- 画像: 会話内の画像表示（`docs/codex-comparison/21-image-in-chat.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
@@ -193,7 +193,7 @@
 
 ### 10.5 承認
 
-![承認](codex-comparison/22-approval.png)
+- 画像: 承認（`docs/codex-comparison/22-approval.png`）
 
 | 項目 | Codex | Bex |
 | --- | --- | --- |
