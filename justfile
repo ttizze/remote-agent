@@ -19,7 +19,7 @@ ios-e2e *tests:
 
 # Exercise the real iroh Host through the headless client.
 iroh-e2e:
-    cargo test --locked --package xtask --test iroh_host
+    cargo test --locked --package host-fixture --test iroh_host
 
 # Run Rust, Kotlin and Swift quality checks, or one selected language.
 quality language="all":

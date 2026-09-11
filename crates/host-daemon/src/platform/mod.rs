@@ -53,3 +53,18 @@ pub(crate) fn terminal_command() -> &'static [&'static str] {
         &["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" -l"]
     }
 }
+
+/// Atomically replace owner-only JSON state and flush its contents before rename.
+pub fn save_private_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
+    let parent = path.parent().ok_or("state path has no parent")?;
+    create_state_directory(parent).map_err(|error| error.to_string())?;
+    atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
+        .write_with_options(
+            |file| {
+                serde_json::to_writer(&mut *file, value)?;
+                file.sync_all()
+            },
+            private_file_options(),
+        )
+        .map_err(|error| error.to_string())
+}

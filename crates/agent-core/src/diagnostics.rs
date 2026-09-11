@@ -1,5 +1,4 @@
 //! Explicit error records, never request/response payloads or third-party traces.
-use file_rotate::{ContentLimit, FileRotate, compression::Compression, suffix::AppendCount};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -221,25 +220,22 @@ impl Log {
         bytes.push(b'\n');
         let lock = private_options().open(self.path.with_extension("lock"))?;
         lock.lock()?;
-        // FileRotate intentionally swallows file-open failures. Use it only for
-        // archive management, and write through our own fallible file handle.
         let mut writer = private_options().open(&self.path)?;
         if writer.metadata()?.len() > self.limit as u64 {
             drop(writer);
-            // This dependency panics on directory-scan errors. Keep that
-            // failure inside the logging boundary and report it like other I/O
-            // errors; the application must be able to continue and retry later.
-            std::panic::catch_unwind(|| {
-                FileRotate::new(
-                    &self.path,
-                    AppendCount::new(ARCHIVES),
-                    ContentLimit::None,
-                    Compression::None,
-                    Some(private_options()),
-                )
-                .rotate()
-            })
-            .map_err(|_| io::Error::other("log rotation panicked"))??;
+            let archive = |index| {
+                let mut path = self.path.as_os_str().to_owned();
+                path.push(format!(".{index}"));
+                PathBuf::from(path)
+            };
+            for index in (1..ARCHIVES).rev() {
+                match fs::rename(archive(index), archive(index + 1)) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error),
+                }
+            }
+            fs::rename(&self.path, archive(1))?;
             writer = private_options().open(&self.path)?;
         }
         writer.write_all(&bytes)?;
@@ -379,6 +375,43 @@ mod tests {
         log.write("info", "shutdown", "Bex stopped", None, None)
             .unwrap();
         assert!(fs::read_to_string(&log.path).unwrap().contains("shutdown"));
+    }
+
+    #[test]
+    fn rotation_failure_preserves_current_records_and_recovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Log::open(directory.path(), Component::Host, 1, "test-version").unwrap();
+        log.write("error", "first", "first record", None, None)
+            .unwrap();
+        let mut archive = log.path.as_os_str().to_owned();
+        archive.push(".4");
+        let archive = PathBuf::from(archive);
+        fs::create_dir(&archive).unwrap();
+        let mut prior = log.path.as_os_str().to_owned();
+        prior.push(".3");
+        fs::write(prior, "older archive").unwrap();
+        assert!(
+            log.write("error", "second", "second record", None, None)
+                .is_err()
+        );
+        assert!(
+            fs::read_to_string(&log.path)
+                .unwrap()
+                .contains("first record")
+        );
+        for entry in fs::read_dir(directory.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                fs::remove_dir(path).unwrap();
+            }
+        }
+        log.write("error", "recovered", "recovered record", None, None)
+            .unwrap();
+        assert!(
+            fs::read_to_string(&log.path)
+                .unwrap()
+                .contains("recovered record")
+        );
     }
 
     #[test]

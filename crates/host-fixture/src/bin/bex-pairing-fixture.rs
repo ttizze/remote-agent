@@ -1,6 +1,6 @@
 //! Loopback pairing controls for the script-owned UI fixture.
+use host_fixture::{Result, pairing::PairingServer};
 use std::path::PathBuf;
-use xtask::{Result, pairing::PairingServer};
 
 #[tokio::main]
 async fn main() -> Result<()> {

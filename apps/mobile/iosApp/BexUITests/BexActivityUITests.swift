@@ -23,7 +23,7 @@ extension BexLaunchUITests {
         let activity = prefixedElement(app, prefix: "turn.activity.fixture-turn-")
         let streamedCommand = prefixedElement(app, prefix: "item.fixture-command-")
         XCTAssertTrue(activity.waitForExistence(timeout: 10), "Streaming activity header did not appear")
-        XCTAssertFalse(streamedCommand.exists, "Live commands must start inside a collapsed group")
+        XCTAssertTrue(streamedCommand.exists, "Live commands must remain visible while work is running")
         XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-commentary-").exists,
                       "Commentary must remain visible outside the work group")
@@ -39,6 +39,11 @@ extension BexLaunchUITests {
             prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists,
             "Completed work did not become an expandable collapsed summary"
         )
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertTrue(app.buttons["task.send"].exists)
+        XCTAssertFalse(app.buttons["task.send"].isEnabled, "Sent input must clear after completion")
+        XCTAssertFalse((input.value as? String ?? "").contains("Start the simulator conversation"))
+        XCTAssertFalse(app.staticTexts["notice"].exists, "Successful completion must not leave an error")
         app.buttons["task.new"].tap()
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         XCTAssertTrue(input.isHittable)

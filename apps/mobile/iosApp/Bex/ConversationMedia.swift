@@ -91,7 +91,7 @@ struct ConversationImage: View {
                 ConversationPreview(url: previewURL, isImage: true, model: model, source: source) { dismissPreview() }
             }
         }
-        .task(id: LoadID(host: model.state.selectedProfileId, source: source)) {
+        .task(id: LoadID(host: model.selectedProfileId, source: source)) {
             image = nil; original = nil; error = nil
             do {
                 let loaded = try await loadConversationImage(

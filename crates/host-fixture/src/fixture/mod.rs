@@ -16,6 +16,8 @@ use std::{
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub initialize_gate: Option<PathBuf>,
     pub trace: bool,
     pub expected_cwd: Option<PathBuf>,
     pub stream_delay_ms: u64,
@@ -24,6 +26,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            initialize_gate: None,
             trace: false,
             expected_cwd: None,
             stream_delay_ms: 2000,
@@ -69,46 +72,8 @@ pub async fn run(arguments: &[String]) -> Result<()> {
         ));
         arguments = &arguments[2..];
     }
-    if arguments.first().map(String::as_str) == Some("app-server")
-        && arguments.get(1).map(String::as_str) == Some("generate-json-schema")
-    {
-        let output = arguments
-            .windows(2)
-            .find(|pair| pair[0] == "--out")
-            .map(|pair| Path::new(&pair[1]))
-            .ok_or("--out is required")?;
-        fs::create_dir_all(output)?;
-        let methods = [
-            "initialize",
-            "model/list",
-            "thread/list",
-            "thread/start",
-            "thread/fork",
-            "account/read",
-            "account/login/start",
-            "account/login/cancel",
-            "account/logout",
-            "getAuthStatus",
-            "thread/read",
-            "thread/turns/list",
-            "thread/items/list",
-            "thread/resume",
-            "turn/start",
-            "turn/steer",
-            "turn/interrupt",
-        ];
-        let entries: Vec<_> = methods
-            .iter()
-            .map(|method| serde_json::json!({"properties":{"method":{"enum":[method]}}}))
-            .collect();
-        fs::write(
-            output.join("ClientRequest.json"),
-            serde_json::to_vec(&serde_json::json!({"oneOf":entries}))?,
-        )?;
-        return Ok(());
-    }
-    if arguments.first().map(String::as_str) != Some("app-server") {
-        return Err("usage: bex-codex-fixture app-server [generate-json-schema --out PATH]".into());
+    if arguments != ["app-server"] && arguments != ["app-server", "--listen", "stdio://"] {
+        return Err("usage: bex-codex-fixture app-server --listen stdio://".into());
     }
     let program = std::env::current_exe()?;
     let home = program

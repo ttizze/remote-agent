@@ -61,7 +61,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     };
                     assert_eq!(
                         request["params"],
-                        json!({"titleOnly":true,"projectLimit":projects,"chatLimit":chats,"projectThreadLimits":{},"searchTerm":search})
+                        json!({"projectLimit":projects,"chatLimit":chats,"projectThreadLimits":{},"searchTerm":search})
                     );
                     if mode == "list" {
                         assert!(!handled);

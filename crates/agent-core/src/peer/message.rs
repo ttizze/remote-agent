@@ -13,15 +13,14 @@ pub enum RpcMessageKind {
 
 /// A classified Codex JSONL line.
 ///
-/// The original line is borrowed verbatim (apart from the line delimiter
-/// removed by the JSONL reader). raw_id is the original top-level JSON
+/// Envelope values borrow the original line without materializing payloads.
+/// raw_id is the original top-level JSON
 /// representation, not a parsed integer/string DTO. method is decoded only
 /// because routing needs the method name; params, result, error, and unknown
 /// fields are never deserialized here.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RpcMessage<'a> {
     kind: RpcMessageKind,
-    raw_line: &'a str,
     raw_id: Option<&'a str>,
     method: Option<String>,
     fields: BTreeMap<String, &'a RawValue>,
@@ -30,7 +29,7 @@ pub struct RpcMessage<'a> {
 impl<'a> RpcMessage<'a> {
     pub fn parse(line: &'a str) -> Result<Self, RpcMessageError> {
         let object = parse_object(line)?;
-        classify_object(line, object)
+        classify_object(object)
     }
 
     pub const fn kind(&self) -> RpcMessageKind {
@@ -51,6 +50,22 @@ impl<'a> RpcMessage<'a> {
         Ok(serde_json::from_str(
             self.fields.get("params").map_or("{}", |raw| raw.get()),
         )?)
+    }
+
+    pub(crate) fn rewrite_id(&self, replacement_id: &str) -> Result<String, RpcMessageError> {
+        if self.raw_id.is_none() {
+            return Err(RpcMessageError::MissingIdForRewrite);
+        }
+        #[derive(Serialize)]
+        struct Rewritten<'a, 'b> {
+            id: &'b RawValue,
+            #[serde(flatten)]
+            retained: RetainedFields<'a, 'b>,
+        }
+        Ok(serde_json::to_string(&Rewritten {
+            id: serde_json::from_str(replacement_id)?,
+            retained: self.retained(&["id"]),
+        })?)
     }
 
     pub fn raw_result(&self) -> Option<&'a RawValue> {
@@ -119,10 +134,6 @@ impl<'a> RpcMessage<'a> {
         }
     }
 
-    pub fn success<T: Serialize>(&self, result: T) -> Result<String, RpcMessageError> {
-        self.response::<T, ()>(Ok(result))
-    }
-
     pub fn error<C: Serialize>(
         &self,
         code: C,
@@ -144,11 +155,6 @@ impl<'a> RpcMessage<'a> {
             fields: &self.fields,
             excluded,
         }
-    }
-
-    /// Returns the original JSON object without its trailing JSONL newline.
-    pub fn raw_line(&self) -> &str {
-        self.raw_line
     }
 }
 
@@ -213,13 +219,6 @@ impl<T: Serialize> Serialize for RpcResponse<T> {
     }
 }
 
-impl PartialEq for RpcMessage<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.raw_line == other.raw_line
-    }
-}
-impl Eq for RpcMessage<'_> {}
-
 struct RetainedFields<'a, 'b> {
     fields: &'b BTreeMap<String, &'a RawValue>,
     excluded: &'static [&'static str],
@@ -242,23 +241,22 @@ impl Serialize for DisplayMessage<'_> {
     }
 }
 
-/// Classifies one already-delimited JSONL message without decoding its
-/// params/result/error values.
-pub fn classify_message(line: &str) -> Result<RpcMessage<'_>, RpcMessageError> {
-    RpcMessage::parse(line)
-}
-
 fn parse_object<'a, T: serde::Deserialize<'a>>(
     line: &'a str,
 ) -> Result<BTreeMap<String, T>, RpcMessageError> {
-    // Parsing to RawValue validates the complete JSON document without
-    // materializing nested values. A second parse then checks the root shape.
-    let raw: &RawValue = serde_json::from_str(line)?;
-    serde_json::from_str(raw.get()).map_err(|_| RpcMessageError::NotObject)
+    serde_json::from_str(line).map_err(|error| {
+        if error.is_data() {
+            // Validate malformed non-object roots only on the error path.
+            serde_json::from_str::<&RawValue>(line)
+                .err()
+                .map_or(RpcMessageError::NotObject, RpcMessageError::Json)
+        } else {
+            RpcMessageError::Json(error)
+        }
+    })
 }
 
 fn classify_object<'a>(
-    line: &'a str,
     object: BTreeMap<String, &'a RawValue>,
 ) -> Result<RpcMessage<'a>, RpcMessageError> {
     let has_id = object.contains_key("id");
@@ -305,7 +303,6 @@ fn classify_object<'a>(
 
     Ok(RpcMessage {
         kind,
-        raw_line: line,
         raw_id,
         method,
         fields: object,
@@ -336,20 +333,7 @@ pub enum RpcMessageError {
 /// Replaces the top-level JSON-RPC id while retaining every other raw value.
 /// Outer whitespace and key order are normalized; duplicate ids collapse to one.
 pub fn rewrite_top_level_id(line: &str, replacement_id: &str) -> Result<String, RpcMessageError> {
-    let mut fields = RpcMessage::parse(line)?.fields;
-    if fields.remove("id").is_none() {
-        return Err(RpcMessageError::MissingIdForRewrite);
-    }
-    #[derive(serde::Serialize)]
-    struct Rewritten<'a> {
-        id: &'a RawValue,
-        #[serde(flatten)]
-        fields: BTreeMap<String, &'a RawValue>,
-    }
-    Ok(serde_json::to_string(&Rewritten {
-        id: serde_json::from_str(replacement_id)?,
-        fields,
-    })?)
+    RpcMessage::parse(line)?.rewrite_id(replacement_id)
 }
 
 /// Returns the top-level object as raw values for code that needs to inspect
@@ -366,17 +350,16 @@ mod tests {
     #[test]
     fn classifies_requests_without_deserializing_nested_values() {
         let line = r#"{"jsonrpc":"2.0","id":"r-1","method":"turn/start","params":{"nested":{"id":99,"method":"not-top-level"}},"future":{"x":[1,2,3]}}"#;
-        let message = classify_message(line).unwrap();
+        let message = RpcMessage::parse(line).unwrap();
 
         assert_eq!(message.kind(), RpcMessageKind::Request);
         assert_eq!(message.raw_id(), Some(r#""r-1""#));
         assert_eq!(message.method(), Some("turn/start"));
-        assert_eq!(message.raw_line(), line);
     }
 
     #[test]
     fn classifies_responses_and_notifications() {
-        let response = classify_message(
+        let response = RpcMessage::parse(
             r#"{"id":42,"result":{"answer":{"id":"nested"}},"futureField":[true,null]}"#,
         )
         .unwrap();
@@ -384,7 +367,7 @@ mod tests {
         assert_eq!(response.raw_id(), Some("42"));
         assert_eq!(response.method(), None);
 
-        let notification = classify_message(
+        let notification = RpcMessage::parse(
             r#"{"method":"item/started","params":{"result":"nested","error":false}}"#,
         )
         .unwrap();
@@ -396,35 +379,35 @@ mod tests {
     #[test]
     fn rejects_invalid_message_combinations() {
         assert!(matches!(
-            classify_message(r#"{"id":1,"result":{},"error":{}}"#),
+            RpcMessage::parse(r#"{"id":1,"result":{},"error":{}}"#),
             Err(RpcMessageError::BothResultAndError)
         ));
         assert!(matches!(
-            classify_message(r#"{"result":{}}"#),
+            RpcMessage::parse(r#"{"result":{}}"#),
             Err(RpcMessageError::MissingIdForResponse)
         ));
         assert!(matches!(
-            classify_message(r#"{"id":1}"#),
+            RpcMessage::parse(r#"{"id":1}"#),
             Err(RpcMessageError::InvalidCombination { .. })
         ));
         assert!(matches!(
-            classify_message(r#"{"id":1,"method":"x","result":{}}"#),
+            RpcMessage::parse(r#"{"id":1,"method":"x","result":{}}"#),
             Err(RpcMessageError::InvalidCombination { .. })
         ));
         assert!(matches!(
-            classify_message(r#"{"method":42}"#),
+            RpcMessage::parse(r#"{"method":42}"#),
             Err(RpcMessageError::InvalidFieldType {
                 field: "method",
                 ..
             })
         ));
         assert!(matches!(
-            classify_message(r#"["method","nested"]"#),
+            RpcMessage::parse(r#"["method","nested"]"#),
             Err(RpcMessageError::NotObject)
         ));
         for malformed in [r#"{"id":1,"result":[}"#, r#"{"id":1,"result":{}} {}"#] {
             assert!(matches!(
-                classify_message(malformed),
+                RpcMessage::parse(malformed),
                 Err(RpcMessageError::Json(_))
             ));
         }
@@ -472,10 +455,10 @@ mod tests {
     }
     #[test]
     fn host_response_keeps_request_extensions_and_raw_id() {
-        let line = r#"{"jsonrpc":"2.0","id":"mobile-1","method":"host/project/list","params":{"future":{"id":9}},"extension":{"keep":[1,true]}}"#;
+        let line = r#"{"jsonrpc":"2.0","id":"mobile-1","method":"host/thread/list","params":{"future":{"id":9}},"extension":{"keep":[1,true]}}"#;
         let response = RpcMessage::parse(line)
             .unwrap()
-            .success(json!({"data":[]}))
+            .response::<_, ()>(Ok(json!({"data":[]})))
             .unwrap();
         let object = raw_object(&response).unwrap();
         assert_eq!(object["id"].get(), r#""mobile-1""#);

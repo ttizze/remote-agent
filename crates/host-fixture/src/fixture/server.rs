@@ -244,8 +244,18 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             let method = message["method"].as_str().unwrap_or("");
             let params = &mut owned_params;
             match method {
-                "initialize" => context.respond(id, &json!({"userAgent":"remote-agent-simulator-fixture",
-                    "platformFamily":"unix","platformOs":"macos","codexHome":context.home}))?,
+                "initialize" => {
+                    if let Some(gate) = &context.config.initialize_gate {
+                        fs::write(gate.with_extension("entered"), [])?;
+                        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                            while !gate.exists() {
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
+                        }).await?;
+                    }
+                    context.respond(id, &json!({"userAgent":"remote-agent-simulator-fixture",
+                        "platformFamily":"unix","platformOs":"macos","codexHome":context.home}))?;
+                },
                 "account/read" | "getAuthStatus" | "account/login/start" | "account/login/cancel" | "account/logout" | "fixture/account/current" | "fixture/account/refresh" => accounts.request(&context, id, method, params)?,
                 "model/list" => {
                     let path = context.home.join("models-fixture.json");

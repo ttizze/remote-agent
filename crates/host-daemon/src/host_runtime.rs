@@ -1,5 +1,5 @@
 use crate::{CodexRpcService, HostCredentials, SessionId};
-use agent_core::peer::{RpcMessageKind, classify_message};
+use agent_core::peer::{RpcMessage, RpcMessageKind};
 use agent_core::{
     models::{HostStatus, Invitation, RemoteHost},
     peer::{PeerEvent, RpcPeer},
@@ -210,7 +210,7 @@ impl HostRuntime {
         session: SessionId,
         line: String,
     ) -> Result<Option<String>, String> {
-        let message = classify_message(&line).map_err(|e| e.to_string())?;
+        let message = RpcMessage::parse(&line).map_err(|e| e.to_string())?;
         let management = matches!(
             message.method(),
             Some(

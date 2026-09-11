@@ -1,6 +1,6 @@
 # モバイルアプリ基盤リファクタ仕様
 
-Historical design and evidence. The Rust Store and iroh architecture in [ADR 0005](adr/0005-rust-store-and-one-iroh-client-path.md) supersedes the Kotlin, Phoenix, SSH and versioned-cache design below.
+Historical design and evidence. The Rust Store and iroh architecture in [ADR 0005](../adr/0005-rust-store-and-one-iroh-client-path.md) supersedes the Kotlin, Phoenix, SSH and versioned-cache design below.
 
 ## ステータス
 

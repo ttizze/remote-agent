@@ -206,13 +206,13 @@ struct ThreadMessageRow: View {
     }
 
     private func fork(through turnId: String) {
-        guard !forking, let threadId = model.state.selectedThreadId,
-              let host = model.state.selectedProfileId else { return }
+        guard !forking, let threadId = model.selectedThreadId,
+              let host = model.selectedProfileId else { return }
         forking = true
         forkError = nil
         model.forkThread(threadId, through: turnId) { result, error in
             forking = false
-            guard model.state.selectedProfileId == host, model.state.selectedThreadId == threadId else { return }
+            guard model.selectedProfileId == host, model.selectedThreadId == threadId else { return }
             if let id = result {
                 model.openThread(id)
             } else {

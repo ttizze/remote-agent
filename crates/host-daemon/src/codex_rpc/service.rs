@@ -1,11 +1,11 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::desktop_projects::ThreadPage;
-use agent_core::peer::{RpcMessageKind, classify_message, rewrite_top_level_id};
+use agent_core::peer::{RpcMessageKind, rewrite_top_level_id};
 use agent_core::{
     models::{
-        HistoryItem, HistoryPage, HistoryParams, ListQuery, PageParams, Thread, ThreadListParams,
-        ThreadParams, ThreadResponse, Turn,
+        HistoryItem, HistoryPage, HistoryParams, ListQuery, Thread, ThreadListParams, ThreadParams,
+        ThreadResponse, Turn,
     },
     peer::{PeerEvent, RpcMessage, RpcMessageError, RpcResponse},
     state::operations as op,
@@ -15,12 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokio::sync::broadcast;
 
-use super::routing::{
-    CodexSession, ResponseDisposition, ResponseRoute, RouteError, SessionId, SessionRouter,
-};
+use super::routing::{CodexSession, ResponseRoute, RouteError, SessionId, SessionRouter};
 use crate::{
-    DesktopProjectStore, HOST_PROJECT_LIST_METHOD, HOST_THREAD_LIST_METHOD,
-    HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
+    DesktopProjectStore, HOST_THREAD_LIST_METHOD, HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
 };
 
 #[derive(Serialize)]
@@ -35,6 +32,17 @@ impl From<RpcMessageError> for Failure {
     }
 }
 
+impl From<AppServerError> for Failure {
+    fn from(error: AppServerError) -> Self {
+        Self::new("codex_unavailable", error)
+    }
+}
+impl From<crate::DesktopProjectError> for Failure {
+    fn from(error: crate::DesktopProjectError) -> Self {
+        Self::new("desktop_project_state_unavailable", error)
+    }
+}
+
 impl Failure {
     fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self::Host {
@@ -43,6 +51,15 @@ impl Failure {
         }
     }
 }
+async fn run_handler<P, R, E: std::fmt::Display, F: Future<Output = Result<R, String>>>(
+    params: Result<P, E>,
+    code: &'static str,
+    run: impl FnOnce(P) -> F,
+) -> Result<R, Failure> {
+    let params = params.map_err(|error| Failure::new(code, error))?;
+    run(params).await.map_err(|error| Failure::new(code, error))
+}
+
 impl From<RpcMessageError> for DispatchError {
     fn from(error: RpcMessageError) -> Self {
         Self::InvalidMessage(error.to_string())
@@ -107,6 +124,7 @@ pub struct CodexRpcService {
 
 struct ServiceInner {
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
+    restoration_error: tokio::sync::watch::Sender<Option<String>>,
     app_server: Arc<CodexAppServer>,
     desktop_projects: DesktopProjectStore,
     router: SessionRouter,
@@ -128,6 +146,7 @@ impl CodexRpcService {
         Self {
             inner: Arc::new(ServiceInner {
                 accounts: tokio::sync::Mutex::new(None),
+                restoration_error: tokio::sync::watch::channel(None).0,
                 app_server,
                 worktrees: crate::worktrees::Worktrees::new(desktop_projects.path()),
                 desktop_projects,
@@ -145,9 +164,13 @@ impl CodexRpcService {
         directory: std::path::PathBuf,
         config: codex_app_server::AppServerConfig,
     ) -> Result<(), String> {
-        let accounts =
-            crate::codex_accounts::Accounts::load(directory, config, &self.inner.app_server)
-                .await?;
+        let accounts = crate::codex_accounts::Accounts::load(
+            directory,
+            config,
+            &self.inner.app_server,
+            self.inner.restoration_error.clone(),
+        )
+        .await?;
         *self.inner.accounts.lock().await = Some(accounts);
         Ok(())
     }
@@ -190,18 +213,14 @@ impl CodexRpcService {
         let method = request
             .method()
             .ok_or_else(|| DispatchError::InvalidMessage("request has no method".into()))?;
-        if method == "turn/start" {
-            let accounts = self.inner.accounts.lock().await;
-            if let Some(error) = accounts
-                .as_ref()
-                .and_then(|accounts| accounts.restoration_error())
-            {
-                return self
-                    .inner
-                    .router
-                    .send_line(session, request.error("account_unavailable", &error)?)
-                    .map_err(Into::into);
-            }
+        if method == "turn/start"
+            && let Some(error) = self.inner.restoration_error.borrow().as_ref()
+        {
+            return self
+                .inner
+                .router
+                .send_line(session, request.error("account_unavailable", &error)?)
+                .map_err(Into::into);
         }
         let response = async {
             let response = match method {
@@ -216,51 +235,44 @@ impl CodexRpcService {
                 | "host/account/login/cancel" => {
                     let mut accounts = self.inner.accounts.lock().await;
                     let result = match accounts.as_mut() {
-                        Some(accounts) => match serde_json::from_str(&line) {
-                            Ok(params) => accounts.request(&self.inner.app_server, params).await,
-                            Err(error) => Err(error.to_string()),
-                        },
-                        None => Err("このHostはアカウント切り替えに対応していません。".into()),
+                        Some(accounts) => {
+                            run_handler(
+                                serde_json::from_str(&line),
+                                "account_operation_failed",
+                                |params| async move {
+                                    accounts.request(&self.inner.app_server, params).await
+                                },
+                            )
+                            .await
+                        }
+                        None => Err(Failure::new(
+                            "account_operation_failed",
+                            "このHostはアカウント切り替えに対応していません。",
+                        )),
                     };
-                    request.response(
-                        result.map_err(|error| Failure::new("account_operation_failed", error)),
-                    )?
+                    request.response(result)?
                 }
-                HOST_PROJECT_LIST_METHOD => {
-                    let result = self
-                        .inner
-                        .desktop_projects
-                        .project_list(&request.params::<PageParams>()?)
-                        .await;
-                    request.response(result.map_err(|error| {
-                        Failure::new("desktop_project_state_unavailable", error)
-                    }))?
-                }
+
                 HOST_THREAD_LIST_METHOD => {
                     let params: op::ListThreads = request.params()?;
-                    if params.title_only {
-                        request.response(self.host_title_list(params.query).await)?
-                    } else {
-                        request.forward_response(self.host_thread_list(&request).await)?
-                    }
+                    request.response(self.host_title_list(params.query).await)?
                 }
                 "host/thread/item/read" => {
                     request.response(self.host_thread_item_read(request.params()?).await)?
                 }
-                "host/thread/watch" | "host/thread/unwatch" => {
-                    let result = match serde_json::from_str(&line) {
-                        Ok(params) => {
+                "host/thread/watch" | "host/thread/unwatch" => request.response(
+                    run_handler(
+                        serde_json::from_str(&line),
+                        "thread_watch_failed",
+                        |params| async move {
                             self.inner
                                 .thread_watches
                                 .request(session, self.inner.router.clone(), params)
                                 .await
-                        }
-                        Err(error) => Err(error.to_string()),
-                    };
-                    request.response(
-                        result.map_err(|error| Failure::new("thread_watch_failed", error)),
-                    )?
-                }
+                        },
+                    )
+                    .await,
+                )?,
                 HOST_THREAD_READ_METHOD => request.forward_response(
                     self.host_thread_request(&request, "thread/read", true)
                         .await,
@@ -278,14 +290,14 @@ impl CodexRpcService {
                     } else {
                         Ok(None)
                     };
-                    let result = match update {
-                        Ok(update) => self.inner.worktrees.settings(update).await,
-                        Err(error) => Err(error.to_string()),
-                    };
                     request.response(
-                        result.map_err(|error| Failure::new("worktree_settings_failed", error)),
+                        run_handler(update, "worktree_settings_failed", |update| async move {
+                            self.inner.worktrees.settings(update).await
+                        })
+                        .await,
                     )?
                 }
+
                 HOST_THREAD_START_METHOD | "thread/start" => request.forward_response(
                     self.host_thread_request(&request, "thread/start", false)
                         .await,
@@ -319,35 +331,35 @@ impl CodexRpcService {
                     }
                     Err(error) => request.error("invalid_terminal_params", &error)?,
                 },
-                "host/dictation/transcribe" => {
-                    let result = match request.params() {
-                        Ok(params) => {
+                "host/dictation/transcribe" => request.response(
+                    run_handler(
+                        request.params().map_err(|_| "録音データがありません。"),
+                        "dictation_failed",
+                        |params| async move {
                             crate::dictation::transcribe(&self.inner.app_server, &params).await
-                        }
-                        Err(_) => Err("録音データがありません。".into()),
-                    };
-                    request
-                        .response(result.map_err(|error| Failure::new("dictation_failed", error)))?
-                }
-                "host/workspace/review" => {
-                    let result = match request.params::<op::ReviewWorkspace>() {
-                        Ok(params) => crate::inspect_workspace(params.cwd).await,
-                        Err(_) => Err("working directory is required".into()),
-                    };
-                    request.response(
-                        result.map_err(|error| Failure::new("workspace_review_failed", error)),
-                    )?
-                }
+                        },
+                    )
+                    .await,
+                )?,
+                "host/workspace/review" => request.response(
+                    run_handler(
+                        request
+                            .params::<op::ReviewWorkspace>()
+                            .map_err(|_| "working directory is required"),
+                        "workspace_review_failed",
+                        |params| async move { crate::inspect_workspace(params.cwd).await },
+                    )
+                    .await,
+                )?,
                 "host/file/list" | "host/file/read" | "host/file/write" | "host/blob/upload"
-                | "host/blob/download" => {
-                    let result = match serde_json::from_str(&line) {
-                        Ok(params) => self.inner.files.request(session, params).await,
-                        Err(_) => Err("invalid file parameters".into()),
-                    };
-                    request.response(
-                        result.map_err(|error| Failure::new("file_operation_failed", error)),
-                    )?
-                }
+                | "host/blob/download" => request.response(
+                    run_handler(
+                        serde_json::from_str(&line).map_err(|_| "invalid file parameters"),
+                        "file_operation_failed",
+                        |params| async move { self.inner.files.request(session, params).await },
+                    )
+                    .await,
+                )?,
                 _ => match self.inner.app_server.request_raw(&line).await {
                     Ok(response) => response,
                     Err(error) => request.error("codex_unavailable", &error)?,
@@ -381,7 +393,7 @@ impl CodexRpcService {
         line: String,
     ) -> Result<(), DispatchError> {
         self.ensure_session(session)?;
-        let message = classify_message(&line)
+        let message = RpcMessage::parse(&line)
             .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
         if message.kind() != RpcMessageKind::Notification {
             return Err(DispatchError::InvalidMessage(
@@ -404,9 +416,9 @@ impl CodexRpcService {
         &self,
         session: SessionId,
         line: String,
-    ) -> Result<ResponseDisposition, DispatchError> {
+    ) -> Result<(), DispatchError> {
         self.ensure_session(session)?;
-        let message = classify_message(&line)
+        let message = RpcMessage::parse(&line)
             .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
         if message.kind() != RpcMessageKind::Response {
             return Err(DispatchError::InvalidMessage(
@@ -414,11 +426,11 @@ impl CodexRpcService {
             ));
         }
         let Some(id) = message.raw_id() else {
-            return Ok(ResponseDisposition::Unknown);
+            return Ok(());
         };
         let ResponseRoute::Forward(upstream_id) = self.inner.router.resolve_response(session, id)
         else {
-            return Ok(ResponseDisposition::Unknown);
+            return Ok(());
         };
         let upstream_line = rewrite_top_level_id(&line, &upstream_id)
             .map_err(|error| DispatchError::InvalidMessage(error.to_string()))?;
@@ -427,7 +439,7 @@ impl CodexRpcService {
             .send_raw(&upstream_line)
             .await
             .map_err(|error| DispatchError::Upstream(Box::new(error)))?;
-        Ok(ResponseDisposition::Accepted)
+        Ok(())
     }
 
     pub(crate) fn files(&self) -> &crate::workspace_files::WorkspaceFiles {
@@ -450,7 +462,7 @@ impl CodexRpcService {
             .desktop_projects
             .load()
             .await
-            .map_err(|error| Failure::new("desktop_project_state_unavailable", error))?;
+            .map_err(Failure::from)?;
         let mut titles =
             crate::desktop_projects::titles::TitleList::new(&snapshot.projects, &query);
         let mut cursors = std::collections::HashSet::new();
@@ -471,7 +483,7 @@ impl CodexRpcService {
                 .app_server
                 .request::<_, ThreadPage>("thread/list", &params)
                 .await
-                .map_err(|error| Failure::new("codex_unavailable", error))?;
+                .map_err(Failure::from)?;
             let page = response.outcome.map_err(Failure::Upstream)?;
             for mut thread in page.data {
                 snapshot.enrich_thread(&mut thread);
@@ -489,28 +501,6 @@ impl CodexRpcService {
             }
         }
         Ok(titles.finish())
-    }
-
-    async fn host_thread_list(
-        &self,
-        request: &RpcMessage<'_>,
-    ) -> Result<RpcResponse<ThreadPage>, Failure> {
-        let params: ThreadParams = request.params()?;
-        let line = self
-            .inner
-            .app_server
-            .request_raw(&request.request("thread/list", &params)?)
-            .await
-            .map_err(|error| Failure::new("codex_unavailable", error))?;
-        let mut response: RpcResponse<ThreadPage> = RpcResponse::parse(&line)?;
-        if let Ok(page) = &mut response.outcome {
-            self.inner
-                .desktop_projects
-                .enrich_threads(&mut page.data)
-                .await
-                .map_err(|error| Failure::new("desktop_project_state_unavailable", error))?;
-        }
-        Ok(response)
     }
 
     async fn host_thread_request(
@@ -542,7 +532,7 @@ impl CodexRpcService {
             .await
         {
             Ok(response) => response,
-            Err(error) => return Err(Failure::new("codex_unavailable", error)),
+            Err(error) => return Err(error.into()),
         };
         let mut response: RpcResponse<ThreadResponse> = RpcResponse::parse(&response)?;
         if let Ok(result) = &mut response.outcome {
@@ -571,7 +561,7 @@ impl CodexRpcService {
                         .await
                     {
                         Ok(line) => line,
-                        Err(error) => return Err(Failure::new("codex_unavailable", error)),
+                        Err(error) => return Err(error.into()),
                     };
                     let history: RpcResponse<HistoryPage<Arc<Turn>>> = RpcResponse::parse(&line)?;
                     let mut page = match history.into_result() {
@@ -598,7 +588,7 @@ impl CodexRpcService {
                         .await
                     {
                         Ok(line) => line,
-                        Err(error) => return Err(Failure::new("codex_unavailable", error)),
+                        Err(error) => return Err(error.into()),
                     };
                     let history: RpcResponse<ThreadResponse> = RpcResponse::parse(&line)?;
                     *result = match history.into_result() {
@@ -619,7 +609,7 @@ impl CodexRpcService {
                 .enrich_threads(std::slice::from_mut(&mut result.thread))
                 .await
             {
-                return Err(Failure::new("desktop_project_state_unavailable", error));
+                return Err(error.into());
             }
             if retain_recent_turns && params.defer_item_details {
                 result.thread.defer_item_details();
@@ -841,7 +831,7 @@ impl CodexRpcService {
                 .app_server
                 .request::<_, HistoryPage<HistoryItem>>("thread/items/list", &query)
                 .await
-                .map_err(|error| Failure::new("codex_unavailable", error))?;
+                .map_err(Failure::from)?;
             let page = response.outcome.map_err(Failure::Upstream)?;
             if let Some(entry) = page.data.into_iter().find(|entry| {
                 entry.turn_id.as_deref() == Some(params.turn_id.as_str())
@@ -885,7 +875,7 @@ impl CodexRpcService {
                 match events.recv().await {
                     Ok(PeerEvent::Message(message)) => {
                         let line = message.value;
-                        let request = classify_message(&line).ok();
+                        let request = RpcMessage::parse(&line).ok();
                         if request.as_ref().is_some_and(|request| {
                             request.kind() == RpcMessageKind::Request
                                 && request.method() == Some("account/chatgptAuthTokens/refresh")
@@ -913,7 +903,7 @@ impl CodexRpcService {
                                     None => Err("アカウントを選択してください。".into()),
                                 };
                                 let response = match result {
-                                    Ok(result) => request.success(result),
+                                    Ok(result) => request.response::<_, ()>(Ok(result)),
                                     Err(error) => request.error(-32000, &error),
                                 };
                                 let Ok(response) = response else {

@@ -8,5 +8,5 @@ mod routing;
 mod service;
 mod thread_watch;
 
-pub use routing::{CodexSession, ResponseDisposition, SessionId};
+pub use routing::{CodexSession, SessionId};
 pub use service::{CodexRpcService, DispatchError};

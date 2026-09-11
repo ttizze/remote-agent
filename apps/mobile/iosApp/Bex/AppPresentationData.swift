@@ -13,32 +13,6 @@ struct HostProfile: Codable, Identifiable {
     }
 }
 
-struct AppPresentation {
-    let screen: AppScreen
-    let isConnected: Bool
-    let isConnecting: Bool
-    let profiles: [HostProfile]
-    let selectedProfileId: String?
-    let selectedProfileName: String?
-    let pairingError: String?
-    let connectionError: String?
-    let workingDirectory: String
-    let projects: [Project]
-    let threadLoadState: LoadState
-    let threadLoadError: String?
-    let threads: [ThreadSummary]
-    let hasMoreProjects: Bool
-    let visibleProjectCount: Int
-    let loadingMoreThreads: Bool
-    let loadingHistory: Bool
-    let moreProjectIds: Set<String>
-    let hasMoreChats: Bool
-    let selectedThreadId: String?
-    let isNewThread: Bool
-    let notice: String?
-    let interruptingTurnId: String?
-}
-
 extension ThreadSummary {
     var title: String {
         name.isEmpty ? (preview.isEmpty ? "無題のタスク" : preview) : name

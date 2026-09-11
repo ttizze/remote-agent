@@ -8,10 +8,10 @@ import UniformTypeIdentifiers
 extension ThreadScreen {
     var composer: some View {
         VStack(spacing: 12) {
-            if state.isNewThread {
+            if model.isNewThread {
                 newThreadContext
             }
-            if !state.isNewThread, let review, review.files > 0 {
+            if !model.isNewThread, let review, review.files > 0 {
                 Button { opensDiff = true; showingFiles = true } label: {
                     HStack(spacing: 10) {
                         Text("\(review.files)件のファイル")
@@ -96,7 +96,7 @@ extension ThreadScreen {
                                 .frame(width: 40, height: 40)
                         }
                     }
-                    .disabled(!state.isConnected || (!state.isNewThread && conversation == nil) || model
+                    .disabled(!model.isConnected || (!model.isNewThread && conversation == nil) || model
                         .transcribing || dictation.requestingPermission || model.sending || model
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
@@ -111,8 +111,8 @@ extension ThreadScreen {
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
-                        .disabled(state.interruptingTurnId == running.turnId)
-                        .accessibilityLabel(state.interruptingTurnId == running.turnId ? "停止中" : "停止")
+                        .disabled(model.interruptingTurnId == running.turnId)
+                        .accessibilityLabel(model.interruptingTurnId == running.turnId ? "停止中" : "停止")
                         .accessibilityIdentifier("turn.interrupt.\(running.id)")
                     } else {
                         Button {
@@ -137,7 +137,7 @@ extension ThreadScreen {
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
                         .accessibilityLabel(dictation.isRecording ? "文字起こしして送信" : "送信")
-                        .disabled(!state.isConnected || (!state.isNewThread && conversation == nil) || model
+                        .disabled(!model.isConnected || (!model.isNewThread && conversation == nil) || model
                             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
                             .transcribing ||
                             (!dictation.isRecording && model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -176,7 +176,7 @@ extension ThreadScreen {
 
     var messageField: some View {
         ConversationMessageField(
-            placeholder: state.isNewThread ? "メッセージを入力" : "追加の指示を入力",
+            placeholder: model.isNewThread ? "メッセージを入力" : "追加の指示を入力",
             draft: Binding(get: { model.draft }, set: { model.draft = $0 })
         )
         .id(model.draftKey)

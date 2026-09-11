@@ -1,5 +1,5 @@
 //! The single state owner. RPC work runs concurrently; publication follows wire order.
-use crate::peer::{RpcMessageKind, classify_message};
+use crate::peer::{RpcMessage, RpcMessageKind};
 use crate::{
     client::*,
     peer::{PeerError, PeerEvent, RpcPeer},
@@ -428,7 +428,7 @@ fn finish(
 }
 fn decode_message(line: &str) -> Result<Event, PeerError> {
     let message =
-        classify_message(line).map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+        RpcMessage::parse(line).map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
     if message.kind() == RpcMessageKind::Request {
         return serde_json::from_str(line)
             .map(Event::ServerRequest)
@@ -590,10 +590,7 @@ async fn run(
     // connection alone does not terminate them.
     let terminals = updates.borrow().terminals.clone();
     for (handle, terminal) in terminals.iter() {
-        if !matches!(
-            terminal.phase,
-            crate::state::TerminalPhase::Exited(_) | crate::state::TerminalPhase::Closed
-        ) {
+        if !matches!(terminal.phase, crate::state::TerminalPhase::Exited(_)) {
             let _ = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 client.call(&op::CloseTerminal {

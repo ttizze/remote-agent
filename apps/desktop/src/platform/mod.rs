@@ -3,7 +3,6 @@ use agent_core::{
     store::Store,
     transport::{Endpoint, Identity, Relays, Ticket},
 };
-use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -204,18 +203,4 @@ pub(crate) fn choose_folder() -> Option<PathBuf> {
 }
 pub(crate) fn choose_destination(name: &str) -> Option<PathBuf> {
     rfd::FileDialog::new().set_file_name(name).save_file()
-}
-
-pub(crate) fn save_snapshot(path: &Path, snapshot: &impl Serialize) -> Result<(), String> {
-    let parent = path.parent().ok_or("snapshot path has no parent")?;
-    host_daemon::platform::create_state_directory(parent).map_err(|error| error.to_string())?;
-    atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
-        .write_with_options(
-            |file| {
-                serde_json::to_writer(&mut *file, snapshot)?;
-                file.sync_all()
-            },
-            os::private_file_options(),
-        )
-        .map_err(|error| error.to_string())
 }

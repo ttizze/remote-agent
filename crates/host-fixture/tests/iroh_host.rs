@@ -6,34 +6,19 @@ use agent_core::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{
-    CodexRpcService, CredentialStore, DesktopProjectStore, HostCredentials, HostRuntime,
-};
+use host_daemon::{CodexRpcService, DesktopProjectStore, HostCredentials};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroizing;
 
-#[derive(Default)]
-struct Memory {
-    bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,
-}
-impl CredentialStore for Memory {
-    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
-        Ok(self.bytes.lock().unwrap().clone())
-    }
-    fn save(&self, bytes: &[u8]) -> Result<(), String> {
-        *self.bytes.lock().unwrap() = Some(Zeroizing::new(bytes.to_vec()));
-        Ok(())
-    }
-}
+use host_fixture::test_support::{HostFixture, Memory};
 fn fixture_program(directory: &Path) -> PathBuf {
-    xtask::fixture::Config {
+    host_fixture::fixture::Config {
         stream_delay_ms: 5,
         ..Default::default()
     }
@@ -56,38 +41,25 @@ impl Fixture {
         Self::start_with_memory(directory, Arc::new(Memory::default())).await
     }
     async fn start_with_memory(directory: &Path, memory: Arc<Memory>) -> Self {
-        let credentials = Arc::new(
-            HostCredentials::load(memory.clone(), directory.join("state"))
-                .await
-                .unwrap(),
-        );
-        let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
-            .await
-            .unwrap();
-        let ticket = endpoint.ticket();
-        let server = Arc::new(
-            CodexAppServer::spawn(AppServerConfig {
+        let HostFixture {
+            server,
+            credentials,
+            memory,
+            ticket,
+            stop,
+            running,
+        } = HostFixture::start(
+            directory,
+            AppServerConfig {
                 program: fixture_program(directory),
                 ..Default::default()
-            })
-            .await
-            .unwrap(),
-        );
-        let service = CodexRpcService::new(
-            server.clone(),
-            DesktopProjectStore::new(directory.join("projects.json")),
-        );
-        let runtime = Arc::new(
-            HostRuntime::new(
-                service,
-                endpoint,
-                credentials.clone(),
-                "isolated Host".into(),
-            )
-            .await,
-        );
-        let stop = CancellationToken::new();
-        let running = tokio::spawn(runtime.run(stop.clone()));
+            },
+            memory,
+            "isolated Host",
+            false,
+        )
+        .await
+        .unwrap();
         Self {
             server,
             credentials,
@@ -97,6 +69,7 @@ impl Fixture {
             running,
         }
     }
+
     async fn connect(&self, identity: Identity) -> Connection {
         let endpoint = Endpoint::bind(identity, Relays::Disabled).await.unwrap();
         let session = endpoint.connect(&self.ticket).await.unwrap();
@@ -919,7 +892,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let fixture = Fixture::start(directory.path()).await;
         let mobile = fixture.local().await;
 
-        let request = |project_limit, chat_limit, thread_limit| json!({"titleOnly":true,"projectLimit":project_limit,"chatLimit":chat_limit,"projectThreadLimits":{"project-5":thread_limit}});
+        let request = |project_limit, chat_limit, thread_limit| json!({"projectLimit":project_limit,"chatLimit":chat_limit,"projectThreadLimits":{"project-5":thread_limit}});
         let start = std::time::Instant::now();
         let first = mobile.peer.request::<_, Value>("host/thread/list", &request(5, 5, 5)).await.unwrap().value;
         let bytes = serde_json::to_vec(&first).unwrap().len();
@@ -947,7 +920,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(end["hasMoreChats"], false);
         assert_eq!(end["hasMoreProjects"], false);
         assert!(!end["moreProjectIds"].as_array().unwrap().contains(&json!("project-5")));
-        let found = mobile.peer.request::<_, Value>("host/thread/list", &json!({"titleOnly":true,"searchTerm":"Project 01"})).await.unwrap().value;
+        let found = mobile.peer.request::<_, Value>("host/thread/list", &json!({"searchTerm":"Project 01"})).await.unwrap().value;
         assert_eq!(found["projects"].as_array().unwrap().len(), 1);
         assert_eq!(found["data"].as_array().unwrap().len(), 5);
         assert_eq!(found["data"][0]["id"], "p1-18");
@@ -1037,7 +1010,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
             let global = request(&restarted, &mut restarted_session, method, json!({})).await;
             assert_eq!(global["thread"]["cwd"], root.to_str().unwrap());
         }
-        let listed = request(&restarted, &mut restarted_session, "host/thread/list", json!({"titleOnly":true})).await;
+        let listed = request(&restarted, &mut restarted_session, "host/thread/list", json!({})).await;
         for id in &ids {
             let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("worktree task must remain in the project list after restart");
             assert_eq!(thread["projectId"], "workspace");
@@ -1110,7 +1083,7 @@ async fn daemon_model_wire_fixture() {
         let mut events = local.peer.subscribe();
         rpc(&local.peer, "turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":"[items]"}]})).await;
         next_method(&mut events, "turn/completed").await;
-        let list = rpc(&local.peer, "host/thread/list", json!({"titleOnly":true})).await;
+        let list = rpc(&local.peer, "host/thread/list", json!({})).await;
         let history = rpc(&local.peer, "host/thread/read", json!({"threadId":thread_id,"includeTurns":true})).await;
         assert_eq!(list["projects"][0]["roots"][0]["path"], directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["result"].is_object()));

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Render desktop approval labels, queued requests, images and thread summaries from core presentation. Share Store session subscription, shutdown and snapshot persistence across desktop windows; split desktop views and core operations by responsibility, and remove the Swift presentation mirror.
+
+- Keep submissions moving while account helpers initialize, and move account persistence off async workers. Cache Desktop project state with source-file invalidation; share private JSON writes, Git execution and account-token handling.
+
+- Allocate typed RPC IDs before serialization and share response decoding. Remove unused schema discovery, legacy project-list routing and dependencies; move isolated Host fixtures and integration tests into `host-fixture`, and archive superseded plans. Rotate diagnostics with fallible filesystem operations while preserving error recovery.
+
+- Remove the iPhone connection error subheader from task lists and conversations; keep connection progress in the navigation header.
+
 - Exercise account-switch and fork history through the Host hydration API in integration tests, and compare startup diagnostics against native OS errors without assuming English Unix messages.
 
 - Persist rotating private JSONL error logs for desktop and Host, including RPC causes and turn errors, startup failures, timeouts, and panic diagnostics. Retain records across restarts and redact common credentials and structured payloads. Preserve string-valued errors and watch failures, distinguish intentional closes from failures, report the caller's application version, and recover from rotation failures without recursive logging deadlocks or panics on closed stderr.

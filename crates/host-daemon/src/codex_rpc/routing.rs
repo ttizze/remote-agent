@@ -4,20 +4,13 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use agent_core::peer::{RpcMessageKind, classify_message, rewrite_top_level_id};
+use agent_core::peer::{RpcMessage, RpcMessageKind, rewrite_top_level_id};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 /// An identifier allocated by the daemon for one authenticated mobile
 /// session. It is never put on the wire.
 pub type SessionId = u64;
-
-/// The result of submitting a response to a Codex-originated request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResponseDisposition {
-    Accepted,
-    Unknown,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseRoute {
@@ -198,7 +191,7 @@ impl SessionRouter {
     /// Fan out a raw Codex notification or server request. Notifications are
     /// sent unchanged; server requests get one unique id per phone.
     pub(crate) fn handle_server_line(&self, line: &str) {
-        let Ok(message) = classify_message(line) else {
+        let Ok(message) = RpcMessage::parse(line) else {
             return;
         };
         let mut state = lock_state(&self.state);
@@ -421,8 +414,8 @@ mod tests {
 
         let first_line = first.recv().await.unwrap();
         let second_line = second.recv().await.unwrap();
-        let first_message = classify_message(&first_line).unwrap();
-        let second_message = classify_message(&second_line).unwrap();
+        let first_message = RpcMessage::parse(&first_line).unwrap();
+        let second_message = RpcMessage::parse(&second_line).unwrap();
         assert_ne!(first_message.raw_id(), second_message.raw_id());
         assert_eq!(first_message.method(), Some("item/request"));
         let first_object = raw_object(&first_line).unwrap();
@@ -462,12 +455,12 @@ mod tests {
         );
         let first_request = first.recv().await.unwrap();
         let second_request = second.recv().await.unwrap();
-        let first_id = classify_message(&first_request)
+        let first_id = RpcMessage::parse(&first_request)
             .unwrap()
             .raw_id()
             .unwrap()
             .to_owned();
-        let second_id = classify_message(&second_request)
+        let second_id = RpcMessage::parse(&second_request)
             .unwrap()
             .raw_id()
             .unwrap()
@@ -524,7 +517,7 @@ mod tests {
 
         let mut later = router.open_session(4);
         let replay = later.recv().await.unwrap();
-        let replay_message = classify_message(&replay).unwrap();
+        let replay_message = RpcMessage::parse(&replay).unwrap();
         assert_eq!(replay_message.method(), Some("request"));
         assert_ne!(replay_message.raw_id(), Some("1"));
     }

@@ -2,6 +2,7 @@ mod app;
 mod browser;
 mod diff;
 mod platform;
+mod store_session;
 mod terminal;
 use futures_util::FutureExt;
 use gpui_kit::{

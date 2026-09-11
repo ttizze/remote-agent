@@ -1,9 +1,9 @@
 use crate::Runtime;
+use crate::store_session::StoreSession;
 use agent_core::state::operations as op;
 use agent_core::{
     client::TerminalSize,
     state::{Intent, Snapshot, TerminalPhase},
-    store::Store,
 };
 use gpui_kit::{
     component::{h_flex, v_flex},
@@ -29,7 +29,7 @@ enum Frontend {
 }
 enum Event {
     Frontend(Frontend),
-    Connected(Result<Arc<Store>, String>),
+    Connected(Result<StoreSession, String>),
     Snapshot(Arc<Snapshot>),
     Error(String),
 }
@@ -37,7 +37,7 @@ enum Event {
 /// A terminal view owns one Store and one iroh session. Output remains in the
 /// immutable snapshot until xterm confirms it has consumed the corresponding bytes.
 pub(crate) struct Terminal {
-    store: Option<Arc<Store>>,
+    session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     events: async_channel::Sender<Event>,
     runtime: Runtime,
@@ -52,21 +52,7 @@ pub(crate) struct Terminal {
     error: Option<String>,
     noticed: Option<String>,
 }
-impl Drop for Terminal {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
 impl Terminal {
-    fn close(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        let store = self.store.take()?;
-        Some(self.runtime.closing.spawn_on(
-            async move {
-                let _ = store.close().await;
-            },
-            &self.runtime.handle,
-        ))
-    }
     pub(crate) fn new(
         remote: &str,
         cwd: String,
@@ -95,29 +81,21 @@ impl Terminal {
         let remote = (!remote.is_empty()).then(|| remote.to_owned());
         let updates = events.clone();
         let connections = runtime.connections.clone();
+        let session_runtime = runtime.clone();
         runtime.handle.spawn(async move {
             match connections
                 .connect(remote.as_deref(), Snapshot::default())
                 .await
             {
                 Ok(store) => {
-                    let mut snapshots = store.subscribe();
-                    if updates
-                        .send(Event::Connected(Ok(Arc::new(store))))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    loop {
-                        let snapshot = snapshots.borrow_and_update().clone();
-                        if updates.send(Event::Snapshot(snapshot)).await.is_err() {
-                            break;
-                        }
-                        if snapshots.changed().await.is_err() {
-                            break;
-                        }
-                    }
+                    StoreSession::publish(
+                        Arc::new(store),
+                        session_runtime,
+                        updates,
+                        |session| Event::Connected(Ok(session)),
+                        Event::Snapshot,
+                    )
+                    .await;
                 }
                 Err(error) => {
                     let _ = updates.send(Event::Connected(Err(error))).await;
@@ -125,13 +103,7 @@ impl Terminal {
             }
         });
         Ok(cx.new(|cx: &mut Context<Self>| {
-            cx.on_app_quit(|view, _| {
-                if let Some(close) = view.close() {
-                    let _ = view.runtime.handle.block_on(close);
-                }
-                async {}
-            })
-            .detach();
+            StoreSession::on_app_quit(cx, |view| &mut view.session);
             cx.spawn_in(window, async move |view, cx| {
                 while let Ok(event) = incoming.recv().await {
                     if view
@@ -144,7 +116,7 @@ impl Terminal {
             })
             .detach();
             Self {
-                store: None,
+                session: None,
                 snapshot: Arc::default(),
                 events,
                 runtime,
@@ -173,7 +145,7 @@ impl Terminal {
         });
     }
     fn dispatch(&self, intent: Intent) {
-        if let Some(store) = &self.store {
+        if let Some(store) = self.session.as_ref().map(|session| &session.store) {
             let receipt = store.dispatch(intent);
             let events = self.events.clone();
             self.runtime.handle.spawn(async move {
@@ -189,8 +161,8 @@ impl Terminal {
     fn event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Connected(Ok(store)) => {
-                self.snapshot = store.snapshot();
-                self.store = Some(store);
+                self.snapshot = store.store.snapshot();
+                self.session = Some(store);
             }
             Event::Connected(Err(error)) | Event::Error(error) => self.error = Some(error),
             Event::Snapshot(snapshot) => self.snapshot = snapshot,
@@ -315,7 +287,6 @@ impl Render for Terminal {
                     TerminalPhase::Running => "実行中".into(),
                     TerminalPhase::Exited(code) => format!("終了 · {code}"),
                     TerminalPhase::Failed(error) => error.clone(),
-                    TerminalPhase::Closed => "終了".into(),
                 })
         });
         v_flex()

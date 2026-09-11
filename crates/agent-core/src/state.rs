@@ -96,7 +96,6 @@ pub enum TerminalPhase {
     Running,
     Exited(i32),
     Failed(String),
-    Closed,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalOutput {
@@ -106,7 +105,6 @@ pub struct TerminalOutput {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Terminal {
-    pub cwd: String,
     pub phase: TerminalPhase,
     pub output: VecDeque<Arc<TerminalOutput>>,
     pub sequence: u64,
@@ -209,18 +207,35 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         event => reduce_event(previous, event),
     }
 }
+macro_rules! prepare_operations {
+    ($intent:expr, $previous:expr, $next:ident, [$($variant:ident),* $(,)?], {$($local:tt)*}) => {
+        match $intent {
+            $(Intent::$variant(operation) => return prepare($previous, $next, operation),)*
+            $($local)*
+        }
+    };
+}
+
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
-    match intent {
+    prepare_operations!(intent, previous, next, [
+        ListAccounts, SelectAccount, StartAccountLogin,
+        ReadAccountLogin, CancelAccountLogin, ForkThread,
+        StartTerminal, CreateInvitation, RemoveRemoteHost,
+        RevokeDevice, ListFiles, ReadFile,
+        SaveFile, ReviewWorkspace, ReadWorktreeSettings,
+        UpdateWorktreeSettings, ListThreads, StartThread,
+        ReadThread, ReadItem, ResizeTerminal,
+        Interrupt, Watch, Unwatch,
+        WriteTerminal, DownloadFile, LoadSessionImages,
+        LoadHostManagement, ReadOlder, LoadModels,
+        Respond, Transcribe,
+    ], {
         Intent::AcknowledgeTerminal { handle, sequence } => {
-            if let Some(terminal) = next.terminals.get(&handle)
-                && terminal
-                    .output
-                    .front()
-                    .is_some_and(|chunk| chunk.sequence <= sequence)
+            if previous.terminals.get(&handle).is_some_and(|terminal| {
+                terminal.output.front().is_some_and(|chunk| chunk.sequence <= sequence)
+            }) && let Some(terminal) = shared_mut(&mut next.terminals, &handle)
             {
-                let terminal =
-                    Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap());
                 while terminal
                     .output
                     .front()
@@ -246,6 +261,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 draft,
                 client_user_message_id,
                 None,
+                None,
             );
         }
         Intent::AddAttachment {
@@ -256,14 +272,10 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
         Intent::RemoveAttachment { draft_key, index } => {
             let index = index as usize;
-            if previous
-                .drafts
-                .get(&draft_key)
-                .is_some_and(|draft| index < draft.attachments.len())
+            if previous.drafts.get(&draft_key).is_some_and(|draft| index < draft.attachments.len())
+                && let Some(draft) = shared_mut(&mut next.drafts, &draft_key)
             {
-                Arc::make_mut(Arc::make_mut(&mut next.drafts).get_mut(&draft_key).unwrap())
-                    .attachments
-                    .remove(index);
+                draft.attachments.remove(index);
             }
         }
 
@@ -417,46 +429,13 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
             }
         }
-        Intent::ListAccounts(operation) => return prepare(previous, next, operation),
-        Intent::SelectAccount(operation) => return prepare(previous, next, operation),
-        Intent::StartAccountLogin(operation) => return prepare(previous, next, operation),
-        Intent::ReadAccountLogin(operation) => return prepare(previous, next, operation),
-        Intent::CancelAccountLogin(operation) => return prepare(previous, next, operation),
-        Intent::ForkThread(operation) => return prepare(previous, next, operation),
-        Intent::StartTerminal(operation) => return prepare(previous, next, operation),
-        Intent::CloseTerminal(operation) => return prepare(previous, next, operation),
-        Intent::CreateInvitation(operation) => return prepare(previous, next, operation),
-        Intent::RemoveRemoteHost(operation) => return prepare(previous, next, operation),
-        Intent::RevokeDevice(operation) => return prepare(previous, next, operation),
-        Intent::ListFiles(operation) => return prepare(previous, next, operation),
-        Intent::ReadFile(operation) => return prepare(previous, next, operation),
-        Intent::SaveFile(operation) => return prepare(previous, next, operation),
-        Intent::ReviewWorkspace(operation) => return prepare(previous, next, operation),
-        Intent::ReadWorktreeSettings(operation) => return prepare(previous, next, operation),
-        Intent::UpdateWorktreeSettings(operation) => return prepare(previous, next, operation),
-        Intent::ListThreads(operation) => return prepare(previous, next, operation),
-        Intent::StartThread(operation) => return prepare(previous, next, operation),
-        Intent::ReadThread(operation) => return prepare(previous, next, operation),
-        Intent::ReadItem(operation) => return prepare(previous, next, operation),
-        Intent::ResizeTerminal(operation) => return prepare(previous, next, operation),
-        Intent::Interrupt(operation) => return prepare(previous, next, operation),
-        Intent::Watch(operation) => return prepare(previous, next, operation),
-        Intent::Unwatch(operation) => return prepare(previous, next, operation),
-        Intent::WriteTerminal(operation) => return prepare(previous, next, operation),
-        Intent::DownloadFile(operation) => return prepare(previous, next, operation),
-        Intent::LoadSessionImages(operation) => return prepare(previous, next, operation),
-        Intent::LoadHostManagement(operation) => return prepare(previous, next, operation),
-        Intent::ReadOlder(operation) => return prepare(previous, next, operation),
-        Intent::LoadModels(operation) => return prepare(previous, next, operation),
-        Intent::Respond(operation) => return prepare(previous, next, operation),
         Intent::UploadAttachment(operation) => {
             return (next, vec![Effect::UploadAttachment(operation)]);
         }
         Intent::PairRemoteHost(operation) => {
             return (next, vec![Effect::PairRemoteHost(operation)]);
         }
-        Intent::Transcribe(operation) => return prepare(previous, next, operation),
-    }
+    });
     (next, Vec::new())
 }
 fn prepare<O: operations::Operation>(
@@ -476,9 +455,8 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     match event {
         Event::TerminalFailed { handle, reason } => {
-            if next.terminals.contains_key(&handle) {
-                Arc::make_mut(Arc::make_mut(&mut next.terminals).get_mut(&handle).unwrap()).phase =
-                    TerminalPhase::Failed(reason);
+            if let Some(terminal) = shared_mut(&mut next.terminals, &handle) {
+                terminal.phase = TerminalPhase::Failed(reason);
             }
         }
 
@@ -918,13 +896,26 @@ fn refresh_turn(previous: &Turn, incoming: &Turn) -> Turn {
     merged
 }
 
-fn mutable_turn<'a>(snapshot: &'a mut Snapshot, thread_id: &str, index: usize) -> &'a mut Turn {
-    let thread = Arc::make_mut(
-        Arc::make_mut(&mut snapshot.conversations)
-            .get_mut(thread_id)
-            .unwrap(),
-    );
-    Arc::make_mut(&mut thread.turns.as_mut().unwrap()[index])
+fn shared_mut<'a, T: Clone>(
+    values: &'a mut Arc<BTreeMap<String, Arc<T>>>,
+    key: &str,
+) -> Option<&'a mut T> {
+    if !values.contains_key(key) {
+        return None;
+    }
+    Arc::make_mut(values).get_mut(key).map(Arc::make_mut)
+}
+
+fn mutable_turn<'a>(
+    snapshot: &'a mut Snapshot,
+    thread_id: &str,
+    index: usize,
+) -> Option<&'a mut Turn> {
+    shared_mut(&mut snapshot.conversations, thread_id)?
+        .turns
+        .as_mut()?
+        .get_mut(index)
+        .map(Arc::make_mut)
 }
 
 fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) -> Snapshot {
@@ -941,7 +932,9 @@ fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) 
         return previous.clone();
     };
     let mut next = previous.clone();
-    let turn = mutable_turn(&mut next, thread_id, index);
+    let Some(turn) = mutable_turn(&mut next, thread_id, index) else {
+        return next;
+    };
     if let Some(deferred) = &mut turn.deferred_item_ids {
         deferred.retain(|id| id != &item.id);
     }
@@ -961,6 +954,7 @@ fn submission(
     draft: Arc<Draft>,
     client_user_message_id: String,
     recovery_text: Option<String>,
+    clear_draft: Option<Arc<Draft>>,
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     let active = thread_id
@@ -985,7 +979,7 @@ fn submission(
                 .map(|item| item.id.clone()),
             accepted: false,
             recovery_text,
-            clear_draft: None,
+            clear_draft,
         }),
     );
     let effect = match thread_id {

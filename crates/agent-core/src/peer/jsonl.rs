@@ -24,7 +24,7 @@ pub enum JsonlError {
 
 /// Reads newline-delimited JSON values from any asynchronous byte stream.
 ///
-/// The reader keeps each line as source text. Call classify_message separately
+/// The reader keeps each line as source text. Call RpcMessage::parse separately
 /// when a line needs routing metadata; this seam never decodes JSON fields.
 /// A missing final newline is accepted by Tokio's line codec.
 pub struct JsonlReader<R> {
@@ -46,10 +46,6 @@ impl<R> JsonlReader<R> {
 
     pub const fn max_message_bytes(&self) -> usize {
         self.maximum
-    }
-
-    pub fn into_inner(self) -> R {
-        self.inner.into_inner()
     }
 }
 
@@ -92,10 +88,6 @@ impl<W: AsyncWrite> JsonlWriter<W> {
     pub const fn max_message_bytes(&self) -> usize {
         self.maximum
     }
-
-    pub fn into_inner(self) -> W {
-        self.inner.into_inner()
-    }
 }
 
 impl<W> JsonlWriter<W>
@@ -105,7 +97,7 @@ where
     /// Writes one source line followed by a newline.
     ///
     /// This transport seam intentionally does not parse or classify the line.
-    /// Callers that need validation can pass it through classify_message.
+    /// Callers that need validation can pass it through RpcMessage::parse.
     pub async fn write_line(&mut self, line: &str) -> Result<(), JsonlError> {
         if line
             .as_bytes()
@@ -128,7 +120,7 @@ where
         self.flush().await
     }
 
-    pub async fn flush(&mut self) -> Result<(), JsonlError> {
+    async fn flush(&mut self) -> Result<(), JsonlError> {
         self.inner.flush().await.map_err(Into::into)
     }
 

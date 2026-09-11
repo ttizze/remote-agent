@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use std::fs;
-use std::{borrow::Cow, io, path::Path};
+use std::{borrow::Cow, path::Path};
 
 pub(crate) fn bundled_codex_path() -> Option<&'static Path> {
     #[cfg(target_os = "macos")]
@@ -34,15 +34,4 @@ pub(crate) fn is_executable(path: &Path) -> bool {
     {
         path.is_file()
     }
-}
-
-pub(crate) fn schema_directory() -> io::Result<tempfile::TempDir> {
-    let mut builder = tempfile::Builder::new();
-    builder.prefix("remote-agent-codex-schema-");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        builder.permissions(fs::Permissions::from_mode(0o700));
-    }
-    builder.tempdir()
 }

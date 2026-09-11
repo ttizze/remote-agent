@@ -19,7 +19,7 @@ struct WorktreeSettingsSheet: View {
     @State private var error: String?
 
     private var connected: Bool {
-        model.state.isConnected && model.state.selectedProfileId == host.id
+        model.isConnected && model.selectedProfileId == host.id
     }
 
     var body: some View {

@@ -4,12 +4,12 @@ mod dictation;
 mod hosts;
 mod view;
 
-use crate::{Runtime, diff::DiffView, platform};
+use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
 use agent_core::{
     client::{Answer, ServerRequest},
     models::{Item, Model, RemoteHost, Thread, Turn, WorktreeSettings},
     state::{Attachment, Draft, Intent, PendingSubmission, Snapshot},
-    store::{Outcome, Store},
+    store::Outcome,
 };
 use dictation::{Dictation, Phase};
 use gpui_kit::{
@@ -37,7 +37,7 @@ type UiEffect = Box<dyn FnOnce(&mut Desktop, &mut Window, &mut Context<Desktop>)
 enum Update {
     Connected {
         epoch: u64,
-        result: Result<(Arc<Store>, PathBuf), String>,
+        result: Result<(StoreSession, PathBuf), String>,
     },
     Snapshot(u64),
     Ui {
@@ -144,12 +144,10 @@ impl ConversationRow {
 /// Business state is owned by Store. Everything else here is a widget, render
 /// cache, pending UI effect, or immutable snapshot retained for display.
 pub(crate) struct Desktop {
-    store: Option<Arc<Store>>,
+    session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     runtime: Runtime,
     updates: async_channel::Sender<Update>,
-    persistence: Option<tokio::sync::watch::Sender<Arc<Snapshot>>>,
-    persistence_task: Option<tokio::task::JoinHandle<()>>,
     epoch: u64,
     connecting: bool,
     remote: Option<RemoteHost>,
@@ -205,43 +203,13 @@ pub(crate) struct Desktop {
     markdown_cache: HashMap<String, MarkdownContent>,
     _subscriptions: Vec<Subscription>,
 }
-impl Drop for Desktop {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
 impl Desktop {
     fn set_error(&mut self, error: String) {
         agent_core::diagnostics::error("desktop", &error);
         self.error = error;
     }
-    fn close(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        let store = self.store.take()?;
-        let persistence = self.persistence.take();
-        let persistence_task = self.persistence_task.take();
-        Some(self.runtime.closing.spawn_on(
-            async move {
-                let _ = store.close().await;
-                if let Some(persistence) = persistence {
-                    persistence.send_replace(store.snapshot());
-                }
-                if let Some(task) = persistence_task {
-                    let _ = task.await;
-                }
-            },
-            &self.runtime.handle,
-        ))
-    }
     pub(crate) fn new(mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.on_app_quit(|view, _| {
-            // GPUI allows only 200 ms for asynchronous quit futures. Finish the
-            // tracked close and disk flush before returning from the callback.
-            if let Some(close) = view.close() {
-                let _ = view.runtime.handle.block_on(close);
-            }
-            async {}
-        })
-        .detach();
+        StoreSession::on_app_quit(cx, |view| &mut view.session);
         let (remote, initial_cwd, side_chat_mode) = match mode {
             Mode::Main => (None, None, false),
             Mode::SideChat { remote, cwd } => (remote, Some(cwd), true),
@@ -409,12 +377,10 @@ impl Desktop {
             }
         });
         let mut view = Self {
-            store: None,
+            session: None,
             snapshot: Arc::default(),
             runtime: cx.global::<Runtime>().clone(),
             updates,
-            persistence: None,
-            persistence_task: None,
             epoch: 0,
             connecting: false,
             remote,
@@ -487,6 +453,7 @@ impl Desktop {
         let initial_cwd = self.initial_cwd.take();
         let updates = self.updates.clone();
         let connections = self.runtime.connections.clone();
+        let runtime = self.runtime.clone();
         self.runtime.handle.spawn(async move {
             let result = async {
                 let host = if let Some(remote) = &remote {
@@ -535,25 +502,17 @@ impl Desktop {
             .await;
             match result {
                 Ok((store, path)) => {
-                    let mut snapshots = store.subscribe();
-                    if updates
-                        .send(Update::Connected {
+                    StoreSession::publish(
+                        store,
+                        runtime,
+                        updates,
+                        move |session| Update::Connected {
                             epoch,
-                            result: Ok((store, path)),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    loop {
-                        snapshots.borrow_and_update();
-                        if updates.send(Update::Snapshot(epoch)).await.is_err()
-                            || snapshots.changed().await.is_err()
-                        {
-                            break;
-                        }
-                    }
+                            result: Ok((session, path)),
+                        },
+                        move |_| Update::Snapshot(epoch),
+                    )
+                    .await;
                 }
                 Err(error) => {
                     let _ = updates
@@ -592,7 +551,7 @@ impl Desktop {
         + Send
         + 'static,
     ) {
-        let Some(store) = &self.store else {
+        let Some(store) = self.session.as_ref().map(|session| &session.store) else {
             return;
         };
         let receipt = store.dispatch(intent);
@@ -614,35 +573,12 @@ impl Desktop {
             Update::Connected { epoch, result } if epoch == self.epoch => {
                 self.connecting = false;
                 match result {
-                    Ok((store, path)) => {
-                        self.store = Some(store);
+                    Ok((mut session, path)) => {
+                        session.persist(path, self.updates.clone(), move |error| {
+                            Update::PersistenceError { epoch, error }
+                        });
+                        self.session = Some(session);
                         self.accept_snapshot(window, cx);
-                        let (send, mut receive) =
-                            tokio::sync::watch::channel(self.snapshot.clone());
-                        self.persistence = Some(send);
-                        let updates = self.updates.clone();
-                        self.persistence_task = Some(self.runtime.closing.spawn_on(
-                            async move {
-                                while receive.changed().await.is_ok() {
-                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                                    let snapshot = receive.borrow_and_update().clone();
-                                    let path = path.clone();
-                                    let result = tokio::task::spawn_blocking(move || {
-                                        platform::save_snapshot(&path, &snapshot)
-                                    })
-                                    .await;
-                                    let result = result
-                                        .map_err(|error| error.to_string())
-                                        .and_then(|result| result);
-                                    if let Err(error) = result {
-                                        let _ = updates
-                                            .send(Update::PersistenceError { epoch, error })
-                                            .await;
-                                    }
-                                }
-                            },
-                            &self.runtime.handle,
-                        ));
                         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
                     }
                     Err(error) => self.set_error(error),
@@ -659,7 +595,7 @@ impl Desktop {
         cx.notify();
     }
     fn accept_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = &self.store else {
+        let Some(store) = self.session.as_ref().map(|session| &session.store) else {
             return;
         };
         let snapshot = store.snapshot();
@@ -818,8 +754,8 @@ impl Desktop {
             self.path
                 .update(cx, |input, cx| input.set_value(cwd, window, cx));
         }
-        if changed && let Some(persistence) = &self.persistence {
-            persistence.send_replace(self.snapshot.clone());
+        if changed && let Some(session) = &self.session {
+            session.save(self.snapshot.clone());
         }
     }
     fn draft_key(&self) -> &str {
@@ -903,20 +839,10 @@ impl Desktop {
             .filter(|item| item.kind.as_deref() == Some("userMessage"))
     }
     fn pending_rows(&self) -> impl Iterator<Item = (&String, &Arc<PendingSubmission>)> {
-        let turns = self
-            .thread()
-            .and_then(|thread| thread.turns.as_deref())
-            .unwrap_or_default();
         self.snapshot
             .pending_submissions
             .iter()
-            .filter(move |(_, pending)| {
-                pending.draft_key == self.draft_key()
-                    && !pending
-                        .turn_id
-                        .as_ref()
-                        .is_some_and(|id| turns.iter().any(|turn| &turn.id == id))
-            })
+            .filter(move |(_, pending)| pending.draft_key == self.draft_key())
     }
     fn visible_requests(&self) -> impl Iterator<Item = (&String, &Arc<ServerRequest>)> {
         self.snapshot.requests.iter().filter(|(_, request)| {
@@ -940,12 +866,33 @@ impl Desktop {
             rows.push(ConversationRow::History);
             rows.extend(rendered.turns.iter().cloned().map(ConversationRow::Turn));
         }
-        rows.extend(
-            self.pending_rows()
-                .map(|(id, pending)| ConversationRow::Pending(id.clone(), pending.clone())),
-        );
+        if let Some(rendered) = &self.rendered {
+            rows.extend(rendered.queued.iter().filter_map(|item| {
+                if let agent_core::presentation::conversation::ItemSource::Pending(id, pending) =
+                    &item.source
+                {
+                    Some(ConversationRow::Pending(id.clone(), pending.clone()))
+                } else {
+                    None
+                }
+            }));
+        } else {
+            rows.extend(
+                self.pending_rows()
+                    .map(|(id, pending)| ConversationRow::Pending(id.clone(), pending.clone())),
+            );
+        }
+        let projected_requests: HashSet<_> = self
+            .rendered
+            .iter()
+            .flat_map(|conversation| &conversation.turns)
+            .flat_map(|turn| &turn.rows)
+            .flat_map(|row| &row.pending_requests)
+            .map(|request| request.key.as_str())
+            .collect();
         rows.extend(
             self.visible_requests()
+                .filter(|(id, _)| !projected_requests.contains(id.as_str()))
                 .map(|(id, request)| ConversationRow::Request(id.clone(), request.clone())),
         );
         if reset {
@@ -1148,7 +1095,7 @@ impl Desktop {
         }
         self.cancel_recording();
         self.dictation = None;
-        self.close();
+        self.session.take();
         self.remote = remote;
         self.snapshot = Arc::default();
         self.composer_pending = None;
@@ -1328,7 +1275,7 @@ impl Desktop {
         &mut self,
         sources: impl FnOnce() -> Result<Vec<PathBuf>, String> + Send + 'static,
     ) {
-        let Some(store) = self.store.clone() else {
+        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
             return;
         };
         let key = self.draft_key().to_owned();
@@ -1385,7 +1332,7 @@ impl Desktop {
         );
     }
     fn download(&mut self, source: String) {
-        let Some(store) = self.store.clone() else {
+        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
             return;
         };
         self.busy += 1;
