@@ -1,6 +1,6 @@
 # Adapt to the installed Codex schema
 
-The Host generates the installed Codex App Server JSON schema at startup, extracts supported request methods and requires the baseline initialize/thread-list/start/read methods before readiness. This checks method availability, not every parameter shape or runtime behavior.
+The Host starts the installed Codex App Server and completes its initialize handshake before readiness. It no longer generates a schema at startup: the extracted method list had no consumers, and method presence did not validate parameter shapes or runtime behavior. Unsupported methods are handled through their RPC errors.
 
 Codex-native RPC payloads pass through without a second stable RPC schema. The mobile adapter projects known response and notification shapes; unknown item payloads remain visible. Unsupported requests return explicit errors. Installed-Codex runtime checks remain necessary: for example, lifecycle notifications with `itemsView: summary` contain only a subset of items and must preserve previously streamed history.
 

@@ -1,5 +1,5 @@
 use crate::{CodexSession, HostRuntime};
-use agent_core::peer::{RpcMessageKind, classify_message};
+use agent_core::peer::{RpcMessage, RpcMessageKind};
 use agent_core::{
     peer::{PeerEvent, RpcPeer},
     transport::NodeId,
@@ -42,7 +42,7 @@ pub(crate) async fn serve_jsonl_session(
                 Ok(PeerEvent::Closed(_)) => break Ok(()),
                 Err(error) => break Err(error.to_string()),
                 Ok(PeerEvent::Message(message)) => {
-                    let notification = classify_message(&message.value).map_err(|e| e.to_string())?.kind() == RpcMessageKind::Notification;
+                    let notification = RpcMessage::parse(&message.value).map_err(|e| e.to_string())?.kind() == RpcMessageKind::Notification;
                     if notification {
                         runtime.dispatch(node, id, message.value.to_string()).await?;
                     } else {
@@ -60,7 +60,7 @@ pub(crate) async fn serve_jsonl_session(
             },
             outgoing = session.recv() => {
                 let Some(mut line) = outgoing else { break Err("session outbound queue closed".into()); };
-                let message = match classify_message(&line) {
+                let message = match RpcMessage::parse(&line) {
                     Ok(message) => message,
                     Err(error) => break Err(error.to_string()),
                 };

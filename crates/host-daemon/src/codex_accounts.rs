@@ -22,7 +22,7 @@ pub(crate) struct Account {
     chatgpt_account_id: String,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Registry {
     accounts: Vec<Account>,
@@ -47,7 +47,7 @@ pub(crate) struct Accounts {
     helpers: HashMap<String, CodexAppServer>,
     login: Option<Login>,
     completed_login: Option<(String, String)>,
-    restoration_error: Option<String>,
+    restoration_error: tokio::sync::watch::Sender<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -70,7 +70,7 @@ pub(crate) enum AccountResponse<'a> {
     List {
         accounts: &'a [Account],
         selected_id: Option<&'a str>,
-        error: Option<&'a str>,
+        error: Option<String>,
     },
     Selected {
         selected_id: String,
@@ -86,15 +86,23 @@ impl Accounts {
         directory: PathBuf,
         config: AppServerConfig,
         primary: &CodexAppServer,
+        restoration_error: tokio::sync::watch::Sender<Option<String>>,
     ) -> Result<Self, String> {
-        std::fs::create_dir_all(&directory)
-            .map_err(|_| "アカウントの保存先を作成できませんでした。")?;
-        let registry = match std::fs::read(directory.join("accounts.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|_| "アカウント設定を読み込めませんでした。")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Registry::default(),
-            Err(_) => return Err("アカウント設定を読み込めませんでした。".into()),
-        };
+        let registry_directory = directory.clone();
+        let registry = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&registry_directory)
+                .map_err(|_| "アカウントの保存先を作成できませんでした。")?;
+            match std::fs::read(registry_directory.join("accounts.json")) {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|_| "アカウント設定を読み込めませんでした。"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(Registry::default())
+                }
+                Err(_) => Err("アカウント設定を読み込めませんでした。"),
+            }
+        })
+        .await
+        .map_err(|error| error.to_string())??;
         let mut accounts = Self {
             directory,
             default_home: primary.initialize_response().codex_home.clone(),
@@ -103,16 +111,13 @@ impl Accounts {
             helpers: HashMap::new(),
             login: None,
             completed_login: None,
-            restoration_error: None,
+            restoration_error,
         };
         if let Some(id) = accounts.registry.selected_id.clone() {
-            accounts.restoration_error = accounts.select(primary, &id).await.err();
+            let error = accounts.select(primary, &id).await.err();
+            accounts.restoration_error.send_replace(error);
         }
         Ok(accounts)
-    }
-
-    pub(crate) fn restoration_error(&self) -> Option<&str> {
-        self.restoration_error.as_deref()
     }
 
     async fn helper(&mut self, id: &str) -> Result<&CodexAppServer, String> {
@@ -164,7 +169,7 @@ impl Accounts {
         self.registry
             .accounts
             .push(account("desktop".into(), &info, &auth)?);
-        self.save()
+        self.save().await
     }
 
     pub(crate) async fn request(
@@ -175,7 +180,7 @@ impl Accounts {
         match request {
             AccountRequest::List(_) => {
                 self.discover_desktop().await?;
-                let selected = if self.restoration_error.is_some() {
+                let selected = if self.restoration_error.borrow().is_some() {
                     None
                 } else {
                     self.registry.selected_id.as_deref().or_else(|| {
@@ -189,14 +194,14 @@ impl Accounts {
                 Ok(AccountResponse::List {
                     accounts: &self.registry.accounts,
                     selected_id: selected,
-                    error: self.restoration_error.as_deref(),
+                    error: self.restoration_error.borrow().clone(),
                 })
             }
             AccountRequest::Select(params) => {
                 self.select(primary, &params.id).await?;
                 Ok(AccountResponse::Selected {
                     selected_id: params.id,
-                    persistence_error: self.save().err(),
+                    persistence_error: self.save().await.err(),
                 })
             }
             AccountRequest::LoginStart(_) => {
@@ -315,7 +320,7 @@ impl Accounts {
             .to_owned();
         let entry = account(id.clone(), &info, &auth)?;
         self.registry.accounts.push(entry);
-        if let Err(error) = self.save() {
+        if let Err(error) = self.save().await {
             self.registry.accounts.pop();
             return Err(error);
         }
@@ -348,7 +353,7 @@ impl Accounts {
         )
         .await?;
         self.registry.selected_id = Some(id.to_owned());
-        self.restoration_error = None;
+        self.restoration_error.send_replace(None);
         Ok(())
     }
 
@@ -382,16 +387,15 @@ impl Accounts {
         credentials(self.helper(&id).await?, true).await
     }
 
-    fn save(&self) -> Result<(), String> {
-        atomicwrites::AtomicFile::new(
-            self.directory.join("accounts.json"),
-            atomicwrites::AllowOverwrite,
-        )
-        .write_with_options(
-            |file| serde_json::to_writer(file, &self.registry),
-            crate::platform::private_file_options(),
-        )
-        .map_err(|_| "アカウント設定を保存できませんでした。".into())
+    async fn save(&self) -> Result<(), String> {
+        let path = self.directory.join("accounts.json");
+        let registry = self.registry.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::platform::save_private_json(&path, &registry)
+                .map_err(|_| "アカウント設定を保存できませんでした。".to_owned())
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 }
 
@@ -411,7 +415,10 @@ fn serialize_token<S: serde::Serializer>(
     serializer.serialize_str(token)
 }
 
-async fn credentials(server: &CodexAppServer, refresh: bool) -> Result<Credentials, String> {
+pub(crate) async fn access_token(
+    server: &CodexAppServer,
+    refresh: bool,
+) -> Result<Zeroizing<String>, String> {
     let mut result = rpc(
         server,
         "getAuthStatus",
@@ -427,13 +434,20 @@ async fn credentials(server: &CodexAppServer, refresh: bool) -> Result<Credentia
     let Value::String(token) = result["authToken"].take() else {
         return Err("Codexにログインしてください。".into());
     };
-    let token = Zeroizing::new(token);
-    let claims = token
+    Ok(Zeroizing::new(token))
+}
+
+pub(crate) fn token_claims(token: &str) -> Option<Value> {
+    token
         .split('.')
         .nth(1)
         .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .ok_or("Codexの認証情報が無効です。")?;
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+async fn credentials(server: &CodexAppServer, refresh: bool) -> Result<Credentials, String> {
+    let token = access_token(server, refresh).await?;
+    let claims = token_claims(&token).ok_or("Codexの認証情報が無効です。")?;
     let auth = &claims["https://api.openai.com/auth"];
     let account_id = auth["chatgpt_account_id"]
         .as_str()

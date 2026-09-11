@@ -1241,16 +1241,6 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         .await
         .unwrap();
     assert!(store.snapshot().terminals["terminal"].output.is_empty());
-    store
-        .dispatch(Intent::CloseTerminal(op::CloseTerminal {
-            handle: "terminal".into(),
-        }))
-        .await
-        .unwrap();
-    assert_eq!(
-        store.snapshot().terminals["terminal"].phase,
-        TerminalPhase::Closed
-    );
     store.close().await.unwrap();
     server.await.unwrap();
 }
@@ -2028,7 +2018,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     );
     assert_eq!(
         requests["host/thread/list"]["params"],
-        json!({"titleOnly":true,"projectLimit":5,"chatLimit":5,"projectThreadLimits":{},"searchTerm":""})
+        json!({"projectLimit":5,"chatLimit":5,"projectThreadLimits":{},"searchTerm":""})
     );
     // Review completes first; the other automatic reads must remain current.
     for (method, result) in [

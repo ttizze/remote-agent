@@ -5,7 +5,6 @@ use std::{
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
-    process::Command,
 };
 
 #[derive(Default, Serialize, Deserialize)]
@@ -66,15 +65,20 @@ impl Worktrees {
                 return Ok(None);
             }
             let cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
-            let root = PathBuf::from(git(&cwd, &["rev-parse", "--show-toplevel"])?)
-                .canonicalize()
-                .map_err(|e| e.to_string())?;
+            let root = PathBuf::from(
+                crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
+            )
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
             let relative_cwd = cwd.strip_prefix(&root).map_err(|e| e.to_string())?;
             let parent = if state.settings.worktree_directory.is_empty() {
-                PathBuf::from(git(
-                    &root,
-                    &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-                )?)
+                PathBuf::from(
+                    crate::git::text(
+                        &root,
+                        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                    )?
+                    .trim_end(),
+                )
                 .join("bex-worktrees")
             } else {
                 PathBuf::from(&state.settings.worktree_directory)
@@ -87,7 +91,7 @@ impl Worktrees {
                 .keep();
             let branch = format!("bex/{}", destination.file_name().unwrap().to_string_lossy());
             let destination_text = destination.to_str().ok_or("worktree path is not UTF-8")?;
-            if let Err(error) = git(
+            if let Err(error) = crate::git::text(
                 &root,
                 &["worktree", "add", "-b", &branch, destination_text, "HEAD"],
             ) {
@@ -131,8 +135,11 @@ impl Worktrees {
             match prepared {
                 Ok(target) => Ok(Some(target)),
                 Err(error) => {
-                    let cleanup = git(&root, &["worktree", "remove", "--force", destination_text])
-                        .and_then(|_| git(&root, &["branch", "-D", &branch]));
+                    let cleanup = crate::git::text(
+                        &root,
+                        &["worktree", "remove", "--force", destination_text],
+                    )
+                    .and_then(|_| crate::git::text(&root, &["branch", "-D", &branch]));
                     match cleanup {
                         Ok(_) => Err(error),
                         Err(cleanup) => Err(format!("{error}; worktree cleanup failed: {cleanup}")),
@@ -260,20 +267,6 @@ fn copy(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
-    }
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim_end().to_owned())
-        .map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,12 +297,12 @@ mod tests {
     fn repository() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        git(root, &["init", "--quiet"]).unwrap();
+        crate::git::text(root, &["init", "--quiet"]).unwrap();
         fs::write(root.join("tracked.txt"), "committed\n").unwrap();
         fs::write(root.join("config.txt"), "default\n").unwrap();
         fs::write(root.join(".gitignore"), ".env\nlocal/\n").unwrap();
-        git(root, &["add", "."]).unwrap();
-        git(
+        crate::git::text(root, &["add", "."]).unwrap();
+        crate::git::text(
             root,
             &[
                 "-c",
@@ -375,7 +368,7 @@ mod tests {
         );
         assert!(!first.join("missing").exists());
         assert!(
-            git(&first, &["branch", "--show-current"])
+            crate::git::text(&first, &["branch", "--show-current"])
                 .unwrap()
                 .starts_with("bex/session-")
         );
@@ -415,8 +408,8 @@ mod tests {
         let directory = repository();
         let root = directory.path();
         let store = Worktrees::new(&root.join("projects.json"));
-        let before = git(root, &["worktree", "list", "--porcelain"]).unwrap();
-        let branches = git(root, &["branch", "--list"]).unwrap();
+        let before = crate::git::text(root, &["worktree", "list", "--porcelain"]).unwrap();
+        let branches = crate::git::text(root, &["branch", "--list"]).unwrap();
         for path in ["link", "nested/value"] {
             if path == "link" {
                 symlink(root.join("tracked.txt"), root.join("link")).unwrap();
@@ -437,10 +430,13 @@ mod tests {
                 "{path} must be rejected"
             );
             assert_eq!(
-                git(root, &["worktree", "list", "--porcelain"]).unwrap(),
+                crate::git::text(root, &["worktree", "list", "--porcelain"]).unwrap(),
                 before
             );
-            assert_eq!(git(root, &["branch", "--list"]).unwrap(), branches);
+            assert_eq!(
+                crate::git::text(root, &["branch", "--list"]).unwrap(),
+                branches
+            );
         }
     }
 
@@ -526,7 +522,7 @@ mod tests {
             .await
             .unwrap();
         assert!(store.prepare(directory.path().to_str()).await.is_err());
-        git(directory.path(), &["init", "--quiet"]).unwrap();
+        crate::git::text(directory.path(), &["init", "--quiet"]).unwrap();
         assert!(store.prepare(directory.path().to_str()).await.is_err());
     }
 }

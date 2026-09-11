@@ -86,7 +86,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 scripts/build-agent-ios.sh simulator
-cargo build --locked --package xtask --bin bex-ui-fixture --bin bex-codex-fixture --bin bex-pairing-fixture
+cargo build --locked --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture --bin bex-pairing-fixture
 "$target/debug/bex-ui-fixture" "$fixture/host" "$target/debug/bex-codex-fixture" 8000 >"$fixture/host.log" 2>&1 &
 host=$!
 state="$fixture/host/state"

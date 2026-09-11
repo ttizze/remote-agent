@@ -3,22 +3,40 @@ import Foundation
 import UniformTypeIdentifiers
 
 extension BexAppViewModel {
-    var state: AppPresentation {
-        let nav = snapshot.navigation()
-        let selected = profiles.first { $0.id == selectedProfileId }
-        return AppPresentation(
-            screen: profiles.isEmpty ? .pairing : screen, isConnected: snapshot.connected(),
-            isConnecting: isConnecting, profiles: profiles, selectedProfileId: selectedProfileId,
-            selectedProfileName: selected?.name, pairingError: pairingError,
-            workingDirectory: nav.cwd, projects: list?.projects ?? [],
-            threadLoadState: loadingThreads ? .loading : list != nil ? .ready : notice != nil ? .failed : .idle,
-            threadLoadError: notice, threads: list?.threads ?? [], hasMoreProjects: list?.hasMoreProjects ?? false,
-            visibleProjectCount: list?.projects.count ?? 0, loadingMoreThreads: loadingThreads,
-            loadingHistory: loadingHistory, moreProjectIds: Set(list?.moreProjectIds ?? []),
-            hasMoreChats: list?.hasMoreChats ?? false, selectedThreadId: nav.threadId,
-            isNewThread: nav.threadId == nil && screen == .thread, notice: notice,
-            interruptingTurnId: interruptingTurnId
-        )
+    var isConnected: Bool {
+        snapshot.connected()
+    }
+
+    var selectedProfileName: String? {
+        profiles.first { $0.id == selectedProfileId }?.name
+    }
+
+    var selectedThreadId: String? {
+        snapshot.navigation().threadId
+    }
+
+    var isNewThread: Bool {
+        selectedThreadId == nil && screen == .thread
+    }
+
+    var projects: [Project] {
+        list?.projects ?? []
+    }
+
+    var threads: [ThreadSummary] {
+        list?.threads ?? []
+    }
+
+    var hasMoreProjects: Bool {
+        list?.hasMoreProjects ?? false
+    }
+
+    var hasMoreChats: Bool {
+        list?.hasMoreChats ?? false
+    }
+
+    var threadLoadState: LoadState {
+        loadingThreads ? .loading : list != nil ? .ready : notice != nil ? .failed : .idle
     }
 
     var cwd: String {

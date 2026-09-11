@@ -1,9 +1,11 @@
 use std::{
     env, io,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
 };
 
-use agent_core::models::{PageParams, Project, Thread};
+use agent_core::models::Thread;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
@@ -11,26 +13,9 @@ use tokio::io::AsyncReadExt;
 pub(crate) mod state;
 pub(crate) mod titles;
 
-pub const HOST_PROJECT_LIST_METHOD: &str = "host/project/list";
 pub const HOST_THREAD_LIST_METHOD: &str = "host/thread/list";
 pub const HOST_THREAD_READ_METHOD: &str = "host/thread/read";
 pub const HOST_THREAD_START_METHOD: &str = "host/thread/start";
-pub const HOST_PROJECT_METHODS: &[&str] = &[
-    HOST_PROJECT_LIST_METHOD,
-    HOST_THREAD_LIST_METHOD,
-    HOST_THREAD_READ_METHOD,
-    HOST_THREAD_START_METHOD,
-];
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectPage {
-    pub data: Vec<Project>,
-    pub next_cursor: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadPage {
@@ -45,6 +30,44 @@ const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct DesktopProjectStore {
     path: PathBuf,
+    cache: Arc<tokio::sync::Mutex<Option<CachedSnapshot>>>,
+}
+
+#[derive(Debug)]
+struct CachedSnapshot {
+    sources: [Option<FileStamp>; 2],
+    snapshot: Arc<state::Snapshot>,
+}
+
+#[derive(Debug, PartialEq)]
+struct FileStamp {
+    modified: SystemTime,
+    length: u64,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+async fn file_stamp(path: &Path) -> Result<Option<FileStamp>, DesktopProjectError> {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(DesktopProjectError::Read(error)),
+    };
+    Ok(Some(FileStamp {
+        modified: metadata.modified().map_err(DesktopProjectError::Read)?,
+        length: metadata.len(),
+        created: metadata.created().ok(),
+        #[cfg(unix)]
+        identity: {
+            use std::os::unix::fs::MetadataExt;
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        },
+    }))
 }
 
 impl DesktopProjectStore {
@@ -57,15 +80,10 @@ impl DesktopProjectStore {
     }
 
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-
-    pub async fn project_list(
-        &self,
-        params: &PageParams,
-    ) -> Result<ProjectPage, DesktopProjectError> {
-        let snapshot = self.load().await?;
-        snapshot.project_list(params).map_err(map_state_error)
+        Self {
+            path: path.into(),
+            cache: Arc::default(),
+        }
     }
 
     pub async fn enrich_threads(&self, threads: &mut [Thread]) -> Result<(), DesktopProjectError> {
@@ -76,7 +94,36 @@ impl DesktopProjectStore {
         Ok(())
     }
 
-    pub(crate) async fn load(&self) -> Result<state::Snapshot, DesktopProjectError> {
+    async fn source_stamps(&self) -> Result<[Option<FileStamp>; 2], DesktopProjectError> {
+        Ok([
+            file_stamp(&self.path).await?,
+            file_stamp(&self.path.with_file_name("bex-worktrees.json")).await?,
+        ])
+    }
+
+    pub(crate) async fn load(&self) -> Result<Arc<state::Snapshot>, DesktopProjectError> {
+        let mut cache = self.cache.lock().await;
+        let sources = self.source_stamps().await?;
+        if let Some(cached) = &*cache
+            && cached.sources == sources
+        {
+            return Ok(cached.snapshot.clone());
+        }
+        let snapshot = Arc::new(self.load_uncached().await?);
+        // An in-place write or atomic replacement during the read must not
+        // associate the resulting snapshot with a different file version.
+        *cache = if self.source_stamps().await? == sources {
+            Some(CachedSnapshot {
+                sources,
+                snapshot: snapshot.clone(),
+            })
+        } else {
+            None
+        };
+        Ok(snapshot)
+    }
+
+    async fn load_uncached(&self) -> Result<state::Snapshot, DesktopProjectError> {
         let file = match tokio::fs::File::open(&self.path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -98,7 +145,10 @@ impl DesktopProjectStore {
         if bytes_read > MAX_STATE_BYTES as usize {
             return Err(DesktopProjectError::TooLarge(bytes_read as u64));
         }
-        let mut snapshot = state::Snapshot::parse(&bytes).map_err(map_state_error)?;
+        let mut snapshot = tokio::task::spawn_blocking(move || state::Snapshot::parse(&bytes))
+            .await
+            .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?
+            .map_err(DesktopProjectError::Invalid)?;
         snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path)
             .await
             .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?;
@@ -107,13 +157,6 @@ impl DesktopProjectStore {
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-fn map_state_error(error: state::Error) -> DesktopProjectError {
-    match error {
-        state::Error::Invalid(error) => DesktopProjectError::Invalid(error),
-        state::Error::InvalidCursor => DesktopProjectError::InvalidCursor,
     }
 }
 
@@ -127,8 +170,6 @@ pub enum DesktopProjectError {
     TooLarge(u64),
     #[error("invalid Codex Desktop project state: {0}")]
     Invalid(#[source] serde_json::Error),
-    #[error("invalid project list cursor")]
-    InvalidCursor,
 }
 
 #[cfg(test)]
@@ -139,7 +180,6 @@ mod tests {
     };
 
     use super::*;
-    use serde_json::json;
 
     fn temporary_path(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -152,32 +192,12 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn maps_state_errors_to_public_errors() {
-        assert!(matches!(
-            map_state_error(state::Error::InvalidCursor),
-            DesktopProjectError::InvalidCursor
-        ));
-
-        let error = serde_json::from_str::<Value>("{").unwrap_err();
-        assert!(matches!(
-            map_state_error(state::Error::Invalid(error)),
-            DesktopProjectError::Invalid(_)
-        ));
-    }
-
     #[tokio::test]
     async fn missing_state_file_returns_an_empty_snapshot() {
         let path = temporary_path("missing");
         let snapshot = DesktopProjectStore::new(path).load().await.unwrap();
 
-        assert_eq!(
-            serde_json::to_value(snapshot.project_list(&PageParams::default()).unwrap()).unwrap(),
-            json!({
-                "data": [],
-                "nextCursor": null,
-            })
-        );
+        assert!(snapshot.projects.is_empty());
     }
 
     #[tokio::test]
@@ -194,5 +214,63 @@ mod tests {
             error,
             DesktopProjectError::TooLarge(bytes) if bytes == MAX_STATE_BYTES + 2
         ));
+    }
+    #[tokio::test]
+    async fn cache_tracks_replacements_deletion_corruption_and_worktree_membership() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("projects.json");
+        std::fs::write(
+            &path,
+            r#"{"local-projects":{"p":{"id":"p","name":"first","rootPaths":["/repo"]}}}"#,
+        )
+        .unwrap();
+        let store = DesktopProjectStore::new(&path);
+        let first = store.load().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &store.clone().load().await.unwrap()));
+        let previous_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let replacement = directory.path().join("replacement");
+        std::fs::write(
+            &replacement,
+            r#"{"local-projects":{"p":{"id":"p","name":"other","rootPaths":["/repo"]}}}"#,
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(previous_mtime))
+            .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let replaced = store.load().await.unwrap();
+        assert_eq!(replaced.projects[0].name, "other");
+        assert!(!Arc::ptr_eq(&first, &replaced));
+        let roots = directory.path().join("bex-worktrees.json");
+        std::fs::write(&roots, r#"{"workspaceRoots":{"/session":"/repo"}}"#).unwrap();
+        let mut thread = Thread {
+            id: Some("thread".into()),
+            cwd: Some("/session".into()),
+            ..Default::default()
+        };
+        store
+            .enrich_threads(std::slice::from_mut(&mut thread))
+            .await
+            .unwrap();
+        assert_eq!(thread.project_id, Some(Some("p".into())));
+        std::fs::remove_file(roots).unwrap();
+        thread.project_id = None;
+        store
+            .enrich_threads(std::slice::from_mut(&mut thread))
+            .await
+            .unwrap();
+        assert_eq!(thread.project_id, None);
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(matches!(
+            store.load().await,
+            Err(DesktopProjectError::Invalid(_))
+        ));
+        std::fs::remove_file(&path).unwrap();
+        assert!(store.load().await.unwrap().projects.is_empty());
+        std::fs::write(&path, "{}").unwrap();
+        assert!(store.load().await.unwrap().projects.is_empty());
     }
 }

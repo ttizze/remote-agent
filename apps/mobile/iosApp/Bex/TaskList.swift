@@ -2,7 +2,6 @@ import AgentCore
 import SwiftUI
 
 struct ThreadsScreen: View {
-    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
     @State private var expandedProjectIds = Set<String>()
@@ -20,17 +19,17 @@ struct ThreadsScreen: View {
     }
 
     @ViewBuilder private var taskList: some View {
-        let knownProjects = Set(state.projects.map(\.id))
+        let knownProjects = Set(model.projects.map(\.id))
         let groupedThreads = Dictionary(grouping: visibleThreads) { thread in
             thread.projectId.flatMap { knownProjects.contains($0) ? $0 : nil }
         }
         let projects = search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? state.projects : state.projects.filter { groupedThreads[$0.id] != nil }
+            ? model.projects : model.projects.filter { groupedThreads[$0.id] != nil }
         let chats = groupedThreads[nil] ?? []
         List {
-            if state.threadLoadState == .failed {
+            if model.threadLoadState == .failed {
                 Section {
-                    if let error = state.threadLoadError {
+                    if let error = model.notice {
                         BexNotice(text: error)
                             .taskListRowStyle()
                     }
@@ -40,7 +39,7 @@ struct ThreadsScreen: View {
                 }
                 .listSectionSeparator(.hidden)
             }
-            if let notice = state.notice {
+            if let notice = model.notice {
                 Section {
                     BexNotice(text: notice)
                         .taskListRowStyle()
@@ -58,7 +57,7 @@ struct ThreadsScreen: View {
             }
             .listSectionSeparator(.hidden)
 
-            ForEach(projects.prefix(Int(state.visibleProjectCount)), id: \.id) { project in
+            ForEach(projects, id: \.id) { project in
                 Section {
                     HStack(spacing: 16) {
                         Button {
@@ -94,10 +93,10 @@ struct ThreadsScreen: View {
                         ForEach(threads, id: \.id) { thread in
                             ThreadListRow(thread: thread, indented: true) { model.openThread(thread.id) }
                         }
-                        if state.moreProjectIds.contains(project.id) {
+                        if (model.list?.moreProjectIds ?? []).contains(project.id) {
                             Button("もっと見る") { model.expandTaskList(projectId: project.id) }
                                 .padding(.leading, 40)
-                                .disabled(state.loadingMoreThreads)
+                                .disabled(model.loadingThreads)
                                 .accessibilityIdentifier("tasks.project.\(project.id).more")
                                 .taskListRowStyle()
                         }
@@ -106,17 +105,17 @@ struct ThreadsScreen: View {
                 .listSectionSeparator(.hidden)
             }
 
-            if state.hasMoreProjects {
+            if model.hasMoreProjects {
                 Section {
                     Button("もっと見る") { model.expandTaskList(projects: true) }
-                        .disabled(state.loadingMoreThreads)
+                        .disabled(model.loadingThreads)
                         .accessibilityIdentifier("tasks.projects.more")
                         .taskListRowStyle()
                 }
                 .listSectionSeparator(.hidden)
             }
 
-            if state.threadLoadState == .ready, state.projects.isEmpty {
+            if model.threadLoadState == .ready, model.projects.isEmpty {
                 Section {
                     Text("Codexに登録されたプロジェクトはありません")
                         .font(.subheadline)
@@ -127,7 +126,7 @@ struct ThreadsScreen: View {
             }
 
             Section {
-                if state.threadLoadState == .ready, chats.isEmpty {
+                if model.threadLoadState == .ready, chats.isEmpty {
                     Text("プロジェクトに属さないチャットはありません")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -137,9 +136,9 @@ struct ThreadsScreen: View {
                     ForEach(chats, id: \.id) { thread in
                         ThreadListRow(thread: thread) { model.openThread(thread.id) }
                     }
-                    if state.hasMoreChats {
+                    if model.hasMoreChats {
                         Button("もっと見る") { model.expandTaskList() }
-                            .disabled(state.loadingMoreThreads)
+                            .disabled(model.loadingThreads)
                             .accessibilityIdentifier("tasks.chats.more")
                             .taskListRowStyle()
                     }
@@ -170,21 +169,21 @@ struct ThreadsScreen: View {
                 VStack(spacing: 1) {
                     Text("リモート").font(.headline)
                     HStack(spacing: 5) {
-                        if state.isConnecting || state.threadLoadState == .loading {
+                        if model.isConnecting || model.threadLoadState == .loading {
                             ProgressView().controlSize(.mini)
-                                .accessibilityLabel(state.isConnecting ? "接続中" : "読み込み中")
+                                .accessibilityLabel(model.isConnecting ? "接続中" : "読み込み中")
                                 .accessibilityIdentifier("connection.progress")
                         } else {
-                            Circle().fill(state.isConnected ? Color.green : Color.secondary).frame(width: 6, height: 6)
+                            Circle().fill(model.isConnected ? Color.green : Color.secondary).frame(width: 6, height: 6)
                         }
                         Image(systemName: "laptopcomputer")
-                        Text(state.selectedProfileName ?? "PC Host").lineLimit(1)
+                        Text(model.selectedProfileName ?? "PC Host").lineLimit(1)
                     }
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel(
-                        "\(state.selectedProfileName ?? "PC Host")、\(state.isConnected ? "接続済み" : "未接続")"
+                        "\(model.selectedProfileName ?? "PC Host")、\(model.isConnected ? "接続済み" : "未接続")"
                     )
                 }
             }
@@ -205,14 +204,14 @@ struct ThreadsScreen: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     Button { model.refreshTaskList() } label: { Label("更新", systemImage: "arrow.clockwise") }
-                        .disabled(state.threadLoadState == .loading)
+                        .disabled(model.threadLoadState == .loading)
                         .accessibilityIdentifier("tasks.refresh")
                     Button {
-                        if let id = state.selectedProfileId {
-                            worktreeHost = WorktreeSettingsHost(id: id, name: state.selectedProfileName ?? "PC Host")
+                        if let id = model.selectedProfileId {
+                            worktreeHost = WorktreeSettingsHost(id: id, name: model.selectedProfileName ?? "PC Host")
                         }
                     } label: { Label("ワークツリー設定", systemImage: "arrow.triangle.branch") }
-                        .disabled(!state.isConnected)
+                        .disabled(!model.isConnected)
                         .accessibilityIdentifier("tasks.worktree-settings")
                     Button { model.showProfiles() } label: { Label("PC一覧", systemImage: "laptopcomputer") }
                 } label: { Image(systemName: "ellipsis") }
@@ -225,8 +224,8 @@ struct ThreadsScreen: View {
 
     private var visibleThreads: [ThreadSummary] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return state.threads }
-        return state.threads.filter {
+        guard !query.isEmpty else { return model.threads }
+        return model.threads.filter {
             $0.title.localizedCaseInsensitiveContains(query) ||
                 $0.preview.localizedCaseInsensitiveContains(query)
         }

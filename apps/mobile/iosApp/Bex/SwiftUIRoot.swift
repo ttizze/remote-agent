@@ -6,7 +6,7 @@ struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {
-        BexScreen(state: model.state, model: model)
+        BexScreen(model: model)
             .sheet(isPresented: $model.isScanning) {
                 BexQrScannerSheet { model.scanned($0) }
                     .interactiveDismissDisabled()
@@ -15,21 +15,20 @@ struct BexSwiftUIRoot: View {
 }
 
 private struct BexScreen: View {
-    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {
         NavigationView {
             Group {
-                if state.profiles.isEmpty {
-                    PairingScreen(state: state, model: model)
+                if model.profiles.isEmpty {
+                    PairingScreen(model: model)
                 } else {
-                    ProfilesScreen(state: state, model: model)
+                    ProfilesScreen(model: model)
                         .background(
                             NavigationLink(isActive: Binding(
-                                get: { state.screen == .threads || state.screen == .thread },
+                                get: { model.screen == .threads || model.screen == .thread },
                                 set: {
-                                    if !$0, model.state.selectedProfileId != nil {
+                                    if !$0, model.selectedProfileId != nil {
                                         model.showProfiles()
                                     }
                                 }
@@ -38,14 +37,14 @@ private struct BexScreen: View {
                             } label: { EmptyView() }
                         )
                         .sheet(isPresented: Binding(
-                            get: { state.screen == .pairing },
+                            get: { model.screen == .pairing },
                             set: {
-                                if !$0, model.state.screen == .pairing {
+                                if !$0, model.screen == .pairing {
                                     model.dismissPairing()
                                 }
                             }
                         )) {
-                            NavigationView { PairingScreen(state: state, model: model) }
+                            NavigationView { PairingScreen(model: model) }
                                 .navigationViewStyle(StackNavigationViewStyle())
                         }
                 }
@@ -57,24 +56,23 @@ private struct BexScreen: View {
     }
 
     private var threadList: some View {
-        ThreadsScreen(state: state, model: model)
+        ThreadsScreen(model: model)
             .background(
                 NavigationLink(isActive: Binding(
-                    get: { state.screen == .thread },
+                    get: { model.screen == .thread },
                     set: {
-                        if !$0, model.state.screen == .thread {
+                        if !$0, model.screen == .thread {
                             model.showThreadList()
                         }
                     }
                 )) {
-                    ThreadScreen(state: state, model: model, conversation: model.conversation)
+                    ThreadScreen(model: model, conversation: model.conversation)
                 } label: { EmptyView() }
             )
     }
 }
 
 private struct PairingScreen: View {
-    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
     @State private var contents = ""
     @State private var showsManualPairing = false
@@ -129,7 +127,7 @@ private struct PairingScreen: View {
                     .multilineTextAlignment(.center)
                     .foregroundColor(.secondary)
 
-                if let error = state.pairingError {
+                if let error = model.pairingError {
                     BexNotice(text: error)
                 }
             }
@@ -140,7 +138,7 @@ private struct PairingScreen: View {
         .navigationTitle("Bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                if !state.profiles.isEmpty {
+                if !model.profiles.isEmpty {
                     Button("キャンセル") { model.dismissPairing() }
                         .accessibilityIdentifier("pairing.cancel")
                 }
@@ -150,12 +148,11 @@ private struct PairingScreen: View {
 }
 
 private struct ProfilesScreen: View {
-    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {
         List {
-            ForEach(state.profiles, id: \.id) { profile in
+            ForEach(model.profiles, id: \.id) { profile in
                 Button { model.selectProfile(profile.id) } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(profile.name).font(.headline)

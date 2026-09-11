@@ -45,22 +45,7 @@ async fn transcribe_request(
 
     // Keep the desktop account token on the Host. Neither the RPC response nor
     // an error contains the token or the authenticated WebSocket request.
-    let response = Zeroizing::new(app_server.request_raw(
-        r#"{"id":"host-dictation-auth","method":"getAuthStatus","params":{"includeToken":true,"refreshToken":false}}"#,
-    ).await.map_err(|_| "Codexの認証情報を取得できませんでした。")?);
-    let mut response: Value =
-        serde_json::from_str(&response).map_err(|_| "Codexの認証応答が無効です。")?;
-    let result = &mut response["result"];
-    if !matches!(
-        result["authMethod"].as_str(),
-        Some("chatgpt" | "chatgptAuthTokens")
-    ) {
-        return Err("MacのCodexにChatGPTアカウントでログインしてください。".into());
-    }
-    let Value::String(token) = result["authToken"].take() else {
-        return Err("MacのCodexにChatGPTアカウントでログインしてください。".into());
-    };
-    let token = Zeroizing::new(token);
+    let token = crate::codex_accounts::access_token(app_server, false).await?;
     let text = transcribe_authenticated(
         &token,
         &app_server.initialize_response().user_agent,
@@ -199,16 +184,7 @@ async fn transcribe_recording(
 
     // As in the desktop's authenticated fetch, route to the token's account.
     // These unverified claims only select headers; the service verifies the JWT.
-    if let Some(claims) = token
-        .split('.')
-        .nth(1)
-        .and_then(|payload| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(payload)
-                .ok()
-        })
-        .and_then(|payload| serde_json::from_slice::<Value>(&payload).ok())
-    {
+    if let Some(claims) = crate::codex_accounts::token_claims(token) {
         let auth = &claims["https://api.openai.com/auth"];
         if let Some(account_id) = auth["chatgpt_account_id"].as_str() {
             let mut account = HeaderValue::from_str(account_id)

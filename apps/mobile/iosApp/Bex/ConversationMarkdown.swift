@@ -90,11 +90,11 @@ struct ConversationMarkdown: View {
         }
         .task(id: linkTarget) {
             guard let target = linkTarget else { return }
-            let host = model.state.selectedProfileId
+            let host = model.selectedProfileId
             let (downloaded, error) = await withCheckedContinuation { continuation in
                 model.download(target.path) { url, error in continuation.resume(returning: (url, error)) }
             }
-            guard !Task.isCancelled, host == model.state.selectedProfileId else {
+            guard !Task.isCancelled, host == model.selectedProfileId else {
                 if let downloaded {
                     try? FileManager.default.removeItem(at: downloaded.deletingLastPathComponent())
                 }

@@ -228,7 +228,11 @@ pub fn project_conversation(
         .collect();
     let queued = pending
         .iter()
-        .filter(|(_, p)| p.turn_id.is_none())
+        .filter(|(_, p)| {
+            p.turn_id
+                .as_ref()
+                .is_none_or(|id| !native.iter().any(|turn| &turn.id == id))
+        })
         .map(|(id, p)| RenderedItem::pending(id, p, queued.get(&(true, id.as_str())).copied()))
         .collect();
     Arc::new(RenderedConversation {
@@ -523,6 +527,43 @@ mod tests {
             snapshot.conversations["thread"].clone(),
             &previous.cloned(),
         )
+    }
+
+    #[test]
+    fn pending_input_remains_visible_until_its_turn_is_loaded() {
+        let mut snapshot = fixture();
+        Arc::make_mut(&mut snapshot.pending_submissions).insert(
+            "pending".into(),
+            Arc::new(PendingSubmission {
+                draft_key: "thread".into(),
+                draft: Arc::new(Draft {
+                    text: "waiting for history".into(),
+                    ..Default::default()
+                }),
+                turn_id: Some("unloaded".into()),
+                after_item_id: None,
+                accepted: true,
+                recovery_text: None,
+                clear_draft: None,
+            }),
+        );
+        let first = project_snapshot(snapshot.clone(), None);
+        assert_eq!(first.queued.len(), 1);
+        assert_eq!(first.queued[0].data.body, "waiting for history");
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.conversations)
+                .get_mut("thread")
+                .unwrap(),
+        );
+        thread.turns.as_mut().unwrap().push(Arc::new(serde_json::from_value(json!({
+            "id":"unloaded","status":"inProgress","items":[{"id":"echo","type":"userMessage","clientId":"pending","text":"waiting for history"}]
+        })).unwrap()));
+        let loaded = project_snapshot(snapshot, Some(&first));
+        assert!(loaded.queued.is_empty());
+        assert_eq!(loaded.turns.last().unwrap().items.len(), 1);
+        let echoed = &loaded.turns.last().unwrap().items[0];
+        assert_eq!(echoed.data.id, "pending");
+        assert!(matches!(&echoed.source, ItemSource::Native(item) if item.id == "echo"));
     }
 
     #[test]

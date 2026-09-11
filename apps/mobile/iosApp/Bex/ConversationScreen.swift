@@ -4,7 +4,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ThreadScreen: View {
-    let state: AppPresentation
     @ObservedObject var model: BexAppViewModel
     let conversation: ConversationPresentation?
     @StateObject var dictation = DictationRecorder()
@@ -35,12 +34,12 @@ struct ThreadScreen: View {
     }
 
     private var project: Project? {
-        state.projects.first { $0.roots.contains { $0.path == model.cwd } }
+        model.projects.first { $0.roots.contains { $0.path == model.cwd } }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if let notice = state.notice {
+            if let notice = model.notice {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
@@ -108,7 +107,7 @@ struct ThreadScreen: View {
                         historyBoundaries = boundaries
                         loadVisibleHistory()
                     }
-                    .onChange(of: state.loadingHistory) {
+                    .onChange(of: model.loadingHistory) {
                         if !$0 {
                             historyRequestPending = false
                         }
@@ -136,7 +135,7 @@ struct ThreadScreen: View {
                         }
                     }
                 }
-            } else if state.isNewThread {
+            } else if model.isNewThread {
                 Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("task.empty")
             } else {
@@ -148,7 +147,7 @@ struct ThreadScreen: View {
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .onDisappear { dictation.cancel() }
         .onChange(of: model.draftKey) { _ in dictation.cancel() }
-        .onChange(of: state.isConnected) {
+        .onChange(of: model.isConnected) {
             if !$0 {
                 dictation.cancel()
             }
@@ -183,11 +182,11 @@ struct ThreadScreen: View {
         )
         .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
         .onAppear {
-            if state.isNewThread {
+            if model.isNewThread {
                 composerFocused = true
             }
         }
-        .onChange(of: state.isNewThread) {
+        .onChange(of: model.isNewThread) {
             if $0 {
                 composerFocused = true
             }
@@ -195,12 +194,12 @@ struct ThreadScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                if !state.isNewThread {
+                if !model.isNewThread {
                     conversationTitle
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                if !state.isNewThread {
+                if !model.isNewThread {
                     conversationActions
                 }
             }
@@ -213,9 +212,9 @@ extension ThreadScreen {
     var conversationTitle: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text(conversation?.title ?? (state.isNewThread ? "チャット" : "タスク"))
+                Text(conversation?.title ?? (model.isNewThread ? "チャット" : "タスク"))
                     .font(.headline).lineLimit(1)
-                if state.isConnecting {
+                if model.isConnecting {
                     ProgressView().controlSize(.small)
                         .accessibilityLabel("接続中")
                         .accessibilityIdentifier("connection.progress")
@@ -223,7 +222,7 @@ extension ThreadScreen {
             }
             Text([
                 project?.name ?? (model.cwd.isEmpty ? "" : URL(fileURLWithPath: model.cwd).lastPathComponent),
-                state.selectedProfileName ?? "Mac"
+                model.selectedProfileName ?? "Mac"
             ].filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
         }
@@ -259,9 +258,9 @@ extension ThreadScreen {
     var newThreadContext: some View {
         VStack(alignment: .leading, spacing: 4) {
             Menu {
-                ForEach(state.profiles, id: \.id) { profile in
+                ForEach(model.profiles, id: \.id) { profile in
                     Button { model.openNewThread(on: profile.id) } label: {
-                        if profile.id == state.selectedProfileId {
+                        if profile.id == model.selectedProfileId {
                             Label(profile.name, systemImage: "checkmark")
                         } else {
                             Text(profile.name)
@@ -269,18 +268,18 @@ extension ThreadScreen {
                     }
                 }
             } label: {
-                contextLabel(state.selectedProfileName ?? "環境を選択", icon: "laptopcomputer")
-                if state.isConnecting {
+                contextLabel(model.selectedProfileName ?? "環境を選択", icon: "laptopcomputer")
+                if model.isConnecting {
                     ProgressView().controlSize(.small)
                 }
             }
-            .accessibilityLabel("環境: \(state.selectedProfileName ?? "未選択")")
+            .accessibilityLabel("環境: \(model.selectedProfileName ?? "未選択")")
             .accessibilityIdentifier("task.environment")
             Menu {
                 Button { model.openNewThread(cwd: "") } label: {
                     Label("チャット", systemImage: "bubble.left.and.bubble.right")
                 }
-                ForEach(state.projects, id: \.id) { project in
+                ForEach(model.projects, id: \.id) { project in
                     ForEach(project.roots, id: \.path) { root in
                         Button { model.openNewThread(cwd: root.path) } label: {
                             Label(project.roots.count == 1 ? project.name : root.path,
@@ -288,7 +287,7 @@ extension ThreadScreen {
                         }
                     }
                 }
-                if state.hasMoreProjects {
+                if model.hasMoreProjects {
                     Button("さらにプロジェクトを読み込む") { model.expandTaskList(projects: true) }
                 }
             } label: {

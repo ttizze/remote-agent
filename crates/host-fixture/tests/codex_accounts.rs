@@ -7,7 +7,7 @@ use std::{
 };
 
 fn fixture_program(directory: &Path) -> PathBuf {
-    xtask::fixture::Config {
+    host_fixture::fixture::Config {
         stream_delay_ms: 5,
         ..Default::default()
     }
@@ -252,4 +252,85 @@ async fn fork_inherits_only_through_selected_completed_turn_and_preserves_origin
     })
     .await
     .expect("forking stalled");
+}
+
+#[tokio::test]
+async fn helper_initialization_does_not_block_completed_turns() {
+    use std::time::Duration;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let config = AppServerConfig {
+            program: fixture_program(home),
+            ..Default::default()
+        };
+        let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
+        let service = CodexRpcService::new(
+            server.clone(),
+            DesktopProjectStore::new(home.join("projects.json")),
+        );
+        service
+            .enable_accounts(home.join("accounts"), config)
+            .await
+            .unwrap();
+        let mut session = service.open_session(256);
+        let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
+        let thread = started["result"]["thread"]["id"].as_str().unwrap();
+        let gate = home.join("initialize-release");
+        std::fs::write(
+            home.join("fixture-config.json"),
+            serde_json::to_vec(&host_fixture::fixture::Config {
+                initialize_gate: Some(gate.clone()),
+                stream_delay_ms: 5,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut login_session = service.open_session(256);
+        let login_service = service.clone();
+        let login = tokio::spawn(async move {
+            call(
+                &login_service,
+                &mut login_session,
+                "host/account/login/start",
+                json!({}),
+            )
+            .await
+        });
+        while !gate.with_extension("entered").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let completion = tokio::time::timeout(
+            Duration::from_secs(2),
+            completed_turn(&service, &mut session, thread, "while logging in"),
+        )
+        .await;
+        std::fs::write(&gate, []).unwrap();
+        assert!(login.await.unwrap().get("error").is_none());
+        completion.expect("turn waited for unrelated account helper initialization");
+        let read = call(
+            &service,
+            &mut session,
+            "host/thread/read",
+            json!({"threadId":thread,"includeTurns":true}),
+        )
+        .await;
+        assert_eq!(read["result"]["thread"]["turns"][0]["status"], "completed");
+        assert!(
+            read["result"]["thread"]
+                .to_string()
+                .contains("while logging in")
+        );
+        drop(session);
+        drop(service);
+        Arc::try_unwrap(server)
+            .ok()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("concurrent account/turn fixture stalled");
 }

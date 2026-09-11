@@ -13,7 +13,7 @@ async fn rotation_failure_does_not_deadlock_and_logging_recovers() {
         let logs = directory.join("logs");
         let path = logs.join("desktop.jsonl");
         fs::write(&path, "{}\n".repeat(5 * 1024 * 1024 / 3 + 1)).unwrap();
-        // Existing files remain writable, but file-rotate's directory scan fails.
+        // Rotation does not require permission to scan the directory.
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o300)).unwrap();
         let _restore = scopeguard::guard(logs.clone(), |logs| {
             fs::set_permissions(logs, fs::Permissions::from_mode(0o700)).unwrap();
@@ -22,7 +22,16 @@ async fn rotation_failure_does_not_deadlock_and_logging_recovers() {
             fs::read_dir(&logs).is_err(),
             "fixture requires an unprivileged user"
         );
+        diagnostics::error("without-listing", "rotation still succeeds");
+        let record: serde_json::Value =
+            serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(record["operation"], "without-listing");
+        fs::write(&path, "{}\n".repeat(5 * 1024 * 1024 / 3 + 1)).unwrap();
+        // Denying directory writes now exercises a real rename failure while
+        // the existing log and lock files remain writable.
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o500)).unwrap();
         diagnostics::error("rotation-failure", "must not hang the application");
+        assert!(fs::metadata(&path).unwrap().len() > 5 * 1024 * 1024);
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
         diagnostics::error("recovered", "logging resumed");
         let record: serde_json::Value =

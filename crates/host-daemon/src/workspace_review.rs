@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    process::{Command, Output},
-};
+use std::{collections::HashMap, path::PathBuf, process::Command};
 
 use serde::Serialize;
 
@@ -52,7 +48,7 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
             .stderr
             .starts_with(b"fatal: not a git repository (or any ");
     if !membership.status.success() && !no_repository {
-        return Err(git_failure(&membership));
+        return Err(crate::git::failure(&membership));
     }
     if no_repository || membership.stdout.trim_ascii() == b"false" {
         return Ok(WorkspaceReview {
@@ -63,14 +59,14 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
             diff: String::new(),
         });
     }
-    let branch = run_git(&cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .or_else(|_| run_git(&cwd, &["rev-parse", "--short", "HEAD"]))?
+    let branch = crate::git::text(&cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .or_else(|_| crate::git::text(&cwd, &["rev-parse", "--short", "HEAD"]))?
         .trim()
         .to_owned();
-    let status = run_git_output(&cwd, &["status", "--porcelain=v1", "-z"])?.stdout;
+    let status = crate::git::output(&cwd, &["status", "--porcelain=v1", "-z"])?.stdout;
     let mut files = parse_git_status(&status);
-    let numstat = run_git_output(&cwd, &["diff", "--numstat", "-z", "HEAD", "--"])
-        .or_else(|_| run_git_output(&cwd, &["diff", "--numstat", "-z", "--"]))?;
+    let numstat = crate::git::output(&cwd, &["diff", "--numstat", "-z", "HEAD", "--"])
+        .or_else(|_| crate::git::output(&cwd, &["diff", "--numstat", "-z", "--"]))?;
     let (mut additions, mut deletions) = {
         let mut counts: HashMap<_, _> = files
             .iter_mut()
@@ -88,8 +84,9 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
             }
         })
     };
-    let mut diff = run_git(&cwd, &["diff", "--no-ext-diff", "--no-color", "HEAD", "--"])
-        .or_else(|_| run_git(&cwd, &["diff", "--no-ext-diff", "--no-color", "--"]))?;
+    let mut diff =
+        crate::git::text(&cwd, &["diff", "--no-ext-diff", "--no-color", "HEAD", "--"])
+            .or_else(|_| crate::git::text(&cwd, &["diff", "--no-ext-diff", "--no-color", "--"]))?;
     for file in files.iter_mut().filter(|file| file.status == "untracked") {
         let output = Command::new("git")
             .args([
@@ -133,32 +130,6 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
         files,
         diff,
     })
-}
-
-fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = run_git_output(cwd, args)?;
-    String::from_utf8(output.stdout).map_err(|_| "git returned non-UTF-8 output".to_owned())
-}
-
-fn run_git_output(cwd: &Path, args: &[&str]) -> Result<Output, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| format!("failed to run git: {error}"))?;
-    if output.status.success() {
-        return Ok(output);
-    }
-    Err(git_failure(&output))
-}
-
-fn git_failure(output: &Output) -> String {
-    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if message.is_empty() {
-        "git command failed".to_owned()
-    } else {
-        message
-    }
 }
 
 fn parse_git_status(output: &[u8]) -> Vec<WorkspaceFileChange> {
@@ -237,7 +208,7 @@ mod tests {
         std::fs::write(directory.path().join("photo.png"), b"untracked outside Git").unwrap();
         for bare in [false, true] {
             if bare {
-                run_git(
+                crate::git::text(
                     directory.path(),
                     &["init", "--bare", "--initial-branch=main"],
                 )
@@ -266,7 +237,7 @@ mod tests {
     fn untracked_files_contribute_to_patch_and_line_counts() {
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path();
-        run_git(cwd, &["init", "--initial-branch=main"]).unwrap();
+        crate::git::text(cwd, &["init", "--initial-branch=main"]).unwrap();
         std::fs::write(cwd.join("notes.txt"), "first\nsecond\n").unwrap();
         let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
         assert_eq!((review.additions, review.deletions), (2, 0));
@@ -329,12 +300,12 @@ mod tests {
     fn file_counts_follow_renames_deletions_and_binary_changes() {
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path();
-        run_git(cwd, &["init", "--initial-branch=main"]).unwrap();
+        crate::git::text(cwd, &["init", "--initial-branch=main"]).unwrap();
         std::fs::write(cwd.join("old.txt"), "first\nsecond\nthird\n").unwrap();
         std::fs::write(cwd.join("gone\tfile\n.txt"), "one\ntwo\n").unwrap();
         std::fs::write(cwd.join("binary.dat"), b"before\0").unwrap();
-        run_git(cwd, &["add", "."]).unwrap();
-        run_git(
+        crate::git::text(cwd, &["add", "."]).unwrap();
+        crate::git::text(
             cwd,
             &[
                 "-c",
@@ -349,7 +320,7 @@ mod tests {
             ],
         )
         .unwrap();
-        run_git(cwd, &["mv", "old.txt", "new\tname\n.txt"]).unwrap();
+        crate::git::text(cwd, &["mv", "old.txt", "new\tname\n.txt"]).unwrap();
         std::fs::write(
             cwd.join("new\tname\n.txt"),
             "first\nsecond\nthird\nfourth\n",

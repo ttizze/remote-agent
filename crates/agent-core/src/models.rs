@@ -55,13 +55,13 @@ pub struct Thread {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
+        with = "double_option"
     )]
     pub history_cursor: Option<Option<String>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
+        with = "double_option"
     )]
     pub project_id: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,7 +100,7 @@ pub struct Turn {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
+        with = "double_option"
     )]
     pub items_next_cursor: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,19 +110,19 @@ pub struct Turn {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
+        with = "double_option"
     )]
     pub started_at: Option<Option<serde_json::Number>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
+        with = "double_option"
     )]
     pub completed_at: Option<Option<serde_json::Number>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        with = "serde_with::rust::double_option"
+        with = "double_option"
     )]
     pub duration_ms: Option<Option<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -434,11 +434,6 @@ impl Default for ListQuery {
         }
     }
 }
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct PageParams {
-    pub cursor: Option<String>,
-    pub limit: Option<usize>,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -509,6 +504,37 @@ pub struct ChangedFile {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn nullable_update_fields_distinguish_absence_null_and_value() {
+        for field in ["historyCursor", "projectId"] {
+            for value in [serde_json::json!(null), serde_json::json!("value")] {
+                let source = serde_json::json!({field:value});
+                let thread: Thread = serde_json::from_value(source.clone()).unwrap();
+                let encoded = serde_json::to_value(thread).unwrap();
+                assert_eq!(encoded[field], value);
+                assert!(encoded.get(field).is_some());
+            }
+            assert!(
+                serde_json::to_value(Thread::default())
+                    .unwrap()
+                    .get(field)
+                    .is_none()
+            );
+        }
+        for field in ["itemsNextCursor", "startedAt", "completedAt", "durationMs"] {
+            let source = serde_json::json!({"id":"turn",field:null});
+            let turn: Turn = serde_json::from_value(source).unwrap();
+            assert!(
+                serde_json::to_value(turn)
+                    .unwrap()
+                    .get(field)
+                    .is_some_and(serde_json::Value::is_null)
+            );
+            let absent: Turn = serde_json::from_value(serde_json::json!({"id":"turn"})).unwrap();
+            assert!(serde_json::to_value(absent).unwrap().get(field).is_none());
+        }
+    }
+
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
@@ -675,5 +701,21 @@ pub(crate) fn append_text(value: &mut Value, delta: &str) {
     }
     if let Value::String(text) = value {
         text.push_str(delta);
+    }
+}
+
+// Preserve omitted fields separately from explicit null in partial updates.
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
+    pub fn serialize<T: Serialize, S: Serializer>(
+        value: &Option<Option<T>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.serialize(serializer)
     }
 }

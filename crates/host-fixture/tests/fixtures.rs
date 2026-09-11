@@ -1,8 +1,8 @@
 use agent_core::peer::{JsonlReader, JsonlWriter};
+use host_fixture::{fixture::Config, pairing::PairingServer};
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Stdio, time::Duration};
 use tokio::process::Command;
-use xtask::{fixture::Config, pairing::PairingServer};
 
 #[tokio::test]
 async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configuration() {
@@ -15,6 +15,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
             trace: true,
             expected_cwd: Some(expected.clone()),
             stream_delay_ms: 0,
+            ..Default::default()
         }
         .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root)
         .unwrap();

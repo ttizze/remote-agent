@@ -1,19 +1,14 @@
 mod executable;
 mod platform;
-mod schema;
 
-use std::{collections::HashSet, env, io, path::PathBuf, process::Stdio, time::Duration};
+use std::{env, io, path::PathBuf, process::Stdio, time::Duration};
 
-use agent_core::peer::{
-    PeerError, PeerEvent, RpcPeer, RpcResponse, classify_message, request_line,
-};
+use agent_core::peer::{PeerError, PeerEvent, RpcMessage, RpcPeer, RpcResponse};
 use serde::{Deserialize, Serialize};
 use tokio::{
     process::{Child, Command},
     sync::broadcast,
 };
-
-const MAX_SCHEMA_BYTES: u64 = schema::MAX_SCHEMA_BYTES;
 
 #[derive(Debug, Clone)]
 pub struct AppServerConfig {
@@ -67,20 +62,6 @@ pub enum Error {
     },
     #[error("Codex executable was not found on PATH: {0}")]
     ExecutableNotFound(PathBuf),
-    #[error("failed to create private schema directory: {0}")]
-    CreateSchemaDirectory(#[source] io::Error),
-    #[error("failed to run Codex schema generator: {0}")]
-    SchemaGenerator(#[source] io::Error),
-    #[error("Codex schema generator exited unsuccessfully: {0}")]
-    SchemaGeneratorFailed(std::process::ExitStatus),
-    #[error("failed to inspect generated Codex schema: {0}")]
-    ReadSchema(#[source] io::Error),
-    #[error("generated Codex ClientRequest schema exceeds {MAX_SCHEMA_BYTES} bytes")]
-    SchemaTooLarge,
-    #[error("generated Codex ClientRequest schema is invalid JSON: {0}")]
-    InvalidSchema(#[source] serde_json::Error),
-    #[error("installed Codex schema is missing required method {0}")]
-    MissingRequiredMethod(&'static str),
     #[error("failed to start Codex App Server: {0}")]
     Spawn(#[source] io::Error),
     #[error("Codex App Server did not expose {0}")]
@@ -93,8 +74,6 @@ pub enum Error {
     Peer(#[from] PeerError),
     #[error("Codex App Server lifecycle method {method} is managed by spawn")]
     LifecycleManaged { method: String },
-    #[error("Codex App Server response to {method} had an unexpected shape: {reason}")]
-    UnexpectedResponse { method: String, reason: String },
 }
 
 /// A ready, initialized Codex App Server process.
@@ -102,14 +81,11 @@ pub struct CodexAppServer {
     child: Child,
     peer: RpcPeer,
     initialize_response: InitializeResponse,
-    supported_methods: HashSet<String>,
 }
 
 impl CodexAppServer {
     pub async fn spawn(config: AppServerConfig) -> Result<Self, Error> {
         let executable = executable::resolve(&config.program)?;
-        let supported_methods =
-            schema::generate_and_validate(&executable, config.request_timeout).await?;
         let mut command = Command::new(&executable);
         if let Some(home) = &config.codex_home {
             command.env("CODEX_HOME", home);
@@ -155,16 +131,11 @@ impl CodexAppServer {
             child,
             peer,
             initialize_response,
-            supported_methods,
         })
     }
 
     pub fn initialize_response(&self) -> &InitializeResponse {
         &self.initialize_response
-    }
-
-    pub fn supported_methods(&self) -> impl Iterator<Item = &str> {
-        self.supported_methods.iter().map(String::as_str)
     }
 
     /// Ordered Codex messages, response markers, and connection termination.
@@ -175,7 +146,7 @@ impl CodexAppServer {
     /// Sends one raw JSON-RPC request to Codex. The request's original id is
     /// restored on the raw response returned to the caller.
     pub async fn request_raw(&self, line: &str) -> Result<String, Error> {
-        let message = classify_message(line)
+        let message = RpcMessage::parse(line)
             .map_err(|error| Error::Peer(PeerError::InvalidMessage(error.to_string())))?;
         if let Some(method) = message.method() {
             ensure_public_method(method)?;
@@ -190,14 +161,7 @@ impl CodexAppServer {
         params: &P,
     ) -> Result<RpcResponse<T>, Error> {
         ensure_public_method(method)?;
-        let response = self
-            .peer
-            .request_raw(&request_line(method, params)?)
-            .await?;
-        RpcResponse::parse(&response.value).map_err(|error| Error::UnexpectedResponse {
-            method: method.into(),
-            reason: error.to_string(),
-        })
+        Ok(self.peer.request_envelope(method, params).await?.value)
     }
 
     /// Sends a raw Codex notification or response exactly as supplied after
@@ -237,7 +201,7 @@ fn ensure_public_method(method: &str) -> Result<(), Error> {
 }
 
 fn ensure_public_send_method(line: &str) -> Result<(), Error> {
-    let message = classify_message(line)
+    let message = RpcMessage::parse(line)
         .map_err(|error| Error::Peer(PeerError::InvalidMessage(error.to_string())))?;
     if let Some(method) = message.method() {
         ensure_public_method(method)?;

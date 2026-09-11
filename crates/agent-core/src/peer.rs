@@ -4,8 +4,7 @@ mod message;
 
 pub use jsonl::{DEFAULT_MAX_MESSAGE_BYTES, JsonlError, JsonlReader, JsonlWriter};
 pub use message::{
-    RpcMessage, RpcMessageError, RpcMessageKind, RpcResponse, classify_message, raw_object,
-    rewrite_top_level_id,
+    RpcMessage, RpcMessageError, RpcMessageKind, RpcResponse, raw_object, rewrite_top_level_id,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
@@ -70,7 +69,7 @@ pub enum PeerEvent {
     Closed(String),
 }
 struct PreparedRequest {
-    original_id: String,
+    original_id: Option<String>,
     method: String,
     id: u64,
     line: String,
@@ -101,7 +100,7 @@ struct Outbound {
     written: oneshot::Sender<()>,
 }
 struct Pending {
-    original_id: String,
+    original_id: Option<String>,
     method: Arc<str>,
     complete: oneshot::Sender<Result<Reply<String>, PeerError>>,
 }
@@ -220,7 +219,7 @@ impl RpcPeer {
         }
     }
     fn prepare(&self, line: &str) -> Result<PreparedRequest, PeerError> {
-        let message = classify_message(line).map_err(invalid)?;
+        let message = RpcMessage::parse(line).map_err(invalid)?;
         if message.kind() != RpcMessageKind::Request {
             return Err(invalid("request must contain method and id"));
         }
@@ -237,10 +236,10 @@ impl RpcPeer {
         let line = if original_id == id_text {
             line.to_owned()
         } else {
-            rewrite_top_level_id(line, &id_text).map_err(invalid)?
+            message.rewrite_id(&id_text).map_err(invalid)?
         };
         Ok(PreparedRequest {
-            original_id,
+            original_id: Some(original_id),
             method,
             id,
             line,
@@ -316,35 +315,60 @@ impl RpcPeer {
             }
         }
     }
+    /// Send a typed request while retaining the response envelope for forwarding.
+    pub fn request_envelope<'a, P: Serialize, T: DeserializeOwned>(
+        &'a self,
+        method: &'a str,
+        params: &P,
+    ) -> Request<
+        impl Future<Output = Result<Reply<RpcResponse<T>>, PeerError>> + Send + use<'a, P, T>,
+    > {
+        let prepared = allocate_id(&self.next_id).and_then(|id| {
+            Ok(PreparedRequest {
+                original_id: None,
+                method: method.into(),
+                id,
+                line: request_line_with_id(id, method, params)?,
+            })
+        });
+        Request {
+            wire_id: prepared.as_ref().ok().map(|request| request.id),
+            response: async move {
+                let reply = self.exchange(prepared?).await?;
+                let value = RpcResponse::parse(&reply.value).map_err(|error| {
+                    PeerError::InvalidResponse {
+                        method: method.into(),
+                        reason: error.to_string(),
+                        raw: RpcMessage::parse(&reply.value)
+                            .ok()
+                            .and_then(|message| message.raw_result())
+                            .map_or_else(|| reply.value.clone(), |result| result.get().into()),
+                        sequence: Some(reply.sequence),
+                    }
+                })?;
+                Ok(Reply {
+                    sequence: reply.sequence,
+                    value,
+                })
+            },
+        }
+    }
+
     pub fn request<'a, P: Serialize, T: DeserializeOwned>(
         &'a self,
         method: &'a str,
         params: &P,
     ) -> Request<impl Future<Output = Result<Reply<T>, PeerError>> + Send + use<'a, P, T>> {
-        let prepared = request_line(method, params).and_then(|line| self.prepare(&line));
+        let response = self.request_envelope(method, params);
         Request {
-            wire_id: prepared.as_ref().ok().map(|request| request.id),
+            wire_id: response.wire_id(),
             response: async move {
-                let reply = self.exchange(prepared?).await?;
-                let object = raw_object(&reply.value).map_err(invalid)?;
-                if let Some(error) = object.get("error") {
-                    return Err(PeerError::Remote {
-                        error: error.get().into(),
-                        sequence: Some(reply.sequence),
-                    });
-                }
-                let result = object
-                    .get("result")
-                    .ok_or_else(|| invalid("response has no result or error"))?;
+                let reply = response.await?;
                 Ok(Reply {
                     sequence: reply.sequence,
-                    value: serde_json::from_str(result.get()).map_err(|error| {
-                        PeerError::InvalidResponse {
-                            method: method.into(),
-                            reason: error.to_string(),
-                            raw: result.get().into(),
-                            sequence: Some(reply.sequence),
-                        }
+                    value: reply.value.outcome.map_err(|error| PeerError::Remote {
+                        error: error.get().into(),
+                        sequence: Some(reply.sequence),
                     })?,
                 })
             },
@@ -352,7 +376,7 @@ impl RpcPeer {
     }
     pub async fn send_raw(&self, line: impl Into<String>) -> Result<(), PeerError> {
         let line = line.into();
-        if classify_message(&line).map_err(invalid)?.kind() == RpcMessageKind::Request {
+        if RpcMessage::parse(&line).map_err(invalid)?.kind() == RpcMessageKind::Request {
             return Err(invalid("raw requests must go through request_raw"));
         }
         self.enqueue(line).await
@@ -396,18 +420,20 @@ fn allocate_id(next: &AtomicU64) -> Result<u64, PeerError> {
         .map_err(|_| PeerError::RequestIdExhausted)
 }
 pub fn request_line<P: Serialize>(method: &str, params: &P) -> Result<String, PeerError> {
+    request_line_with_id(0, method, params)
+}
+fn request_line_with_id<P: Serialize>(
+    id: u64,
+    method: &str,
+    params: &P,
+) -> Result<String, PeerError> {
     #[derive(Serialize)]
     struct Request<'a, P> {
         id: u64,
         method: &'a str,
         params: &'a P,
     }
-    serde_json::to_string(&Request {
-        id: 0,
-        method,
-        params,
-    })
-    .map_err(invalid)
+    serde_json::to_string(&Request { id, method, params }).map_err(invalid)
 }
 pub fn response_line(id: &str, field: &'static str, payload: &str) -> Result<String, PeerError> {
     if !matches!(field, "result" | "error") {
@@ -459,7 +485,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
         if line.trim().is_empty() {
             continue;
         }
-        let message = match classify_message(&line) {
+        let message = match RpcMessage::parse(&line) {
             Ok(message) => message,
             Err(error) => break Termination::Failed(error.to_string()),
         };
@@ -484,10 +510,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 if let Some(error) = message.raw_error() {
                     crate::diagnostics::rpc_error(&pending.method, id, error);
                 }
-                let response = if message.raw_id() == Some(pending.original_id.as_str()) {
-                    Ok(line)
-                } else {
-                    rewrite_top_level_id(&line, &pending.original_id).map_err(invalid)
+                let response = match pending.original_id {
+                    Some(original_id) if message.raw_id() != Some(original_id.as_str()) => {
+                        message.rewrite_id(&original_id).map_err(invalid)
+                    }
+                    _ => Ok(line),
                 };
                 let _ = pending
                     .complete
@@ -610,6 +637,74 @@ mod tests {
             }
         }
         line
+    }
+
+    #[tokio::test]
+    async fn typed_requests_assign_ids_before_serialization_and_preserve_envelopes() {
+        let (peer, server_reader, mut writer) = make_peer();
+        let params = json!({"nested":{"id":0}});
+        let request = peer.request_envelope::<_, u64>("typed", &params);
+        let wire_id = request.wire_id().unwrap();
+        assert_ne!(wire_id, 0);
+        let server = async {
+            let mut reader = BufReader::new(server_reader);
+            let sent: Value = serde_json::from_str(&read_line(&mut reader).await).unwrap();
+            assert_eq!(sent, json!({"id":wire_id,"method":"typed","params":params}));
+            writer.write_all(format!("{{\"jsonrpc\":\"2.0\",\"id\":{wire_id},\"result\":7,\"extension\":{{\"id\":0}}}}\n").as_bytes()).await.unwrap();
+            writer
+        };
+        let (reply, _writer) = tokio::join!(request, server);
+        let reply = reply.unwrap();
+        let envelope = serde_json::to_value(&reply.value).unwrap();
+        assert_eq!(reply.value.outcome.unwrap(), 7);
+        assert_eq!(
+            envelope,
+            json!({"jsonrpc":"2.0","id":wire_id,"result":7,"extension":{"id":0}})
+        );
+    }
+
+    #[tokio::test]
+    async fn typed_errors_retain_remote_payload_and_invalid_result_sequence() {
+        for (field, payload) in [
+            ("error", json!({"code":-1,"message":"rejected"})),
+            ("result", json!({"unexpected":true})),
+        ] {
+            let (peer, server_reader, mut writer) = make_peer();
+            let params = json!({});
+            let request = peer.request::<_, u64>("typed", &params);
+            let server = async {
+                let mut reader = BufReader::new(server_reader);
+                let sent: Value = serde_json::from_str(&read_line(&mut reader).await).unwrap();
+                writer
+                    .write_all(format!("{}\n", json!({"id":sent["id"],field:payload})).as_bytes())
+                    .await
+                    .unwrap();
+                writer
+            };
+            let (reply, _writer) = tokio::join!(request, server);
+            match (field, reply.unwrap_err()) {
+                (
+                    "error",
+                    PeerError::Remote {
+                        error,
+                        sequence: Some(1),
+                    },
+                ) => assert_eq!(serde_json::from_str::<Value>(&error).unwrap(), payload),
+                (
+                    "result",
+                    PeerError::InvalidResponse {
+                        method,
+                        raw,
+                        sequence: Some(1),
+                        ..
+                    },
+                ) => {
+                    assert_eq!(method, "typed");
+                    assert_eq!(serde_json::from_str::<Value>(&raw).unwrap(), payload);
+                }
+                (_, error) => panic!("wrong error contract: {error:?}"),
+            }
+        }
     }
 
     #[tokio::test]

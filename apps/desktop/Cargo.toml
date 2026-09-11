@@ -12,7 +12,6 @@ tokio-util = { workspace = true, features = ["rt"] }
 agent-core = { path = "../../crates/agent-core" }
 host-daemon = { path = "../../crates/host-daemon" }
 directories = "6"
-atomicwrites = "0.4.4"
 rfd = "0.17.2"
 gpui-kit = { version = "=0.6.0", features = ["tree-sitter-languages"] }
 gpui-http = { package = "gpui-pre-reqwest-client", version = "0.3.4" }

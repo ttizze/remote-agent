@@ -164,11 +164,9 @@ pub(super) fn notification(
         if current.status == params.status {
             return (next, effects);
         }
-        let thread = Arc::make_mut(
-            Arc::make_mut(&mut next.conversations)
-                .get_mut(&params.thread_id)
-                .unwrap(),
-        );
+        let Some(thread) = shared_mut(&mut next.conversations, &params.thread_id) else {
+            return (next, Vec::new());
+        };
         thread.status = params.status.clone();
         if let Some(list) = next.threads.as_mut().map(Arc::make_mut)
             && let Some(thread) = list
@@ -274,7 +272,9 @@ fn item(
             message => Map::from_iter([("message".into(), message)]),
         };
         error.insert("willRetry".into(), Value::Bool(params.will_retry));
-        let turn = mutable_turn(&mut next, &params.thread_id, turn_index);
+        let Some(turn) = mutable_turn(&mut next, &params.thread_id, turn_index) else {
+            return (next, Vec::new());
+        };
         turn.error = Some(Value::Object(error));
     } else if kind == Kind::Item || review {
         if remove_review && item_index.is_none() {
@@ -283,7 +283,9 @@ fn item(
         let Some(item) = item else {
             return (next, Vec::new());
         };
-        let turn = mutable_turn(&mut next, &params.thread_id, turn_index);
+        let Some(turn) = mutable_turn(&mut next, &params.thread_id, turn_index) else {
+            return (next, Vec::new());
+        };
         if let Some(deferred) = &mut turn.deferred_item_ids {
             deferred.retain(|id| id != &item.id);
         }
@@ -317,12 +319,13 @@ fn item(
             next.error = Some("invalid file change delta target".into());
             return (next, Vec::new());
         }
-        let item = Arc::make_mut(
-            &mut mutable_turn(&mut next, &params.thread_id, turn_index)
-                .items
-                .as_mut()
-                .unwrap()[index],
-        );
+        let Some(item) = mutable_turn(&mut next, &params.thread_id, turn_index)
+            .and_then(|turn| turn.items.as_mut())
+            .and_then(|items| items.get_mut(index))
+            .map(Arc::make_mut)
+        else {
+            return (next, Vec::new());
+        };
         match expected {
             "agentMessage" => item.text.get_or_insert_with(String::new).push_str(&delta),
             "commandExecution" => item
@@ -364,18 +367,13 @@ fn process(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, Vec<E
     let Some(current) = previous.terminals.get(&params.process_handle) else {
         return (previous.clone(), Vec::new());
     };
-    if matches!(
-        current.phase,
-        TerminalPhase::Closed | TerminalPhase::Exited(_)
-    ) {
+    if matches!(current.phase, TerminalPhase::Exited(_)) {
         return (previous.clone(), Vec::new());
     }
     let mut next = previous.clone();
-    let terminal = Arc::make_mut(
-        Arc::make_mut(&mut next.terminals)
-            .get_mut(&params.process_handle)
-            .unwrap(),
-    );
+    let Some(terminal) = shared_mut(&mut next.terminals, &params.process_handle) else {
+        return (next, Vec::new());
+    };
     if method == "process/exited" {
         let Some(code) = params.exit_code else {
             return reduce(
@@ -471,11 +469,9 @@ fn turn(
     {
         merged.error = None;
     }
-    let thread = Arc::make_mut(
-        Arc::make_mut(&mut next.conversations)
-            .get_mut(&params.thread_id)
-            .unwrap(),
-    );
+    let Some(thread) = shared_mut(&mut next.conversations, &params.thread_id) else {
+        return (next, Vec::new());
+    };
     let turns = thread.turns.get_or_insert_with(Vec::new);
     if let Some(index) = turn_index {
         turns[index] = Arc::new(merged);

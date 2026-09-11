@@ -72,12 +72,7 @@ pub(crate) struct Record {
     pub remotes: BTreeMap<NodeId, RemoteHost>,
 }
 fn save_record(path: &std::path::Path, record: &Record) -> Result<(), String> {
-    atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
-        .write_with_options(
-            |file| serde_json::to_writer(file, record),
-            crate::platform::private_file_options(),
-        )
-        .map_err(|error| error.to_string())
+    crate::platform::save_private_json(path, record)
 }
 
 pub struct HostCredentials {

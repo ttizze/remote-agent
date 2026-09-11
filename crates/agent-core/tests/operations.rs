@@ -28,10 +28,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
     let result = match text(command, "type") {
         "listThreads" => {
             let query: ListQuery = serde_json::from_value(command["query"].clone()).unwrap();
-            call!(ListThreads {
-                title_only: true,
-                query
-            })
+            call!(ListThreads { query })
         }
         "startThread" => call!(StartThread {
             cwd: optional(command, "cwd")

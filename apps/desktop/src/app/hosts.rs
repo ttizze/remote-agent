@@ -1,9 +1,10 @@
 use crate::Runtime;
+use crate::store_session::StoreSession;
 use agent_core::state::operations as op;
 use agent_core::{
     models::{Invitation, RemoteHost},
     state::{Intent, Snapshot},
-    store::{Outcome, Store},
+    store::Outcome,
 };
 use gpui_kit::{
     component::{
@@ -29,7 +30,7 @@ enum Action {
     Revoke,
 }
 enum Update {
-    Connected(Result<Arc<Store>, String>),
+    Connected(Result<StoreSession, String>),
     Snapshot,
     Completed(Action, Result<Outcome, String>),
 }
@@ -37,7 +38,7 @@ enum Update {
 /// Local management is a separate view/session from the selected conversation
 /// host. The parent borrows this snapshot for the host menu, never its connection.
 pub(super) struct Hosts {
-    store: Option<Arc<Store>>,
+    session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     runtime: Runtime,
     updates: async_channel::Sender<Update>,
@@ -49,29 +50,9 @@ pub(super) struct Hosts {
     error: Option<String>,
 }
 impl EventEmitter<HostEvent> for Hosts {}
-impl Drop for Hosts {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
 impl Hosts {
-    fn close(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        let store = self.store.take()?;
-        Some(self.runtime.closing.spawn_on(
-            async move {
-                let _ = store.close().await;
-            },
-            &self.runtime.handle,
-        ))
-    }
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.on_app_quit(|view, _| {
-            if let Some(close) = view.close() {
-                let _ = view.runtime.handle.block_on(close);
-            }
-            async {}
-        })
-        .detach();
+        StoreSession::on_app_quit(cx, |view| &mut view.session);
         let (updates, incoming) = async_channel::unbounded();
         cx.spawn_in(window, async move |view, cx| {
             while let Ok(update) = incoming.recv().await {
@@ -85,7 +66,7 @@ impl Hosts {
         })
         .detach();
         let mut view = Self {
-            store: None,
+            session: None,
             snapshot: Arc::default(),
             runtime: cx.global::<Runtime>().clone(),
             updates,
@@ -109,35 +90,21 @@ impl Hosts {
         }
         self.connecting = true;
         self.error = None;
-        if let Some(store) = self.store.take() {
-            self.runtime.closing.spawn_on(
-                async move {
-                    let _ = store.close().await;
-                },
-                &self.runtime.handle,
-            );
-        }
+        self.session.take();
         let updates = self.updates.clone();
         let connections = self.runtime.connections.clone();
+        let runtime = self.runtime.clone();
         self.runtime.handle.spawn(async move {
             match connections.connect(None, Snapshot::default()).await {
                 Ok(store) => {
-                    let mut snapshots = store.subscribe();
-                    if updates
-                        .send(Update::Connected(Ok(Arc::new(store))))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    loop {
-                        snapshots.borrow_and_update();
-                        if updates.send(Update::Snapshot).await.is_err()
-                            || snapshots.changed().await.is_err()
-                        {
-                            break;
-                        }
-                    }
+                    StoreSession::publish(
+                        Arc::new(store),
+                        runtime,
+                        updates,
+                        |session| Update::Connected(Ok(session)),
+                        |_| Update::Snapshot,
+                    )
+                    .await;
                 }
                 Err(error) => {
                     let _ = updates.send(Update::Connected(Err(error))).await;
@@ -146,7 +113,7 @@ impl Hosts {
         });
     }
     fn dispatch(&mut self, intent: Intent, action: Action) {
-        let Some(store) = &self.store else {
+        let Some(store) = self.session.as_ref().map(|session| &session.store) else {
             return;
         };
         self.busy = true;
@@ -164,8 +131,8 @@ impl Hosts {
                 self.connecting = false;
                 match result {
                     Ok(store) => {
-                        self.snapshot = store.snapshot();
-                        self.store = Some(store);
+                        self.snapshot = store.store.snapshot();
+                        self.session = Some(store);
                         self.dispatch(
                             Intent::LoadHostManagement(op::LoadHostManagement {}),
                             Action::Refresh,
@@ -175,13 +142,13 @@ impl Hosts {
                 }
             }
             Update::Snapshot => {
-                if let Some(store) = &self.store {
+                if let Some(store) = self.session.as_ref().map(|session| &session.store) {
                     self.snapshot = store.snapshot();
                 }
             }
             Update::Completed(action, result) => {
                 self.busy = false;
-                if let Some(store) = &self.store {
+                if let Some(store) = self.session.as_ref().map(|session| &session.store) {
                     self.snapshot = store.snapshot();
                 }
                 match result {
