@@ -364,7 +364,10 @@ impl Desktop {
                     }),
             );
         } else {
-            body = body.child(history);
+            body = body.child(selection::ConversationSelection::wrap(
+                &self.selection,
+                history,
+            ));
         }
         let key = self.draft_key().to_owned();
         let attachments = &self.draft().attachments;

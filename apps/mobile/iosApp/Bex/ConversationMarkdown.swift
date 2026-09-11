@@ -3,51 +3,49 @@ import UniformTypeIdentifiers
 
 /// Foundation parses block structure and inline Markdown; no HTML/web view is involved.
 struct ConversationMarkdown: View {
-    let blocks: [Block]
+    let blocks: [Part]
     let model: BexAppViewModel
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
     @State private var previewDirectory: URL?
     @State private var previewSource: String?
     @State private var linkError: String?
-    struct Block: Identifiable, Sendable {
+    struct Block: Identifiable, Sendable, Equatable {
         let id: Int
         let content: AttributedString
         let style: ParagraphStyle
         let imageURL: URL?
     }
 
+    struct Part: Identifiable, Sendable {
+        let id: Int
+        let blocks: [Block]
+        var image: Block? {
+            blocks.first.flatMap { $0.imageURL == nil ? nil : $0 }
+        }
+
+        var isCode: Bool {
+            blocks.first?.style.code == true
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(blocks) { block in
-                if let imageURL = block.imageURL {
+            ForEach(blocks) { part in
+                if let block = part.image, let imageURL = block.imageURL {
                     ConversationImage(
                         source: imageURL.scheme == nil ? imageURL.path : imageURL.absoluteString,
                         label: String(block.content.characters),
                         identifier: "markdown.image.\(block.id)",
                         model: model
                     )
-                } else if block.style.code {
+                } else if part.isCode {
                     ScrollView(.horizontal) {
-                        Text(block.content).font(.system(.subheadline, design: .monospaced))
-                            .textSelection(.enabled).padding(12)
+                        AssistantSelectableText(blocks: part.blocks, model: model)
+                            .fixedSize(horizontal: true, vertical: false).padding(12)
                     }.background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 } else {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        if let marker = block.style.marker {
-                            Text(marker).frame(minWidth: 14, alignment: .leading)
-                        }
-                        if block.style.quoted {
-                            Rectangle().fill(Color.secondary).frame(width: 2)
-                        }
-                        Text(block.content)
-                            .font(block.style.header == nil ? .system(size: 18) : .system(
-                                size: block.style.header == 1 ? 25 : 21,
-                                weight: .semibold
-                            ))
-                            .lineSpacing(5).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    AssistantSelectableText(blocks: part.blocks, model: model)
                 }
             }
             if let linkError {
@@ -111,9 +109,12 @@ struct ConversationMarkdown: View {
         }
     }
 
-    nonisolated static func parse(_ text: String) -> [Block] {
+    nonisolated static func parse(_ text: String) -> [Part] {
         guard let document = try? AttributedString(markdown: text) else {
-            return [Block(id: 0, content: AttributedString(text), style: ParagraphStyle([]), imageURL: nil)]
+            return [Part(
+                id: 0,
+                blocks: [Block(id: 0, content: AttributedString(text), style: ParagraphStyle([]), imageURL: nil)]
+            )]
         }
         var result: [Block] = []
         var start: AttributedString.Index?
@@ -143,10 +144,30 @@ struct ConversationMarkdown: View {
             result.append(Block(id: result.count,
                                 content: AttributedString(document[start ..< end]), style: style, imageURL: imageURL))
         }
-        return result
+        return parts(result)
     }
 
-    struct ParagraphStyle: Sendable {
+    private nonisolated static func parts(_ blocks: [Block]) -> [Part] {
+        var parts: [Part] = []
+        var paragraphs: [Block] = []
+        for block in blocks {
+            if block.imageURL != nil || block.style.code {
+                if let first = paragraphs.first {
+                    parts.append(Part(id: first.id, blocks: paragraphs))
+                    paragraphs.removeAll(keepingCapacity: true)
+                }
+                parts.append(Part(id: block.id, blocks: [block]))
+            } else {
+                paragraphs.append(block)
+            }
+        }
+        if let first = paragraphs.first {
+            parts.append(Part(id: first.id, blocks: paragraphs))
+        }
+        return parts
+    }
+
+    struct ParagraphStyle: Sendable, Equatable {
         var header: Int?
         var marker: String?
         var code = false

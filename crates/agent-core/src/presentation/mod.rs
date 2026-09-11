@@ -145,7 +145,7 @@ pub fn project_items<'a>(
             answer,
             last: end == count,
             collapsible: false,
-            initially_expanded: !completed,
+            initially_expanded: false,
             label: None,
         };
         segment.collapsible =
@@ -501,6 +501,26 @@ mod presentation_tests {
             .collect()
     }
     #[test]
+    fn command_groups_start_collapsed_for_live_and_restored_turns() {
+        for status in ["inProgress", "completed", "failed", "interrupted", ""] {
+            for command_status in ["inProgress", "completed", "failed"] {
+                let turn = turn!({"id":"turn","status":status,"items":[
+                    {"id":"u","type":"userMessage","text":"Inspect"},
+                    {"id":"c","type":"commandExecution","command":"pwd","status":command_status},
+                    {"id":"a","type":"agentMessage","text":"Result"}
+                ]});
+                let group = project(&turn).find(|part| part.collapsible).unwrap();
+                assert!(
+                    !group.initially_expanded,
+                    "command group opened without a user action: turn={status}, command={command_status}"
+                );
+                assert_eq!(rows(&group, &turn, Role::Activity).next().unwrap().id, "c");
+                assert!(group.label.is_some());
+            }
+        }
+    }
+
+    #[test]
     fn live_commentary_separates_activity_groups_without_reordering() {
         let turn = turn!({"id":"turn","status":"inProgress","items":[
             {"id":"u","type":"userMessage"},
@@ -516,7 +536,7 @@ mod presentation_tests {
             order(&turn),
             ["u", "intro", "c1", "c2", "progress", "tool", "followup"]
         );
-        assert!(project(&turn).all(|part| part.initially_expanded));
+        assert!(project(&turn).all(|part| !part.initially_expanded));
         let labels: Vec<_> = project(&turn)
             .filter(|part| part.collapsible)
             .map(|part| part.label.unwrap())

@@ -280,10 +280,15 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         for mut summary in summaries {
                             let thread_id = summary["id"].as_str().ok_or("fixture thread lacks id")?.to_owned();
                             let mut thread = Thread::new(thread_id.clone(), summary.remove("cwd").unwrap_or(Value::Null));
+                            let persisted_turns = summary.remove("turns");
                             thread.metadata.extend(summary);
                             thread.turns.push(Rc::new(RefCell::new(json!({"id":format!("turn-{thread_id}"),"status":"completed","items":[
                                 {"id":format!("answer-{thread_id}"),"type":"agentMessage","phase":"final_answer",
                                     "text":format!("History for {}",thread.metadata["name"].as_str().unwrap_or(""))}]}))));
+                            if let Some(turns) = persisted_turns {
+                                thread.turns = serde_json::from_value::<Vec<Value>>(turns)?
+                                    .into_iter().map(|turn| Rc::new(RefCell::new(turn))).collect();
+                            }
                             threads.insert(thread_id, Rc::new(RefCell::new(thread)));
                         }
                     } else if contents.is_none() && let Some(saved) = saved_threads.take() {

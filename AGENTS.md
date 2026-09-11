@@ -24,6 +24,9 @@ For every debugging run:
 
 # Post-commit quality
 
+- When a previously implemented feature is reported missing, inspect relevant dirty worktrees as well as branches and reflogs. A patch left in another worktree is not part of the current branch; preserve it and identify the missing integration before attributing the loss to a later refactor.
+- Record behavior changes and their acceptance tests in the same commit. Before claiming a fix is integrated or released, identify its commit and verify that the target contains it; working-tree edits and tests from another checkout do not establish integration.
+- Preserve the approved interaction contracts in `docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md`. When an existing acceptance assertion fails, determine whether the product requirement changed before changing the assertion; current implementation output alone is not evidence of a new requirement.
 - Lefthook queues asynchronous quality checks after each commit. Before reporting a committed change as verified, run `nix develop . --command cargo xtask quality-status --wait` and inspect its JSON and referenced log on failure.
 - Only `passed` for the current commit with `workingTreeDirty: false` verifies the current worktree. Queued, running, missing, interrupted, superseded, and failed are not passes. Uncommitted edits require their own verification.
 - Results are not automatically injected into the agent conversation. Read the status explicitly; no desktop notification is configured.

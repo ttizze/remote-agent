@@ -1,29 +1,84 @@
 # Desktop conversation display contract
 
-Audited against the locally installed Codex Desktop bundle in ChatGPT
+Originally audited against the locally installed Codex Desktop bundle in ChatGPT
 `26.818.61809` (`7019`) and the `codex app-server` v2 JSON schema shipped in
-that bundle on 2026-08-25. This document records observable presentation
-semantics that the mobile conversation screen must preserve. It is not a
-second wire protocol.
+that bundle on 2026-08-25. The turn lifecycle and selection contracts below
+record Bex's current product requirements, updated on 2026-09-11; the original
+reference app's behavior does not override them. It is not a second wire protocol.
 
 ## Turn lifecycle
 
 | Input state | Expanded work | Header / divider | Transition |
 | --- | --- | --- | --- |
 | No work item yet | n/a | Thinking | Replaced as the first renderable work item arrives |
-| `inProgress` | visible | Working / Working for _duration_ | Items and assistant commentary update in place |
-| Waiting on approval | visible | Awaiting approval | The pending request stays actionable and blocks the thinking placeholder |
-| Waiting on user input or MCP elicitation | visible | Waiting for your answer | The request stays outside a hidden collapsed body |
-| Final assistant output starts | collapsible | Worked for _duration_ | Work auto-collapses unless the user/persistence policy says otherwise |
-| `completed` without final text | collapsible when work exists | Worked for _duration_ | Generated output and end resources remain visible |
-| `interrupted` by this client | not auto-collapsed as a successful turn | You stopped after _duration_ | Partial work remains inspectable |
-| `failed` | error remains visible | Error-specific presentation | Retry is offered only for retryable failures |
-| History reopened | restored from server items | Same terminal divider | Collapsed state defaults from the terminal projection and may use persisted user choice |
+| `inProgress` | collapsed by default | Activity summary | Commentary stays visible; each work group opens only on explicit action |
+| Waiting on approval | collapsed by default | Awaiting approval | The pending request stays visible and actionable outside work |
+| Waiting on user input or MCP elicitation | collapsed by default | Waiting for your answer | The request stays outside a hidden collapsed body |
+| Final assistant output starts | collapsed by default | Past-message count | The answer stays visible outside work |
+| `completed` without final text | collapsed when work exists | Worked for _duration_ | Generated output and end resources remain visible |
+| `interrupted` by this client | collapsed by default | You stopped after _duration_ | Partial work can be explicitly opened |
+| `failed` | collapsed by default | Error-specific presentation | The error remains visible outside work |
+| History reopened | collapsed by default | Same terminal divider | Hydrating server items must not auto-expand work |
 
-Auto-collapse is allowed only when a final assistant response has started, the
-turn was not cancelled, and at least one renderable work unit exists. Explicit
-force-expand, full-transcript, manual persisted state, and several live-content
-conditions override that default.
+Manual expansion applies to the selected group while its status is unchanged;
+it must not expand adjacent groups. A status transition resets expansion to the
+collapsed default. Activity wording, counts, streaming updates, and history
+hydration must not change this default.
+
+## Selection and copying
+
+- Mac text selection exposes **チャットに追加**, **詳細を表示**, and
+  **サイドチャットで質問**. Right-click exposes **コピー** and **Googleで検索**
+  for only the selected text. Adding a quote preserves the existing draft and
+  persists it through the Store. **詳細を表示** creates a new side conversation
+  and immediately asks the AI to explain the selection; it does not merely
+  display the selected text in a dialog. Existing side-chat drafts remain saved.
+  Selection must work in the real virtual list,
+  including mouse-move and release before the next paint.
+- iPhone assistant text uses selection handles in the conversation. Copy and
+  chat actions operate on the selected range. Own-message long press is a
+  separate menu for complete copying; it must not replace assistant selection.
+- Side-chat submission must retain the selected input, complete the turn, clear
+  the sent draft, and persist the conversation. Closing the iPhone sheet restores
+  the original conversation and draft, including after a preparation retry.
+
+## Regression history and required checks
+
+The September 11 investigation found two different failures:
+
+- Commit `3a38181` changed `initially_expanded: false` to `!completed` while
+  revising activity presentation, and added a Rust assertion expecting live
+  expansion. The existing Simulator assertion that live commands start closed
+  was later changed to expect expansion in `53a3d41`. The old lifecycle table
+  above also contradicted the closed default. Local post-commit quality ran
+  lint checks, not these behavioral tests. Updating assertions to match the
+  changed implementation masked the product regression.
+- The prior Mac selection toolbar and iPhone `UITextView` selection/own-message
+  copy changes remained uncommitted in worktree `bex/session-yDLr3l` based on
+  `dcc6799`. They were absent from current branch `997b22c` and all available
+  committed/reflog snapshots. This was missing integration, not a deletion
+  identified in a later commit. The old worktree was left intact.
+
+Enabling the Simulator gate in the immutable quality checkout also exposed
+hard-coded `target/debug` and iOS library paths in the build scripts. The worker
+uses a shared `CARGO_TARGET_DIR`; binding generation, Swift compilation, and
+Xcode now consume that same configured directory. Generated binding sources
+remain local to each checkout so Gradle and Xcode keep their existing inputs.
+
+The reopened-history gate also exposed a fixture mismatch: the completed live
+command emitted `passed`, but history rewrote the same item to a different full
+body. The Store correctly retained the already loaded body. The fixture now
+returns identical completed content in live and persisted reads; the Simulator
+case checks both cached reopening and an unseen persisted conversation that
+must fetch deferred details. The full-body assertion remains required.
+
+`just quality rust` runs the core library and desktop tests as well as lint.
+`just quality swift` runs `just conversation-ui`, which exercises selection,
+copying, side-chat completion/recovery, and live/failed/interrupted/reopened work
+through an isolated Host and Simulator. Missing, failed, or skipped cases fail
+the check. A successful build or selectable flag alone does not verify these
+contracts. A completed feature must be tied to a commit in its integration
+target; worktree-local behavior is not proof that another branch contains it.
 
 ## Server `ThreadItem` coverage
 
@@ -38,7 +93,7 @@ and history reload:
   compatibility final response.
 - `plan`: a proposed plan, separate from ordinary activity and collapsed after
   completion.
-- `reasoning`: grouped activity; summary and raw content are expandable.
+- `reasoning`: retained in the source data but hidden from conversation rows.
 - `commandExecution`: in-progress, completed, failed, and declined states;
   output, exit code, cwd, duration, and parsed action type remain inspectable.
 - `fileChange`: in-progress, completed, failed, and declined states; add,

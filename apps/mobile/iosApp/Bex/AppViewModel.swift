@@ -6,6 +6,8 @@ import Foundation
 final class BexAppViewModel: ObservableObject {
     @Published private(set) var snapshot = AgentCore.Snapshot.empty()
     @Published var screen: AppScreen = .profiles
+    @Published var sideChatRequest: SideChatRequest?
+    @Published var composerFocusRequest: UUID?
     @Published var isScanning = false
     @Published var transferError: String?
     @Published var transferring = false
