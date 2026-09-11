@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Start command/tool groups collapsed in active, interrupted and failed conversations as well as completed turns. Keep manual expansion and visible commentary/error messages; cover all turn statuses in the shared native projection.
+
 - Add iPhone PC-list connection removal with confirmation and credential deletion, preventing automatic reconnection after relaunch. Refresh Mac device management when opening settings, place removal above pairing QR codes, and fix the revoke request's `nodeId` field so removing access closes active sessions and rejects reconnection.
 
 - Remove the iPhone connection error subheader from task lists and conversations; keep connection progress in the navigation header.

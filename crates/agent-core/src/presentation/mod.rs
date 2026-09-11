@@ -145,7 +145,7 @@ pub fn project_items<'a>(
             answer,
             last: end == count,
             collapsible: false,
-            initially_expanded: !completed,
+            initially_expanded: false,
             label: None,
         };
         segment.collapsible =
@@ -516,12 +516,35 @@ mod presentation_tests {
             order(&turn),
             ["u", "intro", "c1", "c2", "progress", "tool", "followup"]
         );
-        assert!(project(&turn).all(|part| part.initially_expanded));
+        assert!(project(&turn).all(|part| !part.initially_expanded));
         let labels: Vec<_> = project(&turn)
             .filter(|part| part.collapsible)
             .map(|part| part.label.unwrap())
             .collect();
         assert_eq!(labels, ["コマンドを実行しました", "ツールを使用しました"]);
+    }
+    #[test]
+    fn activity_groups_start_collapsed_for_every_turn_status() {
+        for status in [
+            None,
+            Some("inProgress"),
+            Some("completed"),
+            Some("interrupted"),
+            Some("failed"),
+        ] {
+            let turn = turn!({"id":"turn","status":status,"items":[
+                {"id":"user","type":"userMessage"},
+                {"id":"command","type":"commandExecution"}
+            ]});
+            let segment = project(&turn).next().unwrap();
+            assert!(segment.collapsible);
+            assert!(!segment.initially_expanded, "status: {status:?}");
+            assert!(segment.label.is_some());
+            assert_eq!(
+                rows(&segment, &turn, Role::Activity).next().unwrap().id,
+                "command"
+            );
+        }
     }
     #[test]
     fn completed_exchanges_keep_each_answer_beside_its_question() {

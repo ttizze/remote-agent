@@ -77,7 +77,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
         XCTAssertFalse(progress.exists, "Completed work must hide interim commentary")
         let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
-        XCTAssertTrue(completed.label.contains("3秒 作業しました"))
+        XCTAssertTrue(completed.label.contains("4件の過去のメッセージ"))
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.activity.")).count, 1)
         captureScreen(app, named: "Completed work automatically collapsed")
         completed.tap()
