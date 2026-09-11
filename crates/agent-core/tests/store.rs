@@ -827,7 +827,7 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
         let start = read(&mut reader).await;
         assert_eq!(start["method"], "host/thread/start");
         assert!(start["params"].get("cwd").is_none());
-        writer.write_line(&json!({"id":start["id"],"result":{"thread":{"id":"created","cwd":"/fixture","status":{"type":"idle"},"turns":[]}}}).to_string()).await.unwrap();
+        writer.write_line(&json!({"id":start["id"],"result":{"thread":{"id":"created","cwd":"/fixture","projectId":null,"status":{"type":"idle"},"turns":[]}}}).to_string()).await.unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(submit["method"], "turn/start");
         let input = json!([{"type":"text","text":"typed\nspoken","text_elements":[]},{"type":"localImage","path":"/fixture/photo.png"}]);
@@ -850,6 +850,8 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
         .await;
         let current = store.snapshot();
         assert_eq!(current.navigation.thread_id.as_deref(), Some("created"));
+        assert!(current.selected_directory().is_empty());
+        assert_eq!(current.navigation.cwd, "/fixture");
         assert!(current.drafts["created"].text.is_empty());
         assert!(current.drafts["created"].attachments.is_empty());
         assert!(current.pending_submissions.is_empty());

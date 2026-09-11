@@ -55,6 +55,7 @@ impl Desktop {
     }
     pub(super) fn workspace_card(&self, cx: &Context<Self>) -> AnyElement {
         let enabled = self.snapshot.connected && !self.snapshot.navigation.cwd.is_empty();
+        let review_enabled = enabled && !self.snapshot.selected_directory().is_empty();
         let mut sources = v_flex().gap_1();
         for (i, path) in self.source_paths.iter().enumerate() {
             let path = path.clone();
@@ -108,7 +109,7 @@ impl Desktop {
                                     cx,
                                     |s, _, _| s.refresh_review(),
                                 )
-                                .disabled(!enabled),
+                                .disabled(!review_enabled),
                             ),
                     )
                     .child(
@@ -116,6 +117,8 @@ impl Desktop {
                             "context-files",
                             if self.snapshot.navigation.cwd.is_empty() {
                                 "フォルダを選択".into()
+                            } else if self.snapshot.selected_directory().is_empty() {
+                                "チャット".into()
                             } else {
                                 file_name(&self.snapshot.navigation.cwd)
                             },

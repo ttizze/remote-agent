@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agent_core::models::{Project, ProjectRoot, Thread};
 use serde::Deserialize;
@@ -11,6 +11,7 @@ pub(crate) struct Snapshot {
     projectless_thread_ids: HashSet<String>,
     workspace_root_hints: HashMap<String, String>,
     pub(super) worktree_roots: HashMap<String, String>,
+    pub(super) chat_directory: Option<PathBuf>,
 }
 
 impl Snapshot {
@@ -42,6 +43,7 @@ impl Snapshot {
             projectless_thread_ids: state.projectless_thread_ids.into_iter().collect(),
             workspace_root_hints: state.thread_workspace_root_hints,
             worktree_roots: HashMap::new(),
+            chat_directory: None,
         })
     }
 
@@ -53,7 +55,14 @@ impl Snapshot {
         // projectless threads whose cwd happens to be inside a project.
         if let Some(assignment) = self.assignments.get(thread_id) {
             thread.project_id = Some(Some(assignment.project_id.clone()));
-        } else if self.projectless_thread_ids.contains(thread_id) {
+        } else if self.projectless_thread_ids.contains(thread_id)
+            || self.chat_directory.as_deref().is_some_and(|directory| {
+                thread
+                    .cwd
+                    .as_deref()
+                    .is_some_and(|cwd| Path::new(cwd) == directory)
+            })
+        {
             thread.project_id = Some(None);
         } else if thread
             .project_id

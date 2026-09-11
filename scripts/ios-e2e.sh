@@ -25,6 +25,7 @@ if [[ $# == 0 ]]; then
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorCanStartAConversationInAProject \
+        testSimulatorKeepsChatUnassignedAfterSendingAndReopening \
         testSimulatorMarksUnseenCompletionUntilOpened \
         testSimulatorDictationPermissionDenialPreservesDraftAndSend \
         testSimulatorDictationContinuesPastThirtySecondsAndReachesHost \

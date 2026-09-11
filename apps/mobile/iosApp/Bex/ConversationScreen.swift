@@ -34,7 +34,8 @@ struct ThreadScreen: View {
     }
 
     private var project: Project? {
-        model.projects.first { $0.roots.contains { $0.path == model.cwd } }
+        let directory = model.selectedDirectory
+        return model.projects.first { $0.roots.contains { $0.path == directory } }
     }
 
     var body: some View {
@@ -175,7 +176,11 @@ struct ThreadScreen: View {
         }
         .sheet(
             isPresented: $showingFiles,
-            onDismiss: { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd))) },
+            onDismiss: {
+                if !model.selectedDirectory.isEmpty {
+                    model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd)))
+                }
+            },
             content: {
                 WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
             }
@@ -210,7 +215,8 @@ struct ThreadScreen: View {
 /// Conversation navigation
 extension ThreadScreen {
     var conversationTitle: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        let directory = model.selectedDirectory
+        return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text(conversation?.title ?? (model.isNewThread ? "チャット" : "タスク"))
                     .font(.headline).lineLimit(1)
@@ -221,7 +227,7 @@ extension ThreadScreen {
                 }
             }
             Text([
-                project?.name ?? (model.cwd.isEmpty ? "" : URL(fileURLWithPath: model.cwd).lastPathComponent),
+                project?.name ?? (directory.isEmpty ? "" : URL(fileURLWithPath: directory).lastPathComponent),
                 model.selectedProfileName ?? "Mac"
             ].filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
@@ -231,7 +237,7 @@ extension ThreadScreen {
 
     var conversationActions: some View {
         HStack(spacing: 0) {
-            Button { model.openNewThread(cwd: model.cwd) } label: {
+            Button { model.openNewThread(cwd: model.selectedDirectory) } label: {
                 Image(systemName: "square.and.pencil").font(.title2).frame(width: 44, height: 44)
             }.accessibilityLabel("新しい会話").accessibilityIdentifier("task.new")
             Menu {
@@ -256,7 +262,8 @@ extension ThreadScreen {
     }
 
     var newThreadContext: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let directory = model.selectedDirectory
+        return VStack(alignment: .leading, spacing: 4) {
             Menu {
                 ForEach(model.profiles, id: \.id) { profile in
                     Button { model.openNewThread(on: profile.id) } label: {
@@ -283,7 +290,7 @@ extension ThreadScreen {
                     ForEach(project.roots, id: \.path) { root in
                         Button { model.openNewThread(cwd: root.path) } label: {
                             Label(project.roots.count == 1 ? project.name : root.path,
-                                  systemImage: root.path == model.cwd ? "checkmark" : "folder")
+                                  systemImage: root.path == directory ? "checkmark" : "folder")
                         }
                     }
                 }
@@ -292,11 +299,11 @@ extension ThreadScreen {
                 }
             } label: {
                 contextLabel(
-                    project?.name ?? (model.cwd.isEmpty ? "チャット" : URL(fileURLWithPath: model.cwd).lastPathComponent),
-                    icon: model.cwd.isEmpty ? "bubble.left.and.bubble.right" : "folder"
+                    project?.name ?? (directory.isEmpty ? "チャット" : URL(fileURLWithPath: directory).lastPathComponent),
+                    icon: directory.isEmpty ? "bubble.left.and.bubble.right" : "folder"
                 )
             }
-            .accessibilityLabel("フォルダ: \(project?.name ?? (model.cwd.isEmpty ? "チャット" : model.cwd))")
+            .accessibilityLabel("フォルダ: \(project?.name ?? (directory.isEmpty ? "チャット" : directory))")
             .accessibilityIdentifier("task.folder")
         }
         .font(.title3)

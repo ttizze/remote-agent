@@ -35,7 +35,7 @@ pub struct DesktopProjectStore {
 
 #[derive(Debug)]
 struct CachedSnapshot {
-    sources: [Option<FileStamp>; 2],
+    sources: [Option<FileStamp>; 3],
     snapshot: Arc<state::Snapshot>,
 }
 
@@ -94,10 +94,11 @@ impl DesktopProjectStore {
         Ok(())
     }
 
-    async fn source_stamps(&self) -> Result<[Option<FileStamp>; 2], DesktopProjectError> {
+    async fn source_stamps(&self) -> Result<[Option<FileStamp>; 3], DesktopProjectError> {
         Ok([
             file_stamp(&self.path).await?,
             file_stamp(&self.path.with_file_name("bex-worktrees.json")).await?,
+            file_stamp(&self.chat_directory()).await?,
         ])
     }
 
@@ -123,7 +124,24 @@ impl DesktopProjectStore {
         Ok(snapshot)
     }
 
+    pub(crate) fn chat_directory(&self) -> PathBuf {
+        self.path.with_file_name("bex-chats")
+    }
+
     async fn load_uncached(&self) -> Result<state::Snapshot, DesktopProjectError> {
+        let mut snapshot = self.read_desktop_state().await?;
+        snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path)
+            .await
+            .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?;
+        snapshot.chat_directory = match tokio::fs::canonicalize(self.chat_directory()).await {
+            Ok(path) => Some(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(DesktopProjectError::Read(error)),
+        };
+        Ok(snapshot)
+    }
+
+    async fn read_desktop_state(&self) -> Result<state::Snapshot, DesktopProjectError> {
         let file = match tokio::fs::File::open(&self.path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -145,14 +163,10 @@ impl DesktopProjectStore {
         if bytes_read > MAX_STATE_BYTES as usize {
             return Err(DesktopProjectError::TooLarge(bytes_read as u64));
         }
-        let mut snapshot = tokio::task::spawn_blocking(move || state::Snapshot::parse(&bytes))
+        tokio::task::spawn_blocking(move || state::Snapshot::parse(&bytes))
             .await
             .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?
-            .map_err(DesktopProjectError::Invalid)?;
-        snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path)
-            .await
-            .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?;
-        Ok(snapshot)
+            .map_err(DesktopProjectError::Invalid)
     }
 
     pub fn path(&self) -> &Path {
@@ -180,6 +194,7 @@ mod tests {
     };
 
     use super::*;
+    use serde_json::json;
 
     fn temporary_path(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -190,6 +205,43 @@ mod tests {
             "remote-agent-desktop-projects-{name}-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    #[tokio::test]
+    async fn chat_scope_survives_missing_desktop_state_and_workspace_matching() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DesktopProjectStore::new(directory.path().join("projects.json"));
+        assert!(store.load().await.unwrap().chat_directory.is_none());
+        tokio::fs::create_dir(store.chat_directory()).await.unwrap();
+        let cwd = tokio::fs::canonicalize(store.chat_directory())
+            .await
+            .unwrap();
+        for state in [
+            None,
+            Some(json!({
+                "local-projects":{"parent":{"id":"parent","name":"Parent","rootPaths":[directory.path().canonicalize().unwrap()]}},
+                "thread-project-assignments":{"assigned":{"projectId":"parent"}}
+            })),
+        ] {
+            if let Some(state) = state {
+                tokio::fs::write(store.path(), serde_json::to_vec(&state).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let mut chat: Thread = serde_json::from_value(json!({"id":"chat","cwd":cwd})).unwrap();
+            store
+                .enrich_threads(std::slice::from_mut(&mut chat))
+                .await
+                .unwrap();
+            assert_eq!(chat.project_id, Some(None));
+        }
+        let mut assigned: Thread =
+            serde_json::from_value(json!({"id":"assigned","cwd":cwd})).unwrap();
+        store
+            .enrich_threads(std::slice::from_mut(&mut assigned))
+            .await
+            .unwrap();
+        assert_eq!(assigned.project_id, Some(Some("parent".into())));
     }
 
     #[tokio::test]

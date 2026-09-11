@@ -197,17 +197,18 @@ impl Desktop {
     }
 
     pub(super) fn composer_folder(&self, cx: &Context<Self>) -> AnyElement {
+        let selected_directory = self.snapshot.selected_directory();
         let entity = cx.entity().downgrade();
         Button::new("composer-folder")
-            .label(if self.snapshot.navigation.cwd.is_empty() {
+            .label(if selected_directory.is_empty() {
                 "チャット".into()
             } else {
-                file_name(&self.snapshot.navigation.cwd)
+                file_name(&selected_directory)
             })
-            .accessibility_label(if self.snapshot.navigation.cwd.is_empty() {
+            .accessibility_label(if selected_directory.is_empty() {
                 "フォルダ: チャット".into()
             } else {
-                format!("フォルダ: {}", self.snapshot.navigation.cwd)
+                format!("フォルダ: {}", selected_directory)
             })
             .icon(IconName::Folder)
             .dropdown_caret(true)
@@ -219,10 +220,11 @@ impl Desktop {
                     return menu;
                 };
                 let state = owner.read(cx);
+                let selected_directory = state.snapshot.selected_directory();
                 let unassigned = entity.clone();
                 menu = menu.item(
                     PopupMenuItem::new("チャット")
-                        .checked(state.snapshot.navigation.cwd.is_empty())
+                        .checked(selected_directory.is_empty())
                         .on_click(move |_, _, cx| {
                             let _ = unassigned.update(cx, |s, cx| {
                                 s.new_chat(String::new());
@@ -247,7 +249,7 @@ impl Desktop {
                         let target = entity.clone();
                         menu = menu.item(
                             PopupMenuItem::new(label)
-                                .checked(path == state.snapshot.navigation.cwd)
+                                .checked(path == selected_directory)
                                 .on_click(move |_, _, cx| {
                                     let _ = target.update(cx, |s, cx| {
                                         s.new_chat(path.clone());

@@ -43,6 +43,10 @@ extension BexAppViewModel {
         snapshot.navigation().cwd
     }
 
+    var selectedDirectory: String {
+        snapshot.selectedDirectory()
+    }
+
     var coreDraftKey: String {
         snapshot.navigation().draftKey
     }

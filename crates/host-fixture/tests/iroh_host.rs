@@ -575,6 +575,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                 for photo in [true, false] {
                     let directory = tempfile::tempdir().unwrap();
                     let root = directory.path().canonicalize().unwrap();
+                    assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(&root).status().unwrap().success());
                     let workspace = root.join("project");
                     std::fs::create_dir(&workspace).unwrap();
                     let git = |args: &[&str]| {
@@ -591,6 +592,9 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     // installation does. No test depends on default/off settings.
                     std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({
                         "settings":{"createOnNewSession":automatic,"worktreeDirectory":destination}
+                    })).unwrap()).unwrap();
+                    std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!({
+                        "local-projects":{"default":{"id":"default","name":"Default checkout","rootPaths":[root]}}
                     })).unwrap()).unwrap();
                     let source = root.join("photo.png");
                     let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
@@ -614,6 +618,24 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                             let current = store.snapshot();
                             Some(current.drafts[&current.navigation.draft_key].attachments[0].path.clone())
                         } else { None };
+                        if !project && number == 0 {
+                            let blocked = root.join("bex-chats");
+                            std::fs::write(&blocked, "not a directory").unwrap();
+                            let before = store.snapshot();
+                            let failed = store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "failed-chat".into() }).await;
+                            assert!(failed.is_err(), "an unavailable chat directory must fail before creating a conversation");
+                            let after = store.snapshot();
+                            assert!(after.navigation.thread_id.is_none());
+                            assert!(after.navigation.cwd.is_empty());
+                            assert!(after.selected_directory().is_empty());
+                            assert!(after.pending_submissions.is_empty());
+                            assert_eq!(after.drafts[&after.navigation.draft_key], before.drafts[&before.navigation.draft_key]);
+                            std::fs::remove_file(blocked).unwrap();
+                            // Foreground reconnection reloads Host state and clears the
+                            // previous connection's reported error without discarding drafts.
+                            store.disconnect().await.unwrap();
+                            store.reconnect(&endpoint, &fixture.ticket, None).await.unwrap();
+                        }
                         let sent = store.dispatch(Intent::Submit { thread_id: thread_id.clone(), client_user_message_id: format!("client-{number}") }).await;
                         assert!(matches!(sent.unwrap_or_else(|error| panic!("{prompt}: {error}")), Outcome::Submitted { .. }));
                         let id = store.snapshot().navigation.thread_id.clone().unwrap();
@@ -629,14 +651,36 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                         let cwd = store.snapshot().navigation.cwd.clone();
                         if let Some(previous) = &session_cwd { assert_eq!(&cwd, previous); }
                         if automatic && project { assert_eq!(Path::new(&cwd).parent().unwrap(), destination); }
-                        else { assert_eq!(Path::new(&cwd), if project { &workspace } else { &root }); }
+                        else if project { assert_eq!(Path::new(&cwd), &workspace); }
+                        else {
+                            assert!(store.snapshot().selected_directory().is_empty(), "an unselected chat must remain unselected: {cwd}");
+                            assert_eq!(Path::new(&cwd), root.join("bex-chats"));
+                            let snapshot = store.snapshot();
+                            assert_eq!(snapshot.conversations[&id].project_id, Some(None));
+                            assert_eq!(snapshot.conversations[&id].cwd.as_deref(), root.join("bex-chats").to_str());
+                        }
                         store.dispatch(Intent::ShowThreadList).await.unwrap();
+                        store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
                         store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
-                        store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: cwd.clone() })).await.unwrap();
+                        if project {
+                            store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: cwd.clone() })).await.unwrap();
+                        } else {
+                            assert!(store.snapshot().workspace.review_cwd.is_none());
+                            assert!(store.snapshot().workspace.review.is_none());
+                        }
+                        store.dispatch(Intent::ListFiles(op::ListFiles { path: cwd.clone() })).await.unwrap();
+                        assert_eq!(store.snapshot().workspace.directory.as_ref().unwrap().path, cwd);
+                        assert_eq!(store.snapshot().navigation.cwd, cwd, "reopening must preserve the execution directory");
+                        assert_eq!(store.snapshot().selected_directory(), if project { cwd.clone() } else { String::new() });
                         let snapshot = store.snapshot();
                         assert!(snapshot.connected);
                         assert!(snapshot.error.is_none(), "{prompt}: {:?}", snapshot.error);
                         assert!(snapshot.pending_submissions.is_empty());
+                        let listed = snapshot.threads.as_ref().unwrap().data.iter().find(|thread| thread.id.as_ref() == Some(&id)).expect("sent conversation must be listed");
+                        assert_eq!(listed.project_id, if project { Some(Some("default".into())) } else { Some(None) });
+                        let restored: agent_core::state::Snapshot = serde_json::from_slice(&serde_json::to_vec(snapshot.as_ref()).unwrap()).unwrap();
+                        assert_eq!(restored.selected_directory(), snapshot.selected_directory());
+
                         let draft = &snapshot.drafts[&id];
                         assert!(draft.text.is_empty() && draft.attachments.is_empty());
                         let turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[number];
@@ -1003,17 +1047,31 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
             let read = request(&service, &mut session, "host/thread/read", json!({"threadId":id,"includeTurns":false})).await;
             assert_eq!(read["thread"]["projectId"], "workspace");
         }
+        let mut chat_ids = Vec::new();
+        for method in ["thread/start", "host/thread/start"] {
+            for params in [json!({}), json!({"cwd":""}), json!({"cwd":"  "})] {
+                let global = request(&service, &mut session, method, params).await;
+                assert_eq!(global["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
+                assert_eq!(global["thread"]["projectId"], Value::Null);
+                chat_ids.push(global["thread"]["id"].clone());
+            }
+        }
         let restarted = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
         let mut restarted_session = restarted.open_session(64);
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
-        for method in ["thread/start", "host/thread/start"] {
-            let global = request(&restarted, &mut restarted_session, method, json!({})).await;
-            assert_eq!(global["thread"]["cwd"], root.to_str().unwrap());
+        for id in &chat_ids {
+            let read = request(&restarted, &mut restarted_session, "host/thread/read", json!({"threadId":id,"includeTurns":false})).await;
+            assert_eq!(read["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
+            assert_eq!(read["thread"].get("projectId"), Some(&Value::Null));
         }
-        let listed = request(&restarted, &mut restarted_session, "host/thread/list", json!({})).await;
+        let listed = request(&restarted, &mut restarted_session, "host/thread/list", json!({"chatLimit":10})).await;
         for id in &ids {
             let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("worktree task must remain in the project list after restart");
             assert_eq!(thread["projectId"], "workspace");
+        }
+        for id in &chat_ids {
+            let thread = listed["data"].as_array().unwrap().iter().find(|thread| thread["id"] == *id).expect("chat must remain in the list after restart");
+            assert_eq!(thread.get("projectId"), Some(&Value::Null));
         }
         let after = std::process::Command::new("git").current_dir(&workspace).args(["worktree", "list", "--porcelain"]).output().unwrap().stdout;
         assert_eq!(before, after, "opening and listing must not create worktrees");

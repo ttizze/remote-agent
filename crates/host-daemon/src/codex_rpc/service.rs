@@ -511,14 +511,34 @@ impl CodexRpcService {
     ) -> Result<RpcResponse<ThreadResponse>, Failure> {
         let mut params: ThreadParams = request.params()?;
         if method == "thread/start" {
-            match self.inner.worktrees.prepare(params.cwd.as_deref()).await {
-                Ok(Some(cwd)) => {
-                    params.cwd = Some(cwd.into_os_string().into_string().map_err(|_| {
-                        Failure::new("worktree_creation_failed", "worktree path is not UTF-8")
-                    })?)
+            // A missing selection must not inherit the App Server's checkout.
+            // Keep the real cwd on the thread; project enrichment identifies
+            // this persisted location as a chat even after a Host restart.
+            if params
+                .cwd
+                .as_deref()
+                .is_none_or(|cwd| cwd.trim().is_empty())
+            {
+                let directory = self.inner.desktop_projects.chat_directory();
+                tokio::fs::create_dir_all(&directory)
+                    .await
+                    .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
+                let directory = tokio::fs::canonicalize(directory)
+                    .await
+                    .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
+                params.cwd = Some(directory.into_os_string().into_string().map_err(|_| {
+                    Failure::new("chat_directory_unavailable", "chat path is not UTF-8")
+                })?);
+            } else {
+                match self.inner.worktrees.prepare(params.cwd.as_deref()).await {
+                    Ok(Some(cwd)) => {
+                        params.cwd = Some(cwd.into_os_string().into_string().map_err(|_| {
+                            Failure::new("worktree_creation_failed", "worktree path is not UTF-8")
+                        })?)
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
                 }
-                Ok(None) => {}
-                Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
         let hydrate = method == "thread/read" && params.include_turns == Some(true);

@@ -1161,7 +1161,7 @@ impl Desktop {
         )));
     }
     fn refresh_review(&self) {
-        if !self.snapshot.navigation.cwd.is_empty() {
+        if !self.snapshot.selected_directory().is_empty() {
             self.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
                 cwd: self.snapshot.navigation.cwd.clone(),
             }));
@@ -1174,7 +1174,7 @@ impl Desktop {
                     Self::new(
                         Mode::SideChat {
                             remote: self.remote.clone(),
-                            cwd: self.snapshot.navigation.cwd.clone(),
+                            cwd: self.snapshot.selected_directory(),
                         },
                         window,
                         cx,

@@ -120,7 +120,15 @@ impl rpc::RpcMethod for ReviewWorkspace {
 /// Navigation and notifications already belong to an epoch. Their review read
 /// shares it instead of dispatching a second intent that invalidates siblings.
 pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot) -> Option<Effect> {
-    if !snapshot.connected || snapshot.navigation.cwd.is_empty() {
+    if snapshot.selected_directory().is_empty() {
+        if snapshot.workspace.review.is_some() || snapshot.workspace.review_cwd.is_some() {
+            let workspace = Arc::make_mut(&mut snapshot.workspace);
+            workspace.review = None;
+            workspace.review_cwd = None;
+        }
+        return None;
+    }
+    if !snapshot.connected {
         return None;
     }
     let operation = ReviewWorkspace {

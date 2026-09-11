@@ -20,6 +20,24 @@ pub struct ThreadList {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    /// The selected folder is separate from the provider's execution directory.
+    pub fn selected_directory(&self) -> String {
+        let thread = self.navigation.thread_id.as_ref().and_then(|id| {
+            self.conversations.get(id).map(AsRef::as_ref).or_else(|| {
+                self.threads
+                    .as_ref()?
+                    .data
+                    .iter()
+                    .find(|thread| thread.id.as_ref() == Some(id))
+            })
+        });
+        if thread.is_some_and(|thread| thread.project_id == Some(None)) {
+            String::new()
+        } else {
+            self.navigation.cwd.clone()
+        }
+    }
+
     pub fn thread_list(&self) -> Option<ThreadList> {
         let list = self.threads.as_ref()?;
         Some(ThreadList {

@@ -37,6 +37,46 @@ fn reply(thread: Thread) -> ThreadResponse {
 }
 
 #[test]
+fn selected_folder_preserves_explicit_scope_without_losing_the_execution_directory() {
+    for (project_id, selected) in [
+        (None, "/workspace"),
+        (Some(Value::Null), ""),
+        (Some(json!("project")), "/workspace"),
+    ] {
+        let mut thread = json!({"id":"thread","cwd":"/workspace"});
+        if let Some(project_id) = project_id {
+            thread["projectId"] = project_id;
+        }
+        let thread: Thread = serde_json::from_value(thread).unwrap();
+        let (snapshot, _) = applied(
+            &Snapshot {
+                connected: true,
+                ..Default::default()
+            },
+            op::ReadThread::open("thread".into()),
+            reply(thread),
+        );
+        let restored: Snapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        for snapshot in [&snapshot, &restored] {
+            assert_eq!(snapshot.navigation.cwd, "/workspace");
+            assert_eq!(snapshot.selected_directory(), selected);
+            assert_eq!(
+                snapshot.workspace.review_cwd.as_deref(),
+                (!selected.is_empty()).then_some("/workspace")
+            );
+            for cwd in ["", "/another-project"] {
+                let (next, _) = reduce(
+                    snapshot,
+                    Event::Intent(agent_core::state::Intent::NewChat { cwd: cwd.into() }),
+                );
+                assert_eq!(next.selected_directory(), cwd);
+            }
+        }
+    }
+}
+
+#[test]
 fn submission_drafts_corpus() {
     use agent_core::state::Draft;
     let cases: Vec<Value> =
@@ -510,6 +550,19 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
             assert!(next.workspace.review_cwd.is_none());
         }
     }
+    let mut unassigned = previous.clone();
+    let chat: ThreadResponse =
+        serde_json::from_value(json!({"thread":{"id":"chat","cwd":"/old","projectId":null}}))
+            .unwrap();
+    Arc::make_mut(&mut unassigned.navigation).thread_id = Some("chat".into());
+    Arc::make_mut(&mut unassigned.conversations)
+        .insert("chat".into(), Arc::new(chat.thread.clone()));
+    let mut unassigned: Snapshot =
+        serde_json::from_slice(&serde_json::to_vec(&unassigned).unwrap()).unwrap();
+    op::ReadThread::open("chat".into()).apply(&mut unassigned, chat);
+    assert!(unassigned.workspace.review.is_none());
+    assert!(unassigned.workspace.review_cwd.is_none());
+    assert_eq!(previous.file_drafts, unassigned.file_drafts);
 }
 
 #[test]

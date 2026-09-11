@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep chats without a selected project unassigned after sending, reopening, and restarting the Host. Use a dedicated `bex-chats` working directory beside the Codex project state instead of inheriting the App Server's checkout, while retaining the real directory for attachments and file operations. Preserve unsent drafts when that directory cannot be prepared, and skip automatic Git reviews for unassigned chats so a parent repository’s changes do not appear.
+
 - Render desktop approval labels, queued requests, images and thread summaries from core presentation. Share Store session subscription, shutdown and snapshot persistence across desktop windows; split desktop views and core operations by responsibility, and remove the Swift presentation mirror.
 
 - Keep submissions moving while account helpers initialize, and move account persistence off async workers. Cache Desktop project state with source-file invalidation; share private JSON writes, Git execution and account-token handling.

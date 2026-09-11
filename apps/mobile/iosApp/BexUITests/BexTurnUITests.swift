@@ -3,6 +3,41 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorKeepsChatUnassignedAfterSendingAndReopening() throws {
+        let app = try connectedSimulatorApp()
+        try useAutomaticWorktrees(app)
+        app.buttons["tasks.new.chat"].tap()
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
+        let prompt = app.textFields["task.message"]
+        prompt.tap(); prompt.typeText("[success] Keep this chat unassigned")
+        app.buttons["task.send"].tap()
+        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        let answerID = answer.identifier
+        let completed = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "件の過去のメッセージ"),
+            evaluatedWith: prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        )
+        wait(for: [completed], timeout: 10)
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertTrue(app.staticTexts["[success] Keep this chat unassigned"].exists)
+        XCTAssertEqual(prompt.value as? String, prompt.placeholderValue)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        app.buttons["task.new"].tap()
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
+        app.terminate()
+        _ = try connectedSimulatorApp(expandProject: false)
+        let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
+        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
+        XCTAssertTrue(row.waitForExistence(timeout: 20), "The chat must be outside collapsed projects")
+        row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)[answerID].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        captureScreen(app, named: "Unassigned chat after reopening")
+        app.buttons["task.new"].tap()
+        XCTAssertEqual(app.buttons["task.folder"].label, "フォルダ: チャット")
+    }
+
     func testSimulatorApprovalEditorAndDraftSurviveReconnect() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[approval] Verify approvals")

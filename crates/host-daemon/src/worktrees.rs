@@ -51,8 +51,7 @@ impl Worktrees {
     }
 
     pub(crate) async fn prepare(&self, cwd: Option<&str>) -> Result<Option<PathBuf>, String> {
-        // Automatic worktrees need an explicitly selected checkout. Global
-        // chats have no source repository and retain the App Server's default cwd.
+        // Automatic worktrees need an explicitly selected checkout.
         let Some(cwd) = cwd else {
             return Ok(None);
         };
