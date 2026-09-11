@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add iPhone PC-list connection removal with confirmation and credential deletion, preventing automatic reconnection after relaunch. Refresh Mac device management when opening settings, place removal above pairing QR codes, and fix the revoke request's `nodeId` field so removing access closes active sessions and rejects reconnection.
+
 - Remove the iPhone connection error subheader from task lists and conversations; keep connection progress in the navigation header.
 
 - Exercise account-switch and fork history through the Host hydration API in integration tests, and compare startup diagnostics against native OS errors without assuming English Unix messages.

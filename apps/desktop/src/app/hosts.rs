@@ -145,6 +145,19 @@ impl Hosts {
             }
         });
     }
+    pub(super) fn refresh(&mut self) {
+        if self.busy || self.connecting {
+            return;
+        }
+        if self.snapshot.connected {
+            self.dispatch(
+                Intent::LoadHostManagement(op::LoadHostManagement {}),
+                Action::Refresh,
+            );
+        } else {
+            self.connect();
+        }
+    }
     fn dispatch(&mut self, intent: Intent, action: Action) {
         let Some(store) = &self.store else {
             return;
@@ -321,6 +334,28 @@ impl Render for Hosts {
                 )
                 .into_any_element();
         }
+        if let Some(status) = &self.snapshot.management.status {
+            for (index, node) in status.devices.iter().enumerate() {
+                let node = node.clone();
+                body = body.child(
+                    h_flex()
+                        .gap_3()
+                        .child(div().flex_1().child(node.clone()))
+                        .child(
+                            Button::new(format!("revoke-{index}"))
+                                .label("接続を解除")
+                                .disabled(disabled)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.dispatch(
+                                        Intent::RevokeDevice(op::RevokeDevice { id: node.clone() }),
+                                        Action::Revoke,
+                                    );
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+        }
         body = body.child(
             Button::new("invite")
                 .label("別の端末を招待")
@@ -347,28 +382,6 @@ impl Render for Hosts {
                             ));
                         })),
                 );
-        }
-        if let Some(status) = &self.snapshot.management.status {
-            for (index, node) in status.devices.iter().enumerate() {
-                let node = node.clone();
-                body = body.child(
-                    h_flex()
-                        .gap_3()
-                        .child(div().flex_1().child(node.clone()))
-                        .child(
-                            Button::new(format!("revoke-{index}"))
-                                .label("接続を解除")
-                                .disabled(disabled)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.dispatch(
-                                        Intent::RevokeDevice(op::RevokeDevice { id: node.clone() }),
-                                        Action::Revoke,
-                                    );
-                                    cx.notify();
-                                })),
-                        ),
-                );
-            }
         }
         body = body
             .child("別の Host に接続")
@@ -420,10 +433,7 @@ impl Render for Hosts {
                 .label("接続一覧を更新")
                 .disabled(disabled)
                 .on_click(cx.listener(|view, _, _, cx| {
-                    view.dispatch(
-                        Intent::LoadHostManagement(op::LoadHostManagement {}),
-                        Action::Refresh,
-                    );
+                    view.refresh();
                     cx.notify();
                 })),
         )

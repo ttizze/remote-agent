@@ -23,6 +23,7 @@ if [[ $# == 0 ]]; then
         testSimulatorReturnsToListWithNativeEdgeSwipeAndRetainsDrafts \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
+        testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorCanStartAConversationInAProject \
         testSimulatorMarksUnseenCompletionUntilOpened \

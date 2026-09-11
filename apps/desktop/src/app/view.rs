@@ -1914,8 +1914,11 @@ impl Desktop {
                                     .map_or("この端末", |remote| remote.name.as_str())
                                     .to_owned(),
                                 cx,
-                                |s, _, _| {
+                                |s, _, cx| {
                                     s.tab = Tab::Settings;
+                                    if let Some(hosts) = &s.hosts {
+                                        hosts.update(cx, |hosts, _| hosts.refresh());
+                                    }
                                     s.dispatch(Intent::ReadWorktreeSettings(
                                         op::ReadWorktreeSettings {},
                                     ));
@@ -2522,6 +2525,9 @@ impl Desktop {
             .p_7()
             .child(div().text_2xl().child("設定"))
             .child(self.host_menu("settings-host", cx));
+        if let Some(hosts) = &self.hosts {
+            body = body.child(hosts.clone());
+        }
         body = body.child(
             v_flex().gap_3()
                 .child(div().text_xl().child("ワークツリー"))
@@ -2557,9 +2563,6 @@ impl Desktop {
                     "スイッチは切り替え時、入力欄は入力を終えると自動保存します。"
                 }))
         );
-        if let Some(hosts) = &self.hosts {
-            body = body.child(hosts.clone());
-        }
         div()
             .id("settings-scroll")
             .flex_1()
