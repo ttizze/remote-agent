@@ -120,6 +120,18 @@ impl Operation for ReadThread {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         self.open
     }
+    // Select the conversation before its Host round trip so clients navigate
+    // immediately: a cached thread renders at once and an unknown one shows
+    // its loading state instead of a new chat. cwd, unread state and watches
+    // follow the loaded thread in `open_thread`.
+    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+        if self.open {
+            let navigation = Arc::make_mut(&mut snapshot.navigation);
+            navigation.thread_id = Some(self.thread_id.clone());
+            navigation.draft_key = self.thread_id.clone();
+        }
+        Ok(())
+    }
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         if self.open {

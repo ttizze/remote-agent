@@ -343,6 +343,46 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
 }
 
 #[test]
+fn opening_a_conversation_selects_it_before_the_host_replies() {
+    let previous = Snapshot {
+        navigation: Arc::new(agent_core::state::Navigation {
+            cwd: "/previous".into(),
+            draft_key: "new:/previous".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (opening, effects) = reduce(
+        &previous,
+        Event::Intent(agent_core::state::Intent::ReadThread(op::ReadThread::open(
+            "thread".into(),
+        ))),
+    );
+    assert_eq!(opening.navigation.thread_id.as_deref(), Some("thread"));
+    assert_eq!(opening.navigation.draft_key, "thread");
+    assert_eq!(opening.navigation.cwd, "/previous");
+    assert_eq!(opening.epoch, previous.epoch + 1);
+    assert_eq!(effects.len(), 1);
+    // A plain refresh never moves the selection.
+    let (refreshed, _) = reduce(
+        &previous,
+        Event::Intent(agent_core::state::Intent::ReadThread(op::ReadThread::new(
+            "thread".into(),
+        ))),
+    );
+    assert!(refreshed.navigation.thread_id.is_none());
+    assert_eq!(refreshed.navigation.draft_key, "new:/previous");
+    let thread = serde_json::from_value(json!({"id":"thread","cwd":"/workspace"})).unwrap();
+    let (loaded, _) = applied(
+        &opening,
+        op::ReadThread::open("thread".into()),
+        reply(thread),
+    );
+    assert_eq!(loaded.navigation.thread_id.as_deref(), Some("thread"));
+    assert_eq!(loaded.navigation.cwd, "/workspace");
+}
+
+#[test]
 fn only_external_conversations_watch_persisted_history() {
     for status in ["idle", "active", "notLoaded"] {
         let thread: Thread = serde_json::from_value(json!({
