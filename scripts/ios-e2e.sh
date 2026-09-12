@@ -15,6 +15,8 @@ if [[ $# == 0 ]]; then
         testSimulatorFetchesNewTaskWhenReturningToList \
         testSimulatorFetchesNewTaskAfterForeground \
         testSimulatorKeepsOpenTaskAndFetchesLatestReplyAfterForeground \
+        testSimulatorOpensTasksBeforeHistoryReadFinishes \
+        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorReconnectClearsHistoryFailureAndPreservesDraft \
         testSimulatorUpdatesAnOpenConversationFromAnotherClient \
         testSimulatorReviewsTheOpenSessionsWorktree \

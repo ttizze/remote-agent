@@ -183,6 +183,18 @@ fn route(
         "/fail-next-history-read" => {
             fs::write(root.join("fail-next-history-read"), "")?;
         }
+        "/hold-history-reads" => {
+            fs::write(root.join("hold-history-reads"), [])?;
+        }
+        "/release-history-reads" => {
+            for name in ["hold-history-reads", "history-read-held"] {
+                match fs::remove_file(root.join(name)) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         _ => return Ok((404, Vec::new())),
     }
     Ok((204, Vec::new()))

@@ -813,6 +813,69 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
     .expect("remote registration deadline");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&json!([
+            {"id":"selected","name":"Selected task","cwd":root,"historyMode":"paginated","createdAt":1,"updatedAt":1}
+        ])).unwrap()).unwrap();
+        let fixture = Fixture::start(&root).await;
+        let local = fixture.local().await;
+        let invitation: Invitation = serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
+        let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation)).await.unwrap();
+        store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::SetDraftText { thread_id: "selected".into(), text: "Unsent draft".into() }).await.unwrap();
+        let mut saved = None;
+        let mut owner = Some(store);
+        for cached in [false, true] {
+            let store = if let Some(store) = owner.take() { store } else {
+                Store::connect(&endpoint, &fixture.ticket, saved.take().unwrap(), None).await.unwrap()
+            };
+            assert_eq!(store.snapshot().conversations.contains_key("selected"), cached);
+            if cached {
+                std::fs::write(root.join("background-reply"), "Latest reply from another client").unwrap();
+            }
+            std::fs::write(root.join("hold-history-reads"), []).unwrap();
+            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("selected".into())));
+            tokio::pin!(opening);
+            assert_eq!(store.snapshot().navigation.thread_id.as_deref(), Some("selected"));
+            assert_eq!(store.snapshot().navigation.draft_key, "selected");
+            assert_eq!(store.snapshot().drafts["selected"].text, "Unsent draft");
+            while !root.join("history-read-held").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut opening).await.is_err());
+            if cached {
+                let thread = &store.snapshot().conversations["selected"];
+                assert_eq!(thread.turns.as_ref().unwrap().last().unwrap().items.as_ref().unwrap()[0].text.as_deref(), Some("History for Selected task"));
+            }
+            // List refresh shares the production transport but must not wait for history.
+            store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+            assert!(store.snapshot().threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_deref() == Some("selected")));
+            std::fs::remove_file(root.join("hold-history-reads")).unwrap();
+            std::fs::remove_file(root.join("history-read-held")).unwrap();
+            opening.await.unwrap();
+            let current = store.snapshot();
+            let last = current.conversations["selected"].turns.as_ref().unwrap().last().unwrap();
+            assert_eq!(last.status.as_deref(), Some("completed"));
+            assert_eq!(last.items.as_ref().unwrap()[0].text.as_deref(), Some(if cached { "Latest reply from another client" } else { "History for Selected task" }));
+            assert_eq!(current.navigation.thread_id.as_deref(), Some("selected"));
+            assert_eq!(current.drafts["selected"].text, "Unsent draft");
+            assert!(current.error.is_none(), "{:?}", current.error);
+            store.dispatch(Intent::ShowThreadList).await.unwrap();
+            saved = Some(serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap()).unwrap());
+            store.close().await.unwrap();
+        }
+        endpoint.close().await;
+        local.close().await;
+        fixture.close().await;
+    }).await.expect("opening a task exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();

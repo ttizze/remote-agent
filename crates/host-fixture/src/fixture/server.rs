@@ -82,6 +82,33 @@ impl Context {
         self.write(&Reply { id, result })
     }
 
+    fn respond_history(&self, id: &Value, result: &impl Serialize) -> Result<()> {
+        let gate = self.home.join("hold-history-reads");
+        if !gate.exists() {
+            return self.respond(id, result);
+        }
+        let response = serde_json::to_string(&json!({"id":id,"result":result}))?;
+        let id = id.clone();
+        let output = self.output.clone();
+        fs::write(self.home.join("history-read-held"), [])?;
+        tokio::spawn(async move {
+            let released = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+                while gate.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            let response = if released.is_ok() {
+                response
+            } else {
+                json!({"id":id,"error":{"code":-32000,"message":"fixture history gate timed out"}})
+                    .to_string()
+            };
+            let _ = output.send(Output::Message(response));
+        });
+        Ok(())
+    }
+
     pub(super) fn error(&self, id: &Value, code: i32, message: &str) -> Result<()> {
         self.write(&json!({"id":id,"error":{"code":code,"message":message}}))
     }
@@ -475,8 +502,10 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                                 context.respond(id, &Read { thread: &persisted })?;
                             } else { context.respond(id, &Read { thread })?; }
                         } else {
-                            context.respond(id, &Read { thread: &ThreadView { metadata: &thread.metadata,
-                                turns: if method == "thread/read" { &[] } else { &thread.turns } } })?;
+                            let response = Read { thread: &ThreadView { metadata: &thread.metadata,
+                                turns: if method == "thread/read" { &[] } else { &thread.turns } } };
+                            if method == "thread/read" { context.respond_history(id, &response)?; }
+                            else { context.respond(id, &response)?; }
                         }
                     }
                 }
