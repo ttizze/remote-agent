@@ -5,6 +5,11 @@
 - Do not add an enum variant, error type, generic parameter, trait method, option, or module that has one user. Add it when the second user appears.
 - Each change reports lines added, lines removed, and which existing code the new code replaces. A change that only adds is suspect.
 
+# Integration
+
+- Reuse the current task worktree. Serialize updates to `main` and the running Host; separate worktrees do not isolate either. Integrate dependencies explicitly and preserve other sessions' uncommitted work.
+- Build the Host and affected clients from the same revision. Before deployment, identify the executable actually running and account for active tasks before restarting it. Verify the changed operation against that process; rebuilding a file does not update a running Host.
+
 # Tests
 
 - Assert the user's complete outcome, not an intermediate state: the input reaches the conversation, the turn completes, the draft clears, no error remains. Reopen when persistence is part of the contract.
@@ -13,6 +18,8 @@
 - Match the shipped binary's features and first-use initialization (TLS providers, auth, process-global state) when they could hide the failure.
 - A failure-path test proves error handling, not the successful operation. Report exactly which boundary was exercised and what remains unverified.
 - For each escaped bug, add the smallest regression that fails for its cause. Never weaken an assertion or substitute a simpler configuration.
+
+- When migrating fixtures or runners, preserve initial state, values and counts, response/event order, fixture lifetime, and selected tests. Compare both versions before changing assertions. Navigation and concurrency checks must exercise overlapping operations and late callbacks.
 
 # Debugging mobile
 
