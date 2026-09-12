@@ -124,7 +124,10 @@ never dropped solely because the mobile build does not know their type.
 
 Markdown HTTP/HTTPS links open in the system browser. File links resolve on the
 selected Host, including relative paths, URL-escaped spaces and line suffixes.
-Mac opens the resulting file with the system application. iPhone uses a
+Mac opens images in its image viewer and other files in the Files panel with
+the parent directory and editor, preserving unsaved file drafts and revision checks.
+Side Chat uses its own Files/Diff panel and returns to the same conversation draft.
+iPhone uses a
 temporary download and a Quick Look sheet with an explicit close action;
 closing the sheet removes the temporary copy.
 

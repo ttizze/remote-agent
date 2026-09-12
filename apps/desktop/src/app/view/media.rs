@@ -223,47 +223,11 @@ impl Desktop {
             self.open_image_gallery(Arc::new(path.to_string_lossy().into_owned()), false, cx);
             return;
         }
-        let store = self.session.as_ref().map(|session| session.store.clone());
-        let remote = self.remote.is_some();
-        let directory = self.image_dir.path().to_owned();
-        self.effect(
-            async move {
-                let path = if remote {
-                    let download = tempfile::Builder::new()
-                        .prefix("link-")
-                        .tempdir_in(directory)
-                        .map_err(|error| error.to_string())?
-                        .keep();
-                    let destination =
-                        download.join(path.file_name().ok_or("ファイル名がありません")?);
-                    store
-                        .ok_or("Host に接続していません")?
-                        .dispatch(Intent::DownloadFile(op::DownloadFile {
-                            source: path
-                                .into_os_string()
-                                .into_string()
-                                .map_err(|_| "download source is not UTF-8")?,
-                            destination: destination
-                                .to_str()
-                                .ok_or("download destination is not UTF-8")?
-                                .into(),
-                        }))
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    destination
-                } else {
-                    path
-                };
-                let path = tokio::fs::canonicalize(path)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                url::Url::from_file_path(path).map_err(|_| "ファイルパスが不正です".into())
-            },
-            |view, result, _, cx| match result {
-                Ok(url) => cx.open_url(url.as_str()),
-                Err(error) => view.set_error(error),
-            },
-        );
+        if let Some(parent) = path.parent() {
+            self.browse(parent.to_string_lossy().into_owned());
+        }
+        self.edit(path.to_string_lossy().into_owned(), false);
+        cx.notify();
     }
 
     pub(super) fn open_image_gallery(
@@ -553,5 +517,99 @@ impl Desktop {
         })
         .detach();
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod file_panel_tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[gpui::test]
+    fn side_chat_links_and_changes_are_visible_and_return_to_the_same_draft(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::new(crate::platform::Connections::default()),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let mut desktop = None;
+        let (_, window) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                Desktop::new(
+                    Mode::SideChat {
+                        remote: Some(RemoteHost {
+                            id: "fixture".into(),
+                            name: "fixture".into(),
+                            ticket: "invalid-fixture-ticket".into(),
+                            extra: Default::default(),
+                        }),
+                        cwd: "/fixture".into(),
+                    },
+                    window,
+                    cx,
+                )
+            });
+            desktop = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let desktop = desktop.unwrap();
+        window.update(|window, cx| {
+            desktop.update(cx, |view, cx| {
+                Arc::make_mut(&mut Arc::make_mut(&mut view.snapshot).navigation).cwd =
+                    "/fixture".into();
+                view.composer.update(cx, |input, cx| {
+                    input.set_value("Keep this side draft", window, cx)
+                });
+                view.open_conversation_link("readme.txt:1", cx);
+                assert!(view.panel_open && view.panel == Panel::Files);
+                cx.notify();
+            })
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("conversation-files").is_some(),
+            "file links must show the file panel"
+        );
+        let back = window
+            .debug_bounds("back-side-chat")
+            .expect("return to side chat");
+        window.simulate_click(back.center(), Modifiers::default());
+        window.update(|_, cx| {
+            desktop.update(cx, |view, cx| {
+                assert_eq!(
+                    view.composer.read(cx).value().as_ref(),
+                    "Keep this side draft"
+                );
+                assert!(!view.panel_open);
+                view.open_review(None, cx);
+                cx.notify();
+            })
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("diff-file-navigation").is_some(),
+            "change summaries must show the diff panel"
+        );
+        let back = window.debug_bounds("back-side-chat").unwrap();
+        window.simulate_click(back.center(), Modifiers::default());
+        window.update(|_, cx| {
+            desktop.update(cx, |view, cx| {
+                assert_eq!(
+                    view.composer.read(cx).value().as_ref(),
+                    "Keep this side draft"
+                );
+                assert!(!view.panel_open);
+            })
+        });
     }
 }

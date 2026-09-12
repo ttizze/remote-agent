@@ -243,9 +243,8 @@ impl Render for Desktop {
         let active = self.image_gallery.is_none() && self.panel_open && self.tab == Tab::Chat;
         let composer_visible = self.image_gallery.is_none()
             && self.tab == Tab::Chat
-            && (self.side_chat_mode
-                || !self.panel_open
-                || window.viewport_size().width >= px(1080.));
+            && (!self.panel_open
+                || (!self.side_chat_mode && window.viewport_size().width >= px(1080.)));
         if !composer_visible {
             self.cancel_recording();
         }
@@ -335,7 +334,11 @@ impl Render for Desktop {
             .selected(self.panel_open),
         );
         let content = if self.side_chat_mode {
-            self.chat(cx)
+            if self.panel_open {
+                self.workbench(cx)
+            } else {
+                self.chat(cx)
+            }
         } else if self.tab == Tab::Settings {
             self.settings(cx)
         } else if self.panel_open {
