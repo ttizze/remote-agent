@@ -1013,7 +1013,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
         let mut session = service.open_session(64);
         async fn request(service: &CodexRpcService, session: &mut host_daemon::CodexSession, method: &str, params: Value) -> Value {
-            service.dispatch_request(session.id(), json!({"id":42,"method":method,"params":params}).to_string()).await.unwrap();
+            service.dispatch(session.id(), &agent_core::peer::RpcMessage::parse(&json!({"id":42,"method":method,"params":params}).to_string()).unwrap()).await.unwrap();
             loop {
                 let response: Value = serde_json::from_str(&session.recv().await.unwrap()).unwrap();
                 if response["id"] == 42 {

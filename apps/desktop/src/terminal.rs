@@ -83,24 +83,17 @@ impl Terminal {
         let connections = runtime.connections.clone();
         let session_runtime = runtime.clone();
         runtime.handle.spawn(async move {
-            match connections
-                .connect(remote.as_deref(), Snapshot::default())
-                .await
-            {
-                Ok(store) => {
-                    StoreSession::publish(
-                        Arc::new(store),
-                        session_runtime,
-                        updates,
-                        |session| Event::Connected(Ok(session)),
-                        Event::Snapshot,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    let _ = updates.send(Event::Connected(Err(error))).await;
-                }
-            }
+            StoreSession::publish(
+                connections
+                    .connect(remote.as_deref(), Snapshot::default())
+                    .await
+                    .map(Arc::new),
+                session_runtime,
+                updates,
+                Event::Connected,
+                Event::Snapshot,
+            )
+            .await;
         });
         Ok(cx.new(|cx: &mut Context<Self>| {
             StoreSession::on_app_quit(cx, |view| &mut view.session);

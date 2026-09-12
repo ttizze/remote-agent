@@ -208,9 +208,8 @@ impl HostRuntime {
         &self,
         node: NodeId,
         session: SessionId,
-        line: String,
+        message: &RpcMessage<'_>,
     ) -> Result<Option<String>, String> {
-        let message = RpcMessage::parse(&line).map_err(|e| e.to_string())?;
         let management = matches!(
             message.method(),
             Some(
@@ -224,36 +223,23 @@ impl HostRuntime {
             )
         );
         if management && message.kind() == RpcMessageKind::Request {
-            let request: Request = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-            let result = if request.method == "host/pair" {
+            let method = message.method().expect("management request has a method");
+            let result = if method == "host/pair" {
                 // Only authorized sessions reach dispatch; the invitation was
                 // already consumed at the transport gate.
                 Ok(json!({}))
             } else if node != self.local_node {
                 Err("management requires the local node".into())
             } else {
-                self.manage(&request.method, request.params).await
-            };
-            return Ok(Some(response(request.id, result)));
-        }
-        match message.kind() {
-            RpcMessageKind::Request => self
-                .service
-                .dispatch_request(session, line)
-                .await
-                .map_err(|e| e.to_string())?,
-            RpcMessageKind::Notification => self
-                .service
-                .dispatch_notification(session, line)
-                .await
-                .map_err(|e| e.to_string())?,
-            RpcMessageKind::Response => {
-                self.service
-                    .dispatch_response(session, line)
+                self.manage(method, message.params().map_err(|e| e.to_string())?)
                     .await
-                    .map_err(|e| e.to_string())?;
-            }
+            };
+            return message
+                .response(result.map_err(|message| json!({"code": -32602, "message": message})))
+                .map(Some)
+                .map_err(|e| e.to_string());
         }
+        self.service.dispatch(session, message).await?;
         Ok(None)
     }
     async fn manage(&self, method: &str, params: Value) -> Result<Value, String> {
@@ -360,20 +346,6 @@ impl HostRuntime {
             _ => Err("unknown management method".into()),
         }
     }
-}
-#[derive(Deserialize)]
-struct Request {
-    id: Value,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-fn response(id: Value, result: Result<Value, String>) -> String {
-    match result {
-        Ok(result) => json!({"id":id,"result":result}),
-        Err(message) => json!({"id":id,"error":{"code":-32602,"message":message}}),
-    }
-    .to_string()
 }
 fn now() -> u64 {
     SystemTime::now()

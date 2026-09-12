@@ -32,12 +32,19 @@ impl StoreSession {
     }
 
     pub(crate) async fn publish<E: Send>(
-        store: Arc<Store>,
+        result: Result<Arc<Store>, String>,
         runtime: Runtime,
         updates: async_channel::Sender<E>,
-        connected: impl FnOnce(Self) -> E,
+        connected: impl FnOnce(Result<Self, String>) -> E,
         snapshot: impl Fn(Arc<Snapshot>) -> E,
     ) {
+        let store = match result {
+            Ok(store) => store,
+            Err(error) => {
+                let _ = updates.send(connected(Err(error))).await;
+                return;
+            }
+        };
         let mut snapshots = store.subscribe();
         let session = Self {
             store,
@@ -46,7 +53,7 @@ impl StoreSession {
             persistence: None,
             persistence_task: None,
         };
-        if updates.send(connected(session)).await.is_err() {
+        if updates.send(connected(Ok(session))).await.is_err() {
             return;
         }
         loop {
@@ -127,7 +134,7 @@ mod tests {
     use std::time::Duration;
 
     enum Update {
-        Connected(StoreSession),
+        Connected(Result<StoreSession, String>),
         Snapshot,
         Error,
     }
@@ -149,13 +156,13 @@ mod tests {
             let store = Arc::new(Store::offline(Snapshot::default()));
             let (updates, incoming) = async_channel::unbounded();
             let publish = tokio::spawn(StoreSession::publish(
-                store.clone(),
+                Ok(store.clone()),
                 runtime.clone(),
                 updates.clone(),
                 Update::Connected,
                 |_| Update::Snapshot,
             ));
-            let Update::Connected(mut session) = incoming.recv().await.unwrap() else {
+            let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
                 panic!("missing session")
             };
             session.persist(path.clone(), updates, |_| Update::Error);
@@ -189,13 +196,13 @@ mod tests {
             let store = Arc::new(Store::offline(Snapshot::default()));
             let (updates, incoming) = async_channel::unbounded();
             let publish = tokio::spawn(StoreSession::publish(
-                store.clone(),
+                Ok(store.clone()),
                 runtime.clone(),
                 updates.clone(),
                 Update::Connected,
                 |_| Update::Snapshot,
             ));
-            let Update::Connected(mut session) = incoming.recv().await.unwrap() else {
+            let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
                 panic!("missing session")
             };
             session.persist(path.clone(), updates, |_| Update::Error);
@@ -222,14 +229,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_undelivered_session_closes_its_store() {
+    async fn failed_connection_is_delivered_and_undelivered_session_closes_its_store() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let runtime = runtime();
             let store = Arc::new(Store::offline(Snapshot::default()));
             let (updates, incoming) = async_channel::unbounded();
+            StoreSession::publish(
+                Err("connection failed".into()), runtime.clone(), updates.clone(),
+                Update::Connected, |_| Update::Snapshot,
+            ).await;
+            assert!(matches!(incoming.recv().await.unwrap(), Update::Connected(Err(error)) if error == "connection failed"));
+            assert!(incoming.try_recv().is_err());
             drop(incoming);
             StoreSession::publish(
-                store.clone(),
+                Ok(store.clone()),
                 runtime.clone(),
                 updates,
                 Update::Connected,

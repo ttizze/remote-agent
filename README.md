@@ -27,6 +27,8 @@ nix develop . --command cargo clippy -p agent-core -p agent-cli --all-targets --
 
 The tests execute all 87 expanded behavior-corpus cases and launch the actual CLI against isolated iroh fixture servers for listing, sending and numeric/string approval IDs. They also cover ordered Store publication, concurrent approval handling, unchanged draft preservation and ticket authorization. The daemon integration suite exercises real isolated iroh endpoints, pairing, concurrent approvals, binary transfers, title pagination, large history and worktree creation. These checks do not verify native UIs, production Keychain access, physical devices or other operating systems.
 
+On Unix, isolated Host fixtures raise their process's file-descriptor soft limit to at least 4096 before opening endpoints, including when invoked directly with `cargo test`. This covers the 80-client admission test and concurrent fixtures. Existing higher limits and the hard limit are preserved; an insufficient hard limit fails fixture startup with an explicit error.
+
 The CLI accepts either `--stdio <fixture-executable>` with repeatable `--stdio-arg`, or `--ticket <endpoint-ticket> --identity-file <existing-32-byte-client-key>` for an already paired iroh Host. A new client can supply `--invitation <invitation-UUID>` with its ticket to pair before its first operation. `--no-relay` disables relays and public address lookup for isolated fixtures. It prints JSON results to stdout and errors to stderr. Supported commands:
 
 ```sh

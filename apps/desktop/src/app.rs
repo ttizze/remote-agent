@@ -503,12 +503,12 @@ impl Desktop {
             match result {
                 Ok((store, path)) => {
                     StoreSession::publish(
-                        store,
+                        Ok(store),
                         runtime,
                         updates,
                         move |session| Update::Connected {
                             epoch,
-                            result: Ok((session, path)),
+                            result: session.map(|session| (session, path)),
                         },
                         move |_| Update::Snapshot(epoch),
                     )

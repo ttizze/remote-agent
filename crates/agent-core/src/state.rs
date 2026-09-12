@@ -290,23 +290,8 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
 
         Intent::ShowThreadList => {
             next.epoch += 1;
-            let watch = previous.navigation.watch_id;
-            next.navigation = Arc::new(Navigation {
-                ..Default::default()
-            });
-            clear_workspace_location(Arc::make_mut(&mut next.workspace));
-            return (
-                next,
-                watch
-                    .into_iter()
-                    .map(|watch_id| {
-                        Effect::execute(op::Unwatch {
-                            watch_key: 1,
-                            watch_id,
-                        })
-                    })
-                    .collect(),
-            );
+            let effects = navigate(&mut next, Navigation::default());
+            return (next, effects);
         }
         Intent::NewChat { cwd } => {
             next.epoch += 1;
@@ -322,24 +307,11 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 };
                 Arc::make_mut(&mut next.drafts).insert(key.clone(), Arc::new(draft));
             }
-            if previous.navigation.cwd != cwd {
-                clear_workspace_location(Arc::make_mut(&mut next.workspace));
-            }
-            let navigation = Arc::make_mut(&mut next.navigation);
-            let watch = navigation.watch_id.take();
-            navigation.watch_thread_id = None;
-            navigation.thread_id = None;
-            navigation.draft_key = key;
-            navigation.cwd = cwd;
-            let mut effects: Vec<_> = watch
-                .into_iter()
-                .map(|watch_id| {
-                    Effect::execute(op::Unwatch {
-                        watch_key: 1,
-                        watch_id,
-                    })
-                })
-                .collect();
+            let mut effects = navigate(&mut next, Navigation {
+                cwd,
+                draft_key: key,
+                ..Default::default()
+            });
             effects.extend(op::review_workspace(&mut next));
             return (next, effects);
         }
@@ -447,6 +419,28 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     });
     (next, Vec::new())
 }
+fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
+    let watch = snapshot.navigation.watch_id;
+    if snapshot.navigation.cwd != navigation.cwd || navigation.draft_key.is_empty() {
+        clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
+    }
+    if let Some(id) = &navigation.thread_id
+        && snapshot.activity.unread.contains(id)
+    {
+        Arc::make_mut(&mut snapshot.activity).unread.remove(id);
+    }
+    snapshot.navigation = Arc::new(navigation);
+    watch
+        .into_iter()
+        .map(|watch_id| {
+            Effect::execute(op::Unwatch {
+                watch_key: 1,
+                watch_id,
+            })
+        })
+        .collect()
+}
+
 fn prepare<O: operations::Operation>(
     previous: &Snapshot,
     mut next: Snapshot,

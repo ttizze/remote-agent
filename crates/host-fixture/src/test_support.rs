@@ -41,6 +41,22 @@ impl HostFixture {
         name: &str,
         accounts: bool,
     ) -> Result<Self, String> {
+        #[cfg(unix)]
+        {
+            use rustix::process::{Resource, getrlimit, setrlimit};
+            // The 80-client admission test alone exceeds macOS's default 256 FDs.
+            // Leave room for the other isolated Hosts in the parallel test suite.
+            let mut limit = getrlimit(Resource::Nofile);
+            if limit.current.is_some_and(|current| current < 4096) {
+                limit.current = Some(4096);
+                setrlimit(Resource::Nofile, limit).map_err(|error| {
+                    format!(
+                        "Host fixtures require 4096 file descriptors (hard limit {:?}): {error}",
+                        limit.maximum
+                    )
+                })?;
+            }
+        }
         let credentials =
             Arc::new(HostCredentials::load(memory.clone(), directory.join("state")).await?);
         let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)

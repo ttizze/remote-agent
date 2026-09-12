@@ -20,6 +20,7 @@ pub enum RpcMessageKind {
 /// fields are never deserialized here.
 #[derive(Debug)]
 pub struct RpcMessage<'a> {
+    line: &'a str,
     kind: RpcMessageKind,
     raw_id: Option<&'a str>,
     method: Option<String>,
@@ -29,7 +30,11 @@ pub struct RpcMessage<'a> {
 impl<'a> RpcMessage<'a> {
     pub fn parse(line: &'a str) -> Result<Self, RpcMessageError> {
         let object = parse_object(line)?;
-        classify_object(object)
+        classify_object(line, object)
+    }
+
+    pub fn line(&self) -> &'a str {
+        self.line
     }
 
     pub const fn kind(&self) -> RpcMessageKind {
@@ -52,7 +57,7 @@ impl<'a> RpcMessage<'a> {
         )?)
     }
 
-    pub(crate) fn rewrite_id(&self, replacement_id: &str) -> Result<String, RpcMessageError> {
+    pub fn rewrite_id(&self, replacement_id: &str) -> Result<String, RpcMessageError> {
         if self.raw_id.is_none() {
             return Err(RpcMessageError::MissingIdForRewrite);
         }
@@ -257,6 +262,7 @@ fn parse_object<'a, T: serde::Deserialize<'a>>(
 }
 
 fn classify_object<'a>(
+    line: &'a str,
     object: BTreeMap<String, &'a RawValue>,
 ) -> Result<RpcMessage<'a>, RpcMessageError> {
     let has_id = object.contains_key("id");
@@ -302,6 +308,7 @@ fn classify_object<'a>(
     let raw_id = object.get("id").copied().map(RawValue::get);
 
     Ok(RpcMessage {
+        line,
         kind,
         raw_id,
         method,

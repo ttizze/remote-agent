@@ -18,14 +18,6 @@ pub(crate) enum ResponseRoute {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum RouteError {
-    #[error("RPC session {0} is not open")]
-    UnknownSession(SessionId),
-    #[error("RPC session {session} outbound queue is full")]
-    QueueFull { session: SessionId },
-}
-
 /// A live authenticated session's bounded outbound queue.
 pub struct CodexSession {
     id: SessionId,
@@ -160,53 +152,49 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), RouteError> {
+    pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), String> {
         if lock_state(&self.state).sessions.contains_key(&session) {
             Ok(())
         } else {
-            Err(RouteError::UnknownSession(session))
+            Err(format!("RPC session {session} is not open"))
         }
     }
 
-    pub(crate) fn send_line(&self, session: SessionId, line: String) -> Result<(), RouteError> {
+    pub(crate) fn send_line(&self, session: SessionId, line: String) -> Result<(), String> {
         let mut state = lock_state(&self.state);
         let sender = state
             .sessions
             .get(&session)
             .cloned()
-            .ok_or(RouteError::UnknownSession(session))?;
+            .ok_or_else(|| format!("RPC session {session} is not open"))?;
         match sender.try_send(line) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 remove_session_locked(&mut state, session);
-                Err(RouteError::QueueFull { session })
+                Err(format!("RPC session {session} outbound queue is full"))
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 remove_session_locked(&mut state, session);
-                Err(RouteError::UnknownSession(session))
+                Err(format!("RPC session {session} is not open"))
             }
         }
     }
 
     /// Fan out a raw Codex notification or server request. Notifications are
     /// sent unchanged; server requests get one unique id per phone.
-    pub(crate) fn handle_server_line(&self, line: &str) {
-        let Ok(message) = RpcMessage::parse(line) else {
-            return;
-        };
+    pub(crate) fn handle_server_message(&self, message: &RpcMessage<'_>) {
+        let line = message.line();
         let mut state = lock_state(&self.state);
         match message.kind() {
             RpcMessageKind::Notification => {
-                let resolved = resolved_server_request_id(line).is_some_and(|upstream_id| {
+                let resolved = resolved_server_request_id(message).is_some_and(|upstream_id| {
                     fanout_resolved_request_locked(&mut state, &upstream_id, line)
                 });
                 if !resolved {
                     broadcast_line_locked(&mut state, line);
                 }
             }
-            RpcMessageKind::Request => {
-                fanout_request_locked(&mut state, message.raw_id().unwrap_or_default(), line)
-            }
+            RpcMessageKind::Request => fanout_request_locked(&mut state, message),
             RpcMessageKind::Response => {
                 // Responses are consumed by CodexAppServer's own peer and are
                 // not expected on its event broadcast.
@@ -243,7 +231,9 @@ impl SessionRouter {
     }
 }
 
-fn fanout_request_locked(state: &mut State, upstream_id: &str, line: &str) {
+fn fanout_request_locked(state: &mut State, message: &RpcMessage<'_>) {
+    let upstream_id = message.raw_id().expect("classified request has an ID");
+    let line = message.line();
     if state.pending.contains_key(upstream_id) {
         return;
     }
@@ -256,7 +246,7 @@ fn fanout_request_locked(state: &mut State, upstream_id: &str, line: &str) {
     let mut failed = Vec::new();
     for session in sessions {
         let proxy_id = allocate_proxy_id(state);
-        let Ok(proxy_line) = rewrite_top_level_id(line, &proxy_id) else {
+        let Ok(proxy_line) = message.rewrite_id(&proxy_id) else {
             failed.push(session);
             continue;
         };
@@ -295,12 +285,11 @@ fn broadcast_line_locked(state: &mut State, line: &str) {
     }
 }
 
-fn resolved_server_request_id(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(line).ok()?;
-    if value.get("method")?.as_str()? != "serverRequest/resolved" {
+fn resolved_server_request_id(message: &RpcMessage<'_>) -> Option<String> {
+    if message.method()? != "serverRequest/resolved" {
         return None;
     }
-    serde_json::to_string(value.get("params")?.get("requestId")?).ok()
+    serde_json::to_string(message.params::<Value>().ok()?.get("requestId")?).ok()
 }
 
 /// Codex identifies a resolved request with its upstream id. Each phone only
@@ -410,7 +399,7 @@ mod tests {
         let mut first = router.open_session(4);
         let mut second = router.open_session(4);
         let line = r#"{"id":"codex-1","method":"item/request","params":{"future":{"id":7}},"unknown":{"keep":true}}"#;
-        router.handle_server_line(line);
+        router.handle_server_message(&RpcMessage::parse(line).unwrap());
 
         let first_line = first.recv().await.unwrap();
         let second_line = second.recv().await.unwrap();
@@ -440,7 +429,7 @@ mod tests {
         let mut first = router.open_session(4);
         let mut second = router.open_session(4);
         let line = r#" {"method":"future/event","params":{"unknown":[1,{"id":2}]} } "#;
-        router.handle_server_line(line);
+        router.handle_server_message(&RpcMessage::parse(line).unwrap());
         assert_eq!(first.recv().await.unwrap(), line);
         assert_eq!(second.recv().await.unwrap(), line);
     }
@@ -450,9 +439,7 @@ mod tests {
         let router = SessionRouter::new();
         let mut first = router.open_session(4);
         let mut second = router.open_session(4);
-        router.handle_server_line(
-            r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}"#,
-        );
+        router.handle_server_message(&RpcMessage::parse(r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}"#).unwrap());
         let first_request = first.recv().await.unwrap();
         let second_request = second.recv().await.unwrap();
         let first_id = RpcMessage::parse(&first_request)
@@ -480,9 +467,7 @@ mod tests {
             "an answered request must not be replayed while Codex resolves it"
         );
 
-        router.handle_server_line(
-            r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#,
-        );
+        router.handle_server_message(&RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#).unwrap());
 
         let first_resolved: Value = serde_json::from_str(&first.recv().await.unwrap()).unwrap();
         let second_resolved: Value = serde_json::from_str(&second.recv().await.unwrap()).unwrap();
@@ -511,7 +496,9 @@ mod tests {
     async fn unresolved_requests_are_replayed_to_later_sessions() {
         let router = SessionRouter::new();
         let mut first = router.open_session(4);
-        router.handle_server_line(r#"{"id":1,"method":"request","params":{}}"#);
+        router.handle_server_message(
+            &RpcMessage::parse(r#"{"id":1,"method":"request","params":{}}"#).unwrap(),
+        );
         let _ = first.recv().await.unwrap();
         drop(first);
 

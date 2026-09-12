@@ -42,15 +42,15 @@ pub(crate) async fn serve_jsonl_session(
                 Ok(PeerEvent::Closed(_)) => break Ok(()),
                 Err(error) => break Err(error.to_string()),
                 Ok(PeerEvent::Message(message)) => {
-                    let notification = RpcMessage::parse(&message.value).map_err(|e| e.to_string())?.kind() == RpcMessageKind::Notification;
-                    if notification {
-                        runtime.dispatch(node, id, message.value.to_string()).await?;
+                    let parsed = RpcMessage::parse(&message.value).map_err(|e| e.to_string())?;
+                    if parsed.kind() == RpcMessageKind::Notification {
+                        runtime.dispatch(node, id, &parsed).await?;
                     } else {
                         if tasks.len() >= 128 { break Err("maximum in-flight request count reached".into()); }
                         let peer = peer.clone();
                         let runtime = runtime.clone();
                         tasks.spawn(async move {
-                            if let Some(response) = runtime.dispatch(node, id, message.value.to_string()).await? {
+                            if let Some(response) = runtime.dispatch(node, id, &RpcMessage::parse(&message.value).map_err(|e| e.to_string())?).await? {
                                 peer.send_raw(response).await.map_err(|e| e.to_string())?;
                             }
                             Ok(())
@@ -71,7 +71,7 @@ pub(crate) async fn serve_jsonl_session(
                     let service = &runtime.service;
                     let (request, abort) = abortable(async move {
                         let response = request.await.map_err(|e| e.to_string())?;
-                        service.dispatch_response(id, response.value).await.map_err(|e| e.to_string())?;
+                        service.dispatch(id, &RpcMessage::parse(&response.value).map_err(|e| e.to_string())?).await?;
                         Ok::<_, String>(())
                     });
                     if let Some((_, previous)) = aliases.insert(alias, (wire_id, abort)) { previous.abort(); }

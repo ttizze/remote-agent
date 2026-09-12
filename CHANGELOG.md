@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Establish the descriptor budget inside isolated Host fixture startup so the full 80-client admission test also runs under macOS's inherited 256-descriptor limit. Fail before opening endpoints if the process hard limit prevents the required budget.
+
+- Share navigation reset and history-watch release in core. Route already-classified Host RPC messages through one dispatcher, remove unused routing error enums and repeated envelope parsing, and share Desktop connection-failure delivery.
+
 - Render the existing Rust conversation data directly in native views, removing Swift presentation mirrors and client projection caches. Resolve list pagination, history cursors, project grouping and title fallbacks in core. Restore Desktop file-change headers and diffs by reading the typed change field.
 
 - Keep chats without a selected project unassigned after sending, reopening, and restarting the Host. Use a dedicated `bex-chats` working directory beside the Codex project state instead of inheriting the App Server's checkout, while retaining the real directory for attachments and file operations. Preserve unsent drafts when that directory cannot be prepared, and skip automatic Git reviews for unassigned chats so a parent repository’s changes do not appear.

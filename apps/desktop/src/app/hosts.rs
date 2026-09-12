@@ -95,21 +95,17 @@ impl Hosts {
         let connections = self.runtime.connections.clone();
         let runtime = self.runtime.clone();
         self.runtime.handle.spawn(async move {
-            match connections.connect(None, Snapshot::default()).await {
-                Ok(store) => {
-                    StoreSession::publish(
-                        Arc::new(store),
-                        runtime,
-                        updates,
-                        |session| Update::Connected(Ok(session)),
-                        |_| Update::Snapshot,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    let _ = updates.send(Update::Connected(Err(error))).await;
-                }
-            }
+            StoreSession::publish(
+                connections
+                    .connect(None, Snapshot::default())
+                    .await
+                    .map(Arc::new),
+                runtime,
+                updates,
+                Update::Connected,
+                |_| Update::Snapshot,
+            )
+            .await;
         });
     }
     fn dispatch(&mut self, intent: Intent, action: Action) {

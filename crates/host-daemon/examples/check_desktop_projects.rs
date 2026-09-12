@@ -14,9 +14,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service = CodexRpcService::new(server.clone(), projects);
     let mut session = service.open_session(128);
     service
-        .dispatch_request(
+        .dispatch(
             session.id(),
-            request_line("host/thread/list", &ListThreads::new(Default::default()))?,
+            &agent_core::peer::RpcMessage::parse(&request_line(
+                "host/thread/list",
+                &ListThreads::new(Default::default()),
+            )?)?,
         )
         .await?;
     loop {

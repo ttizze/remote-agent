@@ -151,26 +151,19 @@ pub(super) fn open_thread(
         .is_some_and(|status| status.kind == "notLoaded");
     let mut effects = refresh_thread(snapshot, thread);
     if let Some(id) = id {
-        if snapshot.navigation.cwd != cwd {
-            clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
-        }
-        let navigation = Arc::make_mut(&mut snapshot.navigation);
-        if let Some(watch_id) = navigation.watch_id.take() {
-            effects.push(Effect::execute(Unwatch {
-                watch_key: 1,
-                watch_id,
-            }));
-        }
-        navigation.watch_thread_id = None;
-        navigation.thread_id = Some(id.clone());
-        if snapshot.activity.unread.contains(&id) {
-            Arc::make_mut(&mut snapshot.activity).unread.remove(&id);
-        }
-        navigation.draft_key = id.clone();
-        navigation.cwd = cwd;
+        effects.extend(navigate(
+            snapshot,
+            Navigation {
+                thread_id: Some(id.clone()),
+                draft_key: id.clone(),
+                cwd,
+                ..Default::default()
+            },
+        ));
         // Loaded threads stream native events. Their advertised rollout may
         // not be materialized yet, so file changes must not trigger hydration.
         if external && path.is_some() {
+            let navigation = Arc::make_mut(&mut snapshot.navigation);
             navigation.watch_id = Some(snapshot.epoch);
             navigation.watch_thread_id = Some(id.clone());
             effects.push(Effect::execute(Watch {

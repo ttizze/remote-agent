@@ -18,7 +18,7 @@ pub use host_identity::{
     CredentialStore, FileKeyStore, HostCredentials, KeyringStore, load_local_identity,
 };
 
-pub use codex_rpc::{CodexRpcService, CodexSession, DispatchError, SessionId};
+pub use codex_rpc::{CodexRpcService, CodexSession, SessionId};
 pub use desktop_projects::{
     DesktopProjectError, DesktopProjectStore, HOST_THREAD_LIST_METHOD, HOST_THREAD_READ_METHOD,
     HOST_THREAD_START_METHOD, ThreadPage,

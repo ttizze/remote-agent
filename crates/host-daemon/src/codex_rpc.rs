@@ -9,4 +9,4 @@ mod service;
 mod thread_watch;
 
 pub use routing::{CodexSession, SessionId};
-pub use service::{CodexRpcService, DispatchError};
+pub use service::CodexRpcService;

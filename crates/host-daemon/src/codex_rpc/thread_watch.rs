@@ -179,9 +179,7 @@ impl ThreadWatches {
     ) -> Result<agent_core::models::Empty, String> {
         let watches = self.clone();
         tokio::task::spawn_blocking(move || {
-            router
-                .ensure_session(session)
-                .map_err(|error| error.to_string())?;
+            router.ensure_session(session)?;
             match request {
                 WatchRequest::Unwatch(params) => watches.unwatch(session, params.watch_id),
                 WatchRequest::Watch(params) => watches.watch(session, router, params)?,

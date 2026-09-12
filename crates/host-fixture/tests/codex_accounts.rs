@@ -35,9 +35,12 @@ async fn call(
     params: Value,
 ) -> Value {
     service
-        .dispatch_request(
+        .dispatch(
             session.id(),
-            json!({"id":42,"method":method,"params":params}).to_string(),
+            &agent_core::peer::RpcMessage::parse(
+                &json!({"id":42,"method":method,"params":params}).to_string(),
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
