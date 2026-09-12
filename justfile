@@ -20,6 +20,7 @@ ios-e2e *tests:
 # Native conversation contracts used by the post-commit Swift check.
 conversation-ui:
     scripts/ios-e2e.sh \
+        testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
         testSimulatorCopiesOwnMessageIntoComposer \
         testSimulatorCopiesOnlySelectedMessageText \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \

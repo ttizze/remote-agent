@@ -222,12 +222,63 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
             restored.local_identity().await.node_id(),
             local.endpoint.node_id()
         );
-        rpc(
-            &local.peer,
-            "host/revoke",
-            json!({"nodeId":paired.endpoint.node_id()}),
+        let manager = agent_core::store::Store::connect(
+            &local.endpoint,
+            &fixture.ticket,
+            Default::default(),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        manager
+            .dispatch(agent_core::state::Intent::LoadHostManagement(
+                op::LoadHostManagement {},
+            ))
+            .await
+            .unwrap();
+        let device = paired.endpoint.node_id().to_string();
+        assert!(
+            manager
+                .snapshot()
+                .management
+                .status
+                .as_ref()
+                .unwrap()
+                .devices
+                .contains(&device)
+        );
+        manager
+            .dispatch(agent_core::state::Intent::RevokeDevice(op::RevokeDevice {
+                id: device.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !manager
+                .snapshot()
+                .management
+                .status
+                .as_ref()
+                .unwrap()
+                .devices
+                .contains(&device)
+        );
+        manager
+            .dispatch(agent_core::state::Intent::LoadHostManagement(
+                op::LoadHostManagement {},
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !manager
+                .snapshot()
+                .management
+                .status
+                .as_ref()
+                .unwrap()
+                .devices
+                .contains(&device)
+        );
         assert!(
             paired
                 .peer
@@ -245,6 +296,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .is_err()
         );
         revoked.endpoint.close().await;
+        manager.close().await.unwrap();
         local.close().await;
         fixture.close().await;
     })

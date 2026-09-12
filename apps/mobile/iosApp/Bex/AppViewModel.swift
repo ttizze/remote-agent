@@ -83,6 +83,41 @@ final class BexAppViewModel: ObservableObject {
         }
     }
 
+    func removeProfile(_ id: String) {
+        guard profiles.contains(where: { $0.id == id }) else { return }
+        do {
+            let remaining = profiles.filter { $0.id != id }
+            let encoded = try JSONEncoder().encode(remaining)
+            try DeviceIdentity.remove(id)
+            if selectedProfileId == id {
+                persist()
+                connection?.cancel()
+                observation?.cancel()
+                initialization?.cancel()
+                initialization = nil
+                let old = store
+                store = nil
+                selectedProfileId = nil
+                UserDefaults.standard.removeObject(forKey: "bex.selected-host")
+                let cancelled = pending
+                pending.removeAll()
+                for (_, complete) in cancelled {
+                    complete(.failure(CancellationError()))
+                }
+                isConnecting = false
+                notice = nil
+                connectionError = nil
+                publish(AgentCore.Snapshot.empty())
+                Task { [weak self] in
+                    do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
+                }
+            }
+            profiles = remaining
+            UserDefaults.standard.set(encoded, forKey: "bex.hosts.iroh")
+            screen = .profiles
+        } catch { notice = error.localizedDescription }
+    }
+
     private func initialize(_ id: String, previous old: AgentStore?) async {
         if let old {
             try? await old.shutdown()
@@ -137,6 +172,7 @@ final class BexAppViewModel: ObservableObject {
                     if let old = store {
                         try? await old.shutdown()
                     }
+                    guard !Task.isCancelled else { try? await owner.shutdown(); return }
                     profiles.removeAll { $0.id == id }
                     profiles.append(HostProfile(id: id, name: "PC Host", ticket: invitation.endpoint))
                     try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
@@ -147,7 +183,10 @@ final class BexAppViewModel: ObservableObject {
                     screen = .threads
                     isConnecting = false
                     observe(owner, host: id)
-                } catch { self?.isConnecting = false; self?.pairingError = error.localizedDescription }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self?.isConnecting = false; self?.pairingError = error.localizedDescription
+                }
             }
         } catch { pairingError = error.localizedDescription }
     }

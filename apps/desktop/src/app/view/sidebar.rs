@@ -192,8 +192,11 @@ impl Desktop {
                                     .map_or("この端末", |remote| remote.name.as_str())
                                     .to_owned(),
                                 cx,
-                                |s, _, _| {
+                                |s, _, cx| {
                                     s.tab = Tab::Settings;
+                                    if let Some(hosts) = &s.hosts {
+                                        hosts.update(cx, |hosts, _| hosts.refresh());
+                                    }
                                     s.dispatch(Intent::ReadWorktreeSettings(
                                         op::ReadWorktreeSettings {},
                                     ));

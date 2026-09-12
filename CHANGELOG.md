@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add iPhone PC-list connection removal with confirmation and credential deletion, preventing automatic reconnection after relaunch. Refresh Mac device management when opening settings, place removal above pairing QR codes, and fix the revoke request’s `nodeId` field so removing access closes active sessions and rejects reconnection.
+
 - Add saved Codex account switching to the Mac composer’s account/model menu, with current-account selection and model refresh after switching.
 - Run core/desktop behavior tests and isolated Simulator conversation regressions in post-commit quality. Honor Cargo's configured output directory in mobile binding/library builds and pass it through to Xcode. Correct the stale live-expansion contract and require integration evidence for changes developed in separate worktrees. Keep completed fixture output consistent between streaming and history, and verify both cached reopening and uncached deferred detail loading.
 

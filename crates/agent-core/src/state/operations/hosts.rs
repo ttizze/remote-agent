@@ -40,7 +40,7 @@ impl Operation for RemoveRemoteHost {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeDevice {
-    #[serde(rename = "node_id")]
+    #[serde(rename = "nodeId")]
     pub id: String,
 }
 impl rpc::RpcMethod for RevokeDevice {
