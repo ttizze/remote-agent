@@ -78,11 +78,14 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.staticTexts["GROUP_DETAIL_OUTPUT"].waitForExistence(timeout: 5))
         captureScreen(app, named: "Selected command group and command details expanded")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 20))
+        let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        let completion = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "件の過去のメッセージ"), evaluatedWith: completed
+        )
+        wait(for: [completion], timeout: 10)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
         XCTAssertFalse(progress.exists, "Completed work must hide interim commentary")
-        let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
-        XCTAssertTrue(completed.label.contains("件の過去のメッセージ"))
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.activity.")).count, 1)
         captureScreen(app, named: "Completed work automatically collapsed")
         completed.tap()
