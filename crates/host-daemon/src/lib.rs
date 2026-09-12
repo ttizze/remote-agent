@@ -6,6 +6,7 @@ mod git;
 mod host_identity;
 mod host_runtime;
 mod jsonl_session;
+pub mod local_host;
 pub mod platform;
 mod workspace_files;
 mod workspace_review;
@@ -15,7 +16,7 @@ pub use workspace_review::{WorkspaceReview, inspect_workspace};
 pub use host_runtime::HostRuntime;
 
 pub use host_identity::{
-    CredentialStore, FileKeyStore, HostCredentials, KeyringStore, load_local_identity,
+    CredentialStore, FileKeyStore, HostCredentials, KeyStorage, KeyringStore, load_local_identity,
 };
 
 pub use codex_rpc::{CodexRpcService, CodexSession, SessionId};

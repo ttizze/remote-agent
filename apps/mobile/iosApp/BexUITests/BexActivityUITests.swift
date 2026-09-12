@@ -23,7 +23,7 @@ extension BexLaunchUITests {
         let activity = prefixedElement(app, prefix: "turn.activity.fixture-turn-")
         let streamedCommand = prefixedElement(app, prefix: "item.fixture-command-")
         XCTAssertTrue(activity.waitForExistence(timeout: 10), "Streaming activity header did not appear")
-        XCTAssertTrue(streamedCommand.exists, "Live commands must remain visible while work is running")
+        XCTAssertFalse(streamedCommand.exists, "Live commands must stay collapsed until explicitly expanded")
         XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-commentary-").exists,
                       "Commentary must remain visible outside the work group")
@@ -56,9 +56,6 @@ extension BexLaunchUITests {
         try startSimulatorConversation(app, promptText: "[groups] Inspect grouped live activity")
         let first = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
         XCTAssertTrue(first.waitForExistence(timeout: 10))
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").exists,
-                      "Live activity must initially be expanded")
-        first.tap()
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
         XCTAssertFalse(app.buttons["回答をコピー"].exists, "Commentary must not show final-answer actions")
         let progress = prefixedElement(app, prefix: "item.fixture-progress-")
@@ -69,22 +66,26 @@ extension BexLaunchUITests {
             ":fixture-next-command-"
         )).firstMatch
         XCTAssertTrue(second.waitForExistence(timeout: 5))
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-next-command-").exists,
-                      "A new live group must initially be expanded")
+        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
         XCTAssertLessThan(first.frame.minY, progress.frame.minY)
         XCTAssertLessThan(progress.frame.minY, second.frame.minY)
         captureScreen(app, named: "Commands grouped between visible commentary")
+        second.tap()
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-next-command-").waitForExistence(timeout: 5))
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists,
-                       "A new group must leave the earlier group collapsed")
+                       "Expanding one group must leave the earlier group collapsed")
         app.buttons.matching(NSPredicate(format: "label == %@", "pwd")).firstMatch.tap()
         XCTAssertTrue(app.staticTexts["GROUP_DETAIL_OUTPUT"].waitForExistence(timeout: 5))
         captureScreen(app, named: "Selected command group and command details expanded")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 20))
+        let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
+        let completion = expectation(
+            for: NSPredicate(format: "label CONTAINS %@", "件の過去のメッセージ"), evaluatedWith: completed
+        )
+        wait(for: [completion], timeout: 10)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
         XCTAssertFalse(progress.exists, "Completed work must hide interim commentary")
-        let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
-        XCTAssertTrue(completed.label.contains("4件の過去のメッセージ"))
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.activity.")).count, 1)
         captureScreen(app, named: "Completed work automatically collapsed")
         completed.tap()
@@ -100,8 +101,7 @@ extension BexLaunchUITests {
 
         let retrying = app.staticTexts["サーバーが混み合っています。再接続しています"]
         XCTAssertTrue(retrying.waitForExistence(timeout: 10), "Retrying stream error was not visible")
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").exists,
-                      "Retrying work must keep its live activity expanded")
+        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 15))
         let recovered = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: retrying)
         wait(for: [recovered], timeout: 10)

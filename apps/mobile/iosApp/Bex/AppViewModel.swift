@@ -6,6 +6,8 @@ import Foundation
 final class BexAppViewModel: ObservableObject {
     @Published private(set) var snapshot = AgentCore.Snapshot.empty()
     @Published var screen: AppScreen = .profiles
+    @Published var sideChatRequest: SideChatRequest?
+    @Published var composerFocusRequest: UUID?
     @Published var isScanning = false
     @Published var transferError: String?
     @Published var transferring = false
@@ -20,10 +22,18 @@ final class BexAppViewModel: ObservableObject {
     @Published var interruptingTurnId: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
-    @Published private(set) var conversation: RenderedConversation?
-    private(set) var conversationRows: [TurnPresentationData] = []
+    @Published private(set) var conversation: ConversationPresentation?
     private(set) var list: ThreadList?
     private(set) var models: [Model] = []
+    private let presentation = ConversationPresentationCache()
+    private var presentationTask: Task<Void, Never>?
+    private var pendingPresentation: PresentationInput?
+    private struct PresentationInput {
+        let source: AgentCore.Thread?
+        let snapshot: AgentCore.Snapshot
+        let host: String?
+    }
+
     private var store: AgentStore?
     private var initialization: Task<Void, Never>?
     private var observation: Task<Void, Never>?
@@ -71,6 +81,41 @@ final class BexAppViewModel: ObservableObject {
             await writing?.value
             await self?.initialize(id, previous: old)
         }
+    }
+
+    func removeProfile(_ id: String) {
+        guard profiles.contains(where: { $0.id == id }) else { return }
+        do {
+            let remaining = profiles.filter { $0.id != id }
+            let encoded = try JSONEncoder().encode(remaining)
+            try DeviceIdentity.remove(id)
+            if selectedProfileId == id {
+                persist()
+                connection?.cancel()
+                observation?.cancel()
+                initialization?.cancel()
+                initialization = nil
+                let old = store
+                store = nil
+                selectedProfileId = nil
+                UserDefaults.standard.removeObject(forKey: "bex.selected-host")
+                let cancelled = pending
+                pending.removeAll()
+                for (_, complete) in cancelled {
+                    complete(.failure(CancellationError()))
+                }
+                isConnecting = false
+                notice = nil
+                connectionError = nil
+                publish(AgentCore.Snapshot.empty())
+                Task { [weak self] in
+                    do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
+                }
+            }
+            profiles = remaining
+            UserDefaults.standard.set(encoded, forKey: "bex.hosts.iroh")
+            screen = .profiles
+        } catch { notice = error.localizedDescription }
     }
 
     private func initialize(_ id: String, previous old: AgentStore?) async {
@@ -127,6 +172,7 @@ final class BexAppViewModel: ObservableObject {
                     if let old = store {
                         try? await old.shutdown()
                     }
+                    guard !Task.isCancelled else { try? await owner.shutdown(); return }
                     profiles.removeAll { $0.id == id }
                     profiles.append(HostProfile(id: id, name: "PC Host", ticket: invitation.endpoint))
                     try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
@@ -137,24 +183,19 @@ final class BexAppViewModel: ObservableObject {
                     screen = .threads
                     isConnecting = false
                     observe(owner, host: id)
-                } catch { self?.isConnecting = false; self?.pairingError = error.localizedDescription }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self?.isConnecting = false; self?.pairingError = error.localizedDescription
+                }
             }
         } catch { pairingError = error.localizedDescription }
     }
 
-    func connect(force: Bool = false) {
+    func connect() {
         guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
               !isConnecting else { return }
-        if !force, snapshot.connected() {
-            refreshTaskList()
-            if let id = snapshot.navigation().threadId {
-                perform(.readThread(ReadThread(threadId: id)))
-            }
-            return
-        }
         isConnecting = true
         connectionError = nil
-        notice = nil
         connection = Task { [weak self] in
             do {
                 try await owner.reconnect(connection: Connection(ticket: profile.ticket,
@@ -162,11 +203,13 @@ final class BexAppViewModel: ObservableObject {
                                                                  invitation: nil, useRelays: true))
                 guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
                 publish(owner.snapshot())
+                notice = snapshot.error()
                 isConnecting = false
             } catch {
                 guard self?.selectedProfileId == profile.id else { return }
                 self?.isConnecting = false
                 self?.connectionError = error.localizedDescription
+                self?.notice = error.localizedDescription
             }
         }
     }
@@ -192,8 +235,9 @@ final class BexAppViewModel: ObservableObject {
                 operations[id] = nil
                 if selectedProfileId == host {
                     publish(owner.snapshot())
-                    if case let .failure(error) = result {
-                        notice = error.localizedDescription
+                    if case .failure = result, let error = snapshot.error() {
+                        // Store excludes failures from requests abandoned by navigation.
+                        notice = error
                     }
                 }
                 completion(result)
@@ -234,13 +278,10 @@ extension BexAppViewModel {
             models = next.models()
         }
         let changed = !next.conversationUnchanged(other: snapshot)
+        let source = next.navigation().threadId.flatMap { next.conversation(id: $0) }
         snapshot = next
         if changed {
-            let rendered = next.navigation().threadId.flatMap { next.conversation(id: $0) }.map {
-                AgentCore.projectConversation(snapshot: next, source: $0, previous: conversation)
-            }
-            conversationRows = rendered?.rows() ?? []
-            conversation = rendered
+            projectConversation(source)
         }
         persistence?.cancel()
         if listChanged {
@@ -251,6 +292,28 @@ extension BexAppViewModel {
                 do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
                 self?.persist()
             }
+        }
+    }
+
+    private func projectConversation(_ source: AgentCore.Thread?) {
+        if conversation?.id != source?.id() {
+            conversation = nil
+        }
+        pendingPresentation = PresentationInput(source: source, snapshot: snapshot, host: selectedProfileId)
+        guard presentationTask == nil else { return }
+        presentationTask = Task { [weak self] in
+            while let self, let input = pendingPresentation {
+                pendingPresentation = nil
+                let rendered = await presentation.project(input.source, snapshot: input.snapshot)
+                if selectedProfileId == input.host, snapshot.requestsUnchanged(other: input.snapshot),
+                   snapshot.navigation().threadId == input.source?.id() {
+                    conversation = rendered
+                }
+                // Keep one background projection in flight and coalesce stream deltas.
+                // Rows enter the lazy stack with parsed Markdown and a stable initial height.
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            self?.presentationTask = nil
         }
     }
 
@@ -274,9 +337,5 @@ extension BexAppViewModel {
         }
         persist()
         await persistenceWrite?.value
-    }
-
-    func restoreAfterForeground() {
-        connect(force: true)
     }
 }

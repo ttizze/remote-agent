@@ -99,6 +99,35 @@ pub fn draft_body(draft: &Draft) -> ItemBody {
     ItemBody { text, images }
 }
 
+/// Borrow file display fields without rescanning or serializing the wire payload.
+pub struct FileChange<'a> {
+    pub path: Cow<'a, str>,
+    pub kind: Cow<'a, str>,
+    pub diff: Cow<'a, str>,
+}
+pub fn file_changes(item: &Item) -> impl Iterator<Item = FileChange<'_>> {
+    let (files, unknown) = match &item.changes {
+        Some(crate::models::ItemChanges::Files(files)) => (files.as_slice(), None),
+        Some(crate::models::ItemChanges::Unknown(value)) => (&[][..], value.as_array()),
+        None => (&[][..], None),
+    };
+    files
+        .iter()
+        .map(|change| {
+            let kind = change.kind.as_ref().unwrap_or(&Value::Null);
+            FileChange {
+                path: Cow::Borrowed(change.path.as_deref().unwrap_or_default()),
+                kind: text(kind).unwrap_or_else(|| field(kind, "type")),
+                diff: Cow::Borrowed(change.diff.as_deref().unwrap_or_default()),
+            }
+        })
+        .chain(unknown.into_iter().flatten().map(|change| FileChange {
+            path: field(change, "path"),
+            kind: text(&change["kind"]).unwrap_or_else(|| field(&change["kind"], "type")),
+            diff: field(change, "diff"),
+        }))
+}
+
 /// Potentially large output is formatted only when its row is expanded.
 pub fn expanded_body(item: &Item) -> String {
     match item.kind.as_deref() {
@@ -129,34 +158,12 @@ pub fn expanded_body(item: &Item) -> String {
         }
         Some("fileChange") => {
             let mut result = String::new();
-            let mut first = true;
-            let mut append = |kind: &str, path: &str, diff: &str| {
-                if !first {
+            for (index, change) in file_changes(item).enumerate() {
+                if index != 0 {
                     result.push_str("\n\n");
                 }
-                first = false;
-                write!(result, "{kind}: {path}\n{diff}").expect("writing a String cannot fail");
-            };
-            match &item.changes {
-                Some(crate::models::ItemChanges::Files(changes)) => {
-                    for change in changes {
-                        let raw_kind = change.kind.as_ref().unwrap_or(&Value::Null);
-                        let kind = text(raw_kind).unwrap_or_else(|| field(raw_kind, "type"));
-                        append(
-                            &kind,
-                            change.path.as_deref().unwrap_or_default(),
-                            change.diff.as_deref().unwrap_or_default(),
-                        );
-                    }
-                }
-                Some(crate::models::ItemChanges::Unknown(value)) => {
-                    for change in value.as_array().into_iter().flatten() {
-                        let kind =
-                            text(&change["kind"]).unwrap_or_else(|| field(&change["kind"], "type"));
-                        append(&kind, &field(change, "path"), &field(change, "diff"));
-                    }
-                }
-                None => {}
+                write!(result, "{}: {}\n{}", change.kind, change.path, change.diff)
+                    .expect("writing a String cannot fail");
             }
             result
         }
@@ -168,6 +175,45 @@ pub fn expanded_body(item: &Item) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn file_display_keeps_paths_and_diffs_from_named_wire_fields() {
+        for (changes, expected) in [
+            (
+                json!([{"path":"/a.txt","kind":{"type":"update"},"diff":"-old\n+new"}, {"path":"/b.txt","kind":"add","diff":"+second"}]),
+                vec![
+                    ("/a.txt", "update", "-old\n+new"),
+                    ("/b.txt", "add", "+second"),
+                ],
+            ),
+            (
+                json!([{"path":"/a.txt","kind":"update"}]),
+                vec![("/a.txt", "update", "")],
+            ),
+            (json!([]), vec![]),
+            (json!(null), vec![]),
+            (json!({"future":true}), vec![]),
+        ] {
+            let item: Item = serde_json::from_value(
+                json!({"id":"files", "type":"fileChange", "changes":changes}),
+            )
+            .unwrap();
+            assert!(!item.extra.contains_key("changes"));
+            let displayed: Vec<_> = file_changes(&item)
+                .map(|change| {
+                    (
+                        change.path.into_owned(),
+                        change.kind.into_owned(),
+                        change.diff.into_owned(),
+                    )
+                })
+                .collect();
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|(path, kind, diff)| (path.to_owned(), kind.to_owned(), diff.to_owned()))
+                .collect();
+            assert_eq!(displayed, expected);
+        }
+    }
     #[test]
     fn body_contract_covers_messages_images_details_and_unknown_payloads() {
         for (wire, collapsed, expanded, images) in [

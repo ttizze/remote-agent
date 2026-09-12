@@ -12,12 +12,12 @@ extension ThreadScreen {
             if model.isNewThread {
                 newThreadContext
             }
-            if !model.isNewThread, let review = model.snapshot.review(), review.fileCount() > 0 {
-                Button { opensDiff = true; showingFiles = true } label: {
+            if !model.isNewThread, let review, review.files > 0 {
+                Button { showingDiff = true; showingFiles = true } label: {
                     HStack(spacing: 10) {
-                        Text("\(review.fileCount())件のファイル")
-                        Text("+\(review.additions())").foregroundColor(.green)
-                        Text("−\(review.deletions())").foregroundColor(.red)
+                        Text("\(review.files)件のファイル")
+                        Text("+\(review.additions)").foregroundColor(.green)
+                        Text("−\(review.deletions)").foregroundColor(.red)
                     }
                     .font(.subheadline.monospacedDigit())
                 }
@@ -36,8 +36,7 @@ extension ThreadScreen {
                 ProgressView(sendRecordedText ? "文字起こしして送信中…" : "文字起こし中…").font(.caption)
                     .accessibilityIdentifier("dictation.processing")
             }
-            ForEach(attachments.indices, id: \.self) { index in
-                let attachment = attachments[index]
+            ForEach(Array(attachments.enumerated()), id: \.offset) { index, attachment in
                 HStack {
                     Label(attachment.name, systemImage: attachment.isImage ? "photo" : "doc")
                         .lineLimit(1)
@@ -69,7 +68,8 @@ extension ThreadScreen {
                     } label: {
                         Image(systemName: "plus").font(.title2.weight(.regular)).frame(width: 40, height: 40)
                     }
-                    .disabled(model.transferring || preparingMedia || model.sending || dictation
+                    .disabled((!model.isNewThread && conversation == nil) || model
+                        .transferring || preparingMedia || model.sending || dictation
                         .isRecording || dictation.requestingPermission || model.transcribing)
                     .accessibilityLabel("添付").accessibilityIdentifier("task.attach")
                     if model.transferring || preparingMedia {
@@ -103,7 +103,7 @@ extension ThreadScreen {
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if let runningTurnId,
+                    if let runningTurnId = conversation?.runningTurnId,
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, attachments
                        .isEmpty {
@@ -219,5 +219,13 @@ struct ScrollViewportPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
+    }
+}
+
+struct ThreadConversationRow: Identifiable, Sendable {
+    let id: String
+    let content: Content
+    enum Content: Sendable {
+        case olderTurns, native(ConversationRow, ConversationItem?), queued(ConversationItem)
     }
 }

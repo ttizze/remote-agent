@@ -5,74 +5,77 @@ import UniformTypeIdentifiers
 
 /// History and row presentation
 extension ThreadScreen {
-    func activityIsExpanded(_ turn: TurnPresentationData) -> Bool {
-        guard let choice = activityExpansionOverrides[turn.id], choice.status == turn.status else {
-            return turn.activityInitiallyExpanded
-        }
-        return choice.expanded
+    func activityIsExpanded(_ activity: ActivityPresentation) -> Bool {
+        AgentCore.activityIsExpanded(activity: activity, choice: activityExpansionOverrides[activity.id])
     }
 
-    var runningTurnId: String? {
-        model.conversationRows.last(where: \.isInProgress)?.turnId
-    }
-
-    @ViewBuilder
-    func conversationTurn(_ turn: TurnPresentationData, endsNativeTurn: Bool) -> some View {
-        if let item = turn.openingUserMessage {
-            ThreadMessageRow(item: item, isUser: true, model: model)
-        }
-        if turn.hasOlderItems {
-            historyBoundary(turn.turnId)
-        }
-        ForEach(turn.userMessages.indices, id: \.self) { index in
-            let item = turn.userMessages[index]
-            ThreadMessageRow(item: item, isUser: true, model: model).padding(.top, 16).id(item.id())
-        }
-        if turn.activitySummary != nil {
-            activityHeader(turn)
-            if activityIsExpanded(turn) {
-                ForEach(turn.activityItems.indices, id: \.self) { index in
-                    let item = turn.activityItems[index]
-                    activityItem(item, turnId: turn.turnId).id(item.id())
-                }
+    func conversationRows(_ thread: ConversationPresentation) -> [ThreadConversationRow] {
+        var expanded = false
+        return thread.rows.filter { row in
+            guard case let .native(native, _) = row.content else { return true }
+            switch native.content {
+            case let .activityHeader(activity):
+                expanded = activityIsExpanded(activity)
+                return true
+            case .activity: return expanded
+            case .inProgress: return false
+            default: return true
             }
         }
-        ForEach(turn.pendingRequests, id: \.key) { ThreadRequestRow(request: $0, model: model) }
-        if let error = turn.error {
-            ThreadErrorRow(error: error)
-        }
-        ForEach(turn.responses.indices, id: \.self) { index in
-            let item = turn.responses[index]
-            ThreadMessageRow(item: item, isUser: false, model: model,
-                             forkTurnId: !turn.isInProgress && endsNativeTurn && index == turn.responses.count - 1
-                                 ? turn.turnId : nil).id(item.id())
-        }
-    }
-
-    func activityItem(_ item: RenderedItem, turnId: String) -> some View {
-        let data = item.presentation()
-        return ThreadItemRow(item: item, model: model, isExpanded: expandedItemIds.contains(data.id),
-                             toggleExpanded: {
-                                 isFollowingLatest = false
-                                 if expandedItemIds.contains(data.id) {
-                                     expandedItemIds.remove(data.id)
-                                 } else {
-                                     expandedItemIds.insert(data.id)
-                                 }
-                             },
-                             loadDetails: { await model.readItemDetails(
-                                 threadId: model.selectedThreadId ?? "", turnId: turnId,
-                                 itemId: data.nativeId ?? data.id
-                             ) })
     }
 
     @ViewBuilder
-    func activityHeader(_ turn: TurnPresentationData) -> some View {
+    func conversationRow(_ row: ThreadConversationRow) -> some View {
+        switch row.content {
+        case .olderTurns: historyBoundary(nil)
+        case let .native(content, item): nativeConversationRow(content, item: item)
+        case let .queued(item):
+            VStack(alignment: .leading, spacing: 6) {
+                Text("順番待ち").font(.caption).foregroundColor(.secondary)
+                ThreadMessageRow(item: item, isUser: true, model: model)
+            }
+        }
+    }
+
+    @ViewBuilder
+    func nativeConversationRow(_ row: ConversationRow, item: ConversationItem?) -> some View {
+        switch (row.content, item) {
+        case let (.olderItems(turnId), _): historyBoundary(turnId)
+        case let (.user, item?):
+            ThreadMessageRow(item: item, isUser: true, model: model).padding(.top, 16)
+        case (let .response(_, turnId), let item?):
+            ThreadMessageRow(item: item, isUser: false, model: model, forkTurnId: turnId)
+        case let (.activityHeader(activity), _): activityHeader(activity)
+        case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId)
+        case let (.pendingRequest(request), _): ThreadRequestRow(request: request, model: model)
+        case let (.error(error), _): ThreadErrorRow(error: error)
+        case (.inProgress, _), (_, nil): EmptyView()
+        }
+    }
+
+    func activityItem(_ item: ConversationItem, turnId: String) -> some View {
+        ThreadItemRow(item: item, model: model, isExpanded: expandedItemIds.contains(item.data.id),
+                      toggleExpanded: {
+                          isFollowingLatest = false
+                          if expandedItemIds.contains(item.data.id) {
+                              expandedItemIds.remove(item.data.id)
+                          } else {
+                              expandedItemIds.insert(item.data.id)
+                          }
+                      },
+                      loadDetails: { await model.readItemDetails(
+                          threadId: conversation?.id ?? "", turnId: turnId,
+                          itemId: item.data.nativeId ?? item.data.id
+                      ) })
+    }
+
+    @ViewBuilder
+    func activityHeader(_ turn: ActivityPresentation) -> some View {
         let expanded = activityIsExpanded(turn)
         if turn.activityCanCollapse {
             Button {
                 isFollowingLatest = false
-                activityExpansionOverrides[turn.id] = (turn.status, !expanded)
+                activityExpansionOverrides[turn.id] = ActivityExpansion(status: turn.status, expanded: !expanded)
             } label: {
                 ThreadActivityHeader(turn: turn, expanded: expanded)
             }
@@ -117,12 +120,14 @@ extension ThreadScreen {
         })
     }
 
-    func threadAccessibilityValue(_ thread: RenderedConversation) -> String {
-        let itemCount = model.conversationRows.reduce(0) { count, turn in
-            count + turn.userMessages.count + turn.activityItems.count + turn.responses.count
-                + turn.pendingRequests.count + (turn.error == nil ? 0 : 1)
-                + (turn.openingUserMessage == nil ? 0 : 1)
-        }
-        return "turns=\(thread.source().turnCount());items=\(itemCount)"
+    func threadAccessibilityValue(_ thread: ConversationPresentation) -> String {
+        let itemCount = thread.rows.filter { row in
+            guard case let .native(native, _) = row.content else { return false }
+            return switch native.content {
+            case .user, .activity, .response, .pendingRequest, .error: true
+            default: false
+            }
+        }.count
+        return "turns=\(thread.source.turnCount());items=\(itemCount)"
     }
 }

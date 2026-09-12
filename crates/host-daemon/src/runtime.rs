@@ -1,48 +1,42 @@
 use crate::command_line::StartupConfig;
 use agent_core::transport::{Endpoint, Relays};
 use host_daemon::{
-    CodexRpcService, CredentialStore, DesktopProjectStore, FileKeyStore, HostCredentials,
-    HostRuntime, KeyringStore,
+    CodexRpcService, DesktopProjectStore, HostCredentials, HostRuntime,
+    local_host::{HostLease, LocalHostRegistry},
 };
-use std::{
-    fs::{File, OpenOptions},
-    sync::Arc,
-};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
-    let directory = match config.state_dir {
-        Some(path) => path,
-        None => directories::ProjectDirs::from("app", "bex", "BEX")
-            .ok_or("application data directory unavailable; provide --state-dir")?
-            .data_local_dir()
-            .to_path_buf(),
-    };
-    host_daemon::platform::create_state_directory(&directory).map_err(|e| e.to_string())?;
-    let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+    // Reserve the shared instance before provisioning keys or launching Codex.
+    let lease = tokio::task::spawn_blocking(move || {
+        if config.isolated {
+            HostLease::isolated(
+                config
+                    .state_dir
+                    .as_deref()
+                    .ok_or("--isolated requires --state-dir")?,
+                config.key_storage,
+            )
+        } else {
+            let registry = LocalHostRegistry::for_user()?;
+            let directory = match config.state_dir {
+                Some(directory) => directory,
+                None => registry.resolve(registry.directory())?.directory,
+            };
+            registry.acquire(&directory, config.key_storage)
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let directory = lease.directory().to_owned();
     agent_core::diagnostics::initialize(
         &directory,
         agent_core::diagnostics::Component::Host,
         env!("CARGO_PKG_VERSION"),
     )
     .map_err(|error| format!("cannot initialize Host error log: {error}"))?;
-    // The standard library lock is held before loading or creating credentials.
-    let lock: File = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(directory.join("host.lock"))
-        .map_err(|e| e.to_string())?;
-    lock.try_lock().map_err(|e| e.to_string())?;
-    let store: Arc<dyn CredentialStore> = match config.key_storage {
-        crate::command_line::KeyStorage::Keyring => Arc::new(KeyringStore::new(
-            directory.to_str().ok_or("state directory is not UTF-8")?,
-        )?),
-        crate::command_line::KeyStorage::File => {
-            Arc::new(FileKeyStore(directory.join("identity.keys")))
-        }
-    };
+    let store = lease.key_storage().open(&directory)?;
     let credentials = Arc::new(HostCredentials::load(store, directory.clone()).await?);
     let relays = if config.no_relay {
         Relays::Disabled
@@ -76,9 +70,13 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         .await?;
     service.start();
     let runtime = Arc::new(HostRuntime::new(service, endpoint, credentials, config.name).await);
-    // This file contains a public endpoint address, never a private key or invitation.
-    std::fs::write(directory.join("host.ticket"), runtime.ticket().to_string())
-        .map_err(|e| e.to_string())?;
+    let ticket = runtime.ticket();
+    let lease = tokio::task::spawn_blocking(move || {
+        lease.publish(&ticket)?;
+        Ok::<_, String>(lease)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     let shutdown = CancellationToken::new();
     let result = {
         let run = runtime.clone().run(shutdown.clone());
@@ -96,5 +94,6 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     let app_server =
         Arc::try_unwrap(app_server).map_err(|_| "active session retained Codex during shutdown")?;
     app_server.shutdown().await.map_err(|e| e.to_string())?;
+    drop(lease);
     result
 }

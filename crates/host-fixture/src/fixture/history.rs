@@ -4,6 +4,10 @@ use serde::{Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 
+pub(crate) fn detail_output() -> String {
+    "DEFERRED_DETAIL_FULL_TEXT\n".to_owned() + &"fixture output\n".repeat(500)
+}
+
 pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     let id = thread.metadata["id"].as_str().unwrap();
     let cwd = thread.metadata["cwd"].as_str().unwrap();

@@ -3,11 +3,11 @@ import SwiftUI
 import UIKit
 
 struct ThreadActivityHeader: View {
-    let turn: TurnPresentationData
+    let turn: ActivityPresentation
     let expanded: Bool
     var body: some View {
         HStack(spacing: 5) {
-            Text(turn.activitySummary ?? "")
+            Text(turn.activitySummary)
                 .font(.system(size: 16)).foregroundColor(.secondary)
                 .lineLimit(1).truncationMode(.tail)
             if turn.activityCanCollapse {
@@ -31,8 +31,12 @@ struct ThreadRequestRow: View {
     @State private var error: String?
     @State private var resolved = false
 
+    private var params: [String: JsonValue] {
+        request.params
+    }
+
     private var questions: [JsonValue] {
-        request.params["questions"]?.array ?? []
+        params["questions"]?.array ?? []
     }
 
     var body: some View {
@@ -42,8 +46,7 @@ struct ThreadRequestRow: View {
                     .accessibilityIdentifier("request.\(request.key)")
                 Text(request.body).textSelection(.enabled)
                 DisclosureGroup("詳細") {
-                    Text((try? formatJsonValue(value: .object(fields: request.params))) ?? "")
-                        .font(.caption.monospaced()).textSelection(.enabled)
+                    Text(request.paramsJson).font(.caption.monospaced()).textSelection(.enabled)
                 }
                 if request.kind == .questions {
                     ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
@@ -99,7 +102,7 @@ struct ThreadRequestRow: View {
                     .buttonStyle(.bordered)
             }
         }
-        if case .boolean(true)? = question["isSecret"] {
+        if question["isSecret"]?.bool == true {
             SecureField("回答", text: binding)
         } else {
             TextField("回答", text: binding).textFieldStyle(.roundedBorder).accessibilityIdentifier("request.answer")
@@ -141,32 +144,32 @@ struct ThreadErrorRow: View {
 }
 
 struct ThreadMessageRow: View {
-    let item: RenderedItem
+    let item: ConversationItem
     let isUser: Bool
     let model: BexAppViewModel
     var forkTurnId: String?
     @State private var forking = false
     @State private var forkError: String?
     @State private var copied = false
+    @State private var selectingText = false
 
     var body: some View {
-        let data = item.presentation()
         VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
-                let sources = data.imageSources
+                let sources = item.data.imageSources
                 ForEach(sources.indices, id: \.self) { index in
                     ConversationImage(
                         source: sources[index],
-                        label: data.kind == "imageGeneration" ? "生成画像" : "添付画像",
-                        identifier: "message.image.\(data.id).\(index)",
+                        label: item.data.kind == "imageGeneration" ? "生成画像" : "添付画像",
+                        identifier: "message.image.\(item.data.id).\(index)",
                         model: model
                     )
                 }
-                if !data.body.isEmpty {
+                if !item.data.body.isEmpty {
                     if isUser {
-                        Text(data.body).font(.system(size: 18)).textSelection(.enabled)
+                        Text(item.data.body).font(.system(size: 18))
                     } else {
-                        ConversationMarkdown(text: data.body, model: model).equatable()
+                        ConversationMarkdown(blocks: item.markdown, model: model)
                     }
                 }
             }
@@ -178,10 +181,24 @@ struct ThreadMessageRow: View {
             .padding(.leading, isUser ? 42 : 0)
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("item.\(data.id)")
-            if data.kind == "agent" {
+            .accessibilityIdentifier("item.\(item.data.id)")
+            .contextMenu {
+                if isUser, !item.data.body.isEmpty {
+                    Button {
+                        UIPasteboard.general.string = item.data.body
+                    } label: {
+                        Label("コピー", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        selectingText = true
+                    } label: {
+                        Label("テキストを選択", systemImage: "text.cursor")
+                    }
+                }
+            }
+            if item.data.kind == "agent" {
                 HStack(spacing: 20) {
-                    Button { UIPasteboard.general.string = data.body; copied = true } label: {
+                    Button { UIPasteboard.general.string = item.data.body; copied = true } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     }.accessibilityLabel(copied ? "コピーしました" : "回答をコピー")
                     if let forkTurnId {
@@ -190,7 +207,7 @@ struct ThreadMessageRow: View {
                         }
                         .disabled(forking)
                         .accessibilityLabel("ここから会話を分岐")
-                        .accessibilityIdentifier("response.fork." + data.id)
+                        .accessibilityIdentifier("response.fork." + item.data.id)
                     }
                 }
                 .font(.system(size: 19)).foregroundColor(.secondary).buttonStyle(.plain)
@@ -201,6 +218,18 @@ struct ThreadMessageRow: View {
             }
         }
         .padding(.bottom, isUser ? 12 : 8)
+        .sheet(isPresented: $selectingText) {
+            NavigationStack {
+                MessageTextSelection(text: item.data.body)
+                    .navigationTitle("テキストを選択")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("完了") { selectingText = false }
+                        }
+                    }
+            }
+        }
     }
 
     private func fork(through turnId: String) {
@@ -221,16 +250,18 @@ struct ThreadMessageRow: View {
 }
 
 struct ThreadItemRow: View {
-    let item: RenderedItem
+    let item: ConversationItem
     let model: BexAppViewModel
     let isExpanded: Bool
     let toggleExpanded: () -> Void
-    let loadDetails: () async -> String?
+    let loadDetails: () async -> (String?, String?)
+    @State private var loadedBody: String?
     @State private var detailError: String?
+    @State private var loadedVersion: String?
     @State private var retry = 0
 
-    private func icon(_ kind: String) -> String {
-        switch kind {
+    private var icon: String {
+        switch item.data.kind {
         case "command": "terminal"
         case "fileChange": "doc.badge.gearshape"
         case "webSearch": "globe"
@@ -239,9 +270,8 @@ struct ThreadItemRow: View {
     }
 
     var body: some View {
-        let data = item.presentation()
         VStack(alignment: .leading, spacing: 10) {
-            if data.collapsible {
+            if item.data.collapsible {
                 DisclosureGroup(isExpanded: Binding(
                     get: { isExpanded },
                     set: {
@@ -251,8 +281,8 @@ struct ThreadItemRow: View {
                     }
                 )) {
                     if isExpanded {
-                        let body = data.deferred ? "" : item.expandedBody()
-                        if data.deferred {
+                        let body = item.data.deferred ? loadedBody ?? "" : item.source.expandedBody()
+                        if item.data.deferred, loadedBody == nil {
                             if let detailError {
                                 Text(detailError).font(.caption).foregroundColor(.red)
                                 Button("再読み込み") { retry += 1 }
@@ -271,31 +301,55 @@ struct ThreadItemRow: View {
                     }
                 } label: {
                     Label {
-                        Text(data.title)
+                        Text(item.data.title)
                             .lineLimit(1)
-                    } icon: { Image(systemName: icon(data.kind)) }
+                    } icon: { Image(systemName: icon) }
                         .font(.system(size: 17))
                         .foregroundColor(.secondary)
                         .padding(.vertical, 5)
-                        .accessibilityIdentifier("item.\(data.id)")
+                        .accessibilityIdentifier("item.\(item.data.id)")
                 }
             } else {
-                ConversationMarkdown(text: data.body, model: model).equatable()
-                    .foregroundColor(data.kind == "agent" || data.kind == "user" ? .primary : .secondary)
-                    .accessibilityIdentifier("item.\(data.id)")
+                ConversationMarkdown(blocks: item.markdown, model: model)
+                    .foregroundColor(item.data.kind == "agent" || item.data.kind == "user" ? .primary : .secondary)
+                    .accessibilityIdentifier("item.\(item.data.id)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
-        .onChange(of: item) { _ in
-            detailError = nil; retry += 1
-        }
-        .task(id: "\(isExpanded):\(retry)") {
-            guard isExpanded, data.deferred else { return }
+        .task(id: "\(isExpanded):\(item.contentVersion):\(retry)") {
+            if loadedVersion != item.contentVersion {
+                loadedBody = nil; detailError = nil
+            }
+            guard isExpanded, item.data.deferred, loadedBody == nil else { return }
             detailError = nil
-            let error = await loadDetails()
+            let (body, error) = await loadDetails()
             guard !Task.isCancelled else { return }
+            loadedBody = body
             detailError = error
+            loadedVersion = item.contentVersion
+        }
+    }
+}
+
+/// UIKit supplies selection handles and copies only the selected range.
+private struct MessageTextSelection: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context _: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.font = .systemFont(ofSize: 18)
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        view.backgroundColor = .clear
+        view.accessibilityIdentifier = "message.text-selection"
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context _: Context) {
+        if view.text != text {
+            view.text = text
         }
     }
 }

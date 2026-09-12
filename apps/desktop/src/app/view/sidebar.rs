@@ -195,11 +195,11 @@ impl Desktop {
                                     .map_or("この端末", |remote| remote.name.as_str())
                                     .to_owned(),
                                 cx,
-                                |s, _, _| {
-                                    s.tab = Tab::Settings;
-                                    s.dispatch(Intent::ReadWorktreeSettings(
-                                        op::ReadWorktreeSettings {},
-                                    ));
+                                |s, _, cx| {
+                                    s.open_settings();
+                                    if let Some(hosts) = &s.hosts {
+                                        hosts.update(cx, |hosts, _| hosts.refresh());
+                                    }
                                 },
                             )
                             .accessibility_label("設定を開く")

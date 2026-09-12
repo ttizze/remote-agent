@@ -1,6 +1,8 @@
 //! Loopback-only UI test controls. No saved application profiles are used.
 
 use crate::Result;
+use crate::test_support::Connection;
+use agent_core::transport::{Identity, Ticket};
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
@@ -23,9 +25,9 @@ pub struct PairingServer {
 }
 
 impl PairingServer {
-    pub fn start(state: &Path, port: u16) -> Result<Self> {
-        let state = state.canonicalize()?;
-        let server = Server::http((Ipv4Addr::LOCALHOST, port))?;
+    pub fn start(root: &Path, ticket: Ticket, identity: Identity) -> Result<Self> {
+        let root = root.canonicalize()?;
+        let server = Server::http((Ipv4Addr::LOCALHOST, 0))?;
         let port = server
             .server_addr()
             .to_ip()
@@ -41,7 +43,14 @@ impl PairingServer {
                 let Some(request) = server.recv_timeout(Duration::from_millis(100))? else {
                     continue;
                 };
-                let result = route(&state, &runtime, request.method(), request.url());
+                let result = route(
+                    &root,
+                    &runtime,
+                    &ticket,
+                    &identity,
+                    request.method(),
+                    request.url(),
+                );
                 let (status, body) = match result {
                     Ok(response) => response,
                     Err(_) => (503, b"Isolated Host is unavailable".to_vec()),
@@ -82,26 +91,17 @@ impl Drop for PairingServer {
 }
 
 fn rpc(
-    state: &Path,
     runtime: &tokio::runtime::Runtime,
+    ticket: &Ticket,
+    identity: &Identity,
     method: &str,
     params: Value,
 ) -> Result<Value> {
-    use agent_core::transport::{Endpoint, Identity, Relays, Ticket};
-    let secret = zeroize::Zeroizing::new(fs::read(state.join("local.key"))?);
-    let secret: [u8; 32] = secret
-        .as_slice()
-        .try_into()
-        .map_err(|_| "invalid fixture identity")?;
-    let ticket: Ticket = fs::read_to_string(state.join("host.ticket"))?.parse()?;
     runtime.block_on(async {
-        let endpoint = Endpoint::bind(Identity::from_bytes(secret), Relays::Disabled).await?;
-        let session = endpoint.connect(&ticket).await?;
-        let peer = session.open_peer(Duration::from_secs(10), 8).await?;
-        let response = peer.request::<_, Value>(method, &params).await;
-        let closed = peer.close().await;
-        session.close();
-        endpoint.close().await;
+        let connection =
+            Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
+        let response = connection.peer.request::<_, Value>(method, &params).await;
+        let closed = connection.close().await;
         let response = response?;
         closed?;
         Ok(response.value)
@@ -109,21 +109,22 @@ fn rpc(
 }
 
 fn route(
-    state: &Path,
+    root: &Path,
     runtime: &tokio::runtime::Runtime,
+    ticket: &Ticket,
+    identity: &Identity,
     method: &Method,
     path: &str,
 ) -> Result<(u16, Vec<u8>)> {
     if method == &Method::Get && path == "/pairing" {
         return Ok((
             200,
-            serde_json::to_vec(&rpc(state, runtime, "host/invite", json!({}))?)?,
+            serde_json::to_vec(&rpc(runtime, ticket, identity, "host/invite", json!({}))?)?,
         ));
     }
     if method != &Method::Post {
         return Ok((404, Vec::new()));
     }
-    let root = state.parent().ok_or("fixture state has no parent")?;
     match path {
         "/auth-token/unavailable" => fs::write(root.join("auth-token-unavailable"), [])?,
         "/auth-token/reset" => {
@@ -132,6 +133,25 @@ fn route(
             }
         }
         "/worktree-conversation" => worktree_conversation(root)?,
+        "/worktree/unavailable" => fs::rename(
+            root.join("review-worktree"),
+            root.join("review-worktree-unavailable"),
+        )?,
+        "/worktree/restore" => fs::rename(
+            root.join("review-worktree-unavailable"),
+            root.join("review-worktree"),
+        )?,
+        "/completed-history" => write_json(
+            root.join("list-fixture.json"),
+            &json!([{"id":"fixture-thread-persisted","cwd":root.join("project"),
+            "name":"Persisted completed history","createdAt":10000,"updatedAt":10000,
+            "status":{"type":"notLoaded"},"historyMode":"paginated",
+            "turns":[{"id":"fixture-turn-persisted","status":"completed","items":[
+                {"id":"fixture-command-persisted","type":"commandExecution","command":"./gradlew test",
+                 "status":"completed","aggregatedOutput":crate::fixture::history::detail_output(),"exitCode":0},
+                {"id":"fixture-final-persisted","type":"agentMessage","phase":"final_answer","text":"Persisted history complete."}
+            ]}]}]),
+        )?,
         "/long-conversation" => write_json(
             root.join("list-fixture.json"),
             &json!([{
@@ -157,8 +177,9 @@ fn route(
         "/list-fixture" | "/title-fixture" | "/list-fixture/reset" => list_fixture(root, path)?,
         "/background-task" => {
             let response = rpc(
-                state,
                 runtime,
+                ticket,
+                identity,
                 "host/thread/start",
                 json!({"cwd":root.join("project")}),
             )?;
@@ -182,6 +203,18 @@ fn route(
         }
         "/fail-next-history-read" => {
             fs::write(root.join("fail-next-history-read"), "")?;
+        }
+        "/hold-history-reads" => {
+            fs::write(root.join("hold-history-reads"), [])?;
+        }
+        "/release-history-reads" => {
+            for name in ["hold-history-reads", "history-read-held"] {
+                match fs::remove_file(root.join(name)) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
         _ => return Ok((404, Vec::new())),
     }

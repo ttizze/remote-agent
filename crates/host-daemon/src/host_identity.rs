@@ -12,6 +12,25 @@ pub trait CredentialStore: Send + Sync {
     fn save(&self, bytes: &[u8]) -> Result<(), String>;
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyStorage {
+    #[default]
+    Keyring,
+    File,
+}
+
+impl KeyStorage {
+    pub fn open(self, directory: &std::path::Path) -> Result<Arc<dyn CredentialStore>, String> {
+        match self {
+            Self::Keyring => Ok(Arc::new(KeyringStore::new(
+                directory.to_str().ok_or("state directory is not UTF-8")?,
+            )?)),
+            Self::File => Ok(Arc::new(FileKeyStore(directory.join("identity.keys")))),
+        }
+    }
+}
+
 pub struct KeyringStore(keyring::Entry);
 impl KeyringStore {
     pub fn new(account: &str) -> Result<Self, String> {

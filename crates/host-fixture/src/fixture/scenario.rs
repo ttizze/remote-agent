@@ -98,7 +98,7 @@ pub(super) async fn run(
         fs::write(path, "fixture rollout initializing\n")?;
     }
     if prompt.contains("[delayed-input]") && !wait_for_release(&context.home, &stop).await {
-        return Ok(());
+        return context.finish(&thread, &turn, "interrupted", None);
     }
     context.stream_item(
         &thread_id,
@@ -170,11 +170,10 @@ pub(super) async fn run(
         let mut turn = turn.borrow_mut();
         let command = &mut turn["items"][command_index];
         command["aggregatedOutput"] = if scenario == "history" {
-            "DEFERRED_DETAIL_FULL_TEXT\n".to_owned() + &"fixture output\n".repeat(500)
+            super::history::detail_output().into()
         } else {
             "passed".into()
-        }
-        .into();
+        };
         command["status"] = "completed".into();
         command["exitCode"] = 0.into();
     }
@@ -249,7 +248,9 @@ pub(super) async fn run(
             complete(&context, &thread_id, &turn, index)?;
         }
     }
-    let mut response_text = if scenario == "history" {
+    let mut response_text = if prompt.contains("[selection]") {
+        "Needle Alpha Bravo.\n\nSecond paragraph stays unselected.".to_owned()
+    } else if scenario == "history" {
         "ローカル relay 構成で Mac・iPhone アプリの実装と検証を完了しました。\n\n- **Mac アプリ**：会話、リモート操作、添付・保存・差分を確認。\n- iPhone Simulator：**10/10 成功、スキップ 0**。\n- SwiftUI の会話表示と入力欄を更新しました。\n\n変更したファイルは、下の差分から確認できます。".to_owned()
     } else {
         "シミュレータで完了しました。".to_owned()

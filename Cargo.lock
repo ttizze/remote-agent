@@ -979,6 +979,7 @@ dependencies = [
  "agent-core",
  "async-channel",
  "base64 0.23.1",
+ "chrono",
  "cpal",
  "directories",
  "futures-util",

@@ -20,11 +20,23 @@ impl Operation for ListThreads {
         self.query != *snapshot.list_query
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        snapshot.error = None;
         snapshot.list_query = Arc::new(self.query.clone());
         Ok(())
     }
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
+        for summary in &threads.data {
+            if let Some(id) = &summary.id
+                && snapshot
+                    .conversations
+                    .get(id)
+                    .is_some_and(|thread| thread.name != summary.name)
+                && let Some(thread) = shared_mut(&mut snapshot.conversations, id)
+            {
+                thread.name = summary.name.clone();
+            }
+        }
         snapshot.threads = Some(Arc::new(threads));
         Vec::new()
     }
@@ -117,6 +129,29 @@ impl Operation for ReadThread {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         self.open
     }
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        if self.open {
+            let cwd = snapshot
+                .conversations
+                .get(&self.thread_id)
+                .and_then(|thread| thread.cwd.as_ref())
+                .or_else(|| {
+                    snapshot
+                        .threads
+                        .as_ref()?
+                        .data
+                        .iter()
+                        .find(|thread| thread.id.as_ref() == Some(&self.thread_id))?
+                        .cwd
+                        .as_ref()
+                })
+                .cloned()
+                .unwrap_or_default();
+            select_thread(snapshot, self.thread_id.clone(), cwd);
+        }
+        snapshot.error = None;
+        Ok(())
+    }
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         if self.open {
@@ -132,6 +167,16 @@ impl Operation for ReadThread {
             Vec::new()
         }
     }
+}
+
+fn select_thread(snapshot: &mut Snapshot, id: String, cwd: String) {
+    if snapshot.navigation.cwd != cwd {
+        clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
+    }
+    let navigation = Arc::make_mut(&mut snapshot.navigation);
+    navigation.thread_id = Some(id.clone());
+    navigation.draft_key = id;
+    navigation.cwd = cwd;
 }
 
 pub(super) fn open_thread(

@@ -1,6 +1,27 @@
 use super::*;
 
 impl Desktop {
+    pub(super) fn open_review(&mut self, path: Option<&str>, cx: &mut Context<Self>) {
+        self.panel = Panel::Diff;
+        self.panel_open = true;
+        self.tab = Tab::Chat;
+        if let Some(path) = path {
+            let source = self
+                .snapshot
+                .workspace
+                .review
+                .as_ref()
+                .map_or("", |review| review.diff.as_str());
+            Self::diff(&mut self.diffs, "workspace-patch".into(), source, cx);
+            if let Some(diff) = self.diffs.get("workspace-patch") {
+                diff.update(cx, |diff, cx| {
+                    diff.reveal_path(path, cx);
+                });
+            }
+        }
+        self.refresh_review();
+    }
+
     pub(super) fn review_card(&self, cx: &Context<Self>) -> AnyElement {
         let review = self.snapshot.workspace.review.as_deref();
         let files = review
@@ -20,6 +41,12 @@ impl Desktop {
             .bg(rgb(0x191919))
             .child(
                 h_flex()
+                    .id("review-summary")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.open_review(None, cx);
+                        cx.notify();
+                    }))
                     .gap_3()
                     .p_3()
                     .bg(rgb(0x232323))
@@ -48,11 +75,9 @@ impl Desktop {
                             )),
                     )
                     .child(
-                        self.button("review-changes", "レビューする", cx, |s, _, _| {
-                            s.panel = Panel::Diff;
-                            s.panel_open = true;
-                            s.tab = Tab::Chat;
-                            s.refresh_review();
+                        self.button("review-changes", "レビューする", cx, |s, _, cx| {
+                            cx.stop_propagation();
+                            s.open_review(None, cx);
                         })
                         .border_1()
                         .rounded(px(8.))
@@ -66,7 +91,14 @@ impl Desktop {
                     .overflow_y_scroll()
                     .py_1()
                     .children(files.iter().take(visible).map(|file| {
+                        let path = file.path.clone();
                         h_flex()
+                            .id(SharedString::from(format!("review-file-{}", file.path)))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |s, _, _, cx| {
+                                s.open_review(Some(&path), cx);
+                                cx.notify();
+                            }))
                             .px_3()
                             .h(px(36.))
                             .flex_shrink_0()
@@ -269,6 +301,7 @@ impl Desktop {
             .child(
                 div()
                     .id("file-list")
+                    .debug_selector(|| "conversation-files".into())
                     .h(px(160.))
                     .flex_shrink_0()
                     .overflow_y_scroll()
@@ -285,71 +318,86 @@ impl Desktop {
             (Panel::Browser, IconName::Globe, "ブラウザ"),
             (Panel::Files, IconName::Folder, "ファイラ"),
         ];
-        let selected = TOOLS.iter().position(|(panel, _, _)| *panel == self.panel);
-        let tabs = TabBar::new("workbench-tabs")
-            .small()
-            .underline()
-            .when_some(selected, |bar, ix| bar.selected_index(ix))
-            .children(
-                TOOLS
-                    .iter()
-                    .map(|(_, icon, label)| UiTab::new().icon(icon.clone()).aria_label(*label)),
+        let toolbar = if self.side_chat_mode {
+            h_flex().h_10().px_2().child(
+                self.button(
+                    "back-side-chat",
+                    "サイドチャットに戻る",
+                    cx,
+                    |view, _, _| {
+                        view.panel_open = false;
+                    },
+                )
+                .icon(IconName::ArrowLeft)
+                .debug_selector(|| "back-side-chat".into()),
             )
-            .on_click(cx.listener(|s, ix: &usize, w, cx| {
-                let panel = TOOLS[*ix].0;
-                if panel == Panel::Files {
-                    s.browse(s.snapshot.navigation.cwd.clone());
-                } else {
-                    s.open_panel(panel, w, cx);
-                }
-            }));
-        let toolbar = h_flex()
-            .h_10()
-            .px_2()
-            .gap_1()
-            .border_b_1()
-            .border_color(rgb(0x303030))
-            .child(self.icon_button(
-                "panel-home",
-                IconName::LayoutDashboard,
-                "パネルのホーム",
-                cx,
-                |s, _, _| s.panel = Panel::Home,
-            ))
-            .child(tabs)
-            .child(div().flex_1())
-            .when(self.panel == Panel::Terminal, |bar| {
-                bar.child(self.icon_button(
-                    "new-terminal",
-                    IconName::Plus,
-                    "新しいターミナル",
+        } else {
+            let selected = TOOLS.iter().position(|(panel, _, _)| *panel == self.panel);
+            let tabs = TabBar::new("workbench-tabs")
+                .small()
+                .underline()
+                .when_some(selected, |bar, ix| bar.selected_index(ix))
+                .children(
+                    TOOLS
+                        .iter()
+                        .map(|(_, icon, label)| UiTab::new().icon(icon.clone()).aria_label(*label)),
+                )
+                .on_click(cx.listener(|s, ix: &usize, w, cx| {
+                    let panel = TOOLS[*ix].0;
+                    if panel == Panel::Files {
+                        s.browse(s.snapshot.navigation.cwd.clone());
+                    } else {
+                        s.open_panel(panel, w, cx);
+                    }
+                }));
+            h_flex()
+                .h_10()
+                .px_2()
+                .gap_1()
+                .border_b_1()
+                .border_color(rgb(0x303030))
+                .child(self.icon_button(
+                    "panel-home",
+                    IconName::LayoutDashboard,
+                    "パネルのホーム",
                     cx,
-                    |s, w, cx| {
-                        s.terminal = None;
-                        s.open_panel(Panel::Terminal, w, cx);
-                    },
+                    |s, _, _| s.panel = Panel::Home,
                 ))
-            })
-            .when(self.panel == Panel::SideChat, |bar| {
-                bar.child(self.icon_button(
-                    "new-side-chat",
-                    IconName::Plus,
-                    "新しいサイドチャット",
+                .child(tabs)
+                .child(div().flex_1())
+                .when(self.panel == Panel::Terminal, |bar| {
+                    bar.child(self.icon_button(
+                        "new-terminal",
+                        IconName::Plus,
+                        "新しいターミナル",
+                        cx,
+                        |s, w, cx| {
+                            s.terminal = None;
+                            s.open_panel(Panel::Terminal, w, cx);
+                        },
+                    ))
+                })
+                .when(self.panel == Panel::SideChat, |bar| {
+                    bar.child(self.icon_button(
+                        "new-side-chat",
+                        IconName::Plus,
+                        "新しいサイドチャット",
+                        cx,
+                        |s, _, cx| {
+                            if let Some(chat) = &s.side_chat {
+                                chat.update(cx, |chat, _| chat.new_chat(String::new()));
+                            }
+                        },
+                    ))
+                })
+                .child(self.icon_button(
+                    "close-panel",
+                    IconName::Close,
+                    "右パネルを閉じる",
                     cx,
-                    |s, _, cx| {
-                        if let Some(chat) = &s.side_chat {
-                            chat.update(cx, |chat, _| chat.new_chat(String::new()));
-                        }
-                    },
+                    |s, _, _| s.panel_open = false,
                 ))
-            })
-            .child(self.icon_button(
-                "close-panel",
-                IconName::Close,
-                "右パネルを閉じる",
-                cx,
-                |s, _, _| s.panel_open = false,
-            ));
+        };
         let body = match self.panel {
             Panel::Home => {
                 let mut chooser = v_flex().w_full().max_w(px(400.)).gap_2();
@@ -411,6 +459,7 @@ impl Desktop {
                             |s, _, _| s.refresh_review(),
                         )),
                 )
+                .child(self.diff_file_menu(cx))
                 .child(
                     div().flex_1().min_h_0().child(Self::diff(
                         &mut self.diffs,
@@ -461,6 +510,42 @@ impl Desktop {
             .min_w_0()
             .child(toolbar)
             .child(div().flex_1().min_h_0().flex().child(body))
+            .into_any_element()
+    }
+}
+
+impl Desktop {
+    fn diff_file_menu(&self, cx: &Context<Self>) -> AnyElement {
+        let entity = cx.entity().downgrade();
+        Button::new("diff-file-navigation")
+            .debug_selector(|| "diff-file-navigation".into())
+            .label(format!(
+                "ファイルを選択 ({})",
+                self.snapshot
+                    .workspace
+                    .review
+                    .as_ref()
+                    .map_or(0, |review| review.files.len())
+            ))
+            .accessibility_label("差分のファイルを選択")
+            .dropdown_caret(true)
+            .ghost()
+            .dropdown_menu(move |mut menu, _, cx| {
+                if let Some(owner) = entity.upgrade()
+                    && let Some(review) = &owner.read(cx).snapshot.workspace.review
+                {
+                    for file in &review.files {
+                        let path = file.path.clone();
+                        let entity = entity.clone();
+                        menu = menu.item(PopupMenuItem::new(path.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = entity.update(cx, |s, cx| s.open_review(Some(&path), cx));
+                            },
+                        ));
+                    }
+                }
+                menu
+            })
             .into_any_element()
     }
 }

@@ -258,13 +258,6 @@ pub struct Transcription {
 impl<T: Serialize> RpcMethod for Transcribe<T> {
     type Output = Transcription;
     const METHOD: &'static str = "host/dictation/transcribe";
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.text.trim().is_empty() {
-            Err("transcription is blank")
-        } else {
-            Ok(())
-        }
-    }
 }
 
 #[derive(Debug, Serialize)]

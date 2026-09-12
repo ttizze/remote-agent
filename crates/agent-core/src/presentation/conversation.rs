@@ -22,30 +22,106 @@ pub struct RenderedConversation {
     pub queued: Vec<Arc<RenderedItem>>,
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedTurn {
     pub source: Arc<models::Turn>,
     pending: PendingItems,
     requests: Vec<Arc<ServerRequest>>,
-    pub rows: Vec<TurnPresentationData>,
+    pub rows: Vec<ConversationRow>,
+}
+/// Native clients cache this layout per unchanged turn; expansion only filters activity rows.
+#[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ConversationRow {
+    pub id: String,
+    pub content: ConversationRowContent,
+}
+#[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ConversationRowContent {
+    OlderItems {
+        turn_id: String,
+    },
+    User {
+        item: Arc<RenderedItem>,
+    },
+    ActivityHeader {
+        activity: ActivityPresentation,
+    },
+    Activity {
+        item: Arc<RenderedItem>,
+        turn_id: String,
+    },
+    PendingRequest {
+        request: Box<Request>,
+    },
+    Error {
+        error: TurnErrorPresentation,
+    },
+    Response {
+        item: Arc<RenderedItem>,
+        fork_turn_id: Option<String>,
+    },
+    InProgress {
+        turn_id: String,
+    },
 }
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct TurnPresentationData {
+pub struct ActivityPresentation {
     pub id: String,
-    pub turn_id: String,
-    pub has_older_items: bool,
-    pub opening_user_message: Option<Arc<RenderedItem>>,
     pub status: String,
-    pub is_in_progress: bool,
-    pub user_messages: Vec<Arc<RenderedItem>>,
-    pub activity_summary: Option<String>,
-    pub activity_items: Vec<Arc<RenderedItem>>,
-    pub responses: Vec<Arc<RenderedItem>>,
+    pub activity_summary: String,
     pub activity_initially_expanded: bool,
     pub activity_can_collapse: bool,
-    pub error: Option<TurnErrorPresentation>,
-    pub pending_requests: Vec<Request>,
+    pub is_in_progress: bool,
 }
+#[derive(Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ActivityExpansion {
+    pub status: String,
+    pub expanded: bool,
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn activity_is_expanded(
+    activity: &ActivityPresentation,
+    choice: Option<ActivityExpansion>,
+) -> bool {
+    choice
+        .filter(|choice| choice.status == activity.status)
+        .map_or(activity.activity_initially_expanded, |choice| {
+            choice.expanded
+        })
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl RenderedTurn {
+    pub fn conversation_rows(&self) -> Vec<ConversationRow> {
+        self.rows.clone()
+    }
+
+    pub fn progress_label(&self, include_action: bool, now_seconds: f64) -> String {
+        let action = self.rows.iter().rev().find_map(|row| match &row.content {
+            ConversationRowContent::Activity { item, .. } if include_action => {
+                Some(item.data.title.as_str())
+            }
+            _ => None,
+        });
+        progress_label(&self.source, action, now_seconds)
+    }
+}
+
+impl RenderedTurn {
+    fn items(&self) -> impl Iterator<Item = &Arc<RenderedItem>> {
+        self.rows.iter().filter_map(|row| match &row.content {
+            ConversationRowContent::User { item }
+            | ConversationRowContent::Activity { item, .. }
+            | ConversationRowContent::Response { item, .. } => Some(item),
+            _ => None,
+        })
+    }
+}
+
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TurnErrorPresentation {
@@ -74,18 +150,6 @@ impl RenderedItem {
         }
     }
 }
-impl RenderedTurn {
-    fn items(&self) -> impl Iterator<Item = &Arc<RenderedItem>> {
-        self.rows.iter().flat_map(|row| {
-            row.opening_user_message
-                .iter()
-                .chain(&row.user_messages)
-                .chain(&row.activity_items)
-                .chain(&row.responses)
-        })
-    }
-}
-
 impl RenderedItem {
     fn key(&self) -> (Option<&str>, *const ()) {
         match &self.source {
@@ -109,6 +173,7 @@ impl RenderedItem {
                 kind: presentation.kind.into(),
                 title: presentation.title,
                 collapsible: presentation.collapsible,
+                visible: presentation.visible,
                 body: body.text,
                 image_sources: body.images,
                 deferred,
@@ -132,6 +197,7 @@ impl RenderedItem {
                 kind: "user".into(),
                 title: "You".into(),
                 collapsible: false,
+                visible: true,
                 body: body.text,
                 image_sources: body.images,
                 deferred: false,
@@ -306,57 +372,94 @@ fn render_turn(
             )
         }
     };
-    let opening = source
+    use ConversationRowContent::*;
+    let mut rows = Vec::new();
+    let mut occurrences = HashMap::new();
+    let mut push = |content: ConversationRowContent| {
+        let id = match &content {
+            User { item } | Activity { item, .. } | Response { item, .. } => {
+                format!("history-item:{}:{}", source.id, item.data.id)
+            }
+            ActivityHeader { activity } => activity.id.clone(),
+            PendingRequest { request } => format!("history-request:{}", request.key),
+            OlderItems { turn_id } => format!("history-gap:{turn_id}"),
+            Error { .. } => format!("history-error:{}", source.id),
+            InProgress { turn_id } => format!("in-progress:{turn_id}"),
+        };
+        let occurrence = occurrences.entry(id.clone()).or_insert(0usize);
+        let id = format!("{id}:occurrence:{occurrence}");
+        *occurrence += 1;
+        rows.push(ConversationRow { id, content });
+    };
+    if let Some(item) = source
         .opening_user_message
         .as_ref()
         .filter(|item| !native.iter().any(|native| native.id == item.id))
-        .map(render_native);
-    let rows = project_items(&source, order.len(), metadata)
-        .map(|segment| {
-            let mut users = Vec::new();
-            let mut activity = Vec::new();
-            let mut responses = Vec::new();
-            for index in segment.start..segment.end {
-                match segment.role(index, metadata(index)) {
-                    Role::Hidden => {}
-                    Role::User => users.push(render(index)),
-                    Role::Activity => activity.push(render(index)),
-                    Role::Response => responses.push(render(index)),
-                }
+    {
+        push(User {
+            item: render_native(item),
+        });
+    }
+    if source.items_has_more.unwrap_or(false) {
+        push(OlderItems {
+            turn_id: source.id.clone(),
+        });
+    }
+    for segment in project_items(&source, order.len(), metadata) {
+        let segment = &segment;
+        let group = |role| {
+            (segment.start..segment.end)
+                .filter(move |&index| segment.role(index, metadata(index)) == role)
+                .map(&render)
+        };
+        let in_progress = segment.last && source.status.as_deref() == Some("inProgress");
+        for item in group(Role::User) {
+            push(User { item });
+        }
+        if let Some(summary) = &segment.label {
+            push(ActivityHeader {
+                activity: ActivityPresentation {
+                    id: segment.id.clone(),
+                    status: source.status.clone().unwrap_or_default(),
+                    activity_summary: summary.clone(),
+                    activity_initially_expanded: segment.initially_expanded,
+                    activity_can_collapse: segment.collapsible,
+                    is_in_progress: in_progress,
+                },
+            });
+            for item in group(Role::Activity) {
+                push(Activity {
+                    item,
+                    turn_id: source.id.clone(),
+                });
             }
-            TurnPresentationData {
-                id: segment.id,
+        }
+        if segment.last {
+            for pending in &requests {
+                push(PendingRequest {
+                    request: Box::new(request(&pending.id.to_string(), pending)),
+                });
+            }
+            if let Some(error) = &source.error {
+                push(Error {
+                    error: turn_error(error),
+                });
+            }
+        }
+        let mut responses = group(Role::Response).peekable();
+        while let Some(item) = responses.next() {
+            let can_fork = !in_progress && segment.last && responses.peek().is_none();
+            push(Response {
+                item,
+                fork_turn_id: can_fork.then(|| source.id.clone()),
+            });
+        }
+        if in_progress {
+            push(InProgress {
                 turn_id: source.id.clone(),
-                has_older_items: segment.start == 0 && source.items_has_more.unwrap_or(false),
-                opening_user_message: if segment.start == 0 {
-                    opening.clone()
-                } else {
-                    None
-                },
-                status: source.status.clone().unwrap_or_default(),
-                is_in_progress: segment.last && source.status.as_deref() == Some("inProgress"),
-                user_messages: users,
-                activity_summary: segment.label,
-                activity_items: activity,
-                responses,
-                activity_initially_expanded: segment.initially_expanded,
-                activity_can_collapse: segment.collapsible,
-                error: if segment.last {
-                    source.error.as_ref().map(turn_error)
-                } else {
-                    None
-                },
-                pending_requests: if segment.last {
-                    requests
-                        .iter()
-                        .map(|r| request(&r.id.to_string(), r))
-                        .collect()
-                } else {
-                    Vec::new()
-                },
-            }
-        })
-        .collect();
+            });
+        }
+    }
     Arc::new(RenderedTurn {
         source,
         pending,
@@ -477,6 +580,7 @@ pub struct ItemPresentation {
     pub kind: String,
     pub title: String,
     pub collapsible: bool,
+    pub visible: bool,
 }
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -532,6 +636,131 @@ mod tests {
             snapshot.conversations["thread"].clone(),
             &previous.cloned(),
         )
+    }
+
+    #[test]
+    fn flat_rows_preserve_history_order_and_only_offer_fork_on_last_completed_response() {
+        let mut snapshot = fixture();
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.conversations)
+                .get_mut("thread")
+                .unwrap(),
+        );
+        let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
+        turn.items_has_more = Some(true);
+        turn.opening_user_message = Some(Arc::new(
+            serde_json::from_value(json!({"id":"opening","type":"userMessage","text":"first"}))
+                .unwrap(),
+        ));
+        let rendered = project_snapshot(snapshot.clone(), None);
+        let rows = rendered.turns[1].conversation_rows();
+        let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids[0], "history-item:live:opening:occurrence:0");
+        assert!(ids[1].starts_with("history-gap:"));
+        assert_eq!(ids[2], "history-item:live:accepted:occurrence:0");
+        assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), ids.len());
+        assert!(rows.iter().any(|row| matches!(&row.content, ConversationRowContent::Activity { item, .. } if item.data.native_id.as_deref() == Some("command"))));
+        assert!(rows.iter().all(|row| !matches!(
+            &row.content,
+            ConversationRowContent::Response {
+                fork_turn_id: Some(_),
+                ..
+            }
+        )));
+        assert!(matches!(
+            rows.last().unwrap().content,
+            ConversationRowContent::InProgress { .. }
+        ));
+        let thread = Arc::make_mut(
+            Arc::make_mut(&mut snapshot.conversations)
+                .get_mut("thread")
+                .unwrap(),
+        );
+        Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]).status = Some("completed".into());
+        let completed = project_snapshot(snapshot, Some(&rendered));
+        let rows = completed.turns[1].conversation_rows();
+        assert!(
+            matches!(&rows.last().unwrap().content, ConversationRowContent::Response { item, fork_turn_id: Some(id) } if id == "live" && item.data.native_id.as_deref() == Some("stream"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.id == "history-item:live:accepted:occurrence:0")
+        );
+        for row in rows {
+            if let ConversationRowContent::ActivityHeader { activity } = row.content {
+                assert!(!activity_is_expanded(&activity, None));
+                assert!(activity_is_expanded(
+                    &activity,
+                    Some(ActivityExpansion {
+                        status: activity.status.clone(),
+                        expanded: true
+                    })
+                ));
+                assert!(!activity_is_expanded(
+                    &activity,
+                    Some(ActivityExpansion {
+                        status: "inProgress".into(),
+                        expanded: true
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn flat_row_ids_distinguish_repeated_items_and_turns() {
+        let source = Arc::new(
+            serde_json::from_value(json!({"id":"thread", "turns":[
+                {"id":"first", "status":"completed", "items":[
+                    {"id":"same", "type":"agentMessage", "text":"old"},
+                    {"id":"same", "type":"agentMessage", "phase":"final_answer", "text":"new"}
+                ]},
+                {"id":"second", "status":"completed", "items":[
+                    {"id":"same", "type":"agentMessage", "text":"another turn"}
+                ]}
+            ]}))
+            .unwrap(),
+        );
+        let rendered = project_conversation(&Snapshot::default(), source, &None);
+        let rows: Vec<_> = rendered
+            .turns
+            .iter()
+            .flat_map(|turn| turn.conversation_rows())
+            .collect();
+        assert_eq!(
+            rows.iter().map(|row| &row.id).collect::<HashSet<_>>().len(),
+            rows.len()
+        );
+        let texts: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                ConversationRowContent::Activity { item, .. }
+                | ConversationRowContent::Response { item, .. } => Some(item.data.body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["old", "new", "another turn"]);
+        let again: Vec<_> = rendered
+            .turns
+            .iter()
+            .flat_map(|turn| turn.conversation_rows())
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            again,
+            rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>()
+        );
+        let mut changed = rendered.source.clone();
+        Arc::make_mut(&mut Arc::make_mut(&mut changed).turns.as_mut().unwrap()[0]).status =
+            Some("interrupted".into());
+        let updated = project_conversation(&Snapshot::default(), changed, &Some(rendered.clone()));
+        assert_eq!(updated.turns[0].items().count(), 2);
+        for (before, after) in rendered.turns[0].items().zip(updated.turns[0].items()) {
+            assert!(
+                Arc::ptr_eq(before, after),
+                "unchanged items must retain their cache even when IDs repeat"
+            );
+        }
     }
 
     #[test]
@@ -646,7 +875,14 @@ mod tests {
             .insert("accepted".into(), pending(Some("live".into())));
         Arc::make_mut(&mut snapshot.pending_submissions).insert("queued".into(), pending(None));
         let rendered = project_snapshot(snapshot, None);
-        let done = &rendered.turns[0].rows.last().unwrap().pending_requests;
+        let done: Vec<_> = rendered.turns[0]
+            .rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                ConversationRowContent::PendingRequest { request } => Some(request),
+                _ => None,
+            })
+            .collect();
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].key, "1");
         assert_eq!(done[0].title, "コマンドの承認待ち");
@@ -655,7 +891,14 @@ mod tests {
             done[0].decision_labels,
             ["承認", "このセッションで承認", "拒否", "キャンセル"]
         );
-        let live = &rendered.turns[1].rows.last().unwrap().pending_requests;
+        let live: Vec<_> = rendered.turns[1]
+            .rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                ConversationRowContent::PendingRequest { request } => Some(request),
+                _ => None,
+            })
+            .collect();
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].body, "which?");
         assert_eq!(
@@ -678,5 +921,50 @@ mod tests {
             assert!(error.is_reconnecting);
             assert_eq!(error.message, "retry");
         }
+    }
+}
+
+fn progress_label(turn: &models::Turn, action: Option<&str>, now_seconds: f64) -> String {
+    let started = turn
+        .started_at
+        .as_ref()
+        .and_then(Option::as_ref)
+        .and_then(serde_json::Number::as_f64)
+        .or_else(|| {
+            turn.extra
+                .get("startedAtMs")?
+                .as_f64()
+                .map(|milliseconds| milliseconds / 1000.)
+        });
+    let elapsed = started
+        .map(|started| format!("{}秒 ", (now_seconds - started).max(0.) as u64))
+        .unwrap_or_default();
+    match action.filter(|action| !action.is_empty()) {
+        Some(action) => format!("{elapsed}作業中 · {action}"),
+        None => format!("{elapsed}作業中…"),
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[test]
+    fn elapsed_work_uses_provider_time_and_describes_the_current_tool() {
+        for value in [
+            serde_json::json!({"id":"t","startedAt":100.5}),
+            serde_json::json!({"id":"t","startedAtMs":100500}),
+        ] {
+            let turn = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                progress_label(&turn, Some("cargo test"), 108.5),
+                "8秒 作業中 · cargo test"
+            );
+            assert_eq!(progress_label(&turn, None, 110.5), "10秒 作業中…");
+            assert_eq!(progress_label(&turn, None, 99.), "0秒 作業中…");
+        }
+        assert_eq!(
+            progress_label(&models::Turn::default(), None, 100.),
+            "作業中…"
+        );
     }
 }

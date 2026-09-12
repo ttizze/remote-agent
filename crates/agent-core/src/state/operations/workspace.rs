@@ -210,3 +210,39 @@ impl Operation for LoadSessionImages {
         context.client.session_images(&self.thread_id).await
     }
 }
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListWorktrees {}
+impl rpc::RpcMethod for ListWorktrees {
+    type Output = Vec<crate::models::Worktree>;
+    const METHOD: &'static str = "host/worktree/list";
+}
+impl Operation for ListWorktrees {
+    rpc_operation!();
+    const ORDERED: bool = true;
+    fn apply(self, snapshot: &mut Snapshot, worktrees: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.workspace).worktrees = Some(Arc::new(worktrees));
+        Vec::new()
+    }
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveWorktree {
+    pub path: String,
+}
+impl rpc::RpcMethod for RemoveWorktree {
+    type Output = ();
+    const METHOD: &'static str = "host/worktree/remove";
+}
+impl Operation for RemoveWorktree {
+    rpc_operation!();
+    const ORDERED: bool = true;
+    fn apply(self, snapshot: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
+        if let Some(worktrees) = Arc::make_mut(&mut snapshot.workspace).worktrees.as_mut() {
+            Arc::make_mut(worktrees).retain(|worktree| worktree.path != self.path);
+        }
+        vec![Effect::execute(ListWorktrees {})]
+    }
+}

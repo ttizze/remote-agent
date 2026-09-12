@@ -478,6 +478,24 @@ pub struct WorktreeSettings {
     pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct Worktree {
+    pub path: String,
+    pub project_path: String,
+    pub branch: String,
+    pub blocked_reason: Option<String>,
+    pub threads: Vec<WorktreeThread>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct WorktreeThread {
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct WorkspaceReview {
     pub branch: String,

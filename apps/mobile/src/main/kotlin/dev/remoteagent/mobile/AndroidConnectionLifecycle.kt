@@ -4,8 +4,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 
 /**
- * Foreground connection hook. The owner decides whether background should release the transport; this milestone
- * reconnects the selected Host on start without claiming a false connected state while reconnecting.
+ * Refresh the selected Host on foreground and persist on background, retaining a live connection.
  */
 class AndroidConnectionLifecycle(private val onForeground: () -> Unit, private val onBackground: () -> Unit) :
     DefaultLifecycleObserver {

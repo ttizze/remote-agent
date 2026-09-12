@@ -1876,8 +1876,7 @@
         }
       }
     ],
-    "errorContains": "音声を認識できませんでした",
-    "errorRaw": null
+    "result": " \n"
   },
   {
     "name": "transcription-wrong-text-type",

@@ -42,6 +42,8 @@ pub enum Intent {
     ReviewWorkspace(ReviewWorkspace),
     ReadWorktreeSettings(ReadWorktreeSettings),
     UpdateWorktreeSettings(UpdateWorktreeSettings),
+    ListWorktrees(ListWorktrees),
+    RemoveWorktree(RemoveWorktree),
     ListThreads(ListThreads),
     ExpandThreadList {
         project_id: Option<String>,

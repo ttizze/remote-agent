@@ -48,30 +48,38 @@ impl HostRuntime {
         let mut sessions = JoinSet::new();
         let authorized_slots = Arc::new(tokio::sync::Semaphore::new(64));
         let pairing_slots = Arc::new(tokio::sync::Semaphore::new(16));
-        let result = loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break Ok(()),
-                _ = self.service.stopped() => break Err("Codex App Server event stream stopped".into()),
-                incoming = self.endpoint.accept() => match incoming {
-                    Some(Ok(incoming)) => {
-                        let known = self.credentials.record.lock().await.trust.allowed.contains(&incoming.node_id());
-                        let slots = if known { &authorized_slots } else { &pairing_slots };
-                        let Ok(permit) = slots.clone().try_acquire_owned() else { continue; };
-                        let runtime = self.clone();
-                        let stop = shutdown.child_token();
-                        let authorized_slots = authorized_slots.clone();
-                        sessions.spawn(async move {
-                            runtime.serve(incoming, stop, permit, authorized_slots).await
-                        });
-                    }
-                    Some(Err(error)) => agent_core::diagnostics::error("host.accept", &error.to_string()),
-                    None => break Ok(()),
-                },
-                Some(result) = sessions.join_next(), if !sessions.is_empty() => {
-                    match result {
-                        Ok(Err(error)) => agent_core::diagnostics::error("host.session", &error),
-                        Err(error) => agent_core::diagnostics::error("host.session", &error.to_string()),
-                        Ok(Ok(())) => {}
+        let result = {
+            // Preserve an in-flight handshake when another session finishes.
+            let accept = self.endpoint.accept();
+            tokio::pin!(accept);
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break Ok(()),
+                    _ = self.service.stopped() => break Err("Codex App Server event stream stopped".into()),
+                    incoming = &mut accept => {
+                        accept.set(self.endpoint.accept());
+                        match incoming {
+                            Some(Ok(incoming)) => {
+                                let known = self.credentials.record.lock().await.trust.allowed.contains(&incoming.node_id());
+                                let slots = if known { &authorized_slots } else { &pairing_slots };
+                                let Ok(permit) = slots.clone().try_acquire_owned() else { continue; };
+                                let runtime = self.clone();
+                                let stop = shutdown.child_token();
+                                let authorized_slots = authorized_slots.clone();
+                                sessions.spawn(async move {
+                                    runtime.serve(incoming, stop, permit, authorized_slots).await
+                                });
+                            }
+                            Some(Err(error)) => agent_core::diagnostics::error("host.accept", &error.to_string()),
+                            None => break Ok(()),
+                        }
+                    },
+                    Some(result) = sessions.join_next(), if !sessions.is_empty() => {
+                        match result {
+                            Ok(Err(error)) => agent_core::diagnostics::error("host.session", &error),
+                            Err(error) => agent_core::diagnostics::error("host.session", &error.to_string()),
+                            Ok(Ok(())) => {}
+                        }
                     }
                 }
             }

@@ -891,6 +891,72 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
 }
 
 #[tokio::test]
+async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
+    for existing in [false, true] {
+        for send in [false, true] {
+            for navigate in [false, true] {
+                for transcript in ["", " \n"] {
+                    let mut initial = snapshot();
+                    let key = if existing { "thread" } else { "new:/fixture" };
+                    let navigation = Arc::make_mut(&mut initial.navigation);
+                    navigation.thread_id = existing.then(|| "thread".into());
+                    navigation.cwd = "/fixture".into();
+                    navigation.draft_key = key.into();
+                    Arc::make_mut(&mut initial.drafts).insert(
+                        key.into(),
+                        Arc::new(Draft {
+                            text: "keep this draft".into(),
+                            attachments: vec![agent_core::state::Attachment {
+                                path: "/fixture/photo.png".into(),
+                                name: "photo.png".into(),
+                                is_image: true,
+                            }],
+                            ..Default::default()
+                        }),
+                    );
+                    let (store, mut reader, mut writer) = setup(initial).await;
+                    let operation = store.dispatch(Intent::Transcribe(op::Dictate {
+                        draft_key: key.into(),
+                        audio: vec![0, 0],
+                        send,
+                        client_user_message_id: "silent".into(),
+                    }));
+                    let request = read(&mut reader).await;
+                    assert_eq!(request["method"], "host/dictation/transcribe");
+                    if navigate {
+                        new_chat(&store, &mut reader, &mut writer, "/other").await;
+                    }
+                    let before = store.snapshot();
+                    writer
+                        .write_line(
+                            &json!({"id":request["id"], "result":{"text":transcript}}).to_string(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(operation.await.unwrap(), Outcome::Applied);
+                    let after = store.snapshot();
+                    assert_eq!(after.drafts, before.drafts);
+                    assert_eq!(after.conversations, before.conversations);
+                    assert_eq!(after.pending_submissions, before.pending_submissions);
+                    assert_eq!(after.navigation, before.navigation);
+                    assert!(after.error.is_none());
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(50), reader.read_line())
+                            .await
+                            .is_err(),
+                        "silent dictation must not submit or create a conversation"
+                    );
+                    let restored: Snapshot =
+                        serde_json::from_slice(&serde_json::to_vec(&after).unwrap()).unwrap();
+                    assert_eq!(restored.drafts, after.drafts);
+                    store.close().await.unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn file_navigation_ignores_a_late_reply_from_the_previous_file() {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let first = tokio::spawn({
@@ -1013,6 +1079,129 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
 }
 
 #[tokio::test]
+async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
+    for cached in [false, true] {
+        for restored in [false, true] {
+            let mut initial = if cached {
+                snapshot()
+            } else {
+                Snapshot::default()
+            };
+            initial.threads = Some(Arc::new(
+                serde_json::from_value(json!({
+                    "data":[{"id":"thread","cwd":"/listed","name":"Selected task"}],
+                    "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+                }))
+                .unwrap(),
+            ));
+            Arc::make_mut(&mut initial.drafts).insert(
+                "thread".into(),
+                Arc::new(Draft {
+                    text: "Keep this draft".into(),
+                    ..Default::default()
+                }),
+            );
+            if restored {
+                initial = serde_json::from_slice(&serde_json::to_vec(&initial).unwrap()).unwrap();
+            }
+            let (store, mut reader, mut writer) = setup(initial).await;
+            let refresh = store.dispatch(Intent::ListThreads(op::ListThreads::new(
+                Default::default(),
+            )));
+            let list_request = read(&mut reader).await;
+            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
+            let selected = store.snapshot();
+            assert_eq!(
+                selected.navigation.thread_id.as_deref(),
+                Some("thread"),
+                "selection must not wait for either RPC (cached={cached}, restored={restored})"
+            );
+            assert_eq!(selected.navigation.draft_key, "thread");
+            assert_eq!(
+                selected.navigation.cwd,
+                if cached { "/fixture" } else { "/listed" }
+            );
+            assert_eq!(selected.drafts["thread"].text, "Keep this draft");
+            assert_eq!(loaded_text(&selected), cached.then_some("old"));
+            let request = read(&mut reader).await;
+            assert_eq!(request["method"], "host/thread/read");
+            writer
+                .write_line(
+                    &json!({"id":request["id"],"result":{"thread":thread("latest")}}).to_string(),
+                )
+                .await
+                .unwrap();
+            opening.await.unwrap();
+            assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
+            assert_eq!(store.snapshot().navigation.cwd, "/fixture");
+            writer.write_line(&json!({"id":list_request["id"],"result":{
+                "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+            }}).to_string()).await.unwrap();
+            refresh.await.unwrap();
+            assert_eq!(
+                store.snapshot().navigation.thread_id.as_deref(),
+                Some("thread")
+            );
+            assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
+            assert_eq!(store.snapshot().drafts["thread"].text, "Keep this draft");
+            assert!(store.snapshot().error.is_none());
+            store.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failed_open_keeps_selection_and_draft_and_can_retry() {
+    for cached in [false, true] {
+        let (store, mut reader, mut writer) = setup(if cached {
+            snapshot()
+        } else {
+            Snapshot::default()
+        })
+        .await;
+        let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: "thread".into(),
+                text: "Written while loading".into(),
+            })
+            .await
+            .unwrap();
+        let request = read(&mut reader).await;
+        writer.write_line(&json!({"id":request["id"],"error":{"code":-32000,"message":"history unavailable"}}).to_string()).await.unwrap();
+        assert!(opening.await.is_err());
+        assert_eq!(
+            store.snapshot().navigation.thread_id.as_deref(),
+            Some("thread")
+        );
+        assert_eq!(loaded_text(&store.snapshot()), cached.then_some("old"));
+        assert!(
+            store
+                .snapshot()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("history unavailable")
+        );
+        let retry = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
+        assert!(store.snapshot().error.is_none());
+        let request = read(&mut reader).await;
+        writer
+            .write_line(
+                &json!({"id":request["id"],"result":{"thread":thread("recovered")}}).to_string(),
+            )
+            .await
+            .unwrap();
+        retry.await.unwrap();
+        let recovered = store.snapshot();
+        assert_eq!(loaded_text(&recovered), Some("recovered"));
+        assert_eq!(recovered.drafts["thread"].text, "Written while loading");
+        assert!(recovered.error.is_none());
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let opening = tokio::spawn({
@@ -1056,6 +1245,9 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
         snapshot.activity.active.get("thread") == Some(&false)
     })
     .await;
+    let refresh = read(&mut reader).await;
+    assert_eq!(refresh["method"], "host/thread/list");
+    // Sending must not wait for the catalogue refresh to complete.
     store
         .dispatch(Intent::SetDraft {
             thread_id: "thread".into(),

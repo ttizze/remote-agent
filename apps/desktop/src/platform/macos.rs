@@ -56,6 +56,7 @@ pub(crate) fn start_recording(
         #[serde(default)]
         complete: bool,
         error: Option<String>,
+        level: Option<f32>,
     }
     let directory = tempfile::Builder::new()
         .prefix("bex-dictation-")
@@ -84,6 +85,11 @@ pub(crate) fn start_recording(
                 if state.recording {
                     events
                         .send_blocking(super::RecordingEvent::Started)
+                        .map_err(|_| "recording cancelled")?;
+                }
+                if let Some(level) = state.level {
+                    events
+                        .send_blocking(super::RecordingEvent::Level(level))
                         .map_err(|_| "recording cancelled")?;
                 }
                 if state.complete {

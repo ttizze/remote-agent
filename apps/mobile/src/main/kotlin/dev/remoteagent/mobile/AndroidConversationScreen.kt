@@ -12,8 +12,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
@@ -38,7 +38,11 @@ import dev.remoteagent.core.Interrupt
 import dev.remoteagent.core.UploadAttachment
 import dev.remoteagent.core.Attachment
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.TurnPresentationData
+import dev.remoteagent.core.ConversationRow
+import dev.remoteagent.core.ActivityPresentation
+import dev.remoteagent.core.ConversationRowContent
+import dev.remoteagent.core.ActivityExpansion
+import dev.remoteagent.core.activityIsExpanded
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -51,11 +55,10 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier) {
     val snapshot = model.snapshot
     val threadId = snapshot.navigation().threadId
     val thread = threadId?.let { snapshot.conversation(it) }
-    val conversation = model.conversation
-    val turns = remember(conversation) { conversation?.rows().orEmpty() }
-    val queued = remember(conversation) { conversation?.queued().orEmpty() }
+    val projection = remember(model.profileId, threadId) { ConversationProjection() }
+    val rows = projection.project(snapshot, thread)
     val listState = rememberLazyListState()
-    val activityExpansion = remember(threadId) { mutableStateMapOf<String, Pair<String, Boolean>>() }
+    val activityExpansion = remember(threadId) { mutableStateMapOf<String, ActivityExpansion>() }
     var following by remember(model.selectionKey) { mutableStateOf(true) }
     LaunchedEffect(listState) {
         snapshotFlow {
@@ -92,18 +95,75 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier) {
                         Text("以前の会話を読み込む")
                     }
                 }
-            turns.forEach { turn ->
-                conversationTurn(turn, model, threadId, activityExpansion) { id ->
-                    following = false
-                    model.older(id)
-                }
+            conversationRows(rows, model, threadId, activityExpansion) { turnId ->
+                following = false
+                model.older(turnId)
             }
-            items(queued, key = { "queued:${it.id()}" }) {
+            items(projection.queued, key = { "queued:${it.id()}" }) {
                 Text("順番待ち")
                 ThreadMessageCard(it, true)
             }
         }
         ThreadComposer(model) { following = true }
+    }
+}
+
+private fun LazyListScope.conversationRows(
+    rows: List<ConversationRow>,
+    model: AndroidAppModel,
+    threadId: String?,
+    activityExpansion: MutableMap<String, ActivityExpansion>,
+    older: (String) -> Unit,
+) {
+    var expanded = false
+    rows.forEach { row ->
+        val content = row.content
+        if (content is ConversationRowContent.ActivityHeader) {
+            expanded = activityIsExpanded(content.activity, activityExpansion[content.activity.id])
+        }
+        if (content !is ConversationRowContent.Activity || expanded) {
+            item(key = row.id) { ConversationContent(content, model, threadId, activityExpansion, older) }
+        }
+    }
+}
+
+@Composable
+private fun ConversationContent(
+    content: ConversationRowContent,
+    model: AndroidAppModel,
+    threadId: String?,
+    activityExpansion: MutableMap<String, ActivityExpansion>,
+    older: (String) -> Unit,
+) {
+    when (content) {
+        is ConversationRowContent.OlderItems -> Button(
+            onClick = { older(content.turnId) }, enabled = !model.loadingHistory,
+        ) {
+            Text("途中の履歴を読み込む")
+        }
+        is ConversationRowContent.User -> ThreadMessageCard(content.item, true)
+        is ConversationRowContent.Response -> ThreadMessageCard(content.item, false)
+        is ConversationRowContent.Activity -> ThreadActivityCard(content.item, model, content.turnId)
+        is ConversationRowContent.ActivityHeader -> ActivityHeader(content.activity, activityExpansion)
+        is ConversationRowContent.PendingRequest -> RequestCard(content.request, model)
+        is ConversationRowContent.Error -> {
+            Text(content.error.title, style = MaterialTheme.typography.labelLarge)
+            Text(content.error.message, color = MaterialTheme.colorScheme.error)
+            content.error.details?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
+        is ConversationRowContent.InProgress -> Button(onClick = {
+            if (threadId != null) model.perform(Intent.Interrupt(Interrupt(threadId, content.turnId)))
+        }) { Text("停止") }
+    }
+}
+
+@Composable
+private fun ActivityHeader(activity: ActivityPresentation, expansion: MutableMap<String, ActivityExpansion>) {
+    val expanded = activityIsExpanded(activity, expansion[activity.id])
+    TextButton(onClick = {
+        if (activity.activityCanCollapse) expansion[activity.id] = ActivityExpansion(activity.status, !expanded)
+    }) {
+        Text(activity.activitySummary + if (activity.activityCanCollapse) if (expanded) " ⌄" else " ›" else "")
     }
 }
 
@@ -188,61 +248,6 @@ private fun AttachmentButton(model: AndroidAppModel) {
         enabled = !transferring,
     ) {
         Text(if (transferring) "添付中…" else "添付")
-    }
-}
-
-private fun LazyListScope.conversationTurn(
-    turn: TurnPresentationData,
-    model: AndroidAppModel,
-    threadId: String?,
-    activityExpansion: MutableMap<String, Pair<String, Boolean>>,
-    older: (String) -> Unit,
-) {
-    val id = turn.id
-    turn.openingUserMessage?.let { item(key = "opening:$id") { ThreadMessageCard(it, true) } }
-    if (turn.hasOlderItems)
-        item(key = "history:$id") {
-            Button(onClick = { older(turn.turnId) }, enabled = !model.loadingHistory) { Text("途中の履歴を読み込む") }
-        }
-    items(turn.userMessages, key = { "$id:user:${it.id()}" }) { ThreadMessageCard(it, true) }
-    conversationActivity(turn, model, activityExpansion)
-    items(turn.pendingRequests, key = { "$id:request:${it.key}" }) { RequestCard(it, model) }
-    turn.error?.let { error ->
-        item(key = "$id:error") {
-            Text(error.title, style = MaterialTheme.typography.labelLarge)
-            Text(error.message, color = MaterialTheme.colorScheme.error)
-            error.details?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-        }
-    }
-    items(turn.responses, key = { "$id:response:${it.id()}" }) { ThreadMessageCard(it, false) }
-    if (turn.isInProgress)
-        item(key = "$id:stop") {
-            Button(onClick = {
-                if (threadId != null) model.perform(Intent.Interrupt(Interrupt(threadId, turn.turnId)))
-            }) {
-                Text("停止")
-            }
-        }
-}
-
-private fun LazyListScope.conversationActivity(
-    turn: TurnPresentationData,
-    model: AndroidAppModel,
-    activityExpansion: MutableMap<String, Pair<String, Boolean>>,
-) {
-    val id = turn.id
-    if (turn.activitySummary != null) {
-        val expanded =
-            activityExpansion[id]?.takeIf { it.first == turn.status }?.second ?: turn.activityInitiallyExpanded
-        item(key = "$id:activity") {
-            TextButton(onClick = { if (turn.activityCanCollapse) activityExpansion[id] = turn.status to !expanded }) {
-                Text(turn.activitySummary + if (turn.activityCanCollapse) if (expanded) " ⌄" else " ›" else "")
-            }
-        }
-        if (expanded)
-            items(turn.activityItems, key = { "$id:activity:${it.id()}" }) {
-                ThreadActivityCard(it, model, turn.turnId)
-            }
     }
 }
 

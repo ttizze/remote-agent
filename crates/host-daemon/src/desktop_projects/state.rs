@@ -7,6 +7,7 @@ use serde::Deserialize;
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {
     pub(crate) projects: Vec<Project>,
+    pub(super) resolved_roots: HashMap<String, PathBuf>,
     assignments: HashMap<String, ProjectAssignment>,
     projectless_thread_ids: HashSet<String>,
     workspace_root_hints: HashMap<String, String>,
@@ -40,6 +41,7 @@ impl Snapshot {
                 .map(|(position, project)| project.into_model(position))
                 .collect(),
             assignments: state.thread_project_assignments,
+            resolved_roots: HashMap::new(),
             projectless_thread_ids: state.projectless_thread_ids.into_iter().collect(),
             workspace_root_hints: state.thread_workspace_root_hints,
             worktree_roots: HashMap::new(),
@@ -102,8 +104,14 @@ impl Snapshot {
         let mut ambiguous = false;
         for project in &self.projects {
             for root in &project.roots {
-                let root = Path::new(&root.path);
-                if !root.is_absolute() || !workspace.starts_with(root) {
+                let configured = Path::new(&root.path);
+                let root = self
+                    .resolved_roots
+                    .get(&root.path)
+                    .filter(|resolved| workspace.starts_with(resolved))
+                    .map(PathBuf::as_path)
+                    .unwrap_or(configured);
+                if !configured.is_absolute() || !workspace.starts_with(root) {
                     continue;
                 }
                 let depth = root.components().count();
@@ -339,5 +347,17 @@ mod tests {
         ]}));
         assert_eq!(result["data"][0]["projectId"], "app");
         assert_eq!(result["data"][1]["projectId"], "repo");
+    }
+
+    #[test]
+    fn resolving_aliases_does_not_make_relative_project_roots_valid() {
+        let mut snapshot = Snapshot::parse(
+            br#"{"local-projects":{"relative":{"id":"relative","name":"Relative","rootPaths":["."]}}}"#,
+        ).unwrap();
+        snapshot
+            .resolved_roots
+            .insert(".".into(), "/host/cwd".into());
+        let result = snapshot.enrich_threads(json!({"data":[{"id":"task","cwd":"/host/cwd"}]}));
+        assert!(result["data"][0].get("projectId").is_none());
     }
 }

@@ -17,6 +17,27 @@ build-desktop-macos:
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
+# Native conversation contracts used by the post-commit Swift check.
+conversation-ui:
+    scripts/ios-e2e.sh \
+        testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
+        testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
+        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
+        testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
+        testSimulatorCopiesOwnMessageIntoComposer \
+        testSimulatorCopiesOnlySelectedMessageText \
+        testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
+        testSimulatorAsksAboutAssistantSelectionInSideChatAndRestoresOriginalDraft \
+        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
+        testSimulatorCanStartAConversationInAProject \
+        testSimulatorOpensTasksBeforeHistoryReadFinishes \
+        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
+        testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
+        testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
+        testSimulatorKeepsInterruptedWorkCollapsed \
+        testSimulatorReopensCompletedHistoryCollapsed
+
 # Exercise the real iroh Host through the headless client.
 iroh-e2e:
     cargo test --locked --package host-fixture --test iroh_host

@@ -3,6 +3,30 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorRemovesHostAndRequiresPairingAfterRelaunch() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.hosts"].tap()
+        let remove = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "connection.remove."))
+            .firstMatch
+        XCTAssertTrue(remove.waitForExistence(timeout: 10))
+        captureScreen(app, named: "PC list connection removal")
+        remove.tap()
+        app.alerts.buttons["キャンセル"].tap()
+        XCTAssertTrue(remove.exists)
+        remove.tap()
+        app.alerts.buttons["接続を解除"].tap()
+        XCTAssertTrue(app.buttons["pairing.scan"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.list"].exists)
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["pairing.scan"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.list"].exists)
+        captureScreen(app, named: "Removed Host stays unpaired after relaunch")
+        app.terminate()
+        let reconnected = try connectedSimulatorApp()
+        XCTAssertTrue(reconnected.buttons["tasks.project.simulator-project"].exists)
+        XCTAssertFalse(reconnected.staticTexts["notice"].exists)
+    }
+
     func testSimulatorStartsOnListAndPreservesDetailOnForeground() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This test uses the isolated Simulator fixture")

@@ -1,4 +1,7 @@
 use super::*;
+use agent_core::presentation::conversation::{
+    ActivityExpansion, ConversationRowContent, activity_is_expanded,
+};
 
 impl Desktop {
     pub(super) fn diff(
@@ -147,21 +150,78 @@ impl Desktop {
                         .selectable(true),
                     );
                 }
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .my_4()
-                    .child(body)
+                let text = projected.data.body.clone();
+                let edit = self.button(format!("edit-{id}"), "", cx, move |s, window, cx| {
+                    selection::set_composer_text(&s.composer, text.clone().into(), window, cx);
+                });
+                let timestamp = turn.and_then(|turn| turn.started_at.as_ref()?.as_ref()?.as_i64());
+                user_message_row(&id, &projected.data.body, body, timestamp, edit)
                     .into_any_element()
+            }
+            "commandExecution" => {
+                let label = projected.data.title.clone();
+                let toggle = id.clone();
+                let mut body = v_flex().gap_2().child(
+                    self.button(
+                        format!("expand-{id}"),
+                        format!("{label} {}", if expanded { "⌄" } else { "›" }),
+                        cx,
+                        move |s, _, _| {
+                            toggle_set(&mut s.expanded_items, &toggle);
+                            if s.expanded_items.contains(&toggle) {
+                                s.detail(turn_id.clone(), toggle.clone());
+                            }
+                            s.pause_tail();
+                            s.remeasure_item(&toggle);
+                        },
+                    )
+                    .icon(IconName::SquareTerminal)
+                    .text_color(rgb(0xa0a0a0)),
+                );
+                if expanded {
+                    let output = projected.expanded_body();
+                    let copied = output.clone();
+                    let content = format!(
+                        "$ {}\n\n{output}",
+                        item.command.as_deref().unwrap_or_default()
+                    );
+                    body = body
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x999999))
+                                        .child("プレーンテキスト"),
+                                )
+                                .child(
+                                    Button::new(format!("copy-output-{id}"))
+                                        .label("出力をコピー")
+                                        .small()
+                                        .ghost()
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copied.clone(),
+                                            ))
+                                        }),
+                                ),
+                        )
+                        .child(Self::activity_text(format!("output-{id}"), &content, ""))
+                        .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
+                                "{} {}",
+                                item.status.as_deref().unwrap_or_default(),
+                                item.extra.get("exitCode")
+                                    .map(|v| format!("exit {v}"))
+                                    .unwrap_or_default()
+                            )));
+                }
+                body.into_any_element()
             }
             "fileChange" => {
                 let mut body = v_flex().gap_3();
-                let changes = match &item.changes {
-                    Some(agent_core::models::ItemChanges::Files(files)) => files.as_slice(),
-                    _ => &[],
-                };
-                for (i, change) in changes.iter().enumerate() {
-                    let path = change.path.clone().unwrap_or_default();
+                for (i, change) in agent_core::presentation::body::file_changes(item).enumerate() {
+                    let path = change.path.into_owned();
                     let toggle = id.clone();
                     let turn_id = turn_id.clone();
                     let selector = format!("change-{id}-{i}");
@@ -192,7 +252,7 @@ impl Desktop {
                         body = body.child(Self::diff(
                             &mut self.diffs,
                             format!("diff-{id}-{i}"),
-                            change.diff.as_deref().unwrap_or_default(),
+                            &change.diff,
                             cx,
                         ));
                     }
@@ -201,13 +261,14 @@ impl Desktop {
             }
             _ => {
                 let toggle = id.clone();
-                let mut body = v_flex().gap_2().child(
-                    self.button(
-                        format!("expand-{id}"),
+                v_flex()
+                    .gap_2()
+                    .child(self.button(
+                        format!("unknown-{id}"),
                         format!(
                             "{} {}",
                             if expanded { "⌄" } else { "›" },
-                            projected.data.title
+                            projected.data.title.clone()
                         ),
                         cx,
                         move |s, _, _| {
@@ -218,41 +279,15 @@ impl Desktop {
                             s.pause_tail();
                             s.remeasure_item(&toggle);
                         },
-                    )
-                    .when(kind == "commandExecution", |button| {
-                        button.icon(IconName::SquareTerminal)
+                    ))
+                    .when(expanded, |body| {
+                        body.child(Self::activity_text(
+                            format!("json-{id}"),
+                            &projected.expanded_body(),
+                            "json",
+                        ))
                     })
-                    .text_color(rgb(0xa0a0a0)),
-                );
-                if expanded {
-                    let output = projected.expanded_body();
-                    let command = kind == "commandExecution";
-                    let content = if command {
-                        format!(
-                            "$ {}\n\n{output}",
-                            item.command.as_deref().unwrap_or_default()
-                        )
-                    } else {
-                        output
-                    };
-                    body = body.child(Self::activity_text(
-                        format!("output-{id}"),
-                        &content,
-                        if command { "" } else { "json" },
-                    ));
-                    if command {
-                        body =
-                            body.child(div().text_sm().text_color(rgb(0x999999)).child(format!(
-                                "{} {}",
-                                item.status.as_deref().unwrap_or_default(),
-                                item.extra
-                                    .get("exitCode")
-                                    .map(|v| format!("exit {v}"))
-                                    .unwrap_or_default()
-                            )));
-                    }
-                }
-                body.into_any_element()
+                    .into_any_element()
             }
         }
     }
@@ -263,85 +298,97 @@ impl Desktop {
     ) -> AnyElement {
         let turn = &projected.source;
         let mut body = v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4();
+        let mut expanded = false;
         for row in &projected.rows {
-            let id = &row.id;
-            let expanded = self
-                .expanded_work
-                .get(id)
-                .filter(|(previous, _)| previous == &row.status)
-                .map_or(row.activity_initially_expanded, |(_, expanded)| *expanded);
-            if let Some(opening) = &row.opening_user_message {
-                body = body.child(self.projected_item(opening, turn, cx));
-            }
-            for item in &row.user_messages {
-                body = body.child(self.projected_item(item, turn, cx));
-            }
-            if let Some(label) = &row.activity_summary {
-                let header = if row.activity_can_collapse {
-                    let toggle = id.clone();
-                    let status = row.status.clone();
-                    let turn_id = turn.id.clone();
-                    self.button(
-                        format!("work-{id}"),
-                        format!("{label} {}", if expanded { "⌄" } else { "›" }),
-                        cx,
-                        move |view, _, _| {
-                            view.expanded_work
-                                .insert(toggle.clone(), (status.clone(), !expanded));
-                            view.pause_tail();
-                            view.remeasure_item(&turn_id);
-                        },
-                    )
-                    .text_color(rgb(0xa0a0a0))
-                    .into_any_element()
-                } else {
-                    div()
-                        .text_color(rgb(0xa0a0a0))
-                        .child(label.clone())
-                        .into_any_element()
-                };
-                let selector = format!("work-{id}");
-                body = body.child(
-                    h_flex()
-                        .debug_selector(move || selector.clone())
-                        .gap_2()
-                        .child(header)
-                        .when(row.is_in_progress, |row| {
-                            row.child(spinner::Spinner::new().small())
-                        }),
-                );
-            }
-            if expanded {
-                for item in &row.activity_items {
+            match &row.content {
+                ConversationRowContent::User { item } => {
                     body = body.child(self.projected_item(item, turn, cx));
                 }
-            }
-            if let Some(error) = &row.error {
-                body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
-            }
-            for request in &row.pending_requests {
-                body = body.child(self.request_card(&request.key, request, cx));
-            }
-            for item in &row.responses {
-                body = body.child(self.projected_item(item, turn, cx));
-                if item.data.kind == "agent" {
-                    let item = item.clone();
+                ConversationRowContent::ActivityHeader { activity } => {
+                    let id = &activity.id;
+                    expanded = activity_is_expanded(activity, self.expanded_work.get(id).cloned());
+                    let label = if activity.is_in_progress {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0., |duration| duration.as_secs_f64());
+                        projected.progress_label(!expanded, now)
+                    } else {
+                        activity.activity_summary.clone()
+                    };
+                    let header = if activity.activity_can_collapse {
+                        let toggle = id.clone();
+                        let status = activity.status.clone();
+                        let turn_id = turn.id.clone();
+                        self.button(
+                            format!("work-{id}"),
+                            format!("{label} {}", if expanded { "⌄" } else { "›" }),
+                            cx,
+                            move |view, _, _| {
+                                view.expanded_work.insert(
+                                    toggle.clone(),
+                                    ActivityExpansion {
+                                        status: status.clone(),
+                                        expanded: !expanded,
+                                    },
+                                );
+                                view.pause_tail();
+                                view.remeasure_item(&turn_id);
+                            },
+                        )
+                        .text_color(rgb(0xa0a0a0))
+                        .into_any_element()
+                    } else {
+                        div()
+                            .text_color(rgb(0xa0a0a0))
+                            .child(label.clone())
+                            .into_any_element()
+                    };
+                    let selector = format!("work-{id}");
                     body = body.child(
-                        h_flex().child(
-                            Button::new(format!("copy-{}", item.data.id))
-                                .icon(IconName::Copy)
-                                .small()
-                                .ghost()
-                                .tooltip("回答をコピー")
-                                .accessibility_label("回答をコピー")
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        item.data.body.clone(),
-                                    ));
-                                }),
-                        ),
+                        h_flex()
+                            .debug_selector(move || selector.clone())
+                            .gap_2()
+                            .child(header)
+                            .when(activity.is_in_progress, |row| {
+                                row.child(spinner::Spinner::new().small())
+                            }),
                     );
                 }
+                ConversationRowContent::Activity { item, .. } => {
+                    if expanded {
+                        body = body.child(self.projected_item(item, turn, cx));
+                    }
+                }
+                ConversationRowContent::PendingRequest { request } => {
+                    body = body.child(self.request_card(&request.key, request, cx));
+                }
+                ConversationRowContent::Error { error } => {
+                    body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
+                }
+                ConversationRowContent::Response { item, .. } => {
+                    body = body.child(self.projected_item(item, turn, cx));
+                    if item.data.kind == "agent" {
+                        let item = item.clone();
+                        body = body.child(
+                            h_flex().child(
+                                Button::new(format!("copy-{}", item.data.id))
+                                    .icon(IconName::Copy)
+                                    .small()
+                                    .ghost()
+                                    .tooltip("回答をコピー")
+                                    .accessibility_label("回答をコピー")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            item.data.body.clone(),
+                                        ));
+                                    }),
+                            ),
+                        );
+                    }
+                }
+                // Desktop pages via its virtual list and offers Stop in the composer.
+                ConversationRowContent::OlderItems { .. }
+                | ConversationRowContent::InProgress { .. } => {}
             }
         }
         h_flex()
@@ -373,7 +420,12 @@ impl Desktop {
         draft: &Draft,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut body = user_message_bubble();
+        let mut body = v_flex()
+            .gap_3()
+            .max_w(px(560.))
+            .p_4()
+            .rounded(px(18.))
+            .bg(rgb(0x303030));
         if !draft.text.is_empty() {
             body = body.child(
                 TextView::markdown(
@@ -585,6 +637,107 @@ impl Desktop {
                 },
             );
         }
+    }
+}
+
+fn user_message_row(
+    id: &str,
+    text: &str,
+    body: Div,
+    timestamp: Option<i64>,
+    edit: Button,
+) -> impl IntoElement {
+    let time = timestamp
+        .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+        .map(|value| {
+            value
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        });
+    let copy_text = text.to_owned();
+    let group = SharedString::from(format!("user-message-{id}"));
+    h_flex().w_full().justify_end().my_4().child(
+        v_flex()
+            .group(group.clone())
+            .items_end()
+            .gap_1()
+            .child(body)
+            .child(
+                h_flex()
+                    .debug_selector(|| "user-message-actions".into())
+                    .invisible()
+                    .group_hover(group, |style| style.visible())
+                    .children(
+                        time.map(|time| {
+                            div().text_xs().text_color(rgb(0x999999)).mr_2().child(time)
+                        }),
+                    )
+                    .child(
+                        Button::new(format!("copy-{id}"))
+                            .debug_selector(|| "user-message-copy".into())
+                            .icon(IconName::Copy)
+                            .small()
+                            .ghost()
+                            .tooltip("発言をコピー")
+                            .accessibility_label("発言をコピー")
+                            .disabled(copy_text.is_empty())
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            }),
+                    )
+                    .child(
+                        edit.icon(Icon::default().path("bex/pencil.svg"))
+                            .small()
+                            .ghost()
+                            .debug_selector(|| "user-message-edit".into())
+                            .tooltip("入力欄で編集")
+                            .accessibility_label("入力欄で編集")
+                            .disabled(text.is_empty()),
+                    ),
+            ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{user_message_bubble, user_message_row};
+    use gpui_kit as gpui;
+    use gpui_kit::{
+        ClipboardItem, Context, IntoElement, Modifiers, ParentElement, Render, TestAppContext,
+        Window,
+    };
+
+    struct Message;
+    impl Render for Message {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            user_message_row(
+                "test",
+                "一行目\nsecond line",
+                user_message_bubble().child("一行目\nsecond line"),
+                Some(1),
+                gpui::component::button::Button::new("edit"),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn hovering_own_message_allows_copying_the_complete_text(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_, cx) = cx.add_window_view(|_, _| Message);
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("user-message-actions").unwrap();
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("previous".into())));
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::default());
+        cx.run_until_parked();
+        let copy = cx.debug_bounds("user-message-copy").unwrap().center();
+        cx.simulate_click(copy, Modifiers::default());
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "一行目\nsecond line"
+            );
+        });
     }
 }
 

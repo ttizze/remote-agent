@@ -4,7 +4,7 @@ use crate::{
     client::{AccountLogin, AccountLoginStatus, Accounts},
     models::{FileContent, FileList, ListQuery, Model, Thread, WorkspaceReview, WorktreeSettings},
     presentation::conversation::{
-        ItemPresentation, RenderedConversation, RenderedItem, TurnPresentationData,
+        ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn, Request, request,
     },
     state::{Draft, FileDraft, Navigation, Snapshot},
 };
@@ -22,6 +22,9 @@ impl Snapshot {
     }
     pub fn models_unchanged(&self, other: Arc<Self>) -> bool {
         Arc::ptr_eq(&self.models, &other.models)
+    }
+    pub fn requests_unchanged(&self, other: Arc<Self>) -> bool {
+        Arc::ptr_eq(&self.requests, &other.requests)
     }
     pub fn conversation_unchanged(&self, other: Arc<Self>) -> bool {
         let id = self.navigation.thread_id.as_ref();
@@ -79,6 +82,12 @@ impl Snapshot {
     pub fn conversation(&self, id: String) -> Option<Arc<Thread>> {
         self.conversations.get(&id).cloned()
     }
+    pub fn requests(&self) -> Vec<Request> {
+        self.requests
+            .iter()
+            .map(|(key, source)| request(key, source))
+            .collect()
+    }
     pub fn directory(&self) -> Option<FileList> {
         self.workspace.directory.as_deref().cloned()
     }
@@ -121,17 +130,23 @@ impl Thread {
 }
 #[uniffi::export]
 impl RenderedConversation {
-    pub fn source(&self) -> Arc<Thread> {
-        self.source.clone()
+    pub fn unchanged(&self, other: Arc<Self>) -> bool {
+        std::ptr::eq(self, other.as_ref())
     }
-    pub fn rows(&self) -> Vec<TurnPresentationData> {
-        self.turns
-            .iter()
-            .flat_map(|turn| turn.rows.iter().cloned())
-            .collect()
+    pub fn turns(&self) -> Vec<Arc<RenderedTurn>> {
+        self.turns.clone()
     }
     pub fn queued(&self) -> Vec<Arc<RenderedItem>> {
         self.queued.clone()
+    }
+}
+#[uniffi::export]
+impl RenderedTurn {
+    pub fn id(&self) -> String {
+        self.source.id.clone()
+    }
+    pub fn unchanged(&self, other: Arc<Self>) -> bool {
+        std::ptr::eq(self, other.as_ref())
     }
 }
 #[uniffi::export]
@@ -158,8 +173,5 @@ impl WorkspaceReview {
     }
     pub fn deletions(&self) -> u64 {
         self.deletions
-    }
-    pub fn diff(&self) -> String {
-        self.diff.clone()
     }
 }

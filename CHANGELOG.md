@@ -12,7 +12,46 @@
 
 - Share navigation reset and history-watch release in core. Route already-classified Host RPC messages through one dispatcher, remove unused routing error enums and repeated envelope parsing, and share Desktop connection-failure delivery.
 
-- Render the existing Rust conversation data directly in native views, removing Swift presentation mirrors and client projection caches. Resolve list pagination, history cursors, project grouping and title fallbacks in core. Restore Desktop file-change headers and diffs by reading the typed change field.
+- Resolve native list pagination, history cursors, project grouping and title fallbacks in core, removing unused native Turn/Item getters. Preserve the shared conversation rows, Markdown caches, selection actions and repeated-history handling integrated on main.
+
+- Open iPhone change summaries in a tabbed Changes/All Files sheet. Show per-file diff cards with line numbers, wrapping, and addition/deletion backgrounds, reusing the desktop Git patch parser from core. Closing returns to the conversation.
+
+- Share mobile foreground refresh and recovery in agent-core: retain live connections, reconnect after a disconnect or a request deadline with no incoming RPC traffic, and preserve individual request timeouts while other replies or notifications arrive. Clear stale notices after successful recovery. Verify retained navigation and drafts, refresh retries on the same transport, disconnected/silent transport recovery with real iroh sessions, and foreground list/history refresh in iOS Simulator.
+
+- Match saved project roots through filesystem aliases when assigning worktree conversations, including macOS `/var` and `/private/var` paths.
+
+- Preserve individual history occurrences when turn IDs repeat, so opening a conversation keeps both responses visible instead of duplicating and collapsing their contents.
+
+- Keep new Host connection handshakes alive while prior sessions finish, preventing intermittent reconnection failures.
+
+- Open iPhone tasks immediately while Host history loads, using cached history and the selected task directory when available. Preserve drafts after a failed read, restore the original conversation when side-chat preparation fails, offer retry, and disable submission and attachments until the conversation is ready.
+
+- Share isolated Host and JSONL connection ownership across integration and UI fixtures. Run the UI Host and loopback pairing controls in one process, remove the separate pairing executable and on-disk key exchange. Remove the redundant iOS screen identifier that overrode the existing detail, loading and retry identifiers.
+
+- Open Mac conversation file links in the Files panel using the selected Host, preserving file drafts and revision checks. Show Files and Diff within Side Chat and return to its existing draft.
+
+- Gate native conversation changes with repeated back navigation, all activity families, long-history paging, and repeated turn IDs. Keep the current Swift navigation implementation.
+
+- Refresh conversation lists and titles after submitted messages and completed turns. Show elapsed execution time and the current action from core presentation, and provide command-output copying. Open the desktop diff from change summaries and file rows, with file navigation, readable Git paths, and expandable unchanged context.
+
+- Place desktop dictation controls in the composer with a live microphone waveform, cancel/Escape, stop, and send. Preserve drafts on cancellation and show readable failure reasons.
+
+- List Bex-managed worktrees and their conversations in desktop settings. Confirm removal and refuse modified, ignored-file, locked, detached, or actively used worktrees; retain branches and conversation history. Requires the updated Host.
+
+- Share flat conversation rows, stable row IDs, fork eligibility, and activity expansion defaults across Desktop, iOS, and Android through core presentation. Keep native turn/item and Markdown caches while removing Swift record copies. Restore Desktop file-change headers and diffs by reading typed change fields, shared with expanded activity text.
+
+- Share one normal local Host across desktop and mobile independently of their state directories. Reuse and remember its credential directory and key-storage backend, reject competing starts before provisioning, verify discovered tickets, and require explicit isolation for separate test Hosts. Report conflicting legacy Hosts without stopping active work.
+
+- End successful dictation with no recognized text without an error or submission. Preserve drafts and attachments, including after navigation; malformed responses and failed transcription still report errors.
+
+- Add iPhone PC-list connection removal with confirmation and credential deletion, preventing automatic reconnection after relaunch. Refresh Mac device management when opening settings, place removal above pairing QR codes, and fix the revoke request’s `nodeId` field so removing access closes active sessions and rejects reconnection.
+
+- Add saved Codex account switching to the Mac composer’s account/model menu, with current-account selection and model refresh after switching.
+- Run core/desktop behavior tests and isolated Simulator conversation regressions in post-commit quality. Honor Cargo's configured output directory in mobile binding/library builds and pass it through to Xcode. Correct the stale live-expansion contract and require integration evidence for changes developed in separate worktrees. Keep completed fixture output consistent between streaming and history, and verify both cached reopening and uncached deferred detail loading.
+
+- Add desktop selection actions for quoting, requesting an AI explanation in a new side conversation, and asking in the current side chat, plus right-click Copy and Google Search. Show timestamp, Copy and an action to return text to the composer on own-message hover. On iPhone, keep assistant text selectable in place with native selection actions, while own messages use a separate long-press menu. Preserve the original conversation and draft when closing an iPhone side chat, including after retrying its preparation.
+
+- Keep command activity collapsed by default while running and after reopening; preserve explicit expansion.
 
 - Keep chats without a selected project unassigned after sending, reopening, and restarting the Host. Use a dedicated `bex-chats` working directory beside the Codex project state instead of inheriting the App Server's checkout, while retaining the real directory for attachments and file operations. Preserve unsent drafts when that directory cannot be prepared, and skip automatic Git reviews for unassigned chats so a parent repository’s changes do not appear.
 

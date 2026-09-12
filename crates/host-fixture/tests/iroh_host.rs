@@ -2,7 +2,7 @@ use agent_core::state::operations as op;
 use agent_core::{
     models::Invitation,
     peer::{PeerEvent, RpcPeer},
-    transport::{Endpoint, Identity, Relays, Session, Ticket},
+    transport::{Endpoint, Identity, Relays, Ticket},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
@@ -16,98 +16,19 @@ use std::{
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+mod codex_fixture;
 use host_fixture::test_support::{HostFixture, Memory};
-fn fixture_program(directory: &Path) -> PathBuf {
-    host_fixture::fixture::Config {
-        stream_delay_ms: 5,
-        ..Default::default()
-    }
-    .install(
-        Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")),
-        directory,
-    )
-    .unwrap()
-}
-struct Fixture {
-    server: Arc<CodexAppServer>,
-    credentials: Arc<HostCredentials>,
-    memory: Arc<Memory>,
-    ticket: Ticket,
-    stop: CancellationToken,
-    running: tokio::task::JoinHandle<Result<(), String>>,
-}
-impl Fixture {
-    async fn start(directory: &Path) -> Self {
-        Self::start_with_memory(directory, Arc::new(Memory::default())).await
-    }
-    async fn start_with_memory(directory: &Path, memory: Arc<Memory>) -> Self {
-        let HostFixture {
-            server,
-            credentials,
-            memory,
-            ticket,
-            stop,
-            running,
-        } = HostFixture::start(
-            directory,
-            AppServerConfig {
-                program: fixture_program(directory),
-                ..Default::default()
-            },
-            memory,
-            "isolated Host",
-            false,
-        )
-        .await
-        .unwrap();
-        Self {
-            server,
-            credentials,
-            memory,
-            ticket,
-            stop,
-            running,
-        }
-    }
 
-    async fn connect(&self, identity: Identity) -> Connection {
-        let endpoint = Endpoint::bind(identity, Relays::Disabled).await.unwrap();
-        let session = endpoint.connect(&self.ticket).await.unwrap();
-        let peer = session
-            .open_peer(Duration::from_secs(10), 128)
-            .await
-            .unwrap();
-        Connection {
-            endpoint,
-            session,
-            peer,
-        }
-    }
-    async fn local(&self) -> Connection {
-        self.connect(self.credentials.local_identity().await).await
-    }
-    async fn close(self) {
-        self.stop.cancel();
-        self.running.await.unwrap().unwrap();
-        Arc::try_unwrap(self.server)
-            .ok()
-            .expect("Codex process retained")
-            .shutdown()
-            .await
-            .unwrap();
-    }
-}
-struct Connection {
-    endpoint: Endpoint,
-    session: Session,
-    peer: RpcPeer,
-}
-impl Connection {
-    async fn close(self) {
-        self.peer.close().await.unwrap();
-        self.session.close();
-        self.endpoint.close().await;
-    }
+async fn start_host(directory: &Path) -> HostFixture {
+    HostFixture::start(
+        directory,
+        codex_fixture::config(directory),
+        Arc::new(Memory::default()),
+        "isolated Host",
+        false,
+    )
+    .await
+    .unwrap()
 }
 async fn rpc(peer: &RpcPeer, method: &str, params: Value) -> Value {
     peer.request::<_, Value>(method, &params)
@@ -137,9 +58,9 @@ async fn next_method(events: &mut broadcast::Receiver<PeerEvent>, method: &str) 
 async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_active_sessions() {
     tokio::time::timeout(Duration::from_secs(45), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let local = fixture.local().await;
-        let stranger = fixture.connect(Identity::generate()).await;
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
+        let stranger = fixture.connect(Identity::generate()).await.unwrap();
         assert!(
             stranger
                 .peer
@@ -159,7 +80,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
         let backup = directory.path().join("state/trust-backup.json");
         std::fs::rename(&trust_path, &backup).unwrap();
         std::fs::create_dir(&trust_path).unwrap();
-        let failed = fixture.connect(Identity::from_bytes(key)).await;
+        let failed = fixture.connect(Identity::from_bytes(key)).await.unwrap();
         assert!(
             failed
                 .peer
@@ -170,7 +91,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
         failed.endpoint.close().await;
         std::fs::remove_dir(&trust_path).unwrap();
         std::fs::rename(&backup, &trust_path).unwrap();
-        let paired = fixture.connect(Identity::from_bytes(key)).await;
+        let paired = fixture.connect(Identity::from_bytes(key)).await.unwrap();
         rpc(
             &paired.peer,
             "host/pair",
@@ -198,7 +119,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .await
                 .is_err()
         );
-        let reused = fixture.connect(Identity::generate()).await;
+        let reused = fixture.connect(Identity::generate()).await.unwrap();
         assert!(
             reused
                 .peer
@@ -222,12 +143,63 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
             restored.local_identity().await.node_id(),
             local.endpoint.node_id()
         );
-        rpc(
-            &local.peer,
-            "host/revoke",
-            json!({"nodeId":paired.endpoint.node_id()}),
+        let manager = agent_core::store::Store::connect(
+            &local.endpoint,
+            &fixture.ticket,
+            Default::default(),
+            None,
         )
-        .await;
+        .await
+        .unwrap();
+        manager
+            .dispatch(agent_core::state::Intent::LoadHostManagement(
+                op::LoadHostManagement {},
+            ))
+            .await
+            .unwrap();
+        let device = paired.endpoint.node_id().to_string();
+        assert!(
+            manager
+                .snapshot()
+                .management
+                .status
+                .as_ref()
+                .unwrap()
+                .devices
+                .contains(&device)
+        );
+        manager
+            .dispatch(agent_core::state::Intent::RevokeDevice(op::RevokeDevice {
+                id: device.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !manager
+                .snapshot()
+                .management
+                .status
+                .as_ref()
+                .unwrap()
+                .devices
+                .contains(&device)
+        );
+        manager
+            .dispatch(agent_core::state::Intent::LoadHostManagement(
+                op::LoadHostManagement {},
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !manager
+                .snapshot()
+                .management
+                .status
+                .as_ref()
+                .unwrap()
+                .devices
+                .contains(&device)
+        );
         assert!(
             paired
                 .peer
@@ -236,7 +208,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .is_err()
         );
         paired.endpoint.close().await;
-        let revoked = fixture.connect(Identity::from_bytes(key)).await;
+        let revoked = fixture.connect(Identity::from_bytes(key)).await.unwrap();
         assert!(
             revoked
                 .peer
@@ -245,8 +217,9 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .is_err()
         );
         revoked.endpoint.close().await;
-        local.close().await;
-        fixture.close().await;
+        manager.close().await.unwrap();
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("pairing contract deadline");
@@ -256,12 +229,12 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
 async fn concurrent_consumers_cannot_both_use_one_invitation() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let local = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
         let invitation: Invitation =
             serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
-        let first = fixture.connect(Identity::generate()).await;
-        let second = fixture.connect(Identity::generate()).await;
+        let first = fixture.connect(Identity::generate()).await.unwrap();
+        let second = fixture.connect(Identity::generate()).await.unwrap();
         let params = json!({"invitation":invitation.invitation});
         let (a, b) = tokio::join!(
             first.peer.request::<_, Value>("host/pair", &params),
@@ -272,8 +245,8 @@ async fn concurrent_consumers_cannot_both_use_one_invitation() {
         assert_eq!(status["devices"].as_array().unwrap().len(), 2);
         first.endpoint.close().await;
         second.endpoint.close().await;
-        local.close().await;
-        fixture.close().await;
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("concurrent pairing deadline");
@@ -283,9 +256,9 @@ async fn concurrent_consumers_cannot_both_use_one_invitation() {
 async fn simultaneous_clients_receive_their_own_resolved_approval_id() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let first = fixture.local().await;
-        let second = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let first = fixture.local().await.unwrap();
+        let second = fixture.local().await.unwrap();
         let mut first_events = first.peer.subscribe();
         let mut second_events = second.peer.subscribe();
         let started = rpc(&first.peer, "thread/start", json!({"cwd":directory.path()})).await;
@@ -310,9 +283,9 @@ async fn simultaneous_clients_receive_their_own_resolved_approval_id() {
         assert_eq!(done_b["params"]["requestId"], b["id"]);
         let completed = next_method(&mut second_events, "turn/completed").await;
         assert_eq!(completed["params"]["turn"]["status"], "completed");
-        first.close().await;
-        second.close().await;
-        fixture.close().await;
+        first.close().await.unwrap();
+        second.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("approval routing deadline");
@@ -322,8 +295,8 @@ async fn simultaneous_clients_receive_their_own_resolved_approval_id() {
 async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let client = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let client = fixture.local().await.unwrap();
         let content: Vec<u8> = (0..65537).map(|n| (n % 251) as u8).collect();
         let source = directory.path().join("source.bin");
         std::fs::write(&source, &content).unwrap();
@@ -354,7 +327,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
             .unwrap();
         let uploaded =
             PathBuf::from(&store.snapshot().drafts["transfer-draft"].attachments[0].path);
-        let other = fixture.local().await;
+        let other = fixture.local().await.unwrap();
         rpc(&other.peer, "thread/list", json!({})).await;
         let denied = directory.path().join("denied.bin");
         assert!(
@@ -377,7 +350,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
             !denied.exists(),
             "a different session must not receive file bytes"
         );
-        other.close().await;
+        other.close().await.unwrap();
         let destination = directory.path().join("download.bin");
         store
             .dispatch(Intent::DownloadFile(op::DownloadFile {
@@ -457,11 +430,54 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
 
         store.close().await.unwrap();
         assert!(!store.snapshot().connected);
-        client.close().await;
-        fixture.close().await;
+        client.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("binary transfer deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnecting_during_session_cleanup_keeps_host_requests_available() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let mut session = endpoint.connect(&fixture.ticket).await.unwrap();
+        let mut peer = session
+            .open_peer(Duration::from_secs(10), 16)
+            .await
+            .unwrap();
+        for attempt in 0..128 {
+            assert_eq!(
+                rpc(&peer, "thread/list", json!({})).await["data"],
+                json!([])
+            );
+            let close = async {
+                tokio::task::yield_now().await;
+                peer.close().await.unwrap();
+                session.close();
+            };
+            let (_, opened) = tokio::join!(close, endpoint.connect(&fixture.ticket));
+            session = opened.unwrap_or_else(|error| panic!("reconnect {attempt}: {error}"));
+            peer = session
+                .open_peer(Duration::from_secs(10), 16)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            rpc(&peer, "thread/list", json!({})).await["data"],
+            json!([])
+        );
+        peer.close().await.unwrap();
+        session.close();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("reconnection cleanup deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -469,7 +485,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
     use agent_core::{state::Intent, store::Store};
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
+        let fixture = start_host(directory.path()).await;
         let endpoint = Endpoint::bind(
             host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
             Relays::Disabled,
@@ -520,7 +536,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
             store.snapshot().navigation.watch_id.is_none(),
             "a live thread must not read its unmaterialized rollout"
         );
-        let client = fixture.local().await;
+        let client = fixture.local().await.unwrap();
         let error = client
             .peer
             .request::<_, Value>(
@@ -580,7 +596,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
         client.peer.close().await.unwrap();
         drop(client);
         endpoint.close().await;
-        fixture.close().await;
+        fixture.close().await.unwrap();
     })
     .await
     .expect("live conversation recovery exceeded deadline");
@@ -622,7 +638,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     let source = root.join("photo.png");
                     let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
                     std::fs::write(&source, bytes).unwrap();
-                    let fixture = Fixture::start(&root).await;
+                    let fixture = start_host(&root).await;
                     let endpoint = Endpoint::bind(host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(), Relays::Disabled).await.unwrap();
                     let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
                     store.dispatch(Intent::NewChat { cwd: if project { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
@@ -726,7 +742,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     store.close().await.unwrap();
                     drop(store);
                     endpoint.close().await;
-                    fixture.close().await;
+                    fixture.close().await.unwrap();
                 }
             }
         }
@@ -738,8 +754,8 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
     tokio::time::timeout(Duration::from_secs(30), async {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
-        let first = Fixture::start(a.path()).await;
-        let second = Fixture::start(b.path()).await;
+        let first = start_host(a.path()).await;
+        let second = start_host(b.path()).await;
         let endpoint_a = Endpoint::bind(first.credentials.local_identity().await, Relays::Disabled)
             .await
             .unwrap();
@@ -832,12 +848,195 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
         direct_session.close();
         manager_a.close().await.unwrap();
         manager_b.close().await.unwrap();
-        first.close().await;
-        second.close().await;
+        first.close().await.unwrap();
+        second.close().await.unwrap();
     })
     .await
     .expect("remote registration deadline");
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&json!([
+            {"id":"selected","name":"Selected task","cwd":root,"historyMode":"paginated","createdAt":1,"updatedAt":1}
+        ])).unwrap()).unwrap();
+        let fixture = start_host(&root).await;
+        let local = fixture.local().await.unwrap();
+        let invitation: Invitation = serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
+        let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation)).await.unwrap();
+        store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::SetDraftText { thread_id: "selected".into(), text: "Unsent draft".into() }).await.unwrap();
+        let mut saved = None;
+        let mut owner = Some(store);
+        for cached in [false, true] {
+            let store = if let Some(store) = owner.take() { store } else {
+                Store::connect(&endpoint, &fixture.ticket, saved.take().unwrap(), None).await.unwrap()
+            };
+            assert_eq!(store.snapshot().conversations.contains_key("selected"), cached);
+            if cached {
+                std::fs::write(root.join("background-reply"), "Latest reply from another client").unwrap();
+            }
+            std::fs::write(root.join("hold-history-reads"), []).unwrap();
+            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("selected".into())));
+            tokio::pin!(opening);
+            assert_eq!(store.snapshot().navigation.thread_id.as_deref(), Some("selected"));
+            assert_eq!(store.snapshot().navigation.draft_key, "selected");
+            assert_eq!(store.snapshot().drafts["selected"].text, "Unsent draft");
+            while !root.join("history-read-held").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut opening).await.is_err());
+            if cached {
+                let thread = &store.snapshot().conversations["selected"];
+                assert_eq!(thread.turns.as_ref().unwrap().last().unwrap().items.as_ref().unwrap()[0].text.as_deref(), Some("History for Selected task"));
+            }
+            // List refresh shares the production transport but must not wait for history.
+            store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+            assert!(store.snapshot().threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_deref() == Some("selected")));
+            std::fs::remove_file(root.join("hold-history-reads")).unwrap();
+            std::fs::remove_file(root.join("history-read-held")).unwrap();
+            opening.await.unwrap();
+            let current = store.snapshot();
+            let last = current.conversations["selected"].turns.as_ref().unwrap().last().unwrap();
+            assert_eq!(last.status.as_deref(), Some("completed"));
+            assert_eq!(last.items.as_ref().unwrap()[0].text.as_deref(), Some(if cached { "Latest reply from another client" } else { "History for Selected task" }));
+            assert_eq!(current.navigation.thread_id.as_deref(), Some("selected"));
+            assert_eq!(current.drafts["selected"].text, "Unsent draft");
+            assert!(current.error.is_none(), "{:?}", current.error);
+            store.dispatch(Intent::ShowThreadList).await.unwrap();
+            saved = Some(serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap()).unwrap());
+            store.close().await.unwrap();
+        }
+        endpoint.close().await;
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
+    }).await.expect("opening a task exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_turn_history_preserves_both_responses_after_reopening_and_restoration() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: key,
+                text: "[duplicate] Preserve both persisted responses".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "duplicate-message".into(),
+            })
+            .await
+            .unwrap();
+        let id = store.snapshot().navigation.thread_id.clone().unwrap();
+        let mut updates = store.subscribe();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if snapshot.conversations[&id]
+                .turns
+                .as_ref()
+                .is_some_and(|turns| {
+                    turns
+                        .first()
+                        .is_some_and(|turn| turn.status.as_deref() == Some("completed"))
+                })
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+        let mut store = store;
+        for restore in [false, true] {
+            store.dispatch(Intent::ShowThreadList).await.unwrap();
+            if restore {
+                let saved = serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap())
+                    .unwrap();
+                store.close().await.unwrap();
+                store = Store::connect(&endpoint, &fixture.ticket, saved, None)
+                    .await
+                    .unwrap();
+            }
+            store
+                .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+                .await
+                .unwrap();
+            let snapshot = store.snapshot();
+            let items: Vec<_> = snapshot.conversations[&id]
+                .turns
+                .as_ref()
+                .unwrap()
+                .iter()
+                .flat_map(|turn| turn.items.as_ref().unwrap())
+                .collect();
+            let mut unique_items = std::collections::HashSet::new();
+            assert!(
+                items.iter().all(|item| unique_items.insert(&item.id)),
+                "turn hydration duplicated another occurrence's items"
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.id.starts_with("fixture-final-")),
+                "latest response missing after restore={restore}"
+            );
+            assert!(
+                items.iter().any(|item| item.id == "duplicate-history-old"),
+                "older response missing after restore={restore}"
+            );
+            let rendered = agent_core::presentation::conversation::project_conversation(
+                &snapshot,
+                snapshot.conversations[&id].clone(),
+                &None,
+            );
+            let responses: Vec<_> = rendered
+                .turns
+                .iter()
+                .flat_map(|turn| &turn.rows)
+                .filter_map(|row| match &row.content {
+                    agent_core::presentation::conversation::ConversationRowContent::Response {
+                        item,
+                        ..
+                    } => Some(item.data.id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                responses.iter().any(|id| id.starts_with("fixture-final-")),
+                "latest response collapsed after restore={restore}"
+            );
+            assert!(responses.contains(&"duplicate-history-old"));
+            assert!(snapshot.pending_submissions.is_empty());
+            assert!(snapshot.drafts[&id].text.is_empty());
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        }
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("repeated-turn history exceeded its deadline");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -845,8 +1044,8 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!({
             "local-projects": {"workspace": {"id":"workspace", "name":"Workspace", "rootPaths":[directory.path()]}}
         })).unwrap()).unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let mobile = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let mobile = fixture.local().await.unwrap();
 
         let started = mobile.peer.request::<_, Value>("host/thread/start", &json!({"cwd":directory.path().join("large-history")})).await.unwrap().value;
         assert_eq!(started["thread"]["projectId"], "workspace");
@@ -919,8 +1118,8 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
             assert_eq!(STANDARD.decode(item["result"].as_str().unwrap()).unwrap(), original);
             assert!(!turn["deferredItemIds"].as_array().is_some_and(|ids| ids.contains(&item["id"])));
         }
-        mobile.close().await;
-        fixture.close().await;
+        mobile.close().await.unwrap();
+        fixture.close().await.unwrap();
     }).await.expect("large history loop exceeded deadline");
 }
 
@@ -959,8 +1158,8 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             "projectless-thread-ids":["projectless"],
             "thread-workspace-root-hints":{"worktree":directory.path().join("project-5")}
         })).unwrap()).unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let mobile = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let mobile = fixture.local().await.unwrap();
 
         let request = |project_limit, chat_limit, thread_limit| json!({"projectLimit":project_limit,"chatLimit":chat_limit,"projectThreadLimits":{"project-5":thread_limit}});
         let start = std::time::Instant::now();
@@ -1010,8 +1209,8 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         }).await.expect("rollout changes must cross iroh");
         assert_eq!(changed["params"], json!({"watchId":1,"threadId":"p5-1"}));
         mobile.peer.request::<_, Value>("host/thread/unwatch", &json!({"watchId":1})).await.unwrap();
-        mobile.close().await;
-        fixture.close().await;
+        mobile.close().await.unwrap();
+        fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");
 }
 
@@ -1035,7 +1234,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         std::fs::write(&project_state, serde_json::to_vec(&json!({
             "local-projects":{"workspace":{"id":"workspace","name":"Workspace","rootPaths":[workspace]}}
         })).unwrap()).unwrap();
-        let server = Arc::new(CodexAppServer::spawn(AppServerConfig { program: fixture_program(&root), ..Default::default() }).await.unwrap());
+        let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
         let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
         let mut session = service.open_session(64);
         async fn request(service: &CodexRpcService, session: &mut host_daemon::CodexSession, method: &str, params: Value) -> Value {
@@ -1112,8 +1311,8 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
 async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let client = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let client = fixture.local().await.unwrap();
         let files = directory.path().join("editable");
         std::fs::create_dir(&files).unwrap();
         let path = files.join("document.txt");
@@ -1146,8 +1345,8 @@ async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
             1,
             "atomic save cleans its staging directory"
         );
-        client.close().await;
-        fixture.close().await;
+        client.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("file edit deadline");
@@ -1160,8 +1359,8 @@ async fn daemon_model_wire_fixture() {
         std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!({
             "local-projects":{"workspace":{"id":"workspace","name":"Workspace","rootPaths":[directory.path()]}}
         })).unwrap()).unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let local = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
         let started = rpc(&local.peer, "host/thread/start", json!({"cwd":directory.path()})).await;
         let thread_id = &started["thread"]["id"];
         let mut events = local.peer.subscribe();
@@ -1175,8 +1374,8 @@ async fn daemon_model_wire_fixture() {
             .replace(directory.path().canonicalize().unwrap().to_str().unwrap(), "/fixture/workspace")
             .replace(directory.path().to_str().unwrap(), "/fixture/workspace");
         assert_eq!(serde_json::from_str::<Value>(&capture).unwrap(), serde_json::from_str::<Value>(include_str!("../../agent-core/tests/fixtures/daemon-wire.json")).unwrap());
-        local.close().await;
-        fixture.close().await;
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
     }).await.expect("wire fixture deadline");
 }
 
@@ -1184,7 +1383,7 @@ async fn daemon_model_wire_fixture() {
 async fn failed_handshakes_do_not_stop_the_host() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
+        let fixture = start_host(directory.path()).await;
         let stranger = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
             .relay_mode(iroh::RelayMode::Disabled)
             .clear_address_lookup()
@@ -1199,14 +1398,14 @@ async fn failed_handshakes_do_not_stop_the_host() {
                 .await
                 .is_err()
         );
-        let local = fixture.local().await;
+        let local = fixture.local().await.unwrap();
         assert_eq!(
             rpc(&local.peer, "thread/list", json!({})).await["data"],
             json!([])
         );
         stranger.close().await;
-        local.close().await;
-        fixture.close().await;
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("handshake isolation deadline");
@@ -1220,8 +1419,8 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
     };
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let local = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
         let store = Store::new(local.peer, Snapshot::default());
         store
             .dispatch(Intent::ListThreads(
@@ -1270,21 +1469,29 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
 async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let local = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
         let invitation: Invitation =
             serde_json::from_value(rpc(&local.peer, "host/invite", json!({})).await).unwrap();
         let saved_keys = fixture.memory.clone();
-        local.close().await;
-        fixture.close().await;
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
         std::fs::remove_file(directory.path().join("bex-codex-fixture")).unwrap();
         let path = directory.path().join("state/trust.json");
         let mut trust: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         trust["trust"]["invitations"][invitation.invitation.to_string()] = json!(0);
         std::fs::write(&path, serde_json::to_vec(&trust).unwrap()).unwrap();
         // Reload this isolated Host's expired trust while preserving its key store.
-        let fixture = Fixture::start_with_memory(directory.path(), saved_keys).await;
-        let stranger = fixture.connect(Identity::generate()).await;
+        let fixture = HostFixture::start(
+            directory.path(),
+            codex_fixture::config(directory.path()),
+            saved_keys,
+            "isolated Host",
+            false,
+        )
+        .await
+        .unwrap();
+        let stranger = fixture.connect(Identity::generate()).await.unwrap();
         assert!(
             stranger
                 .peer
@@ -1298,7 +1505,7 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
             0
         );
         stranger.endpoint.close().await;
-        let local = fixture.local().await;
+        let local = fixture.local().await.unwrap();
         assert_eq!(
             rpc(&local.peer, "host/status", json!({})).await["devices"]
                 .as_array()
@@ -1306,8 +1513,8 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
                 .len(),
             1
         );
-        local.close().await;
-        fixture.close().await;
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("expired invitation deadline");
@@ -1317,22 +1524,22 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
 async fn passive_client_can_approve_after_five_minutes_without_reconnecting() {
     tokio::time::timeout(Duration::from_secs(330), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
-        let sender = fixture.local().await;
+        let fixture = start_host(directory.path()).await;
+        let sender = fixture.local().await.unwrap();
         let started = rpc(&sender.peer, "thread/start", json!({"cwd":directory.path()})).await;
         let mut sender_events = sender.peer.subscribe();
         rpc(&sender.peer, "turn/start", json!({"threadId":started["thread"]["id"],"input":[{"type":"text","text":"[approval]"}]})).await;
         next_method(&mut sender_events, "item/commandExecution/requestApproval").await;
         // No dummy request: opening this peer must register it and replay approval.
-        let passive = fixture.local().await;
+        let passive = fixture.local().await.unwrap();
         let mut events = passive.peer.subscribe();
         let request = next_method(&mut events, "item/commandExecution/requestApproval").await;
         tokio::time::sleep(Duration::from_secs(301)).await;
         passive.peer.respond_raw(&request["id"].to_string(), "result", r#"{"decision":"accept"}"#).await.unwrap();
         assert_eq!(next_method(&mut events, "turn/completed").await["params"]["turn"]["status"], "completed");
-        passive.close().await;
-        sender.close().await;
-        fixture.close().await;
+        passive.close().await.unwrap();
+        sender.close().await.unwrap();
+        fixture.close().await.unwrap();
     }).await.expect("unattended approval deadline");
 }
 
@@ -1340,7 +1547,7 @@ async fn passive_client_can_approve_after_five_minutes_without_reconnecting() {
 async fn unpaired_connections_cannot_exhaust_authorized_session_slots() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        let fixture = Fixture::start(directory.path()).await;
+        let fixture = start_host(directory.path()).await;
         let mut strangers = Vec::new();
         for _ in 0..80 {
             let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled)
@@ -1349,7 +1556,7 @@ async fn unpaired_connections_cannot_exhaust_authorized_session_slots() {
             let session = endpoint.connect(&fixture.ticket).await.ok();
             strangers.push((endpoint, session));
         }
-        let local = fixture.local().await;
+        let local = fixture.local().await.unwrap();
         assert_eq!(
             rpc(&local.peer, "thread/list", json!({})).await["data"],
             json!([])
@@ -1360,9 +1567,404 @@ async fn unpaired_connections_cannot_exhaust_authorized_session_slots() {
             }
             endpoint.close().await;
         }
-        local.close().await;
-        fixture.close().await;
+        local.close().await.unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("authorized admission deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect() {
+    use agent_core::{
+        client::Answer,
+        state::{Intent, Snapshot},
+        store::Store,
+    };
+    use host_daemon::{
+        FileKeyStore, HostRuntime, KeyStorage,
+        local_host::{LocalHostRegistry, LocalHostState},
+    };
+
+    async fn wait_for(store: &Store, condition: impl Fn(&Snapshot) -> bool) {
+        let mut updates = store.subscribe();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            if condition(&snapshot) {
+                return;
+            }
+            updates.changed().await.unwrap();
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mobile_state = root.join("mobile-host");
+        let desktop_state = root.join("desktop");
+        let registry = LocalHostRegistry::new(desktop_state.clone());
+        let lease = registry
+            .acquire(&mobile_state, Some(KeyStorage::File))
+            .unwrap();
+        let credentials = Arc::new(
+            HostCredentials::load(
+                Arc::new(FileKeyStore(mobile_state.join("identity.keys"))),
+                mobile_state.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let host_endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(codex_fixture::config(&root))
+                .await
+                .unwrap(),
+        );
+        let service = CodexRpcService::new(
+            server.clone(),
+            DesktopProjectStore::new(root.join("projects.json")),
+        );
+        let runtime = Arc::new(
+            HostRuntime::new(service, host_endpoint, credentials, "shared Host".into()).await,
+        );
+        lease.publish(&runtime.ticket()).unwrap();
+        let stop = CancellationToken::new();
+        let running = tokio::spawn(runtime.clone().run(stop.clone()));
+
+        // Fresh desktop state must discover the mobile Host and read *its* keys,
+        // without provisioning a second identity in the desktop directory.
+        let location = registry.resolve(&desktop_state).unwrap();
+        assert_eq!(location.directory, mobile_state);
+        let LocalHostState::Ready(ticket) = location.state else {
+            panic!("Host is not ready")
+        };
+        assert!(ticket == runtime.ticket());
+        assert!(!desktop_state.join("identity.keys").exists());
+        assert!(!desktop_state.join("trust.json").exists());
+        let desktop_endpoint = Endpoint::bind(
+            host_daemon::load_local_identity(&FileKeyStore(
+                location.directory.join("identity.keys"),
+            ))
+            .unwrap(),
+            Relays::Disabled,
+        )
+        .await
+        .unwrap();
+        let mut desktop = Store::connect(&desktop_endpoint, &ticket, Snapshot::default(), None)
+            .await
+            .unwrap();
+        desktop
+            .dispatch(Intent::CreateInvitation(op::CreateInvitation {}))
+            .await
+            .unwrap();
+        let invitation = desktop
+            .snapshot()
+            .management
+            .invitation
+            .as_ref()
+            .unwrap()
+            .invitation;
+        let mobile_endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let mobile = Store::connect(
+            &mobile_endpoint,
+            &ticket,
+            Snapshot::default(),
+            Some(invitation),
+        )
+        .await
+        .unwrap();
+        mobile
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+
+        for (index, final_status) in ["completed", "interrupted"].into_iter().enumerate() {
+            let previous_id = mobile.snapshot().navigation.thread_id.clone();
+            let draft_key = previous_id.clone().unwrap_or_else(|| "new:".into());
+            let prompt = format!("[approval] shared turn {index}");
+            mobile
+                .dispatch(Intent::SetDraftText {
+                    thread_id: draft_key,
+                    text: prompt.clone(),
+                })
+                .await
+                .unwrap();
+            mobile
+                .dispatch(Intent::Submit {
+                    thread_id: previous_id,
+                    client_user_message_id: format!("shared-{index}"),
+                })
+                .await
+                .unwrap();
+            let id = mobile.snapshot().navigation.thread_id.clone().unwrap();
+            wait_for(&mobile, |snapshot| !snapshot.requests.is_empty()).await;
+            desktop
+                .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+                .await
+                .unwrap();
+            let active = |snapshot: &Snapshot| {
+                snapshot
+                    .conversations
+                    .get(&id)
+                    .and_then(|thread| thread.turns.as_ref())
+                    .and_then(|turns| turns.last())
+                    .is_some_and(|turn| turn.status.as_deref() == Some("inProgress"))
+            };
+            assert!(active(&mobile.snapshot()));
+            assert!(active(&desktop.snapshot()));
+
+            // Restore the stale interrupted status from the formerly separate
+            // desktop Host. Reconnecting must replace it with the owner's live turn.
+            let mut saved = serde_json::to_value(desktop.snapshot()).unwrap();
+            saved["conversations"][&id]["turns"][index]["status"] = "interrupted".into();
+            desktop.close().await.unwrap();
+            let registry = LocalHostRegistry::new(desktop_state.clone());
+            let location = registry.resolve(&desktop_state).unwrap();
+            let LocalHostState::Ready(reloaded_ticket) = location.state else {
+                panic!("Host disappeared")
+            };
+            assert!(reloaded_ticket == ticket);
+            desktop = Store::connect(
+                &desktop_endpoint,
+                &reloaded_ticket,
+                serde_json::from_value(saved).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            wait_for(&desktop, |snapshot| {
+                active(snapshot) && !snapshot.requests.is_empty()
+            })
+            .await;
+            let request = desktop
+                .snapshot()
+                .requests
+                .values()
+                .next()
+                .unwrap()
+                .id
+                .clone();
+            desktop
+                .dispatch(Intent::Respond(op::Respond {
+                    request_id: request,
+                    answer: Answer::Decision {
+                        index: if final_status == "completed" { 0 } else { 3 },
+                    },
+                }))
+                .await
+                .unwrap();
+            for store in [&mobile, &desktop] {
+                wait_for(store, |snapshot| {
+                    snapshot.conversations[&id]
+                        .turns
+                        .as_ref()
+                        .unwrap()
+                        .last()
+                        .is_some_and(|turn| turn.status.as_deref() == Some(final_status))
+                        && snapshot.requests.is_empty()
+                })
+                .await;
+                store.dispatch(Intent::ShowThreadList).await.unwrap();
+                store
+                    .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+                    .await
+                    .unwrap();
+                let snapshot = store.snapshot();
+                assert!(snapshot.error.is_none());
+                let turns = snapshot.conversations[&id].turns.as_ref().unwrap();
+                assert_eq!(turns.len(), index + 1);
+                let turn = turns.last().unwrap();
+                assert_eq!(turn.status.as_deref(), Some(final_status));
+                assert!(
+                    turn.items
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item.text.as_deref() == Some(&prompt))
+                );
+                if final_status == "completed" {
+                    assert!(
+                        turn.items
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .any(|item| item.kind.as_deref() == Some("agentMessage")
+                                && item.extra.get("phase") == Some(&json!("final_answer")))
+                    );
+                }
+            }
+            assert!(mobile.snapshot().pending_submissions.is_empty());
+            let snapshot = mobile.snapshot();
+            assert!(snapshot.drafts[&id].text.is_empty());
+            assert!(snapshot.drafts[&id].attachments.is_empty());
+        }
+        mobile.close().await.unwrap();
+        desktop.close().await.unwrap();
+        mobile_endpoint.close().await;
+        desktop_endpoint.close().await;
+        stop.cancel();
+        running.await.unwrap().unwrap();
+        drop(runtime);
+        Arc::try_unwrap(server)
+            .ok()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+        drop(lease);
+        assert!(matches!(
+            registry.resolve(&desktop_state).unwrap().state,
+            LocalHostState::Stopped
+        ));
+    })
+    .await
+    .expect("shared Host conversation synchronization deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for automatic in [false, true] {
+            for scoped in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path().canonicalize().unwrap();
+                let project = root.join("project");
+                std::fs::create_dir(&project).unwrap();
+                let git = |args: &[&str]| {
+                    let result = std::process::Command::new("git").current_dir(&project).args(args).output().unwrap();
+                    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+                };
+                git(&["init", "--quiet"]);
+                git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "fixture"]);
+                let configured_project = root.join("project-alias");
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&project, &configured_project).unwrap();
+                #[cfg(not(unix))]
+                let configured_project = project.clone();
+                std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[configured_project]}}})).unwrap()).unwrap();
+                std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
+                let program = host_fixture::fixture::Config { deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
+                    .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();
+                let fixture = HostFixture::start(&root, AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated", false).await.unwrap();
+                let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
+                let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+                store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                let key = store.snapshot().navigation.draft_key.clone();
+                store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] list automatically".into() }).await.unwrap();
+                store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "sidebar-message".into() }).await.unwrap();
+                let id = store.snapshot().navigation.thread_id.clone().unwrap();
+                let mut updates = store.subscribe();
+                let reflected = tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let snapshot = updates.borrow_and_update().clone();
+                        let complete = snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns.first().is_some_and(|turn| turn.status.as_deref() == Some("completed")));
+                        let listed = snapshot.thread_list().is_some_and(|list| list.threads.iter().any(|thread| thread.id == id && thread.title == "Completed conversation" && thread.project_id == scoped.then(|| "project".into())));
+                        if complete && listed {
+                            assert!(snapshot.pending_submissions.is_empty());
+                            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+                            assert!(snapshot.drafts[&id].text.is_empty());
+                            break;
+                        }
+                        updates.changed().await.unwrap();
+                    }
+                }).await;
+                store.close().await.unwrap();
+                drop(store);
+                endpoint.close().await;
+                fixture.close().await.unwrap();
+                assert!(reflected.is_ok(), "completed conversation and title did not appear automatically (worktree={automatic}, scoped={scoped})");
+            }
+        }
+    }).await.expect("sidebar regression exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worktree_management_lists_conversations_refuses_active_work_and_persists_removal() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&project).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            output.stdout
+        };
+        git(&["init", "--quiet"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "fixture"]);
+        let fixture = start_host(&root).await;
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+        store.dispatch(Intent::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings: agent_core::models::WorktreeSettings { create_on_new_session: true, ..Default::default() } })).await.unwrap();
+        store.dispatch(Intent::NewChat { cwd: project.to_str().unwrap().into() }).await.unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] [delayed-input] keep running".into() }).await.unwrap();
+        store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "managed".into() }).await.unwrap();
+        let id = store.snapshot().navigation.thread_id.clone().unwrap();
+        let path = store.snapshot().navigation.cwd.clone();
+        let mut updates = store.subscribe();
+        let turn_id = loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if let Some(turn) = snapshot.conversations[&id].turns.as_ref().and_then(|turns| turns.first()) { break turn.id.clone(); }
+            updates.changed().await.unwrap();
+        };
+        store.dispatch(Intent::ListWorktrees(op::ListWorktrees {})).await.unwrap();
+        let snapshot = store.snapshot();
+        let entries = snapshot.workspace.worktrees.as_ref().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, path);
+        assert_eq!(entries[0].project_path, project.to_str().unwrap());
+        assert_eq!(entries[0].threads[0].id, id);
+        assert!(entries[0].threads[0].active && entries[0].blocked_reason.is_some());
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        assert!(Path::new(&path).is_dir());
+        store.dispatch(Intent::Interrupt(op::Interrupt { thread_id: id.clone(), turn_id })).await.unwrap();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns[0].status.as_deref() == Some("interrupted")) { break; }
+            updates.changed().await.unwrap();
+        }
+        let local = fixture.local().await.unwrap();
+        // Failed process starts must not leave a permanent "terminal open" block.
+        assert!(local.peer.request::<_, Value>("host/terminal/start", &json!({"processHandle":"failed-terminal","cwd":root.join("missing"),"size":{"rows":24,"cols":80}})).await.is_err());
+        let terminal_directory = {
+            #[cfg(unix)]
+            {
+                let alias = root.join("worktree-alias");
+                std::os::unix::fs::symlink(&path, &alias).unwrap();
+                alias
+            }
+            #[cfg(not(unix))]
+            { PathBuf::from(&path) }
+        };
+        rpc(&local.peer, "host/terminal/start", json!({"processHandle":"managed-terminal","cwd":terminal_directory,"size":{"rows":24,"cols":80}})).await;
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        assert!(Path::new(&path).is_dir());
+        assert!(local.peer.request::<_, Value>("host/terminal/start", &json!({"processHandle":"managed-terminal","cwd":path,"size":{"rows":24,"cols":80}})).await.is_err());
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        rpc(&local.peer, "process/kill", json!({"processHandle":"managed-terminal"})).await;
+        store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
+        store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.unwrap();
+        assert!(!Path::new(&path).exists());
+        assert!(store.snapshot().workspace.worktrees.as_ref().unwrap().is_empty());
+        store.disconnect().await.unwrap();
+        store.reconnect(&endpoint, &fixture.ticket, None).await.unwrap();
+        store.dispatch(Intent::ListWorktrees(op::ListWorktrees {})).await.unwrap();
+        assert!(store.snapshot().workspace.worktrees.as_ref().unwrap().is_empty());
+        assert!(store.snapshot().error.is_none());
+        assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
+        let listed = rpc(&local.peer, "thread/list", json!({})).await;
+        assert!(listed["data"].as_array().unwrap().iter().any(|thread| thread["id"] == id), "removal must preserve conversation history");
+        local.close().await.unwrap();
+        store.close().await.unwrap();
+        drop(store);
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    }).await.expect("worktree management exceeded its deadline");
 }

@@ -37,8 +37,6 @@ import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.ThreadList
-import dev.remoteagent.core.RenderedConversation
-import dev.remoteagent.core.projectConversation
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.ticketIdentity
@@ -74,9 +72,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
     var snapshot by mutableStateOf(Snapshot.empty())
-        private set
-
-    var conversation by mutableStateOf<RenderedConversation?>(null)
         private set
 
     var profiles by mutableStateOf(emptyList<HostProfile>())
@@ -258,16 +253,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    fun connect(force: Boolean = false) {
+    fun connect() {
         val store = owner
         val profile = profiles.firstOrNull { it.id == profileId }
         if (store == null || profile == null || busy) return
-        notice = null
-        if (!force && snapshot.connected()) {
-            refresh()
-            snapshot.navigation().threadId?.let { perform(Intent.ReadThread(ReadThread(it))) }
-            return
-        }
         busy = true
         connection = scope.launch {
             try {
@@ -282,6 +271,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 if (profileId != profile.id) return@launch
                 publish(store.snapshot())
+                notice = snapshot.error()
                 busy = false
             } catch (error: AgentException) {
                 connectionFailed(profile.id, error)
@@ -311,6 +301,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 if (profileId != id) return@launch
                 val latest = store.snapshot()
                 publish(latest)
+                if (previous.connected() && !latest.connected() && !busy) connect()
                 previous = latest
             }
         }
@@ -318,11 +309,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun publish(next: Snapshot) {
         if (!next.listUnchanged(snapshot)) list = next.threadList()
-        if (!next.conversationUnchanged(snapshot)) {
-            conversation = next.navigation().threadId?.let(next::conversation)?.let {
-                projectConversation(next, it, conversation)
-            }
-        }
         snapshot = next
         persistence?.cancel()
         persistence = scope.launch {
@@ -379,7 +365,7 @@ internal fun RemoteAgentApp(
     requestQrScan: ((onContents: (String) -> Unit) -> Unit)?,
 ) {
     DisposableEffect(model, activity) {
-        val observer = AndroidConnectionLifecycle({ model.connect(force = true) }, model::persist)
+        val observer = AndroidConnectionLifecycle(model::connect, model::persist)
         activity.lifecycle.addObserver(observer)
         onDispose { activity.lifecycle.removeObserver(observer) }
     }

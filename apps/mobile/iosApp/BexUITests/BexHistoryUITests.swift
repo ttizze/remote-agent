@@ -150,7 +150,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 20))
         XCTAssertEqual(message.value as? String, "Keep this draft")
-        let completed = app.staticTexts.matching(NSPredicate(format: "label == %@", "MARKDOWN_STREAM_COMPLETE"))
+        let completed = app.textViews.matching(NSPredicate(format: "value CONTAINS %@", "MARKDOWN_STREAM_COMPLETE"))
             .firstMatch
         XCTAssertTrue(completed.waitForExistence(timeout: 30))
         captureScreen(app, named: "Long Markdown stream completed with draft preserved")
@@ -187,9 +187,9 @@ extension BexLaunchUITests {
             .firstMatch
         XCTAssertTrue(
             fullOutput.waitForExistence(timeout: 10),
-            "Reopening must preserve the completed command output"
+            "Reopening must preserve the full completed output"
         )
-        captureScreen(app, named: "Completed activity retained")
+        captureScreen(app, named: "Completed activity loaded")
         command.tap()
         // Activity headers now leave the accessibility tree when virtualized.
         // Scroll back to the real control before collapsing its work rows.
@@ -203,5 +203,24 @@ extension BexLaunchUITests {
         activity.tap()
         app.buttons["回答をコピー"].firstMatch.tap()
         XCTAssertTrue(app.buttons["コピーしました"].firstMatch.exists)
+
+        try verifyUncachedHistoryDetails(app, fullOutput: fullOutput)
+    }
+
+    private func verifyUncachedHistoryDetails(_ app: XCUIApplication, fullOutput: XCUIElement) throws {
+        // A previously unseen conversation must fetch deferred details instead of using the live cache.
+        try useSimulatorListFixture("completed-history")
+        app.terminate(); app.launch()
+        expandSimulatorProject(app)
+        let persisted = app.descendants(matching: .any)["tasks.row.fixture-thread-persisted"]
+        XCTAssertTrue(persisted.waitForExistence(timeout: 20)); persisted.tap()
+        let persistedActivity = app.buttons["turn.activity.fixture-turn-persisted"]
+        XCTAssertTrue(persistedActivity.waitForExistence(timeout: 20))
+        XCTAssertFalse(app.buttons["item.fixture-command-persisted"].exists)
+        persistedActivity.tap()
+        let persistedCommand = app.buttons["item.fixture-command-persisted"]
+        XCTAssertTrue(persistedCommand.waitForExistence(timeout: 10)); persistedCommand.tap()
+        XCTAssertTrue(fullOutput.waitForExistence(timeout: 10), "Uncached history must fetch the full deferred body")
+        captureScreen(app, named: "Uncached deferred activity loaded")
     }
 }

@@ -1,4 +1,4 @@
-use agent_core::models::WorktreeSettings;
+use agent_core::models::{Worktree, WorktreeSettings};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -25,6 +25,58 @@ impl Worktrees {
             path: project_state.with_file_name("bex-worktrees.json"),
             lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub(crate) async fn list(&self) -> Result<Vec<Worktree>, String> {
+        let _guard = self.lock.lock().await;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let state = read(&path)?;
+            let mut entries = state
+                .workspace_roots
+                .into_iter()
+                .map(|(path, project_path)| {
+                    let (branch, blocked_reason) = inspect(&path, &project_path)
+                        .unwrap_or_else(|error| (String::new(), Some(error)));
+                    Worktree {
+                        path,
+                        project_path,
+                        branch,
+                        blocked_reason,
+                        threads: Vec::new(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            entries.sort_by(|a, b| (&a.project_path, &a.path).cmp(&(&b.project_path, &b.path)));
+            Ok(entries)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    pub(crate) async fn remove(&self, target: String) -> Result<(), String> {
+        let _guard = self.lock.lock().await;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut state = read(&path)?;
+            let root = state
+                .workspace_roots
+                .get(&target)
+                .ok_or("Bexが作成したワークツリーではありません。")?;
+            if !already_removed(&target, root)? {
+                let (_, blocked) = inspect(&target, root)?;
+                if let Some(reason) = blocked {
+                    return Err(reason);
+                }
+                // Git rechecks tracked/untracked changes and locks at removal time.
+                // Keep the branch so commits remain reachable even if not merged.
+                crate::git::text(Path::new(root), &["worktree", "remove", "--", &target])?;
+            }
+            state.workspace_roots.remove(&target);
+            save(&path, &state)
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     pub(crate) async fn settings(
@@ -149,6 +201,73 @@ impl Worktrees {
         .await
         .map_err(|e| e.to_string())?
     }
+}
+
+fn inspect(path: &str, project: &str) -> Result<(String, Option<String>), String> {
+    if already_removed(path, project)? {
+        return Ok(("削除済み（登録を解除できます）".into(), None));
+    }
+    let target = Path::new(path)
+        .canonicalize()
+        .map_err(|error| format!("ワークツリーを確認できません: {error}"))?;
+    let project = Path::new(project)
+        .canonicalize()
+        .map_err(|error| format!("元のリポジトリを確認できません: {error}"))?;
+    if target != Path::new(path) || target == project {
+        return Err("登録されたワークツリーの場所が変わっています。".into());
+    }
+    let listing = crate::git::text(&project, &["worktree", "list", "--porcelain", "-z"])?;
+    let expected = format!("worktree {path}");
+    let entry = listing
+        .split("\0\0")
+        .find(|entry| entry.split('\0').next() == Some(expected.as_str()))
+        .ok_or("元のリポジトリに登録されたワークツリーではありません。")?;
+    let branch = entry
+        .split('\0')
+        .find_map(|field| field.strip_prefix("branch refs/heads/"));
+    let locked = entry
+        .split('\0')
+        .any(|field| field == "locked" || field.starts_with("locked "));
+    let reason = if locked {
+        Some("ロックされているため削除できません。".into())
+    } else if branch.is_none() {
+        Some(
+            "ブランチに属さないコミットがあります。ブランチに保存してから削除してください。".into(),
+        )
+    } else if !crate::git::output(
+        &target,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+    )?
+    .stdout
+    .is_empty()
+    {
+        Some("未保存の変更、未追跡ファイル、または無視対象のファイルがあります。保存・移動してから削除してください。".into())
+    } else {
+        None
+    };
+    Ok((branch.unwrap_or("detached HEAD").into(), reason))
+}
+
+// A registry write can fail after Git has removed the directory. Allow retrying
+// that write only when both the filesystem and Git agree removal is complete.
+fn already_removed(path: &str, project: &str) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let listing = crate::git::text(
+        Path::new(project),
+        &["worktree", "list", "--porcelain", "-z"],
+    )?;
+    let expected = format!("worktree {path}");
+    Ok(!listing.split('\0').any(|field| field == expected))
 }
 
 pub(crate) async fn workspace_roots(
@@ -318,6 +437,90 @@ mod tests {
         )
         .unwrap();
         directory
+    }
+
+    #[tokio::test]
+    async fn managed_removal_rechecks_changes_locks_and_ownership_and_preserves_commits() {
+        let repository = repository();
+        let root = repository.path().canonicalize().unwrap();
+        let state = root.join("projects.json");
+        let worktrees = Worktrees::new(&state);
+        worktrees
+            .settings(Some(WorktreeSettings {
+                create_on_new_session: true,
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        let first = worktrees.prepare(root.to_str()).await.unwrap().unwrap();
+        let other = worktrees.prepare(root.to_str()).await.unwrap().unwrap();
+        let first_path = first.to_str().unwrap().to_owned();
+        let branch = crate::git::text(&first, &["branch", "--show-current"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        let head = crate::git::text(&first, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(Worktrees::new(&state).list().await.unwrap().len(), 2);
+        assert!(
+            worktrees
+                .remove(root.to_str().unwrap().into())
+                .await
+                .is_err()
+        );
+        for file in ["tracked.txt", "new.txt", ".env"] {
+            let previous = fs::read(first.join(file)).ok();
+            fs::write(first.join(file), "preserve this local data\n").unwrap();
+            assert!(
+                worktrees
+                    .list()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .find(|tree| tree.path == first_path)
+                    .unwrap()
+                    .blocked_reason
+                    .is_some()
+            );
+            assert!(worktrees.remove(first_path.clone()).await.is_err());
+            assert_eq!(
+                fs::read_to_string(first.join(file)).unwrap(),
+                "preserve this local data\n"
+            );
+            if let Some(previous) = previous {
+                fs::write(first.join(file), previous).unwrap();
+            } else {
+                fs::remove_file(first.join(file)).unwrap();
+            }
+        }
+        crate::git::text(&root, &["worktree", "lock", &first_path]).unwrap();
+        assert!(worktrees.remove(first_path.clone()).await.is_err());
+        crate::git::text(&root, &["worktree", "unlock", &first_path]).unwrap();
+        crate::git::text(&first, &["checkout", "--detach", "HEAD"]).unwrap();
+        assert!(worktrees.remove(first_path.clone()).await.is_err());
+        crate::git::text(&first, &["checkout", &branch]).unwrap();
+        worktrees.remove(first_path.clone()).await.unwrap();
+        assert!(!first.exists());
+        assert!(other.join("tracked.txt").exists());
+        assert_eq!(
+            crate::git::text(&root, &["rev-parse", &branch]).unwrap(),
+            head
+        );
+        let restarted = Worktrees::new(&state);
+        let entries = restarted.list().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, other.to_str().unwrap());
+        assert!(
+            !workspace_roots(&state)
+                .await
+                .unwrap()
+                .contains_key(&first_path)
+        );
+        // Simulate a registry write failure after successful Git removal.
+        let other_path = other.to_str().unwrap();
+        crate::git::text(&root, &["worktree", "remove", "--", other_path]).unwrap();
+        assert!(restarted.list().await.unwrap()[0].blocked_reason.is_none());
+        restarted.remove(other_path.into()).await.unwrap();
+        assert!(Worktrees::new(&state).list().await.unwrap().is_empty());
     }
 
     #[tokio::test]

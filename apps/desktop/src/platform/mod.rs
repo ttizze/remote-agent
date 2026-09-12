@@ -1,10 +1,11 @@
 use agent_core::{
-    state::Snapshot,
+    state::{Intent, Snapshot, operations as op},
     store::Store,
-    transport::{Endpoint, Identity, Relays, Ticket},
+    transport::{Endpoint, Relays, Ticket},
 };
+use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Command, Stdio},
     time::Duration,
 };
@@ -27,6 +28,7 @@ mod microphone;
 pub(crate) use os::{Recording, start_recording};
 pub(crate) enum RecordingEvent {
     Started,
+    Level(f32),
     Finished(Result<Vec<u8>, String>),
 }
 
@@ -40,32 +42,10 @@ pub(crate) fn state_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "application data directory unavailable".into())
 }
 
-async fn local_identity(directory: &Path) -> Result<Identity, String> {
-    let directory = directory.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let directory = directory
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        match std::env::var("BEX_KEY_STORAGE").as_deref() {
-            Ok("file") => host_daemon::load_local_identity(&host_daemon::FileKeyStore(
-                directory.join("identity.keys"),
-            )),
-            Err(_) | Ok("keyring") => {
-                host_daemon::load_local_identity(&host_daemon::KeyringStore::new(
-                    directory.to_str().ok_or("state directory is not UTF-8")?,
-                )?)
-            }
-            Ok(_) => Err("BEX_KEY_STORAGE must be keyring or file".into()),
-        }
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
 /// One identity and endpoint per app. Views own independent sessions.
 #[derive(Default)]
 pub(crate) struct Connections {
-    endpoint: tokio::sync::OnceCell<Endpoint>,
+    endpoint: tokio::sync::OnceCell<(PathBuf, host_daemon::KeyStorage, Endpoint)>,
     startup: tokio::sync::Mutex<()>,
 }
 impl Connections {
@@ -74,103 +54,136 @@ impl Connections {
         remote: Option<&str>,
         snapshot: Snapshot,
     ) -> Result<Store, String> {
-        // Keep daemon provisioning and identity loading in the same critical section.
         let startup = self.startup.lock().await;
-        let directory = state_dir()?;
-        let ticket = if let Some(remote) = remote {
-            remote
+        if let Some(remote) = remote {
+            let ticket = remote
                 .parse::<Ticket>()
-                .map_err(|error| error.to_string())?
-        } else {
-            local_ticket(&directory).await?
-        };
-        let endpoint = self
+                .map_err(|error| error.to_string())?;
+            let endpoint = match self.endpoint.get() {
+                Some((_, _, endpoint)) => endpoint,
+                None => self.endpoint_for(&discover_local_host().await?).await?,
+            };
+            drop(startup);
+            return Store::connect(endpoint, &ticket, snapshot, None)
+                .await
+                .map_err(|error| error.to_string());
+        }
+        self.connect_local(snapshot).await
+    }
+
+    async fn endpoint_for(&self, host: &LocalHost) -> Result<&Endpoint, String> {
+        let directory = tokio::fs::canonicalize(&host.directory)
+            .await
+            .map_err(|error| error.to_string())?;
+        let storage = host.key_storage.unwrap_or_default();
+        let (identity_directory, identity_storage, endpoint) = self
             .endpoint
             .get_or_try_init(|| async {
-                Endpoint::bind(local_identity(&directory).await?, Relays::Default)
+                let mut host = host.clone();
+                host.directory = directory.clone();
+                let identity = tokio::task::spawn_blocking(move || host.load_identity())
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())??;
+                let endpoint = Endpoint::bind(identity, Relays::Default)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok::<_, String>((directory.clone(), storage, endpoint))
             })
             .await?;
-        drop(startup);
-        Store::connect(endpoint, &ticket, snapshot, None)
-            .await
-            .map_err(|error| error.to_string())
+        if identity_directory != &directory || identity_storage != &storage {
+            return Err("Local Host changed; restart Bex to use its identity".into());
+        }
+        Ok(endpoint)
     }
+
+    async fn connect_local(&self, snapshot: Snapshot) -> Result<Store, String> {
+        let isolated = isolated_host()?;
+        let mut child = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut last_error = "Host startup timed out".to_owned();
+        let ready = async {
+            loop {
+                let location = discover_local_host().await?;
+                match &location.state {
+                    LocalHostState::Ready(ticket) => {
+                        let endpoint = self.endpoint_for(&location).await?;
+                        // Legacy Hosts do not mark a startup generation. Verify the
+                        // live management route before exposing a possibly stale ticket.
+                        let attempt = tokio::time::timeout(Duration::from_secs(1), async {
+                            let store = Store::connect(endpoint, ticket, snapshot.clone(), None)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            store
+                                .dispatch(Intent::LoadHostManagement(op::LoadHostManagement {}))
+                                .await
+                                .map_err(|error| error.to_string())?;
+                            Ok::<_, String>(store)
+                        })
+                        .await;
+                        match attempt {
+                            Ok(Ok(store)) => break Ok(store),
+                            Ok(Err(error)) => last_error = error,
+                            Err(_) => last_error = "Host did not answer during startup".into(),
+                        }
+                    }
+                    LocalHostState::Stopped if child.is_none() => {
+                        child = Some(start_host(&location, isolated)?);
+                    }
+                    _ => {}
+                }
+                if let Some(child) = child.as_mut()
+                    && let Some(status) = child.try_wait().map_err(|error| error.to_string())?
+                    && matches!(location.state, LocalHostState::Stopped)
+                {
+                    break Err(format!("Host exited during startup ({status})"));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break Err(last_error);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        .await;
+        if let Some(mut child) = child {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        ready
+    }
+
     pub(crate) async fn close(&self) {
-        if let Some(endpoint) = self.endpoint.get() {
+        if let Some((_, _, endpoint)) = self.endpoint.get() {
             endpoint.close().await;
         }
     }
 }
 
-async fn local_ticket(directory: &Path) -> Result<Ticket, String> {
-    let ticket_path = directory.join("host.ticket");
-    // The daemon's file lock distinguishes a running instance from a stale
-    // public ticket. Starting a view never re-provisions credentials.
-    host_daemon::platform::create_state_directory(directory).map_err(|error| error.to_string())?;
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(directory.join("host.lock"))
-        .map_err(|error| error.to_string())?;
-    let start = match lock.try_lock() {
-        Ok(()) => {
-            lock.unlock().map_err(|error| error.to_string())?;
-            true
-        }
-        Err(std::fs::TryLockError::WouldBlock) => false,
-        Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
-    };
-    let previous_ticket = std::fs::metadata(&ticket_path)
-        .and_then(|metadata| metadata.modified())
-        .ok();
-    let mut child = if start {
-        Some(start_host(directory)?)
-    } else {
-        None
-    };
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let ready = loop {
-        let fresh = !start
-            || std::fs::metadata(&ticket_path)
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                != previous_ticket;
-        if fresh
-            && let Ok(ticket) = std::fs::read_to_string(&ticket_path)
-            && let Ok(ticket) = ticket.trim().parse::<Ticket>()
-        {
-            // A previous ticket is usable only once the daemon owns its lock.
-            match lock.try_lock() {
-                Err(std::fs::TryLockError::WouldBlock) => break Ok(ticket),
-                Ok(()) => lock.unlock().map_err(|error| error.to_string())?,
-                Err(std::fs::TryLockError::Error(error)) => break Err(error.to_string()),
-            }
-        }
-        if let Some(child) = child.as_mut()
-            && let Some(status) = child.try_wait().map_err(|error| error.to_string())?
-            && lock.try_lock().is_ok()
-        {
-            lock.unlock().map_err(|error| error.to_string())?;
-            break Err(format!("Host exited during startup ({status})"));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            break Err("Host startup timed out".into());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    if let Some(mut child) = child {
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
+fn isolated_host() -> Result<bool, String> {
+    match std::env::var("BEX_ISOLATED_HOST").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => Ok(false),
+        Ok("1") if std::env::var_os("BEX_STATE_DIR").is_some() => Ok(true),
+        Ok("1") => Err("BEX_ISOLATED_HOST=1 requires BEX_STATE_DIR".into()),
+        _ => Err("BEX_ISOLATED_HOST must be 0 or 1".into()),
     }
-    ready
 }
 
-fn start_host(directory: &Path) -> Result<std::process::Child, String> {
+async fn discover_local_host() -> Result<LocalHost, String> {
+    let preferred = state_dir()?;
+    let isolated = isolated_host()?;
+    tokio::task::spawn_blocking(move || {
+        let registry = if isolated {
+            LocalHostRegistry::new(preferred.clone())
+        } else {
+            LocalHostRegistry::for_user()?
+        };
+        registry.resolve(&preferred)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn start_host(host: &LocalHost, isolated: bool) -> Result<std::process::Child, String> {
     let executable = std::env::var_os("BEX_HOST_DAEMON")
         .map(PathBuf::from)
         .map(Ok)
@@ -183,14 +196,23 @@ fn start_host(directory: &Path) -> Result<std::process::Child, String> {
     let mut command = Command::new(executable);
     command
         .arg("--state-dir")
-        .arg(directory)
-        .arg("--key-storage")
-        .arg(std::env::var_os("BEX_KEY_STORAGE").unwrap_or_else(|| "keyring".into()))
+        .arg(&host.directory)
         .arg("--codex")
         .arg(std::env::var_os("BEX_CODEX").unwrap_or_else(|| "codex".into()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    let key_storage = match host.key_storage {
+        Some(host_daemon::KeyStorage::File) => Some("file".into()),
+        Some(host_daemon::KeyStorage::Keyring) => Some("keyring".into()),
+        None => std::env::var_os("BEX_KEY_STORAGE"),
+    };
+    if let Some(storage) = key_storage {
+        command.arg("--key-storage").arg(storage);
+    }
+    if isolated {
+        command.arg("--isolated");
+    }
     os::prepare_host(&mut command);
     command.spawn().map_err(|error| error.to_string())
 }

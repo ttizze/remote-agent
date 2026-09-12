@@ -45,6 +45,7 @@ pub struct Workspace {
     pub review_cwd: Option<String>,
     pub review: Option<Arc<WorkspaceReview>>,
     pub settings: Option<Arc<WorktreeSettings>>,
+    pub worktrees: Option<Arc<Vec<crate::models::Worktree>>>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -198,7 +199,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         StartTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListThreads, StartThread,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, StartThread,
         ReadThread, ReadItem, ResizeTerminal,
         Interrupt, Watch, Unwatch,
         WriteTerminal, DownloadFile, LoadSessionImages,

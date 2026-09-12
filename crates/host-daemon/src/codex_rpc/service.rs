@@ -99,6 +99,8 @@ struct ServiceInner {
     stopped: tokio_util::sync::CancellationToken,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
+    worktree_access: tokio::sync::RwLock<()>,
+    process_directories: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
     thread_watches: super::thread_watch::ThreadWatches,
 }
 
@@ -116,6 +118,8 @@ impl CodexRpcService {
                 restoration_error: tokio::sync::watch::channel(None).0,
                 app_server,
                 worktrees: crate::worktrees::Worktrees::new(desktop_projects.path()),
+                worktree_access: tokio::sync::RwLock::new(()),
+                process_directories: std::sync::Mutex::new(Default::default()),
                 desktop_projects,
                 router: SessionRouter::new(),
                 event_pump_started: OnceLock::new(),
@@ -215,6 +219,48 @@ impl CodexRpcService {
     ) -> Result<String, RpcMessageError> {
         let line = request.line();
         let method = request.method().expect("classified request has a method");
+        let _workspace_read = if matches!(
+            method,
+            HOST_THREAD_START_METHOD
+                | "thread/start"
+                | "host/thread/resume"
+                | "thread/resume"
+                | "turn/start"
+                | "turn/steer"
+                | "host/terminal/start"
+                | "process/spawn"
+                | "process/exec"
+                | "host/file/write"
+                | "host/blob/upload"
+        ) {
+            Some(self.inner.worktree_access.read().await)
+        } else {
+            None
+        };
+        let registered_process = if matches!(method, "host/terminal/start" | "process/spawn") {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct ProcessDirectory {
+                process_handle: String,
+                cwd: String,
+            }
+            if let Ok(params) = request.params::<ProcessDirectory>() {
+                let cwd = tokio::fs::canonicalize(&params.cwd)
+                    .await
+                    .unwrap_or_else(|_| std::path::PathBuf::from(params.cwd));
+                let mut processes = self.inner.process_directories.lock().unwrap();
+                if processes.contains_key(&params.process_handle) {
+                    None
+                } else {
+                    processes.insert(params.process_handle.clone(), cwd);
+                    Some(params.process_handle)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         if method == "turn/start"
             && let Some(error) = self.inner.restoration_error.borrow().as_ref()
         {
@@ -294,6 +340,11 @@ impl CodexRpcService {
                         .await,
                     )?
                 }
+                "host/worktree/list" => request.response(self.worktree_list().await)?,
+                "host/worktree/remove" => {
+                    let _exclusive = self.inner.worktree_access.write().await;
+                    request.response(self.remove_worktree(request.params()?).await)?
+                }
 
                 HOST_THREAD_START_METHOD | "thread/start" => request.forward_response(
                     self.host_thread_request(request, "thread/start", false)
@@ -372,6 +423,13 @@ impl CodexRpcService {
         if let Ok(response) = RpcMessage::parse(&response)
             && let Some(error) = response.raw_error()
         {
+            if let Some(handle) = registered_process {
+                self.inner
+                    .process_directories
+                    .lock()
+                    .unwrap()
+                    .remove(&handle);
+            }
             agent_core::diagnostics::rpc_error(
                 method,
                 request.raw_id().and_then(|id| id.parse().ok()),
@@ -383,6 +441,116 @@ impl CodexRpcService {
 
     pub(crate) fn files(&self) -> &crate::workspace_files::WorkspaceFiles {
         &self.inner.files
+    }
+
+    async fn worktree_list(&self) -> Result<Vec<agent_core::models::Worktree>, Failure> {
+        let mut worktrees = self
+            .inner
+            .worktrees
+            .list()
+            .await
+            .map_err(|error| Failure::new("worktree_list_failed", error))?;
+        if worktrees.is_empty() {
+            return Ok(worktrees);
+        }
+        let mut params = ThreadListParams {
+            limit: 100,
+            sort_key: "updated_at",
+            sort_direction: "desc",
+            use_state_db_only: true,
+            search_term: None,
+            cursor: None,
+        };
+        let mut cursors = std::collections::HashSet::new();
+        loop {
+            let page = self
+                .inner
+                .app_server
+                .request::<_, ThreadPage>("thread/list", &params)
+                .await
+                .map_err(Failure::from)?
+                .outcome
+                .map_err(Failure::Upstream)?;
+            for thread in page.data {
+                let Some(cwd) = thread.cwd.as_deref() else {
+                    continue;
+                };
+                let cwd = tokio::fs::canonicalize(cwd)
+                    .await
+                    .unwrap_or_else(|_| std::path::PathBuf::from(cwd));
+                for worktree in &mut worktrees {
+                    if !cwd.starts_with(&worktree.path) {
+                        continue;
+                    }
+                    let active = thread
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| status.kind == "active");
+                    if active {
+                        worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
+                    }
+                    if let Some(id) = &thread.id {
+                        worktree.threads.push(agent_core::models::WorktreeThread {
+                            id: id.clone(),
+                            name: thread
+                                .name
+                                .clone()
+                                .filter(|name| !name.is_empty())
+                                .or_else(|| {
+                                    thread
+                                        .preview
+                                        .as_deref()
+                                        .map(|preview| preview.chars().take(120).collect())
+                                })
+                                .unwrap_or_else(|| "新しいチャット".into()),
+                            active,
+                        });
+                    }
+                }
+            }
+            params.cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
+            let Some(cursor) = &params.cursor else {
+                break;
+            };
+            if !cursors.insert(cursor.clone()) {
+                return Err(Failure::new(
+                    "worktree_list_failed",
+                    "thread list cursor repeated",
+                ));
+            }
+        }
+        let processes = self.inner.process_directories.lock().unwrap();
+        for worktree in &mut worktrees {
+            if processes
+                .values()
+                .any(|cwd| cwd.starts_with(&worktree.path))
+            {
+                worktree.blocked_reason =
+                    Some("このワークツリーのターミナルを閉じてから削除してください。".into());
+            }
+        }
+        Ok(worktrees)
+    }
+
+    async fn remove_worktree(&self, params: op::RemoveWorktree) -> Result<(), Failure> {
+        let entries = self.worktree_list().await?;
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == params.path)
+            .ok_or_else(|| {
+                Failure::new(
+                    "worktree_remove_failed",
+                    "Bexが作成したワークツリーではありません。",
+                )
+            })?;
+        if let Some(reason) = &entry.blocked_reason {
+            return Err(Failure::new("worktree_remove_failed", reason));
+        }
+        self.inner
+            .worktrees
+            .remove(params.path)
+            .await
+            .map_err(|error| Failure::new("worktree_remove_failed", error))
     }
 
     async fn host_title_list(
@@ -515,18 +683,13 @@ impl CodexRpcService {
                         Ok(line) => line,
                         Err(error) => return Err(error.into()),
                     };
-                    let history: RpcResponse<HistoryPage<Arc<Turn>>> = RpcResponse::parse(&line)?;
-                    let mut page = match history.into_result() {
+                    let response: RpcResponse<HistoryPage<Arc<Turn>>> = RpcResponse::parse(&line)?;
+                    let mut page = match response.into_result() {
                         Ok(page) => page,
                         Err(response) => return Ok(response),
                     };
                     if params.paginate_history
-                        && let Err(error) = self
-                            .hydrate_turn_page(
-                                &mut page,
-                                result.thread.id.as_deref().unwrap_or_default(),
-                            )
-                            .await
+                        && let Err(error) = self.hydrate_turn_page(&mut page, &history).await
                     {
                         return Err(Failure::new("invalid_thread_history", error));
                     }
@@ -589,10 +752,44 @@ impl CodexRpcService {
     async fn hydrate_turn_page(
         &self,
         page: &mut HistoryPage<Arc<Turn>>,
-        thread_id: &str,
+        query: &HistoryParams<'_>,
     ) -> Result<(), String> {
         if page.data.len() > MOBILE_THREAD_PAGE_SIZE {
             return Err("turn page exceeds requested size".into());
+        }
+        let thread_id = query.thread_id;
+        let mut ids = std::collections::HashSet::new();
+        let repeated = page.data.iter().any(|turn| !ids.insert(turn.id.as_str()));
+        if repeated {
+            // Item pagination is keyed only by turn ID, so it cannot preserve
+            // boundaries between historical occurrences sharing that ID.
+            let full = self
+                .history_request::<Arc<Turn>>(
+                    "thread/turns/list",
+                    &HistoryParams {
+                        items_view: Some("full"),
+                        ..*query
+                    },
+                )
+                .await?;
+            if full.next_cursor != page.next_cursor
+                || !full
+                    .data
+                    .iter()
+                    .map(|turn| &turn.id)
+                    .eq(page.data.iter().map(|turn| &turn.id))
+            {
+                return Err("turn history changed while loading repeated IDs".into());
+            }
+            if full
+                .data
+                .iter()
+                .any(|turn| turn.items.is_none() || turn.items_view.as_deref() == Some("notLoaded"))
+            {
+                return Err("full turn history omitted repeated-turn items".into());
+            }
+            *page = full;
+            return Ok(());
         }
         let mut budget = MOBILE_THREAD_PAGE_SIZE * 100;
         for turn in &mut page.data {
@@ -743,7 +940,7 @@ impl CodexRpcService {
             if cursor.is_some() && page.next_cursor.as_deref() == cursor {
                 return Err(invalid("history cursor repeated"));
             }
-            self.hydrate_turn_page(&mut page, thread_id)
+            self.hydrate_turn_page(&mut page, &upstream)
                 .await
                 .map_err(|error| Failure::new("invalid_thread_history", error))?;
             result.thread.apply_history_page(page);
@@ -830,6 +1027,22 @@ impl CodexRpcService {
                         let Ok(request) = RpcMessage::parse(&line) else {
                             continue;
                         };
+                        if request.method() == Some("process/exited")
+                            && let Some(inner) = inner.upgrade()
+                        {
+                            #[derive(Deserialize)]
+                            #[serde(rename_all = "camelCase")]
+                            struct Exited {
+                                process_handle: String,
+                            }
+                            if let Ok(params) = request.params::<Exited>() {
+                                inner
+                                    .process_directories
+                                    .lock()
+                                    .unwrap()
+                                    .remove(&params.process_handle);
+                            }
+                        }
                         if request.kind() == RpcMessageKind::Request
                             && request.method() == Some("account/chatgptAuthTokens/refresh")
                         {
