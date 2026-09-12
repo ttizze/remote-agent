@@ -3,6 +3,7 @@ use super::*;
 impl Desktop {
     pub(super) fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
+        let opening = entity.clone();
         popover::Popover::new("model-controls")
             .bg(rgb(0x2b2b2b))
             .rounded(px(16.))
@@ -13,13 +14,21 @@ impl Desktop {
             .trigger(
                 Button::new("model-select")
                     .icon(Icon::default().path("bex/gauge.svg").size(px(23.)))
-                    .accessibility_label("モデル設定")
-                    .tooltip("モデル設定")
+                    .accessibility_label("アカウントとモデル")
+                    .tooltip("アカウントとモデル")
                     .large()
                     .w(px(44.))
                     .h(px(44.))
                     .ghost(),
             )
+            .on_open_change(move |open, _, cx| {
+                if *open {
+                    let _ = opening.update(cx, |view, _| {
+                        view.dispatch(Intent::ListAccounts(op::ListAccounts {}));
+                        view.dispatch(Intent::LoadModels(op::LoadModels {}));
+                    });
+                }
+            })
             .content(move |_, _, cx| {
                 entity
                     .update(cx, |s, cx| s.model_controls(cx))
@@ -162,9 +171,38 @@ impl Desktop {
                 }
                 menu
             });
+        let entity = cx.entity().downgrade();
+        let accounts = self.snapshot.account.accounts.clone();
+        let account_error = accounts
+            .as_ref()
+            .and_then(|accounts| accounts.error.clone());
         v_flex()
             .w(px(280.))
             .gap_2()
+            .child(div().text_sm().child("Codex アカウント"))
+            .child(account_selector(
+                accounts,
+                self.busy > 0 || !self.snapshot.connected,
+                move |intent, _, cx| {
+                    let _ = entity.update(cx, |view, cx| {
+                        if view.busy > 0 || view.session.is_none() || !view.snapshot.connected {
+                            return;
+                        }
+                        view.busy += 1;
+                        view.perform(intent, |view, result, window, cx| {
+                            view.busy = view.busy.saturating_sub(1);
+                            if let Err(error) = result {
+                                view.set_error(error);
+                            }
+                            view.accept_snapshot(window, cx);
+                        });
+                        cx.notify();
+                    });
+                },
+            ))
+            .when_some(account_error, |column, error| {
+                column.child(div().text_xs().text_color(rgb(0xff7777)).child(error))
+            })
             .child(h_flex().justify_between().child(speed).child(models))
             .child(model_effort_slider(
                 &self.effort_slider,
@@ -364,7 +402,10 @@ impl Desktop {
                     }),
             );
         } else {
-            body = body.child(history);
+            body = body.child(selection::ConversationSelection::wrap(
+                &self.selection,
+                history,
+            ));
         }
         let key = self.draft_key().to_owned();
         let attachments = &self.draft().attachments;
@@ -556,5 +597,138 @@ impl Desktop {
                 .child(controls),
         )
         .into_any_element()
+    }
+}
+
+fn account_selector(
+    accounts: Option<Arc<agent_core::client::Accounts>>,
+    disabled: bool,
+    on_select: impl Fn(Intent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let selected = accounts.as_ref().and_then(|accounts| {
+        accounts
+            .accounts
+            .iter()
+            .find(|account| Some(&account.id) == accounts.selected_id.as_ref())
+    });
+    let label = selected.map_or("アカウントを選択", |account| {
+        account.email.as_deref().unwrap_or(&account.id)
+    });
+    let on_select = Rc::new(on_select);
+    Button::new("account-select")
+        .debug_selector(|| "account-select".into())
+        .label(label.to_owned())
+        .accessibility_label("Codex アカウントを変更")
+        .dropdown_caret(true)
+        .w_full()
+        .small()
+        .ghost()
+        .disabled(
+            disabled
+                || accounts
+                    .as_ref()
+                    .is_none_or(|accounts| accounts.accounts.is_empty()),
+        )
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+            if let Some(accounts) = &accounts {
+                for account in &accounts.accounts {
+                    let id = account.id.clone();
+                    let select = on_select.clone();
+                    let email = account.email.as_deref().unwrap_or(&account.id);
+                    let label = account.plan_type.as_ref().map_or_else(
+                        || email.to_owned(),
+                        |plan| format!("{email} · {}", plan.to_uppercase()),
+                    );
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(accounts.selected_id.as_ref() == Some(&id))
+                            .on_click(move |_, window, cx| {
+                                select(
+                                    Intent::SelectAccount(op::SelectAccount { id: id.clone() }),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                    );
+                }
+            }
+            menu
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::account_selector;
+    use agent_core::state::Intent;
+    use gpui_kit as gpui;
+    use gpui_kit::{
+        AppContext, Context, IntoElement, Modifiers, ParentElement, Render, Styled, TestAppContext,
+        Window, component::Root, div,
+    };
+    use std::{cell::RefCell, rc::Rc, sync::Arc};
+
+    struct Picker {
+        accounts: Arc<agent_core::client::Accounts>,
+        disabled: bool,
+        selected: Rc<RefCell<Vec<String>>>,
+    }
+    impl Render for Picker {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let selected = self.selected.clone();
+            div().size_full().child(account_selector(
+                Some(self.accounts.clone()),
+                self.disabled,
+                move |intent, _, _| {
+                    let Intent::SelectAccount(account) = intent else {
+                        panic!("wrong account operation")
+                    };
+                    selected.borrow_mut().push(account.id);
+                },
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn account_menu_selects_the_requested_account_and_blocks_changes_while_busy(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let accounts = Arc::new(
+            serde_json::from_value(serde_json::json!({
+                "accounts":[{"id":"first","email":"first@example.invalid","planType":"plus"},
+                            {"id":"second","email":"second@example.invalid","planType":"pro"}],
+                "selectedId":"first","error":null
+            }))
+            .unwrap(),
+        );
+        let captures = selected.clone();
+        let picker = cx.new(|_| Picker {
+            accounts,
+            disabled: false,
+            selected: captures,
+        });
+        let rendered = picker.clone();
+        let (_, window) = cx.add_window_view(|window, cx| Root::new(rendered, window, cx));
+        window.run_until_parked();
+        let bounds = window.debug_bounds("account-select").unwrap();
+        window.simulate_click(bounds.center(), Modifiers::default());
+        window.simulate_keystrokes("down down enter");
+        assert_eq!(*selected.borrow(), ["second"]);
+        window.update(|_, cx| {
+            picker.update(cx, |picker, cx| {
+                picker.disabled = true;
+                cx.notify();
+            })
+        });
+        window.run_until_parked();
+        let bounds = window.debug_bounds("account-select").unwrap();
+        window.simulate_click(bounds.center(), Modifiers::default());
+        window.simulate_keystrokes("down enter");
+        assert_eq!(
+            *selected.borrow(),
+            ["second"],
+            "busy picker must not switch accounts"
+        );
     }
 }

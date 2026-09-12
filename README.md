@@ -37,6 +37,8 @@ State that must be backed up and never committed: the identity keys (keyring ent
 
 Host preferences for worktrees (`bex-worktrees.json`) and the directory for chats without a project (`bex-chats/`) live beside the Codex project state, normally `$CODEX_HOME` or `~/.codex`. Worktree settings are edited from Mac **設定 → ワークツリー** or iPhone **タスク一覧 → … → ワークツリー設定**.
 
+To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続を解除** and confirm. This deletes its authentication key on that iPhone and prevents reconnection after relaunch, while retaining Host conversation data. On Mac, **設定 → 端末と接続 → 接続を解除** revokes the device’s access and closes active connections. Pair again to reconnect. Removing a PC on iPhone does not remove the old device entry from the Mac.
+
 ## Build the clients
 
 ```sh
@@ -52,6 +54,12 @@ nix develop . --command ./gradlew :apps:mobile:assembleDebug
 ```
 
 Rerun the iOS library build after changing Rust sources. The desktop `BEX_STATE_DIR` and `BEX_KEY_STORAGE=file` mirror the Host flags.
+
+## Conversation controls
+
+On Mac and iPhone, select assistant text to quote it into the draft or ask about it in a side chat. Closing an iPhone side chat restores the original conversation and draft. Mac also supports right-click Copy and Google Search, and own-message hover actions for copying or returning text to the composer. Command activity starts collapsed while running and after reopening; explicit expansion is preserved. See the [conversation display contract](docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md).
+
+The composer gauge opens **アカウントとモデル**. On Mac, **Codex アカウント** selects a saved account; opening the menu refreshes the account list, and switching refreshes the model catalog while retaining the conversation and draft. Add accounts through **Codex アカウントを追加** on iPhone. The Host owns authentication and persists the selected account across restarts; account switching shares the existing Codex process and conversation history.
 
 ## Headless CLI
 
@@ -70,11 +78,12 @@ agent-cli <connection> approve '"request-id"' --decision 2   # string request ID
 nix develop . --command cargo test --workspace            # Rust, including the behavior corpus
 nix develop . --command just iroh-e2e                     # real daemon over isolated iroh sessions
 nix develop . --command just ios-e2e [TestMethod…]        # Simulator XCUITest against a fixture Host
-nix develop . --command just quality [rust|kotlin|swift]  # fmt, clippy -D warnings, ktfmt, detekt, swiftformat, swiftlint
+nix develop . --command just conversation-ui             # selection, side chat, and activity regressions
+nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop tests, and conversation-ui
 ```
 
 Linux CI uses the `nix develop .#native` shell. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
 
-`crates/host-fixture::test_support` shares isolated Host startup, connections and shutdown. `bex-ui-fixture DIRECTORY CODEX PORT_FILE [STREAM_DELAY_MS]` runs the Host and loopback pairing controls together with credentials in memory; Codex remains a subprocess to exercise the stdio boundary. `ios-e2e` owns this process and a fresh Simulator, removes both after the run, and retains results under `target/qa`. Failed or skipped tests fail the command.
+`crates/host-fixture::test_support` shares isolated Host startup, connections and shutdown. `bex-ui-fixture DIRECTORY CODEX PORT_FILE [STREAM_DELAY_MS]` runs the Host and loopback pairing controls together with credentials in memory; Codex remains a subprocess to exercise the stdio boundary. `ios-e2e` removes this process, its fresh Simulator and Xcode build products after the run, and retains results under `target/qa`. Failed, skipped or missing tests fail the command.
 
 Simulator and fixture runs do not verify physical devices, production Keychain access, camera, or real Codex accounts.

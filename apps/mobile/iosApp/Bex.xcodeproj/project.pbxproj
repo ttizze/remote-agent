@@ -41,6 +41,8 @@
 		C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000002 /* ModelSettingsSheet.swift */; };
 		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
 		C0DE00000000000000000104 /* ConversationPresentationCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000004 /* ConversationPresentationCache.swift */; };
+		C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000005 /* ConversationTextSelection.swift */; };
+		C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000006 /* ConversationSideChat.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -82,6 +84,8 @@
 		C0DE00000000000000000002 /* ModelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsSheet.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000004 /* ConversationPresentationCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentationCache.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000005 /* ConversationTextSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTextSelection.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000006 /* ConversationSideChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChat.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -148,6 +152,8 @@
 				613A5AAB450EC067108110F3 /* ConversationScreen.swift */,
 				F6A4ABC2B38DF545C243FD72 /* ConversationRows.swift */,
 				63950266A2798560BC414B70 /* ConversationMedia.swift */,
+				C0DE00000000000000000005 /* ConversationTextSelection.swift */,
+				C0DE00000000000000000006 /* ConversationSideChat.swift */,
 				D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */,
 				CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */,
 				8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */,
@@ -280,6 +286,8 @@
 				FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */,
 				F9897A4D00C8F44425414C1F /* ConversationRows.swift in Sources */,
 				2DCDAABCD1000D782FF1BE5B /* ConversationMedia.swift in Sources */,
+				C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */,
+				C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */,
 				FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */,
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
 				A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */,
@@ -333,20 +341,21 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 46;
 				DEVELOPMENT_TEAM = K65K9J8686;
-				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
-				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
-				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release";
-				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release";
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Bex/Info.plist;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
-				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
@@ -360,20 +369,21 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 46;
 				DEVELOPMENT_TEAM = K65K9J8686;
-				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
-				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
-				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release";
-				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release";
+				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
+				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
+				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release";
+				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Bex/Info.plist;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
-				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
-				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(SRCROOT)/../../../target/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";

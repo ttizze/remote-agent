@@ -2,6 +2,7 @@ use agent_core::state::operations as op;
 mod clipboard;
 mod dictation;
 mod hosts;
+mod selection;
 mod view;
 
 use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
@@ -157,6 +158,9 @@ pub(crate) struct Desktop {
     busy: usize,
     error: String,
     composer: Entity<TextareaState>,
+    selection: Entity<selection::ConversationSelection>,
+    pending_quote: Option<String>,
+    pending_explanation: Option<String>,
     composer_value: SharedString,
     composer_revision: u64,
     composer_pending: Option<u64>,
@@ -244,7 +248,33 @@ impl Desktop {
         });
         let effort_slider = cx.new(|_| slider::SliderState::new().max(1.).step(1.));
         let hosts = (!side_chat_mode).then(|| cx.new(|cx| Hosts::new(window, cx)));
+        let selection = cx.new(|_| selection::ConversationSelection::new(!side_chat_mode));
         let mut subscriptions = vec![
+            cx.subscribe_in(
+                &selection,
+                window,
+                |view, _, action, window, cx| match action {
+                    selection::SelectionAction::AddToChat(text) => {
+                        view.quote_selection(text, window, cx)
+                    }
+                    selection::SelectionAction::AskSideChat(text) => {
+                        view.open_panel(Panel::SideChat, window, cx);
+                        if let Some(chat) = &view.side_chat {
+                            chat.update(cx, |chat, cx| chat.quote_selection(text, window, cx));
+                        }
+                    }
+                    selection::SelectionAction::Explain(text) => {
+                        if view.side_chat_mode {
+                            view.explain_selection(text, cx);
+                        } else {
+                            view.open_panel(Panel::SideChat, window, cx);
+                            if let Some(chat) = &view.side_chat {
+                                chat.update(cx, |chat, cx| chat.explain_selection(text, cx));
+                            }
+                        }
+                    }
+                },
+            ),
             cx.subscribe(&composer, |view, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value();
@@ -390,6 +420,9 @@ impl Desktop {
             busy: 0,
             error: String::new(),
             composer,
+            selection,
+            pending_quote: None,
+            pending_explanation: None,
             composer_value: "".into(),
             composer_revision: 0,
             composer_pending: None,
@@ -579,6 +612,12 @@ impl Desktop {
                         });
                         self.session = Some(session);
                         self.accept_snapshot(window, cx);
+                        if let Some(text) = self.pending_quote.take() {
+                            self.quote_selection(&text, window, cx);
+                        }
+                        if let Some(text) = self.pending_explanation.take() {
+                            self.explain_selection(&text, cx);
+                        }
                         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
                     }
                     Err(error) => self.set_error(error),
@@ -620,6 +659,8 @@ impl Desktop {
                 .map(|draft| &draft.attachments);
         let navigated = previous.navigation.draft_key != self.snapshot.navigation.draft_key;
         if navigated {
+            self.selection
+                .update(cx, |selection, cx| selection.clear(cx));
             self.cancel_recording();
             self.composer_pending = None;
             self.history_loading = false;
@@ -1099,6 +1140,8 @@ impl Desktop {
         self.remote = remote;
         self.snapshot = Arc::default();
         self.composer_pending = None;
+        self.pending_quote = None;
+        self.pending_explanation = None;
         self.editor_pending = None;
         self.editor_path = None;
         self.worktree_dirty = false;
@@ -1155,6 +1198,73 @@ impl Desktop {
             },
         );
     }
+    fn quote_selection(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            let queued = self.pending_quote.get_or_insert_with(String::new);
+            if !queued.is_empty() {
+                queued.push_str("\n\n");
+            }
+            queued.push_str(text);
+            return;
+        }
+        selection::append_to_composer(&self.composer, text, window, cx);
+    }
+
+    fn explain_selection(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
+            self.pending_explanation = Some(text.into());
+            return;
+        };
+        let cwd = self.snapshot.selected_directory();
+        let prompt = format!("次の選択範囲について詳しく説明してください。\n\n{text}");
+        self.busy += 1;
+        self.effect(
+            async move {
+                let Outcome::StartedThread { id } = store
+                    .dispatch(Intent::StartThread(op::StartThread {
+                        cwd: Some(cwd),
+                        model: None,
+                    }))
+                    .await
+                    .map_err(|error| error.to_string())?
+                else {
+                    return Err("新しいサイドチャットを作成できませんでした".into());
+                };
+                // The new thread has its own draft; existing side-chat input stays intact.
+                store
+                    .dispatch(Intent::SetDraftText {
+                        thread_id: id.clone(),
+                        text: prompt,
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                store
+                    .dispatch(Intent::ReadThread(op::ReadThread {
+                        include_turns: false,
+                        paginate_history: false,
+                        ..op::ReadThread::open(id.clone())
+                    }))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                store
+                    .dispatch(Intent::Submit {
+                        thread_id: Some(id),
+                        client_user_message_id: uuid::Uuid::new_v4().to_string(),
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            |view, result, window, cx| {
+                view.busy = view.busy.saturating_sub(1);
+                if let Err(error) = result {
+                    view.set_error(error);
+                }
+                view.accept_snapshot(window, cx);
+            },
+        );
+        cx.notify();
+    }
+
     fn refresh_threads(&self) {
         self.dispatch(Intent::ListThreads(op::ListThreads::new(
             (*self.snapshot.list_query).clone(),

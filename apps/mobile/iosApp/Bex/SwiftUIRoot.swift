@@ -7,6 +7,9 @@ struct BexSwiftUIRoot: View {
 
     var body: some View {
         BexScreen(model: model)
+            .sheet(item: $model.sideChatRequest) { request in
+                ConversationSideChat(model: model, request: request)
+            }
             .sheet(isPresented: $model.isScanning) {
                 BexQrScannerSheet { model.scanned($0) }
                     .interactiveDismissDisabled()
@@ -66,7 +69,10 @@ private struct BexScreen: View {
                         }
                     }
                 )) {
-                    ThreadScreen(model: model, conversation: model.conversation)
+                    ThreadScreen(
+                        model: model,
+                        conversation: model.sideChatRequest?.originalConversation ?? model.conversation
+                    )
                 } label: { EmptyView() }
             )
     }
@@ -149,17 +155,28 @@ private struct PairingScreen: View {
 
 private struct ProfilesScreen: View {
     @ObservedObject var model: BexAppViewModel
+    @State private var removing: HostProfile?
 
     var body: some View {
         List {
+            if let notice = model.notice {
+                BexNotice(text: notice)
+            }
             ForEach(model.profiles, id: \.id) { profile in
-                Button { model.selectProfile(profile.id) } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(profile.name).font(.headline)
-                        Text(profile.hostIdentity).font(.caption).foregroundColor(.secondary)
+                HStack {
+                    Button { model.selectProfile(profile.id) } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(profile.name).font(.headline)
+                            Text(profile.hostIdentity).font(.caption).foregroundColor(.secondary)
+                        }
                     }
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("profiles.\(profile.id)")
+                    Spacer()
+                    Button("接続を解除", role: .destructive) { removing = profile }
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier("connection.remove.\(profile.id)")
                 }
-                .accessibilityIdentifier("profiles.\(profile.id)")
             }
             Section {
                 Button("PCを追加") { model.openPairing() }
@@ -167,6 +184,20 @@ private struct ProfilesScreen: View {
             }
         }
         .navigationTitle("PC Hosts")
+        .alert("このPCとの接続を解除しますか？", isPresented: Binding(
+            get: { removing != nil }, set: {
+                if !$0 {
+                    removing = nil
+                }
+            }
+        )) {
+            if let removing {
+                Button("接続を解除", role: .destructive) { model.removeProfile(removing.id) }
+            }
+            Button("キャンセル", role: .cancel) { removing = nil }
+        } message: {
+            Text("このiPhoneの接続先と認証鍵を削除します。再接続にはペアリングが必要です。")
+        }
     }
 }
 

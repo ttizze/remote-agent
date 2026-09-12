@@ -133,6 +133,17 @@ fn route(
             }
         }
         "/worktree-conversation" => worktree_conversation(root)?,
+        "/completed-history" => write_json(
+            root.join("list-fixture.json"),
+            &json!([{"id":"fixture-thread-persisted","cwd":root.join("project"),
+            "name":"Persisted completed history","createdAt":10000,"updatedAt":10000,
+            "status":{"type":"notLoaded"},"historyMode":"paginated",
+            "turns":[{"id":"fixture-turn-persisted","status":"completed","items":[
+                {"id":"fixture-command-persisted","type":"commandExecution","command":"./gradlew test",
+                 "status":"completed","aggregatedOutput":crate::fixture::history::detail_output(),"exitCode":0},
+                {"id":"fixture-final-persisted","type":"agentMessage","phase":"final_answer","text":"Persisted history complete."}
+            ]}]}]),
+        )?,
         "/long-conversation" => write_json(
             root.join("list-fixture.json"),
             &json!([{

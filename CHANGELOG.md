@@ -6,6 +6,15 @@
 
 - Share isolated Host and JSONL connection ownership across integration and UI fixtures. Run the UI Host and loopback pairing controls in one process, remove the separate pairing executable and on-disk key exchange. Remove the redundant iOS screen identifier that overrode the existing detail, loading and retry identifiers.
 
+- Add iPhone PC-list connection removal with confirmation and credential deletion, preventing automatic reconnection after relaunch. Refresh Mac device management when opening settings, place removal above pairing QR codes, and fix the revoke request’s `nodeId` field so removing access closes active sessions and rejects reconnection.
+
+- Add saved Codex account switching to the Mac composer’s account/model menu, with current-account selection and model refresh after switching.
+- Run core/desktop behavior tests and isolated Simulator conversation regressions in post-commit quality. Honor Cargo's configured output directory in mobile binding/library builds and pass it through to Xcode. Correct the stale live-expansion contract and require integration evidence for changes developed in separate worktrees. Keep completed fixture output consistent between streaming and history, and verify both cached reopening and uncached deferred detail loading.
+
+- Add desktop selection actions for quoting, requesting an AI explanation in a new side conversation, and asking in the current side chat, plus right-click Copy and Google Search. Show timestamp, Copy and an action to return text to the composer on own-message hover. On iPhone, keep assistant text selectable in place with native selection actions, while own messages use a separate long-press menu. Preserve the original conversation and draft when closing an iPhone side chat, including after retrying its preparation.
+
+- Keep command activity collapsed by default while running and after reopening; preserve explicit expansion.
+
 - Keep chats without a selected project unassigned after sending, reopening, and restarting the Host. Use a dedicated `bex-chats` working directory beside the Codex project state instead of inheriting the App Server's checkout, while retaining the real directory for attachments and file operations. Preserve unsent drafts when that directory cannot be prepared, and skip automatic Git reviews for unassigned chats so a parent repository’s changes do not appear.
 
 - Render desktop approval labels, queued requests, images and thread summaries from core presentation. Share Store session subscription, shutdown and snapshot persistence across desktop windows; split desktop views and core operations by responsibility, and remove the Swift presentation mirror.

@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 serde.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true, features = ["rt"] }
 agent-core = { path = "../../crates/agent-core" }

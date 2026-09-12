@@ -151,6 +151,7 @@ struct ThreadMessageRow: View {
     @State private var forking = false
     @State private var forkError: String?
     @State private var copied = false
+    @State private var selectingText = false
 
     var body: some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
@@ -166,7 +167,7 @@ struct ThreadMessageRow: View {
                 }
                 if !item.collapsedBody.isEmpty {
                     if isUser {
-                        Text(item.collapsedBody).font(.system(size: 18)).textSelection(.enabled)
+                        Text(item.collapsedBody).font(.system(size: 18))
                     } else {
                         ConversationMarkdown(blocks: item.markdown, model: model)
                     }
@@ -181,6 +182,20 @@ struct ThreadMessageRow: View {
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("item.\(item.id)")
+            .contextMenu {
+                if isUser, !item.collapsedBody.isEmpty {
+                    Button {
+                        UIPasteboard.general.string = item.collapsedBody
+                    } label: {
+                        Label("コピー", systemImage: "doc.on.doc")
+                    }
+                    Button {
+                        selectingText = true
+                    } label: {
+                        Label("テキストを選択", systemImage: "text.cursor")
+                    }
+                }
+            }
             if item.kind == "agent" {
                 HStack(spacing: 20) {
                     Button { UIPasteboard.general.string = item.collapsedBody; copied = true } label: {
@@ -203,6 +218,18 @@ struct ThreadMessageRow: View {
             }
         }
         .padding(.bottom, isUser ? 12 : 8)
+        .sheet(isPresented: $selectingText) {
+            NavigationStack {
+                MessageTextSelection(text: item.collapsedBody)
+                    .navigationTitle("テキストを選択")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("完了") { selectingText = false }
+                        }
+                    }
+            }
+        }
     }
 
     private func fork(through turnId: String) {
@@ -301,6 +328,28 @@ struct ThreadItemRow: View {
             loadedBody = body
             detailError = error
             loadedVersion = item.contentVersion
+        }
+    }
+}
+
+/// UIKit supplies selection handles and copies only the selected range.
+private struct MessageTextSelection: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context _: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.font = .systemFont(ofSize: 18)
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        view.backgroundColor = .clear
+        view.accessibilityIdentifier = "message.text-selection"
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context _: Context) {
+        if view.text != text {
+            view.text = text
         }
     }
 }

@@ -23,6 +23,7 @@ impl AssetSource for DesktopAssets {
         let bytes: &'static [u8] = match path {
             "bex/microphone.svg" => include_bytes!("../assets/microphone.svg"),
             "bex/gauge.svg" => include_bytes!("../assets/gauge.svg"),
+            "bex/pencil.svg" => include_bytes!("../assets/pencil.svg"),
             "bex/stop.svg" => include_bytes!("../assets/stop.svg"),
             _ => return gpui_kit::assets::Assets.load(path),
         };
@@ -31,10 +32,15 @@ impl AssetSource for DesktopAssets {
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(
-            ["bex/microphone.svg", "bex/gauge.svg", "bex/stop.svg"]
-                .into_iter()
-                .filter(|item| item.starts_with(path))
-                .map(SharedString::from),
+            [
+                "bex/microphone.svg",
+                "bex/gauge.svg",
+                "bex/stop.svg",
+                "bex/pencil.svg",
+            ]
+            .into_iter()
+            .filter(|item| item.starts_with(path))
+            .map(SharedString::from),
         );
         Ok(paths)
     }

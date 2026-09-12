@@ -32,6 +32,17 @@ enum SnapshotFiles {
 }
 
 enum DeviceIdentity {
+    static func remove(_ reference: String) throws {
+        let status = SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.bex.iroh.identity",
+            kSecAttrAccount as String: reference
+        ] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+
     static func loadOrGenerate(_ reference: String) throws -> Data {
         let query: [String: CFTypeRef] = [
             kSecClass as String: kSecClassGenericPassword,
