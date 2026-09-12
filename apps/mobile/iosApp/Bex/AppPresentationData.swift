@@ -70,26 +70,15 @@ struct ConversationPresentation: Sendable {
     let source: AgentCore.Thread
     let id: String
     let title: String
-    let turns: [TurnPresentation]
-    let queuedMessages: [ConversationItem]
-    let hasOlderTurns: Bool
-}
-
-struct TurnPresentation: Sendable {
-    let id: String
-    let turnId: String
-    let hasOlderItems: Bool
-    let openingUserMessage: ConversationItem?
-    let status: String
-    let isInProgress: Bool
-    let userMessages: [ConversationItem]
-    let activitySummary: String?
-    let activityItems: [ConversationItem]
-    let responses: [ConversationItem]
-    let activityInitiallyExpanded: Bool
-    let activityCanCollapse: Bool
-    let error: TurnErrorPresentation?
-    let pendingRequests: [Request]
+    let rows: [ThreadConversationRow]
+    var runningTurnId: String? {
+        for row in rows.reversed() {
+            if case let .native(native, _) = row.content, case let .inProgress(turnId) = native.content {
+                return turnId
+            }
+        }
+        return nil
+    }
 }
 
 extension Request {
@@ -100,30 +89,16 @@ extension Request {
 
 final class ConversationItem: Sendable {
     let source: RenderedItem
-    let id: String
-    let nativeId: String?
-    let kind: String
-    let title: String
-    let collapsedBody: String
+    let data: ItemPresentation
     let markdown: [ConversationMarkdown.Part]
-    let isCollapsible: Bool
-    let isDeferred: Bool
-    let imageSources: [String]
     var contentVersion: String {
         String(describing: ObjectIdentifier(self))
     }
 
     init(_ source: RenderedItem) {
         self.source = source
-        let value = source.presentation()
-        id = value.id; nativeId = value.nativeId; kind = value.kind; title = value.title
-        collapsedBody = value.body; isCollapsible = value.collapsible; isDeferred = value.deferred
-        imageSources = value.imageSources
-        markdown = kind != "user" && !isCollapsible ? ConversationMarkdown.parse(collapsedBody) : []
-    }
-
-    func expandedBody() -> String {
-        source.expandedBody()
+        data = source.presentation()
+        markdown = data.kind != "user" && !data.collapsible ? ConversationMarkdown.parse(data.body) : []
     }
 }
 

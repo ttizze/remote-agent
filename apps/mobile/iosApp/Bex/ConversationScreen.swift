@@ -22,7 +22,7 @@ struct ThreadScreen: View {
     @State var historyBoundaries = [String: CGFloat]()
     @State var historyRequestPending = false
     @State var expandedItemIds = Set<String>()
-    @State var activityExpansionOverrides = [String: (status: String, expanded: Bool)]()
+    @State var activityExpansionOverrides = [String: ActivityExpansion]()
     @State var opensDiff = false
     @FocusState var composerFocused: Bool
 

@@ -7,8 +7,7 @@ use crate::{
         WorktreeSettings,
     },
     presentation::conversation::{
-        ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn, Request,
-        TurnPresentationData, request,
+        ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn, Request, request,
     },
     state::{Draft, FileDraft, Navigation, Snapshot},
 };
@@ -178,9 +177,6 @@ impl RenderedTurn {
     }
     pub fn unchanged(&self, other: Arc<Self>) -> bool {
         std::ptr::eq(self, other.as_ref())
-    }
-    pub fn rows(&self) -> Vec<TurnPresentationData> {
-        self.rows.clone()
     }
 }
 #[uniffi::export]

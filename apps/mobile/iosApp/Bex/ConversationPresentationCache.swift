@@ -5,7 +5,7 @@ import Foundation
 actor ConversationPresentationCache {
     private struct CachedTurn {
         let source: RenderedTurn
-        let rows: [TurnPresentation]
+        let rows: [ThreadConversationRow]
         let items: [String: ConversationItem]
     }
 
@@ -24,7 +24,10 @@ actor ConversationPresentationCache {
             return previous
         }
         var next: [String: CachedTurn] = [:]
-        var rows: [TurnPresentation] = []
+        var rows: [ThreadConversationRow] = []
+        if source.historyCursor() != nil {
+            rows.append(.init(id: "history-older-turns", content: .olderTurns))
+        }
         for turn in rendered.turns() {
             let id = turn.id()
             if let cached = turns[id], turn.unchanged(other: cached.source) {
@@ -33,35 +36,35 @@ actor ConversationPresentationCache {
             }
             let cached = turns[id]?.items ?? [:]
             var items: [String: ConversationItem] = [:]
-            func item(_ source: RenderedItem) -> ConversationItem {
-                Self.item(source, previous: cached, next: &items)
-            }
-            let projected = turn.rows().map { row in
-                TurnPresentation(
-                    id: row.id, turnId: row.turnId, hasOlderItems: row.hasOlderItems,
-                    openingUserMessage: row.openingUserMessage.map(item), status: row.status,
-                    isInProgress: row.isInProgress, userMessages: row.userMessages.map(item),
-                    activitySummary: row.activitySummary, activityItems: row.activityItems.map(item),
-                    responses: row.responses.map(item), activityInitiallyExpanded: row.activityInitiallyExpanded,
-                    activityCanCollapse: row.activityCanCollapse, error: row.error, pendingRequests: row.pendingRequests
-                )
+            let projected = turn.conversationRows().map { row in
+                let item: ConversationItem? = switch row.content {
+                case let .user(source), let .response(source, _), let .activity(source, _):
+                    Self.item(source, id: row.id, previous: cached, next: &items)
+                default: nil
+                }
+                return ThreadConversationRow(id: row.id, content: .native(row, item))
             }
             next[id] = CachedTurn(source: turn, rows: projected, items: items)
             rows += projected
         }
         var nextQueued: [String: ConversationItem] = [:]
-        let queuedMessages = rendered.queued().map { Self.item($0, previous: queued, next: &nextQueued) }
+        rows += rendered.queued().map {
+            let item = Self.item($0, id: $0.id(), previous: queued, next: &nextQueued)
+            return ThreadConversationRow(id: item.data.id, content: .queued(item))
+        }
         queued = nextQueued; turns = next; projection = rendered
-        let result = ConversationPresentation(source: source, id: source.id(), title: source.title(), turns: rows,
-                                              queuedMessages: queuedMessages,
-                                              hasOlderTurns: source.historyCursor() != nil)
+        let result = ConversationPresentation(
+            source: source,
+            id: source.id(),
+            title: source.title(),
+            rows: rows
+        )
         previous = result
         return result
     }
 
-    private static func item(_ source: RenderedItem, previous: [String: ConversationItem],
+    private static func item(_ source: RenderedItem, id: String, previous: [String: ConversationItem],
                              next: inout [String: ConversationItem]) -> ConversationItem {
-        let id = source.id()
         let result: ConversationItem = if let cached = previous[id], source.unchanged(other: cached.source) {
             cached
         } else {

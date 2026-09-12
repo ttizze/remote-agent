@@ -9,6 +9,7 @@ use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
 use agent_core::{
     client::{Answer, ServerRequest},
     models::{Item, Model, RemoteHost, Thread, Turn, WorktreeSettings},
+    presentation::conversation::{ActivityExpansion, ConversationRowContent},
     state::{Attachment, Draft, Intent, PendingSubmission, Snapshot},
     store::Outcome,
 };
@@ -181,7 +182,7 @@ pub(crate) struct Desktop {
     worktree_save_pending: bool,
     expanded_projects: HashSet<String>,
     expanded_items: HashSet<String>,
-    expanded_work: HashMap<String, (String, bool)>,
+    expanded_work: HashMap<String, ActivityExpansion>,
     tab: Tab,
     sidebar: bool,
     panel_open: bool,
@@ -928,8 +929,10 @@ impl Desktop {
             .iter()
             .flat_map(|conversation| &conversation.turns)
             .flat_map(|turn| &turn.rows)
-            .flat_map(|row| &row.pending_requests)
-            .map(|request| request.key.as_str())
+            .filter_map(|row| match &row.content {
+                ConversationRowContent::PendingRequest { request } => Some(request.key.as_str()),
+                _ => None,
+            })
             .collect();
         rows.extend(
             self.visible_requests()

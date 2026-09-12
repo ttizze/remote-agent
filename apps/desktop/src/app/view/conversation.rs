@@ -1,4 +1,7 @@
 use super::*;
+use agent_core::presentation::conversation::{
+    ActivityExpansion, ConversationRowContent, activity_is_expanded,
+};
 
 impl Desktop {
     pub(super) fn diff(
@@ -195,11 +198,13 @@ impl Desktop {
             }
             "fileChange" => {
                 let mut body = v_flex().gap_3();
-                for (i, change) in array(extra(item, "changes")).iter().enumerate() {
-                    let path = text(change, "path").to_owned();
+                for (i, change) in agent_core::presentation::body::file_changes(item).enumerate() {
+                    let path = change.path.into_owned();
                     let toggle = id.clone();
                     let turn_id = turn_id.clone();
+                    let selector = format!("change-{id}-{i}");
                     let row = h_flex()
+                        .debug_selector(move || selector.clone())
                         .gap_2()
                         .child(self.button(
                             format!("change-{id}-{i}"),
@@ -225,7 +230,7 @@ impl Desktop {
                         body = body.child(Self::diff(
                             &mut self.diffs,
                             format!("diff-{id}-{i}"),
-                            text(change, "diff"),
+                            &change.diff,
                             cx,
                         ));
                     }
@@ -271,87 +276,90 @@ impl Desktop {
     ) -> AnyElement {
         let turn = &projected.source;
         let mut body = v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4();
+        let mut expanded = false;
         for row in &projected.rows {
-            let id = &row.id;
-            let expanded = self
-                .expanded_work
-                .get(id)
-                .filter(|(previous, _)| previous == &row.status)
-                .map_or(row.activity_initially_expanded, |(_, expanded)| *expanded);
-            if let Some(opening) = &row.opening_user_message {
-                body = body.child(self.projected_item(opening, turn, cx));
-            }
-            for item in &row.user_messages {
-                body = body.child(self.projected_item(item, turn, cx));
-            }
-            if let Some(label) = &row.activity_summary {
-                let header = if row.activity_can_collapse {
-                    let toggle = id.clone();
-                    let status = row.status.clone();
-                    let turn_id = turn.id.clone();
-                    self.button(
-                        format!("work-{id}"),
-                        format!("{label} {}", if expanded { "⌄" } else { "›" }),
-                        cx,
-                        move |view, _, _| {
-                            view.expanded_work
-                                .insert(toggle.clone(), (status.clone(), !expanded));
-                            view.pause_tail();
-                            view.remeasure_item(&turn_id);
-                        },
-                    )
-                    .text_color(rgb(0xa0a0a0))
-                    .into_any_element()
-                } else {
-                    div()
-                        .text_color(rgb(0xa0a0a0))
-                        .child(label.clone())
-                        .into_any_element()
-                };
-                body = body.child(
-                    h_flex()
-                        .gap_2()
-                        .child(header)
-                        .when(row.is_in_progress, |row| {
-                            row.child(spinner::Spinner::new().small())
-                        }),
-                );
-            }
-            if expanded {
-                for item in &row.activity_items {
+            match &row.content {
+                ConversationRowContent::User { item } => {
                     body = body.child(self.projected_item(item, turn, cx));
                 }
-            }
-            if let Some(error) = &row.error {
-                body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
-            }
-            for request in &row.pending_requests {
-                body = body.child(self.request_card(&request.key, request, cx));
-            }
-            for item in &row.responses {
-                body = body.child(self.projected_item(item, turn, cx));
-                if let agent_core::presentation::conversation::ItemSource::Native(native) =
-                    &item.source
-                    && native.kind.as_deref() == Some("agentMessage")
-                    && extra(native, "phase") != "commentary"
-                {
-                    let native = native.clone();
+                ConversationRowContent::ActivityHeader { activity } => {
+                    let id = &activity.id;
+                    expanded = activity_is_expanded(activity, self.expanded_work.get(id).cloned());
+                    let label = &activity.activity_summary;
+                    let header = if activity.activity_can_collapse {
+                        let toggle = id.clone();
+                        let status = activity.status.clone();
+                        let turn_id = turn.id.clone();
+                        self.button(
+                            format!("work-{id}"),
+                            format!("{label} {}", if expanded { "⌄" } else { "›" }),
+                            cx,
+                            move |view, _, _| {
+                                view.expanded_work.insert(
+                                    toggle.clone(),
+                                    ActivityExpansion {
+                                        status: status.clone(),
+                                        expanded: !expanded,
+                                    },
+                                );
+                                view.pause_tail();
+                                view.remeasure_item(&turn_id);
+                            },
+                        )
+                        .text_color(rgb(0xa0a0a0))
+                        .into_any_element()
+                    } else {
+                        div()
+                            .text_color(rgb(0xa0a0a0))
+                            .child(label.clone())
+                            .into_any_element()
+                    };
+                    let selector = format!("work-{id}");
                     body = body.child(
-                        h_flex().child(
-                            Button::new(format!("copy-{}", native.id))
-                                .icon(IconName::Copy)
-                                .small()
-                                .ghost()
-                                .tooltip("回答をコピー")
-                                .accessibility_label("回答をコピー")
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        native.text.clone().unwrap_or_default(),
-                                    ));
-                                }),
-                        ),
+                        h_flex()
+                            .debug_selector(move || selector.clone())
+                            .gap_2()
+                            .child(header)
+                            .when(activity.is_in_progress, |row| {
+                                row.child(spinner::Spinner::new().small())
+                            }),
                     );
                 }
+                ConversationRowContent::Activity { item, .. } => {
+                    if expanded {
+                        body = body.child(self.projected_item(item, turn, cx));
+                    }
+                }
+                ConversationRowContent::PendingRequest { request } => {
+                    body = body.child(self.request_card(&request.key, request, cx));
+                }
+                ConversationRowContent::Error { error } => {
+                    body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
+                }
+                ConversationRowContent::Response { item, .. } => {
+                    body = body.child(self.projected_item(item, turn, cx));
+                    if item.data.kind == "agent" {
+                        let item = item.clone();
+                        body = body.child(
+                            h_flex().child(
+                                Button::new(format!("copy-{}", item.data.id))
+                                    .icon(IconName::Copy)
+                                    .small()
+                                    .ghost()
+                                    .tooltip("回答をコピー")
+                                    .accessibility_label("回答をコピー")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            item.data.body.clone(),
+                                        ));
+                                    }),
+                            ),
+                        );
+                    }
+                }
+                // Desktop pages via its virtual list and offers Stop in the composer.
+                ConversationRowContent::OlderItems { .. }
+                | ConversationRowContent::InProgress { .. } => {}
             }
         }
         h_flex()
@@ -700,6 +708,112 @@ mod tests {
                 cx.read_from_clipboard().unwrap().text().unwrap(),
                 "一行目\nsecond line"
             );
+        });
+    }
+}
+
+#[cfg(test)]
+mod file_change_tests {
+    use super::{Desktop, Mode, Snapshot};
+    use agent_core::presentation::conversation::{RenderedConversation, project_conversation};
+    use gpui_kit as gpui;
+    use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, TestAppContext, Window, px};
+    use std::sync::Arc;
+
+    struct FileActivity {
+        desktop: Entity<Desktop>,
+        conversation: Arc<RenderedConversation>,
+    }
+    impl Render for FileActivity {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.desktop.update(cx, |desktop, cx| {
+                desktop.turn(&self.conversation.turns[0], cx)
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn file_changes_render_and_expand_in_the_desktop_view(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::new(crate::platform::Connections::default()),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let source = Arc::new(serde_json::from_value(serde_json::json!({
+            "id":"fixture", "turns":[{"id":"turn", "status":"completed", "items":[{
+                "id":"files", "type":"fileChange", "status":"completed", "changes":[
+                    {"path":"/fixture/a.txt", "kind":"update", "diff":"@@ -1 +1 @@\n-old\n+new"},
+                    {"path":"/fixture/b.txt", "kind":"add", "diff":"@@ -0,0 +1 @@\n+second"}
+                ]
+            }]}]
+        })).unwrap());
+        let conversation = project_conversation(&Snapshot::default(), source, &None);
+        let (view, window) = cx.add_window_view(|window, cx| FileActivity {
+            desktop: cx.new(|cx| {
+                Desktop::new(
+                    Mode::SideChat {
+                        // Reject before reading preferences or connecting to a real Host.
+                        remote: Some(agent_core::models::RemoteHost {
+                            id: "fixture".into(),
+                            name: "fixture".into(),
+                            ticket: "invalid-fixture-ticket".into(),
+                            extra: Default::default(),
+                        }),
+                        cwd: "/fixture".into(),
+                    },
+                    window,
+                    cx,
+                )
+            }),
+            conversation,
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("change-files-0").is_none(),
+            "completed work starts collapsed"
+        );
+        let group = window.debug_bounds("work-turn").unwrap();
+        window.simulate_click(
+            gpui_kit::point(group.left() + px(20.), group.center().y),
+            gpui_kit::Modifiers::default(),
+        );
+        view.update(window, |_, cx| cx.notify());
+        window.run_until_parked();
+        for selector in ["change-files-0", "change-files-1"] {
+            assert!(
+                window.debug_bounds(selector).is_some(),
+                "file header must be visible"
+            );
+        }
+        let before = window.debug_bounds("change-files-1").unwrap().top();
+        let bounds = window.debug_bounds("change-files-0").unwrap();
+        window.simulate_click(
+            gpui_kit::point(bounds.left() + px(20.), bounds.center().y),
+            gpui_kit::Modifiers::default(),
+        );
+        view.update(window, |view, cx| {
+            assert!(view.desktop.read(cx).expanded_items.contains("files"));
+            cx.notify();
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("change-files-1").unwrap().top() > before,
+            "expanded diff must occupy space in the rendered conversation"
+        );
+        view.update(window, |view, cx| {
+            view.desktop.update(cx, |desktop, _| {
+                assert_eq!(desktop.diffs.len(), 2);
+                assert!(desktop.diffs.contains_key("diff-files-0"));
+                assert!(desktop.diffs.contains_key("diff-files-1"));
+            });
         });
     }
 }

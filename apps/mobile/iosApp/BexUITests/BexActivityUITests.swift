@@ -170,7 +170,7 @@ extension BexLaunchUITests {
         activity.tap()
 
         let detail = app.descendants(matching: .any)["task.detail"]
-        XCTAssertEqual(detail.value as? String, "turns=1;items=13")
+        XCTAssertEqual(detail.value as? String, "turns=1;items=12")
         for _ in 0 ..< 10 {
             detail.swipeDown()
         }
@@ -183,6 +183,7 @@ extension BexLaunchUITests {
             XCTAssertTrue(waitForPrefixedElement(app, prefix: prefix, scrolling: detail), prefix)
         }
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-sleep-").exists)
+        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-reasoning-").exists)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-review-in-").exists)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-review-out-").exists)
     }

@@ -3,11 +3,11 @@ import SwiftUI
 import UIKit
 
 struct ThreadActivityHeader: View {
-    let turn: TurnPresentation
+    let turn: ActivityPresentation
     let expanded: Bool
     var body: some View {
         HStack(spacing: 5) {
-            Text(turn.activitySummary ?? "")
+            Text(turn.activitySummary)
                 .font(.system(size: 16)).foregroundColor(.secondary)
                 .lineLimit(1).truncationMode(.tail)
             if turn.activityCanCollapse {
@@ -156,18 +156,18 @@ struct ThreadMessageRow: View {
     var body: some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
-                let sources = item.imageSources
+                let sources = item.data.imageSources
                 ForEach(sources.indices, id: \.self) { index in
                     ConversationImage(
                         source: sources[index],
-                        label: item.kind == "imageGeneration" ? "生成画像" : "添付画像",
-                        identifier: "message.image.\(item.id).\(index)",
+                        label: item.data.kind == "imageGeneration" ? "生成画像" : "添付画像",
+                        identifier: "message.image.\(item.data.id).\(index)",
                         model: model
                     )
                 }
-                if !item.collapsedBody.isEmpty {
+                if !item.data.body.isEmpty {
                     if isUser {
-                        Text(item.collapsedBody).font(.system(size: 18))
+                        Text(item.data.body).font(.system(size: 18))
                     } else {
                         ConversationMarkdown(blocks: item.markdown, model: model)
                     }
@@ -181,11 +181,11 @@ struct ThreadMessageRow: View {
             .padding(.leading, isUser ? 42 : 0)
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("item.\(item.id)")
+            .accessibilityIdentifier("item.\(item.data.id)")
             .contextMenu {
-                if isUser, !item.collapsedBody.isEmpty {
+                if isUser, !item.data.body.isEmpty {
                     Button {
-                        UIPasteboard.general.string = item.collapsedBody
+                        UIPasteboard.general.string = item.data.body
                     } label: {
                         Label("コピー", systemImage: "doc.on.doc")
                     }
@@ -196,9 +196,9 @@ struct ThreadMessageRow: View {
                     }
                 }
             }
-            if item.kind == "agent" {
+            if item.data.kind == "agent" {
                 HStack(spacing: 20) {
-                    Button { UIPasteboard.general.string = item.collapsedBody; copied = true } label: {
+                    Button { UIPasteboard.general.string = item.data.body; copied = true } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     }.accessibilityLabel(copied ? "コピーしました" : "回答をコピー")
                     if let forkTurnId {
@@ -207,7 +207,7 @@ struct ThreadMessageRow: View {
                         }
                         .disabled(forking)
                         .accessibilityLabel("ここから会話を分岐")
-                        .accessibilityIdentifier("response.fork." + item.id)
+                        .accessibilityIdentifier("response.fork." + item.data.id)
                     }
                 }
                 .font(.system(size: 19)).foregroundColor(.secondary).buttonStyle(.plain)
@@ -220,7 +220,7 @@ struct ThreadMessageRow: View {
         .padding(.bottom, isUser ? 12 : 8)
         .sheet(isPresented: $selectingText) {
             NavigationStack {
-                MessageTextSelection(text: item.collapsedBody)
+                MessageTextSelection(text: item.data.body)
                     .navigationTitle("テキストを選択")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -261,7 +261,7 @@ struct ThreadItemRow: View {
     @State private var retry = 0
 
     private var icon: String {
-        switch item.kind {
+        switch item.data.kind {
         case "command": "terminal"
         case "fileChange": "doc.badge.gearshape"
         case "webSearch": "globe"
@@ -271,7 +271,7 @@ struct ThreadItemRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if item.isCollapsible {
+            if item.data.collapsible {
                 DisclosureGroup(isExpanded: Binding(
                     get: { isExpanded },
                     set: {
@@ -281,8 +281,8 @@ struct ThreadItemRow: View {
                     }
                 )) {
                     if isExpanded {
-                        let body = item.isDeferred ? loadedBody ?? "" : item.expandedBody()
-                        if item.isDeferred, loadedBody == nil {
+                        let body = item.data.deferred ? loadedBody ?? "" : item.source.expandedBody()
+                        if item.data.deferred, loadedBody == nil {
                             if let detailError {
                                 Text(detailError).font(.caption).foregroundColor(.red)
                                 Button("再読み込み") { retry += 1 }
@@ -301,18 +301,18 @@ struct ThreadItemRow: View {
                     }
                 } label: {
                     Label {
-                        Text(item.title)
+                        Text(item.data.title)
                             .lineLimit(1)
                     } icon: { Image(systemName: icon) }
                         .font(.system(size: 17))
                         .foregroundColor(.secondary)
                         .padding(.vertical, 5)
-                        .accessibilityIdentifier("item.\(item.id)")
+                        .accessibilityIdentifier("item.\(item.data.id)")
                 }
             } else {
                 ConversationMarkdown(blocks: item.markdown, model: model)
-                    .foregroundColor(item.kind == "agent" || item.kind == "user" ? .primary : .secondary)
-                    .accessibilityIdentifier("item.\(item.id)")
+                    .foregroundColor(item.data.kind == "agent" || item.data.kind == "user" ? .primary : .secondary)
+                    .accessibilityIdentifier("item.\(item.data.id)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -321,7 +321,7 @@ struct ThreadItemRow: View {
             if loadedVersion != item.contentVersion {
                 loadedBody = nil; detailError = nil
             }
-            guard isExpanded, item.isDeferred, loadedBody == nil else { return }
+            guard isExpanded, item.data.deferred, loadedBody == nil else { return }
             detailError = nil
             let (body, error) = await loadDetails()
             guard !Task.isCancelled else { return }

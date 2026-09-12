@@ -206,3 +206,21 @@ Within activity:
 The mobile implementation should derive this projection from state on every
 snapshot/live update. UI components must not independently guess item order,
 final-message identity, terminal state, or collapse eligibility.
+
+## Shared native layout
+
+`RenderedTurn` stores one flat layout, shared by Desktop and the mobile
+`conversation_rows` getter, with core-owned row order and identities,
+including partial-history boundaries, activity membership, pending requests,
+errors, and the last response eligible for a fork. Activity rows follow their
+header consecutively; clients filter them using that header's expansion state.
+Native clients cache rows while the rendered turn is unchanged. `activity_is_expanded` applies a
+user choice only while its status matches the current activity status; otherwise
+it uses the core default. Filtering activity rows must leave requests and errors
+visible. Only visible items receive rendered data; cached rows retain those
+items across updates. iOS keeps parsed Markdown beside each cached message row.
+
+Desktop file-change headers and patches, and the mobile expanded text, read
+`presentation::body::file_changes`. The wire model stores `changes` as a named
+field, so it must never be looked up in `Item::extra`. Deferred items retain
+file headers while their diff bodies are fetched separately.

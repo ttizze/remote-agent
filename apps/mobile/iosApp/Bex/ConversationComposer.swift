@@ -101,19 +101,19 @@ extension ThreadScreen {
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if let running = conversation?.turns.last(where: { $0.isInProgress }),
+                    if let runningTurnId = conversation?.runningTurnId,
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, model.attachments
                        .isEmpty {
-                        Button { model.interrupt(running.turnId) } label: {
+                        Button { model.interrupt(runningTurnId) } label: {
                             Image(systemName: "stop.fill").font(.system(size: 15))
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
-                        .disabled(model.interruptingTurnId == running.turnId)
-                        .accessibilityLabel(model.interruptingTurnId == running.turnId ? "停止中" : "停止")
-                        .accessibilityIdentifier("turn.interrupt.\(running.id)")
+                        .disabled(model.interruptingTurnId == runningTurnId)
+                        .accessibilityLabel(model.interruptingTurnId == runningTurnId ? "停止中" : "停止")
+                        .accessibilityIdentifier("turn.interrupt.\(runningTurnId)")
                     } else {
                         Button {
                             // Commit native text before Store can clear the accepted draft.
@@ -220,13 +220,10 @@ struct ScrollViewportPreferenceKey: PreferenceKey {
     }
 }
 
-struct ThreadConversationRow: Identifiable {
+struct ThreadConversationRow: Identifiable, Sendable {
     let id: String
     let content: Content
-    enum Content {
-        case olderTurns, olderItems(String)
-        case user(ConversationItem), response(ConversationItem, String?), queued(ConversationItem)
-        case activityHeader(TurnPresentation), activity(ConversationItem, String)
-        case request(Request), error(TurnErrorPresentation)
+    enum Content: Sendable {
+        case olderTurns, native(ConversationRow, ConversationItem?), queued(ConversationItem)
     }
 }

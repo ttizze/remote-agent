@@ -24,14 +24,16 @@ extension BexLaunchUITests {
             let value = detail.value as? String ?? ""
             return Int(value.components(separatedBy: "items=").last ?? "") ?? -1
         }
-        XCTAssertEqual(loadedItems(), 500, "Initial history is five turns with a total budget of 500 items")
+        let initialItems = 501
+        XCTAssertEqual(loadedItems(), initialItems, "Initial history has 500 items plus the preserved opening input")
         for _ in 0 ..< 40 {
-            if loadedItems() > 500 {
+            if loadedItems() > initialItems {
                 break
             }
             detail.swipeDown(velocity: .fast)
         }
-        XCTAssertGreaterThan(loadedItems(), 500, "Scrolling upward must load older items without tapping a button")
+        XCTAssertGreaterThan(loadedItems(), initialItems,
+                             "Scrolling upward must load older items without tapping a button")
         XCTAssertFalse(latest.isHittable, "Prepending history must not jump back to the latest message")
         captureScreen(app, named: "Older history loaded by scrolling")
         app.navigationBars.buttons.element(boundBy: 0).tap()

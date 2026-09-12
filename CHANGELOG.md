@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Share flat conversation rows, stable row IDs, fork eligibility, and activity expansion defaults across Desktop, iOS, and Android through core presentation. Keep native turn/item and Markdown caches while removing Swift record copies. Restore Desktop file-change headers and diffs by reading typed change fields, shared with expanded activity text.
+
 - Share one normal local Host across desktop and mobile independently of their state directories. Reuse and remember its credential directory and key-storage backend, reject competing starts before provisioning, verify discovered tickets, and require explicit isolation for separate test Hosts. Report conflicting legacy Hosts without stopping active work.
 
 - End successful dictation with no recognized text without an error or submission. Preserve drafts and attachments, including after navigation; malformed responses and failed transcription still report errors.
