@@ -111,7 +111,7 @@ impl Snapshot {
                     .filter(|resolved| workspace.starts_with(resolved))
                     .map(PathBuf::as_path)
                     .unwrap_or(configured);
-                if !root.is_absolute() || !workspace.starts_with(root) {
+                if !configured.is_absolute() || !workspace.starts_with(root) {
                     continue;
                 }
                 let depth = root.components().count();
@@ -347,5 +347,17 @@ mod tests {
         ]}));
         assert_eq!(result["data"][0]["projectId"], "app");
         assert_eq!(result["data"][1]["projectId"], "repo");
+    }
+
+    #[test]
+    fn resolving_aliases_does_not_make_relative_project_roots_valid() {
+        let mut snapshot = Snapshot::parse(
+            br#"{"local-projects":{"relative":{"id":"relative","name":"Relative","rootPaths":["."]}}}"#,
+        ).unwrap();
+        snapshot
+            .resolved_roots
+            .insert(".".into(), "/host/cwd".into());
+        let result = snapshot.enrich_threads(json!({"data":[{"id":"task","cwd":"/host/cwd"}]}));
+        assert!(result["data"][0].get("projectId").is_none());
     }
 }

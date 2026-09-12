@@ -131,11 +131,19 @@ impl DesktopProjectStore {
     async fn load_uncached(&self) -> Result<state::Snapshot, DesktopProjectError> {
         let mut snapshot = self.read_desktop_state().await?;
         for root in snapshot.projects.iter().flat_map(|project| &project.roots) {
+            if !Path::new(&root.path).is_absolute() {
+                continue;
+            }
             match tokio::fs::canonicalize(&root.path).await {
                 Ok(path) => {
                     snapshot.resolved_roots.insert(root.path.clone(), path);
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                // Saved projects remain listable when their directories are offline or inaccessible.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                    ) => {}
                 Err(error) => return Err(DesktopProjectError::Read(error)),
             }
         }
@@ -333,5 +341,29 @@ mod tests {
         assert!(store.load().await.unwrap().projects.is_empty());
         std::fs::write(&path, "{}").unwrap();
         assert!(store.load().await.unwrap().projects.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inaccessible_project_root_does_not_hide_saved_conversations() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("restricted");
+        let root = parent.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = directory.path().join("projects.json");
+        std::fs::write(&path, serde_json::to_vec(&json!({"local-projects":{"saved":{"id":"saved","name":"Saved","rootPaths":[root]}}})).unwrap()).unwrap();
+        let mut thread = Thread {
+            id: Some("saved-thread".into()),
+            cwd: Some(root.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = DesktopProjectStore::new(&path)
+            .enrich_threads(std::slice::from_mut(&mut thread))
+            .await;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        assert_eq!(thread.project_id, Some(Some("saved".into())));
     }
 }
