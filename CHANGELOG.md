@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Render the existing Rust conversation data directly in native views, removing Swift presentation mirrors and client projection caches. Resolve list pagination, history cursors, project grouping and title fallbacks in core. Restore Desktop file-change headers and diffs by reading the typed change field.
+
 - Keep chats without a selected project unassigned after sending, reopening, and restarting the Host. Use a dedicated `bex-chats` working directory beside the Codex project state instead of inheriting the App Server's checkout, while retaining the real directory for attachments and file operations. Preserve unsent drafts when that directory cannot be prepared, and skip automatic Git reviews for unassigned chats so a parent repository’s changes do not appear.
 
 - Render desktop approval labels, queued requests, images and thread summaries from core presentation. Share Store session subscription, shutdown and snapshot persistence across desktop windows; split desktop views and core operations by responsibility, and remove the Swift presentation mirror.

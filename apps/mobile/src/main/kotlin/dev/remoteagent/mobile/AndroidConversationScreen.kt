@@ -51,8 +51,9 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier) {
     val snapshot = model.snapshot
     val threadId = snapshot.navigation().threadId
     val thread = threadId?.let { snapshot.conversation(it) }
-    val projection = remember(model.profileId, threadId) { ConversationProjection() }
-    val turns = projection.project(snapshot, thread)
+    val conversation = model.conversation
+    val turns = remember(conversation) { conversation?.rows().orEmpty() }
+    val queued = remember(conversation) { conversation?.queued().orEmpty() }
     val listState = rememberLazyListState()
     val activityExpansion = remember(threadId) { mutableStateMapOf<String, Pair<String, Boolean>>() }
     var following by remember(model.selectionKey) { mutableStateOf(true) }
@@ -97,7 +98,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier) {
                     model.older(id)
                 }
             }
-            items(projection.queued, key = { "queued:${it.id()}" }) {
+            items(queued, key = { "queued:${it.id()}" }) {
                 Text("順番待ち")
                 ThreadMessageCard(it, true)
             }

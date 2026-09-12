@@ -18,7 +18,7 @@ impl Operation for StartTerminal {
     fn terminal_handle(&self) -> Option<&str> {
         Some(&self.handle)
     }
-    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if snapshot.terminals.contains_key(&self.handle) {
             return Err("terminal handle is already in use".into());
         }

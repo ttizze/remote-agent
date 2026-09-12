@@ -22,7 +22,7 @@ impl Operation for ListThreads {
     fn invalidates(&self, snapshot: &Snapshot) -> bool {
         self.query != *snapshot.list_query
     }
-    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.list_query = Arc::new(self.query.clone());
         Ok(())
     }
@@ -325,7 +325,7 @@ impl rpc::RpcMethod for Watch {
 
 impl Operation for Watch {
     rpc_operation!();
-    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         let navigation = Arc::make_mut(&mut snapshot.navigation);
         navigation.watch_id = Some(self.watch_id);
         navigation.watch_thread_id = Some(self.thread_id.clone());
@@ -350,7 +350,7 @@ impl Operation for Unwatch {
     fn disconnected_is_complete(&self) -> bool {
         true
     }
-    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if snapshot.navigation.watch_id == Some(self.watch_id) {
             let navigation = Arc::make_mut(&mut snapshot.navigation);
             navigation.watch_id = None;
@@ -366,6 +366,7 @@ impl Operation for Unwatch {
 pub struct ReadOlder {
     pub thread_id: String,
     pub turn_id: Option<String>,
+    #[cfg_attr(feature = "bindings", uniffi(default = None))]
     pub cursor: Option<String>,
     #[serde(default)]
     #[cfg_attr(feature = "bindings", uniffi(default = true))]
@@ -398,6 +399,28 @@ impl rpc::RpcMethod for ReadOlder {
 
 impl Operation for ReadOlder {
     rpc_operation!();
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        if self.cursor.is_none() {
+            self.cursor = snapshot
+                .conversations
+                .get(&self.thread_id)
+                .and_then(|thread| {
+                    if let Some(id) = &self.turn_id {
+                        thread
+                            .turns
+                            .as_ref()?
+                            .iter()
+                            .find(|turn| &turn.id == id)?
+                            .items_next_cursor
+                            .clone()
+                            .flatten()
+                    } else {
+                        thread.history_cursor.clone().flatten()
+                    }
+                });
+        }
+        Ok(())
+    }
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let id = &self.thread_id;

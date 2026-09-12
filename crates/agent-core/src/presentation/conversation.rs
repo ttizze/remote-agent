@@ -22,13 +22,10 @@ pub struct RenderedConversation {
     pub queued: Vec<Arc<RenderedItem>>,
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedTurn {
     pub source: Arc<models::Turn>,
     pending: PendingItems,
     requests: Vec<Arc<ServerRequest>>,
-    items: Vec<Arc<RenderedItem>>,
-    opening: Option<Arc<RenderedItem>>,
     pub rows: Vec<TurnPresentationData>,
 }
 #[derive(Clone)]
@@ -77,28 +74,27 @@ impl RenderedItem {
         }
     }
 }
-impl RenderedItem {
-    fn key(&self) -> (bool, &str) {
-        match &self.source {
-            ItemSource::Native(item) => (false, &item.id),
-            ItemSource::Pending(id, _) => (true, id),
-        }
+impl RenderedTurn {
+    fn items(&self) -> impl Iterator<Item = &Arc<RenderedItem>> {
+        self.rows.iter().flat_map(|row| {
+            row.opening_user_message
+                .iter()
+                .chain(&row.user_messages)
+                .chain(&row.activity_items)
+                .chain(&row.responses)
+        })
     }
-    fn metadata(&self) -> ItemMetadata<'_> {
+}
+
+impl RenderedItem {
+    fn key(&self) -> (Option<&str>, *const ()) {
         match &self.source {
-            ItemSource::Native(item) => ItemMetadata::from(item.as_ref()),
-            ItemSource::Pending(id, _) => ItemMetadata {
-                id,
-                client_id: Some(id),
-                kind: "userMessage",
-                ..Default::default()
-            },
+            ItemSource::Native(item) => (None, Arc::as_ptr(item).cast()),
+            ItemSource::Pending(id, pending) => (Some(id), Arc::as_ptr(pending).cast()),
         }
     }
     fn native(item: &Arc<models::Item>, deferred: bool, previous: Option<&Arc<Self>>) -> Arc<Self> {
         if let Some(previous) = previous
-            && let ItemSource::Native(old) = &previous.source
-            && Arc::ptr_eq(item, old)
             && previous.data.deferred == deferred
         {
             return previous.clone();
@@ -113,7 +109,6 @@ impl RenderedItem {
                 kind: presentation.kind.into(),
                 title: presentation.title,
                 collapsible: presentation.collapsible,
-                visible: presentation.visible,
                 body: body.text,
                 image_sources: body.images,
                 deferred,
@@ -125,11 +120,7 @@ impl RenderedItem {
         pending: &Arc<PendingSubmission>,
         previous: Option<&Arc<Self>>,
     ) -> Arc<Self> {
-        if let Some(previous) = previous
-            && let ItemSource::Pending(old_id, old) = &previous.source
-            && old_id == id
-            && Arc::ptr_eq(pending, old)
-        {
+        if let Some(previous) = previous {
             return previous.clone();
         }
         let body = body::draft_body(&pending.draft);
@@ -141,7 +132,6 @@ impl RenderedItem {
                 kind: "user".into(),
                 title: "You".into(),
                 collapsible: false,
-                visible: true,
                 body: body.text,
                 image_sources: body.images,
                 deferred: false,
@@ -233,7 +223,15 @@ pub fn project_conversation(
                 .as_ref()
                 .is_none_or(|id| !native.iter().any(|turn| &turn.id == id))
         })
-        .map(|(id, p)| RenderedItem::pending(id, p, queued.get(&(true, id.as_str())).copied()))
+        .map(|(id, p)| {
+            RenderedItem::pending(
+                id,
+                p,
+                queued
+                    .get(&(Some(id.as_str()), Arc::as_ptr(p).cast()))
+                    .copied(),
+            )
+        })
         .collect();
     Arc::new(RenderedConversation {
         source,
@@ -252,7 +250,7 @@ fn render_turn(
 ) -> Arc<RenderedTurn> {
     let cached: HashMap<_, _> = previous
         .into_iter()
-        .flat_map(|turn| turn.items.iter().chain(turn.opening.iter()))
+        .flat_map(|turn| turn.items())
         .map(|item| (item.key(), item))
         .collect();
     let deferred: HashSet<_> = source
@@ -272,48 +270,58 @@ fn render_turn(
         .map(|&index| pending[index].1.after_item_id.as_deref())
         .collect();
     let order = source_order(native.len(), |index| native[index].id.as_str(), &anchors);
-    let items: Vec<_> = order
-        .into_iter()
-        .map(|index| {
-            if let Some(item) = native.get(index) {
-                RenderedItem::native(
-                    item,
-                    deferred.contains(item.id.as_str()),
-                    cached.get(&(false, item.id.as_str())).copied(),
-                )
-            } else {
-                let (id, submission) = &pending[retained[index - native.len()]];
-                RenderedItem::pending(id, submission, cached.get(&(true, id.as_str())).copied())
+    let metadata = |index: usize| {
+        let index = order[index];
+        if let Some(item) = native.get(index) {
+            ItemMetadata::from(item.as_ref())
+        } else {
+            let id = pending[retained[index - native.len()]].0.as_str();
+            ItemMetadata {
+                id,
+                client_id: Some(id),
+                kind: "userMessage",
+                ..Default::default()
             }
-        })
-        .collect();
+        }
+    };
+    let render_native = |item: &Arc<models::Item>| {
+        RenderedItem::native(
+            item,
+            deferred.contains(item.id.as_str()),
+            cached.get(&(None, Arc::as_ptr(item).cast())).copied(),
+        )
+    };
+    let render = |index: usize| {
+        let index = order[index];
+        if let Some(item) = native.get(index) {
+            render_native(item)
+        } else {
+            let (id, submission) = &pending[retained[index - native.len()]];
+            RenderedItem::pending(
+                id,
+                submission,
+                cached
+                    .get(&(Some(id.as_str()), Arc::as_ptr(submission).cast()))
+                    .copied(),
+            )
+        }
+    };
     let opening = source
         .opening_user_message
         .as_ref()
         .filter(|item| !native.iter().any(|native| native.id == item.id))
-        .map(|item| {
-            RenderedItem::native(
-                item,
-                deferred.contains(item.id.as_str()),
-                cached.get(&(false, item.id.as_str())).copied(),
-            )
-        });
-    let rows = project_items(&source, items.len(), |index| items[index].metadata())
+        .map(render_native);
+    let rows = project_items(&source, order.len(), metadata)
         .map(|segment| {
             let mut users = Vec::new();
             let mut activity = Vec::new();
             let mut responses = Vec::new();
-            for (index, item) in items
-                .iter()
-                .enumerate()
-                .take(segment.end)
-                .skip(segment.start)
-            {
-                match segment.role(index, item.metadata()) {
+            for index in segment.start..segment.end {
+                match segment.role(index, metadata(index)) {
                     Role::Hidden => {}
-                    Role::User => users.push(item.clone()),
-                    Role::Activity => activity.push(item.clone()),
-                    Role::Response => responses.push(item.clone()),
+                    Role::User => users.push(render(index)),
+                    Role::Activity => activity.push(render(index)),
+                    Role::Response => responses.push(render(index)),
                 }
             }
             TurnPresentationData {
@@ -353,8 +361,6 @@ fn render_turn(
         source,
         pending,
         requests,
-        items,
-        opening,
         rows,
     })
 }
@@ -471,7 +477,6 @@ pub struct ItemPresentation {
     pub kind: String,
     pub title: String,
     pub collapsible: bool,
-    pub visible: bool,
 }
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -560,8 +565,8 @@ mod tests {
         })).unwrap()));
         let loaded = project_snapshot(snapshot, Some(&first));
         assert!(loaded.queued.is_empty());
-        assert_eq!(loaded.turns.last().unwrap().items.len(), 1);
-        let echoed = &loaded.turns.last().unwrap().items[0];
+        assert_eq!(loaded.turns.last().unwrap().items().count(), 1);
+        let echoed = loaded.turns.last().unwrap().items().next().unwrap();
         assert_eq!(echoed.data.id, "pending");
         assert!(matches!(&echoed.source, ItemSource::Native(item) if item.id == "echo"));
     }
@@ -584,12 +589,15 @@ mod tests {
         assert!(!Arc::ptr_eq(&first.turns[1], &second.turns[1]));
         for index in [0, 1] {
             assert!(Arc::ptr_eq(
-                &first.turns[1].items[index],
-                &second.turns[1].items[index]
+                first.turns[1].items().nth(index).unwrap(),
+                second.turns[1].items().nth(index).unwrap()
             ));
         }
-        assert_eq!(first.turns[1].items[2].data.body, "hello");
-        assert_eq!(second.turns[1].items[2].data.body, "hello world");
+        assert_eq!(first.turns[1].items().nth(2).unwrap().data.body, "hello");
+        assert_eq!(
+            second.turns[1].items().nth(2).unwrap().data.body,
+            "hello world"
+        );
         let mut deferred = updated;
         let thread = Arc::make_mut(
             Arc::make_mut(&mut deferred.conversations)
@@ -600,13 +608,13 @@ mod tests {
             Some(vec!["command".into()]);
         let third = project_snapshot(deferred, Some(&second));
         assert!(!Arc::ptr_eq(
-            &second.turns[1].items[1],
-            &third.turns[1].items[1]
+            second.turns[1].items().nth(1).unwrap(),
+            third.turns[1].items().nth(1).unwrap()
         ));
-        assert!(third.turns[1].items[1].data.deferred);
+        assert!(third.turns[1].items().nth(1).unwrap().data.deferred);
         assert!(Arc::ptr_eq(
-            &second.turns[1].items[2],
-            &third.turns[1].items[2]
+            second.turns[1].items().nth(2).unwrap(),
+            third.turns[1].items().nth(2).unwrap()
         ));
     }
     #[test]
@@ -652,8 +660,7 @@ mod tests {
         assert_eq!(live[0].body, "which?");
         assert_eq!(
             rendered.turns[1]
-                .items
-                .iter()
+                .items()
                 .filter(|item| item.data.id == "accepted")
                 .count(),
             1

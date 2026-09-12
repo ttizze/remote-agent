@@ -86,7 +86,6 @@ pub struct ThreadStatus {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Turn {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,7 +131,6 @@ pub struct Turn {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Item {
     pub id: String,
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]

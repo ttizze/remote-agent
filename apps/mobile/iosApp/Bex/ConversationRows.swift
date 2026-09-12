@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 
 struct ThreadActivityHeader: View {
-    let turn: TurnPresentation
+    let turn: TurnPresentationData
     let expanded: Bool
     var body: some View {
         HStack(spacing: 5) {
@@ -31,12 +31,8 @@ struct ThreadRequestRow: View {
     @State private var error: String?
     @State private var resolved = false
 
-    private var params: [String: JsonValue] {
-        request.params
-    }
-
     private var questions: [JsonValue] {
-        params["questions"]?.array ?? []
+        request.params["questions"]?.array ?? []
     }
 
     var body: some View {
@@ -46,7 +42,8 @@ struct ThreadRequestRow: View {
                     .accessibilityIdentifier("request.\(request.key)")
                 Text(request.body).textSelection(.enabled)
                 DisclosureGroup("詳細") {
-                    Text(request.paramsJson).font(.caption.monospaced()).textSelection(.enabled)
+                    Text((try? formatJsonValue(value: .object(fields: request.params))) ?? "")
+                        .font(.caption.monospaced()).textSelection(.enabled)
                 }
                 if request.kind == .questions {
                     ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
@@ -102,7 +99,7 @@ struct ThreadRequestRow: View {
                     .buttonStyle(.bordered)
             }
         }
-        if question["isSecret"]?.bool == true {
+        if case .boolean(true)? = question["isSecret"] {
             SecureField("回答", text: binding)
         } else {
             TextField("回答", text: binding).textFieldStyle(.roundedBorder).accessibilityIdentifier("request.answer")
@@ -144,7 +141,7 @@ struct ThreadErrorRow: View {
 }
 
 struct ThreadMessageRow: View {
-    let item: ConversationItem
+    let item: RenderedItem
     let isUser: Bool
     let model: BexAppViewModel
     var forkTurnId: String?
@@ -153,22 +150,23 @@ struct ThreadMessageRow: View {
     @State private var copied = false
 
     var body: some View {
+        let data = item.presentation()
         VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
-                let sources = item.imageSources
+                let sources = data.imageSources
                 ForEach(sources.indices, id: \.self) { index in
                     ConversationImage(
                         source: sources[index],
-                        label: item.kind == "imageGeneration" ? "生成画像" : "添付画像",
-                        identifier: "message.image.\(item.id).\(index)",
+                        label: data.kind == "imageGeneration" ? "生成画像" : "添付画像",
+                        identifier: "message.image.\(data.id).\(index)",
                         model: model
                     )
                 }
-                if !item.collapsedBody.isEmpty {
+                if !data.body.isEmpty {
                     if isUser {
-                        Text(item.collapsedBody).font(.system(size: 18)).textSelection(.enabled)
+                        Text(data.body).font(.system(size: 18)).textSelection(.enabled)
                     } else {
-                        ConversationMarkdown(blocks: item.markdown, model: model)
+                        ConversationMarkdown(text: data.body, model: model).equatable()
                     }
                 }
             }
@@ -180,10 +178,10 @@ struct ThreadMessageRow: View {
             .padding(.leading, isUser ? 42 : 0)
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("item.\(item.id)")
-            if item.kind == "agent" {
+            .accessibilityIdentifier("item.\(data.id)")
+            if data.kind == "agent" {
                 HStack(spacing: 20) {
-                    Button { UIPasteboard.general.string = item.collapsedBody; copied = true } label: {
+                    Button { UIPasteboard.general.string = data.body; copied = true } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     }.accessibilityLabel(copied ? "コピーしました" : "回答をコピー")
                     if let forkTurnId {
@@ -192,7 +190,7 @@ struct ThreadMessageRow: View {
                         }
                         .disabled(forking)
                         .accessibilityLabel("ここから会話を分岐")
-                        .accessibilityIdentifier("response.fork." + item.id)
+                        .accessibilityIdentifier("response.fork." + data.id)
                     }
                 }
                 .font(.system(size: 19)).foregroundColor(.secondary).buttonStyle(.plain)
@@ -223,18 +221,16 @@ struct ThreadMessageRow: View {
 }
 
 struct ThreadItemRow: View {
-    let item: ConversationItem
+    let item: RenderedItem
     let model: BexAppViewModel
     let isExpanded: Bool
     let toggleExpanded: () -> Void
-    let loadDetails: () async -> (String?, String?)
-    @State private var loadedBody: String?
+    let loadDetails: () async -> String?
     @State private var detailError: String?
-    @State private var loadedVersion: String?
     @State private var retry = 0
 
-    private var icon: String {
-        switch item.kind {
+    private func icon(_ kind: String) -> String {
+        switch kind {
         case "command": "terminal"
         case "fileChange": "doc.badge.gearshape"
         case "webSearch": "globe"
@@ -243,8 +239,9 @@ struct ThreadItemRow: View {
     }
 
     var body: some View {
+        let data = item.presentation()
         VStack(alignment: .leading, spacing: 10) {
-            if item.isCollapsible {
+            if data.collapsible {
                 DisclosureGroup(isExpanded: Binding(
                     get: { isExpanded },
                     set: {
@@ -254,8 +251,8 @@ struct ThreadItemRow: View {
                     }
                 )) {
                     if isExpanded {
-                        let body = item.isDeferred ? loadedBody ?? "" : item.expandedBody()
-                        if item.isDeferred, loadedBody == nil {
+                        let body = data.deferred ? "" : item.expandedBody()
+                        if data.deferred {
                             if let detailError {
                                 Text(detailError).font(.caption).foregroundColor(.red)
                                 Button("再読み込み") { retry += 1 }
@@ -274,33 +271,31 @@ struct ThreadItemRow: View {
                     }
                 } label: {
                     Label {
-                        Text(item.title)
+                        Text(data.title)
                             .lineLimit(1)
-                    } icon: { Image(systemName: icon) }
+                    } icon: { Image(systemName: icon(data.kind)) }
                         .font(.system(size: 17))
                         .foregroundColor(.secondary)
                         .padding(.vertical, 5)
-                        .accessibilityIdentifier("item.\(item.id)")
+                        .accessibilityIdentifier("item.\(data.id)")
                 }
             } else {
-                ConversationMarkdown(blocks: item.markdown, model: model)
-                    .foregroundColor(item.kind == "agent" || item.kind == "user" ? .primary : .secondary)
-                    .accessibilityIdentifier("item.\(item.id)")
+                ConversationMarkdown(text: data.body, model: model).equatable()
+                    .foregroundColor(data.kind == "agent" || data.kind == "user" ? .primary : .secondary)
+                    .accessibilityIdentifier("item.\(data.id)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
-        .task(id: "\(isExpanded):\(item.contentVersion):\(retry)") {
-            if loadedVersion != item.contentVersion {
-                loadedBody = nil; detailError = nil
-            }
-            guard isExpanded, item.isDeferred, loadedBody == nil else { return }
+        .onChange(of: item) { _ in
+            detailError = nil; retry += 1
+        }
+        .task(id: "\(isExpanded):\(retry)") {
+            guard isExpanded, data.deferred else { return }
             detailError = nil
-            let (body, error) = await loadDetails()
+            let error = await loadDetails()
             guard !Task.isCancelled else { return }
-            loadedBody = body
             detailError = error
-            loadedVersion = item.contentVersion
         }
     }
 }

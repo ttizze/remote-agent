@@ -169,7 +169,12 @@ pub(super) async fn run(
     {
         let mut turn = turn.borrow_mut();
         let command = &mut turn["items"][command_index];
-        command["aggregatedOutput"] = "passed".into();
+        command["aggregatedOutput"] = if scenario == "history" {
+            "DEFERRED_DETAIL_FULL_TEXT\n".to_owned() + &"fixture output\n".repeat(500)
+        } else {
+            "passed".into()
+        }
+        .into();
         command["status"] = "completed".into();
         command["exitCode"] = 0.into();
     }

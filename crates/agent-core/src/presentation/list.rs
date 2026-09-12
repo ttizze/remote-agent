@@ -3,9 +3,7 @@ use crate::{models::Project, state::Snapshot};
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadSummary {
     pub id: String,
-    pub name: String,
-    pub preview: String,
-    pub cwd: String,
+    pub title: String,
     pub project_id: Option<String>,
     pub active: bool,
     pub unread: bool,
@@ -55,10 +53,23 @@ impl Snapshot {
                     let unread = self.activity.unread.contains(&id);
                     ThreadSummary {
                         id,
-                        name: thread.name.clone().unwrap_or_default(),
-                        preview: thread.preview.clone().unwrap_or_default(),
-                        cwd: thread.cwd.clone().unwrap_or_default(),
-                        project_id: thread.project_id.clone().flatten(),
+                        title: thread
+                            .name
+                            .as_deref()
+                            .filter(|name| !name.is_empty())
+                            .or_else(|| {
+                                thread
+                                    .preview
+                                    .as_deref()
+                                    .filter(|preview| !preview.is_empty())
+                            })
+                            .unwrap_or("無題のタスク")
+                            .to_owned(),
+                        project_id: thread
+                            .project_id
+                            .clone()
+                            .flatten()
+                            .filter(|id| list.projects.iter().any(|project| &project.id == id)),
                         active,
                         unread,
                     }

@@ -20,18 +20,10 @@ final class BexAppViewModel: ObservableObject {
     @Published var interruptingTurnId: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
-    @Published private(set) var conversation: ConversationPresentation?
+    @Published private(set) var conversation: RenderedConversation?
+    private(set) var conversationRows: [TurnPresentationData] = []
     private(set) var list: ThreadList?
     private(set) var models: [Model] = []
-    private let presentation = ConversationPresentationCache()
-    private var presentationTask: Task<Void, Never>?
-    private var pendingPresentation: PresentationInput?
-    private struct PresentationInput {
-        let source: AgentCore.Thread?
-        let snapshot: AgentCore.Snapshot
-        let host: String?
-    }
-
     private var store: AgentStore?
     private var initialization: Task<Void, Never>?
     private var observation: Task<Void, Never>?
@@ -242,10 +234,13 @@ extension BexAppViewModel {
             models = next.models()
         }
         let changed = !next.conversationUnchanged(other: snapshot)
-        let source = next.navigation().threadId.flatMap { next.conversation(id: $0) }
         snapshot = next
         if changed {
-            projectConversation(source)
+            let rendered = next.navigation().threadId.flatMap { next.conversation(id: $0) }.map {
+                AgentCore.projectConversation(snapshot: next, source: $0, previous: conversation)
+            }
+            conversationRows = rendered?.rows() ?? []
+            conversation = rendered
         }
         persistence?.cancel()
         if listChanged {
@@ -256,28 +251,6 @@ extension BexAppViewModel {
                 do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
                 self?.persist()
             }
-        }
-    }
-
-    private func projectConversation(_ source: AgentCore.Thread?) {
-        if conversation?.id != source?.id() {
-            conversation = nil
-        }
-        pendingPresentation = PresentationInput(source: source, snapshot: snapshot, host: selectedProfileId)
-        guard presentationTask == nil else { return }
-        presentationTask = Task { [weak self] in
-            while let self, let input = pendingPresentation {
-                pendingPresentation = nil
-                let rendered = await presentation.project(input.source, snapshot: input.snapshot)
-                if selectedProfileId == input.host, snapshot.requestsUnchanged(other: input.snapshot),
-                   snapshot.navigation().threadId == input.source?.id() {
-                    conversation = rendered
-                }
-                // Keep one background projection in flight and coalesce stream deltas.
-                // Rows enter the lazy stack with parsed Markdown and a stable initial height.
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-            self?.presentationTask = nil
         }
     }
 

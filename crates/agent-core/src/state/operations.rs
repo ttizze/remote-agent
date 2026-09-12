@@ -36,6 +36,10 @@ pub enum Intent {
     ReadWorktreeSettings(ReadWorktreeSettings),
     UpdateWorktreeSettings(UpdateWorktreeSettings),
     ListThreads(ListThreads),
+    ExpandThreadList {
+        project_id: Option<String>,
+        projects: bool,
+    },
     StartThread(StartThread),
     ReadThread(ReadThread),
     ReadItem(ReadItem),
@@ -116,7 +120,7 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         false
     }
-    fn prepare(&self, _snapshot: &mut Snapshot) -> Result<(), String> {
+    fn prepare(&mut self, _snapshot: &mut Snapshot) -> Result<(), String> {
         Ok(())
     }
     fn apply(self, _snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {

@@ -2,13 +2,9 @@
 use super::{AgentError, error};
 use crate::{
     client::{AccountLogin, AccountLoginStatus, Accounts},
-    models::{
-        FileContent, FileList, Item, ListQuery, Model, Thread, Turn, WorkspaceReview,
-        WorktreeSettings,
-    },
+    models::{FileContent, FileList, ListQuery, Model, Thread, WorkspaceReview, WorktreeSettings},
     presentation::conversation::{
-        ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn, Request,
-        TurnPresentationData, request,
+        ItemPresentation, RenderedConversation, RenderedItem, TurnPresentationData,
     },
     state::{Draft, FileDraft, Navigation, Snapshot},
 };
@@ -26,9 +22,6 @@ impl Snapshot {
     }
     pub fn models_unchanged(&self, other: Arc<Self>) -> bool {
         Arc::ptr_eq(&self.models, &other.models)
-    }
-    pub fn requests_unchanged(&self, other: Arc<Self>) -> bool {
-        Arc::ptr_eq(&self.requests, &other.requests)
     }
     pub fn conversation_unchanged(&self, other: Arc<Self>) -> bool {
         let id = self.navigation.thread_id.as_ref();
@@ -86,12 +79,6 @@ impl Snapshot {
     pub fn conversation(&self, id: String) -> Option<Arc<Thread>> {
         self.conversations.get(&id).cloned()
     }
-    pub fn requests(&self) -> Vec<Request> {
-        self.requests
-            .iter()
-            .map(|(key, source)| request(key, source))
-            .collect()
-    }
     pub fn directory(&self) -> Option<FileList> {
         self.workspace.directory.as_deref().cloned()
     }
@@ -125,62 +112,26 @@ impl Thread {
     pub fn title(&self) -> String {
         self.name.clone().unwrap_or_default()
     }
-    pub fn cwd(&self) -> String {
-        self.cwd.clone().unwrap_or_default()
-    }
     pub fn history_cursor(&self) -> Option<String> {
         self.history_cursor.clone().flatten()
     }
-    pub fn turns(&self) -> Vec<Arc<Turn>> {
-        self.turns.clone().unwrap_or_default()
-    }
-}
-#[uniffi::export]
-impl Turn {
-    pub fn id(&self) -> String {
-        self.id.clone()
-    }
-    pub fn items_cursor(&self) -> Option<String> {
-        self.items_next_cursor.clone().flatten()
-    }
-    pub fn items(&self) -> Vec<Arc<Item>> {
-        self.items.clone().unwrap_or_default()
-    }
-}
-#[uniffi::export]
-impl Item {
-    pub fn id(&self) -> String {
-        self.id.clone()
-    }
-    pub fn client_id(&self) -> Option<String> {
-        self.client_id.clone()
-    }
-    pub fn expanded_body(&self) -> String {
-        crate::presentation::body::expanded_body(self)
+    pub fn turn_count(&self) -> u64 {
+        self.turns.as_ref().map_or(0, |turns| turns.len() as u64)
     }
 }
 #[uniffi::export]
 impl RenderedConversation {
-    pub fn unchanged(&self, other: Arc<Self>) -> bool {
-        std::ptr::eq(self, other.as_ref())
+    pub fn source(&self) -> Arc<Thread> {
+        self.source.clone()
     }
-    pub fn turns(&self) -> Vec<Arc<RenderedTurn>> {
-        self.turns.clone()
+    pub fn rows(&self) -> Vec<TurnPresentationData> {
+        self.turns
+            .iter()
+            .flat_map(|turn| turn.rows.iter().cloned())
+            .collect()
     }
     pub fn queued(&self) -> Vec<Arc<RenderedItem>> {
         self.queued.clone()
-    }
-}
-#[uniffi::export]
-impl RenderedTurn {
-    pub fn id(&self) -> String {
-        self.source.id.clone()
-    }
-    pub fn unchanged(&self, other: Arc<Self>) -> bool {
-        std::ptr::eq(self, other.as_ref())
-    }
-    pub fn rows(&self) -> Vec<TurnPresentationData> {
-        self.rows.clone()
     }
 }
 #[uniffi::export]

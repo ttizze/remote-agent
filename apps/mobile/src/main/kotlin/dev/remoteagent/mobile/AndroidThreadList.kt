@@ -37,7 +37,6 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier) {
     val list = model.list
     val projects = list?.projects.orEmpty()
     val threads = list?.threads.orEmpty()
-    val known = projects.map { it.id }.toSet()
     var search by remember { mutableStateOf("") }
     LaunchedEffect(search) {
         kotlinx.coroutines.delay(SEARCH_DEBOUNCE_MILLIS)
@@ -67,19 +66,24 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier) {
             items(threads.filter { it.projectId == project.id }, key = { it.id }) { SummaryRow(it, model) }
             if (project.id in list?.moreProjectIds.orEmpty())
                 item(key = "more:${project.id}") {
-                    TextButton(onClick = { model.expand(projectId = project.id) }) { Text("もっと見る") }
+                    TextButton(onClick = { model.perform(Intent.ExpandThreadList(project.id, false)) }) {
+                        Text("もっと見る")
+                    }
                 }
         }
         if (list?.hasMoreProjects == true)
-            item { TextButton(onClick = { model.expand(projects = true) }) { Text("もっと見る") } }
+            item { TextButton(onClick = { model.perform(Intent.ExpandThreadList(null, true)) }) { Text("もっと見る") } }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("チャット", style = MaterialTheme.typography.titleMedium)
                 TextButton(onClick = { model.newChat("") }) { Text("新規") }
             }
         }
-        items(threads.filter { it.projectId !in known }, key = { it.id }) { SummaryRow(it, model) }
-        if (list?.hasMoreChats == true) item { TextButton(onClick = { model.expand() }) { Text("もっと見る") } }
+        items(threads.filter { it.projectId == null }, key = { it.id }) { SummaryRow(it, model) }
+        if (list?.hasMoreChats == true)
+            item {
+                TextButton(onClick = { model.perform(Intent.ExpandThreadList(null, false)) }) { Text("もっと見る") }
+            }
         if (list != null && threads.isEmpty()) item { Text("タスクがありません。") }
     }
 }
@@ -87,7 +91,7 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier) {
 @Composable
 private fun SummaryRow(thread: ThreadSummary, model: AndroidAppModel) {
     Row(Modifier.fillMaxWidth().clickable { model.openThread(thread.id) }.padding(vertical = 8.dp)) {
-        Text(thread.name.ifEmpty { thread.preview.ifEmpty { "無題のタスク" } }, Modifier.weight(1f))
+        Text(thread.title, Modifier.weight(1f))
         if (thread.active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
         else if (thread.unread) Text("● 完了・未確認")
     }
@@ -95,23 +99,6 @@ private fun SummaryRow(thread: ThreadSummary, model: AndroidAppModel) {
 
 internal fun AndroidAppModel.refresh() {
     perform(Intent.ListThreads(ListThreads(query = snapshot.listQuery())))
-}
-
-internal fun AndroidAppModel.expand(projects: Boolean = false, projectId: String? = null) {
-    val query = snapshot.listQuery()
-    val expanded =
-        when {
-            projectId != null ->
-                query.copy(
-                    projectThreadLimits =
-                        query.projectThreadLimits +
-                            (projectId to
-                                ((query.projectThreadLimits[projectId] ?: THREAD_PAGE_SIZE) + THREAD_PAGE_INCREMENT))
-                )
-            projects -> query.copy(projectLimit = query.projectLimit + THREAD_PAGE_INCREMENT)
-            else -> query.copy(chatLimit = query.chatLimit + THREAD_PAGE_INCREMENT)
-        }
-    perform(Intent.ListThreads(ListThreads(query = expanded)))
 }
 
 internal fun AndroidAppModel.showThreads() {
@@ -137,19 +124,12 @@ internal fun AndroidAppModel.newChat(cwd: String) {
 
 internal fun AndroidAppModel.older(turnId: String?) {
     val id = snapshot.navigation().threadId ?: return
-    val thread = snapshot.conversation(id) ?: return
-    val cursor =
-        if (turnId == null) thread.historyCursor() else thread.turns().firstOrNull { it.id() == turnId }?.itemsCursor()
     loadingHistory = true
-    perform(Intent.ReadOlder(ReadOlder(id, turnId, cursor))) { loadingHistory = false }
+    perform(Intent.ReadOlder(ReadOlder(id, turnId))) { loadingHistory = false }
 }
 
 internal fun AndroidAppModel.send(complete: (Result<Outcome>) -> Unit) {
     perform(Intent.Submit(snapshot.navigation().threadId, UUID.randomUUID().toString()), complete)
 }
-
-private const val THREAD_PAGE_SIZE = 5u
-
-private const val THREAD_PAGE_INCREMENT = 10u
 
 private const val SEARCH_DEBOUNCE_MILLIS = 200L

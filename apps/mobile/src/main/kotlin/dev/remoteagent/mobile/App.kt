@@ -37,6 +37,8 @@ import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.ThreadList
+import dev.remoteagent.core.RenderedConversation
+import dev.remoteagent.core.projectConversation
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.ticketIdentity
@@ -72,6 +74,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
     var snapshot by mutableStateOf(Snapshot.empty())
+        private set
+
+    var conversation by mutableStateOf<RenderedConversation?>(null)
         private set
 
     var profiles by mutableStateOf(emptyList<HostProfile>())
@@ -313,6 +318,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun publish(next: Snapshot) {
         if (!next.listUnchanged(snapshot)) list = next.threadList()
+        if (!next.conversationUnchanged(snapshot)) {
+            conversation = next.navigation().threadId?.let(next::conversation)?.let {
+                projectConversation(next, it, conversation)
+            }
+        }
         snapshot = next
         persistence?.cancel()
         persistence = scope.launch {

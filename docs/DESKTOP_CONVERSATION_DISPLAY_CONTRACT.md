@@ -151,3 +151,8 @@ Within activity:
 The mobile implementation should derive this projection from state on every
 snapshot/live update. UI components must not independently guess item order,
 final-message identity, terminal state, or collapse eligibility.
+
+Native clients render the existing Rust `TurnPresentationData` and `RenderedItem`
+values directly. Do not copy them into client presentation models or a second
+row layout. Desktop file changes read the typed `Item.changes` field; the field
+is not available through `Item::extra`.

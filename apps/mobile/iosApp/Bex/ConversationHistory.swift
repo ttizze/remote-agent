@@ -5,108 +5,69 @@ import UniformTypeIdentifiers
 
 /// History and row presentation
 extension ThreadScreen {
-    /// Give lazy conversation rows stable identities across streamed updates.
-    func activityIsExpanded(_ turn: TurnPresentation) -> Bool {
-        guard let override = activityExpansionOverrides[turn.id], override.status == turn.status else {
+    func activityIsExpanded(_ turn: TurnPresentationData) -> Bool {
+        guard let choice = activityExpansionOverrides[turn.id], choice.status == turn.status else {
             return turn.activityInitiallyExpanded
         }
-        return override.expanded
+        return choice.expanded
     }
 
-    func conversationRows(_ thread: ConversationPresentation) -> [ThreadConversationRow] {
-        var rows = [ThreadConversationRow]()
-        rows
-            .reserveCapacity(thread.turns
-                .reduce(0) { $0 + $1.userMessages.count + $1.activityItems.count + $1.responses.count + 4 })
-        if thread.hasOlderTurns {
-            rows.append(.init(id: "history-older-turns", content: .olderTurns))
-        }
-        for (index, turn) in thread.turns.enumerated() {
-            let endsNativeTurn = index + 1 == thread.turns.count || thread.turns[index + 1].turnId != turn.turnId
-            appendRows(for: turn, endsNativeTurn: endsNativeTurn, to: &rows)
-        }
-        for item in thread.queuedMessages {
-            rows.append(.init(id: item.id, content: .queued(item)))
-        }
-        return rows
+    var runningTurnId: String? {
+        model.conversationRows.last(where: \.isInProgress)?.turnId
     }
 
-    func appendRows(for turn: TurnPresentation, endsNativeTurn: Bool, to rows: inout [ThreadConversationRow]) {
-        if let opening = turn.openingUserMessage {
-            rows.append(.init(
-                id: "opening:" + turn.id,
-                content: .user(opening)
-            ))
+    @ViewBuilder
+    func conversationTurn(_ turn: TurnPresentationData, endsNativeTurn: Bool) -> some View {
+        if let item = turn.openingUserMessage {
+            ThreadMessageRow(item: item, isUser: true, model: model)
         }
-        if turn
-            .hasOlderItems {
-            rows.append(.init(id: "history-gap:" + turn.id, content: .olderItems(turn.turnId)))
+        if turn.hasOlderItems {
+            historyBoundary(turn.turnId)
         }
-        for item in turn.userMessages {
-            rows.append(.init(id: "history-item:" + item.id, content: .user(item)))
+        ForEach(turn.userMessages.indices, id: \.self) { index in
+            let item = turn.userMessages[index]
+            ThreadMessageRow(item: item, isUser: true, model: model).padding(.top, 16).id(item.id())
         }
         if turn.activitySummary != nil {
-            rows.append(.init(id: turn.id, content: .activityHeader(turn)))
+            activityHeader(turn)
             if activityIsExpanded(turn) {
-                for item in turn.activityItems {
-                    rows.append(.init(
-                        id: "history-item:" + item.id,
-                        content: .activity(item, turn.turnId)
-                    ))
+                ForEach(turn.activityItems.indices, id: \.self) { index in
+                    let item = turn.activityItems[index]
+                    activityItem(item, turnId: turn.turnId).id(item.id())
                 }
             }
         }
-        for request in turn.pendingRequests {
-            rows.append(.init(
-                id: "history-request:" + request.key,
-                content: .request(request)
-            ))
-        }
+        ForEach(turn.pendingRequests, id: \.key) { ThreadRequestRow(request: $0, model: model) }
         if let error = turn.error {
-            rows.append(.init(id: "history-error:" + turn.id, content: .error(error)))
+            ThreadErrorRow(error: error)
         }
-        for item in turn.responses {
-            let forkTurnId = !turn.isInProgress && endsNativeTurn && item.id == turn.responses.last?.id ? turn
-                .turnId : nil
-            rows.append(.init(id: "history-item:" + item.id, content: .response(item, forkTurnId)))
-        }
-    }
-
-    @ViewBuilder
-    func conversationRow(_ row: ThreadConversationRow) -> some View {
-        switch row.content {
-        case .olderTurns: historyBoundary(nil)
-        case let .olderItems(turnId): historyBoundary(turnId)
-        case let .user(item): ThreadMessageRow(item: item, isUser: true, model: model).padding(.top, 16)
-        case let .response(item, turnId): ThreadMessageRow(item: item, isUser: false, model: model, forkTurnId: turnId)
-        case let .activityHeader(turn): activityHeader(turn)
-        case let .activity(item, turnId):
-            ThreadItemRow(item: item, model: model, isExpanded: expandedItemIds.contains(item.id),
-                          toggleExpanded: {
-                              isFollowingLatest = false
-                              if expandedItemIds.contains(item.id) {
-                                  expandedItemIds.remove(item.id)
-                              } else {
-                                  expandedItemIds.insert(item.id)
-                              }
-                          },
-                          loadDetails: { await model.readItemDetails(
-                              threadId: conversation?.id ?? "",
-                              turnId: turnId,
-                              itemId: item.nativeId ?? item.id
-                          ) })
-        case let .request(request): ThreadRequestRow(request: request, model: model)
-        case let .error(error): ThreadErrorRow(error: error)
-        case let .queued(item):
-            VStack(alignment: .leading, spacing: 6) {
-                Text("順番待ち").font(.caption).foregroundColor(.secondary)
-                ThreadMessageRow(item: item, isUser: true, model: model)
-            }
+        ForEach(turn.responses.indices, id: \.self) { index in
+            let item = turn.responses[index]
+            ThreadMessageRow(item: item, isUser: false, model: model,
+                             forkTurnId: !turn.isInProgress && endsNativeTurn && index == turn.responses.count - 1
+                                 ? turn.turnId : nil).id(item.id())
         }
     }
 
+    func activityItem(_ item: RenderedItem, turnId: String) -> some View {
+        let data = item.presentation()
+        return ThreadItemRow(item: item, model: model, isExpanded: expandedItemIds.contains(data.id),
+                             toggleExpanded: {
+                                 isFollowingLatest = false
+                                 if expandedItemIds.contains(data.id) {
+                                     expandedItemIds.remove(data.id)
+                                 } else {
+                                     expandedItemIds.insert(data.id)
+                                 }
+                             },
+                             loadDetails: { await model.readItemDetails(
+                                 threadId: model.selectedThreadId ?? "", turnId: turnId,
+                                 itemId: data.nativeId ?? data.id
+                             ) })
+    }
+
     @ViewBuilder
-    func activityHeader(_ turn: TurnPresentation) -> some View {
+    func activityHeader(_ turn: TurnPresentationData) -> some View {
         let expanded = activityIsExpanded(turn)
         if turn.activityCanCollapse {
             Button {
@@ -156,11 +117,12 @@ extension ThreadScreen {
         })
     }
 
-    func threadAccessibilityValue(_ thread: ConversationPresentation) -> String {
-        let itemCount = thread.turns.reduce(0) { total, turn in
-            total + turn.userMessages.count + turn.activityItems.count + turn.responses.count
+    func threadAccessibilityValue(_ thread: RenderedConversation) -> String {
+        let itemCount = model.conversationRows.reduce(0) { count, turn in
+            count + turn.userMessages.count + turn.activityItems.count + turn.responses.count
                 + turn.pendingRequests.count + (turn.error == nil ? 0 : 1)
+                + (turn.openingUserMessage == nil ? 0 : 1)
         }
-        return "turns=\(Set(thread.turns.map(\.turnId)).count);items=\(itemCount)"
+        return "turns=\(thread.source().turnCount());items=\(itemCount)"
     }
 }

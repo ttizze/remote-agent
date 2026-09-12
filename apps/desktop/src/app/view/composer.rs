@@ -269,9 +269,10 @@ impl Desktop {
                     menu = menu.item(PopupMenuItem::new("さらにプロジェクトを読み込む").on_click(
                         move |_, _, cx| {
                             let _ = target.update(cx, |s, cx| {
-                                let mut query = (*s.snapshot.list_query).clone();
-                                query.project_limit += 10;
-                                s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                                s.dispatch(Intent::ExpandThreadList {
+                                    project_id: None,
+                                    projects: true,
+                                });
                                 cx.notify();
                             });
                         },

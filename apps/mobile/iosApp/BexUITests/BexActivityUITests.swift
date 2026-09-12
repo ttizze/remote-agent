@@ -56,6 +56,9 @@ extension BexLaunchUITests {
         try startSimulatorConversation(app, promptText: "[groups] Inspect grouped live activity")
         let first = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
         XCTAssertTrue(first.waitForExistence(timeout: 10))
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").exists,
+                      "Live activity must initially be expanded")
+        first.tap()
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
         XCTAssertFalse(app.buttons["回答をコピー"].exists, "Commentary must not show final-answer actions")
         let progress = prefixedElement(app, prefix: "item.fixture-progress-")
@@ -66,14 +69,13 @@ extension BexLaunchUITests {
             ":fixture-next-command-"
         )).firstMatch
         XCTAssertTrue(second.waitForExistence(timeout: 5))
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-next-command-").exists,
+                      "A new live group must initially be expanded")
         XCTAssertLessThan(first.frame.minY, progress.frame.minY)
         XCTAssertLessThan(progress.frame.minY, second.frame.minY)
         captureScreen(app, named: "Commands grouped between visible commentary")
-        second.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-next-command-").waitForExistence(timeout: 5))
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists,
-                       "Expanding one group must leave the earlier group collapsed")
+                       "A new group must leave the earlier group collapsed")
         app.buttons.matching(NSPredicate(format: "label == %@", "pwd")).firstMatch.tap()
         XCTAssertTrue(app.staticTexts["GROUP_DETAIL_OUTPUT"].waitForExistence(timeout: 5))
         captureScreen(app, named: "Selected command group and command details expanded")
@@ -82,7 +84,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
         XCTAssertFalse(progress.exists, "Completed work must hide interim commentary")
         let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
-        XCTAssertTrue(completed.label.contains("3秒 作業しました"))
+        XCTAssertTrue(completed.label.contains("4件の過去のメッセージ"))
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.activity.")).count, 1)
         captureScreen(app, named: "Completed work automatically collapsed")
         completed.tap()
@@ -98,7 +100,8 @@ extension BexLaunchUITests {
 
         let retrying = app.staticTexts["サーバーが混み合っています。再接続しています"]
         XCTAssertTrue(retrying.waitForExistence(timeout: 10), "Retrying stream error was not visible")
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").exists,
+                      "Retrying work must keep its live activity expanded")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 15))
         let recovered = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: retrying)
         wait(for: [recovered], timeout: 10)
@@ -170,7 +173,7 @@ extension BexLaunchUITests {
         activity.tap()
 
         let detail = app.descendants(matching: .any)["task.detail"]
-        XCTAssertEqual(detail.value as? String, "turns=1;items=13")
+        XCTAssertEqual(detail.value as? String, "turns=1;items=12")
         for _ in 0 ..< 10 {
             detail.swipeDown()
         }
@@ -183,6 +186,7 @@ extension BexLaunchUITests {
             XCTAssertTrue(waitForPrefixedElement(app, prefix: prefix, scrolling: detail), prefix)
         }
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-sleep-").exists)
+        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-reasoning-").exists)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-review-in-").exists)
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-review-out-").exists)
     }

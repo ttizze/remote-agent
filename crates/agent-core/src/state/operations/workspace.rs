@@ -40,7 +40,7 @@ impl rpc::RpcMethod for ReadFile {
 
 impl Operation for ReadFile {
     rpc_operation!();
-    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if self.discard_draft {
             Arc::make_mut(&mut snapshot.file_drafts).remove(&self.path);
         }
@@ -131,7 +131,7 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot) -> Option<Effe
     if !snapshot.connected {
         return None;
     }
-    let operation = ReviewWorkspace {
+    let mut operation = ReviewWorkspace {
         cwd: snapshot.navigation.cwd.clone(),
     };
     operation
@@ -145,7 +145,7 @@ impl Operation for ReviewWorkspace {
     fn invalidates(&self, snapshot: &Snapshot) -> bool {
         snapshot.workspace.review_cwd.as_ref() != Some(&self.cwd)
     }
-    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         let workspace = Arc::make_mut(&mut snapshot.workspace);
         if workspace.review_cwd.as_ref() != Some(&self.cwd) {
             workspace.review = None;

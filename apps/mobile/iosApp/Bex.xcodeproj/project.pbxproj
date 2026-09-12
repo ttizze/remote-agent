@@ -40,7 +40,6 @@
 		C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* CodexModelSettings.swift */; };
 		C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000002 /* ModelSettingsSheet.swift */; };
 		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
-		C0DE00000000000000000104 /* ConversationPresentationCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000004 /* ConversationPresentationCache.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -81,7 +80,6 @@
 		C0DE00000000000000000001 /* CodexModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelSettings.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000002 /* ModelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsSheet.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000004 /* ConversationPresentationCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentationCache.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -139,7 +137,6 @@
 				109E523F621AEB123226918A /* ConversationHistory.swift */,
 				2036041A039EEBAA78D55844 /* AppPresentationData.swift */,
 				1DBDDA3779489C57B929936E /* AppViewModel.swift */,
-				C0DE00000000000000000004 /* ConversationPresentationCache.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
@@ -271,7 +268,6 @@
 				556D7396D1777928A463D2DF /* ConversationHistory.swift in Sources */,
 				B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */,
 				FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */,
-				C0DE00000000000000000104 /* ConversationPresentationCache.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,

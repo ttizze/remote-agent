@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
-    let conversation: ConversationPresentation?
+    let conversation: RenderedConversation?
     @StateObject var dictation = DictationRecorder()
     @State var sendRecordedText = false
     @State var importing = false
@@ -25,17 +25,9 @@ struct ThreadScreen: View {
     @State var opensDiff = false
     @FocusState var composerFocused: Bool
 
-    var review: WorkspaceReviewSummary? {
-        model.snapshot.review().map { WorkspaceReviewSummary(
-            files: Int($0.fileCount()),
-            additions: Int($0.additions()),
-            deletions: Int($0.deletions())
-        ) }
-    }
-
     private var project: Project? {
         let directory = model.selectedDirectory
-        return model.projects.first { $0.roots.contains { $0.path == directory } }
+        return (model.list?.projects ?? []).first { $0.roots.contains { $0.path == directory } }
     }
 
     var body: some View {
@@ -44,16 +36,27 @@ struct ThreadScreen: View {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
-                let rows = conversationRows(thread)
-                let latestRowId = rows.last?.id
+                let rows = model.conversationRows
+                let queued = thread.queued()
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(rows) { row in
-                                conversationRow(row)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(row.id)
+                            if thread.source().historyCursor() != nil {
+                                historyBoundary(nil)
                             }
+                            ForEach(rows.indices, id: \.self) { index in
+                                let turn = rows[index]
+                                conversationTurn(turn, endsNativeTurn: index + 1 == rows.count
+                                    || rows[index + 1].turnId != turn.turnId).id(turn.id)
+                            }
+                            ForEach(queued.indices, id: \.self) { index in
+                                let item = queued[index]
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("順番待ち").font(.caption).foregroundColor(.secondary)
+                                    ThreadMessageRow(item: item, isUser: true, model: model)
+                                }.id(item.id())
+                            }
+                            Color.clear.frame(height: 1).id("conversation-bottom")
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
@@ -77,8 +80,8 @@ struct ThreadScreen: View {
                     })
                     .onPreferenceChange(LatestMessageBottomPreferenceKey.self) { bottom in
                         isNearLatest = bottom > 0 && bottom <= scrollViewportHeight + 80
-                        if isFollowingLatest, bottom > scrollViewportHeight + 1, let latestRowId {
-                            proxy.scrollTo(latestRowId, anchor: .bottom)
+                        if isFollowingLatest, bottom > scrollViewportHeight + 1 {
+                            proxy.scrollTo("conversation-bottom", anchor: .bottom)
                         }
                     }
                     .overlay(alignment: .bottom) {
@@ -86,9 +89,7 @@ struct ThreadScreen: View {
                             Button {
                                 isFollowingLatest = true
                                 scrollingToOlder = false
-                                if let latestRowId {
-                                    withAnimation { proxy.scrollTo(latestRowId, anchor: .bottom) }
-                                }
+                                withAnimation { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                             } label: {
                                 Image(systemName: "arrow.down").font(.title3.weight(.medium))
                             }
@@ -115,25 +116,18 @@ struct ThreadScreen: View {
                     }
                     .onPreferenceChange(ScrollViewportPreferenceKey.self) { height in
                         scrollViewportHeight = height
-                        if isFollowingLatest, let latestRowId {
-                            proxy.scrollTo(latestRowId, anchor: .bottom)
+                        if isFollowingLatest {
+                            proxy.scrollTo("conversation-bottom", anchor: .bottom)
                         }
                     }
-                    .onChange(of: latestRowId) { id in
-                        if isFollowingLatest, let id {
-                            proxy.scrollTo(id, anchor: .bottom)
-                        }
-                    }
-                    .onChange(of: thread.id) { _ in
+                    .onChange(of: thread.source().id()) { _ in
                         scrollingToOlder = false
                         historyRequestPending = false
                         historyBoundaries.removeAll()
                         expandedItemIds.removeAll()
                         activityExpansionOverrides.removeAll()
                         isFollowingLatest = true
-                        if let latestRowId {
-                            proxy.scrollTo(latestRowId, anchor: .bottom)
-                        }
+                        proxy.scrollTo("conversation-bottom", anchor: .bottom)
                     }
                 }
             } else if model.isNewThread {
@@ -218,7 +212,7 @@ extension ThreadScreen {
         let directory = model.selectedDirectory
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text(conversation?.title ?? (model.isNewThread ? "チャット" : "タスク"))
+                Text(conversation?.source().title() ?? (model.isNewThread ? "チャット" : "タスク"))
                     .font(.headline).lineLimit(1)
                 if model.isConnecting {
                     ProgressView().controlSize(.small)
@@ -248,7 +242,7 @@ extension ThreadScreen {
                     Label("変更を表示", systemImage: "plus.forwardslash.minus")
                 }
                 Button {
-                    if let id = conversation?.id {
+                    if let id = conversation?.source().id() {
                         model.openThread(id)
                     }
                 } label: { Label("更新", systemImage: "arrow.clockwise") }
@@ -286,7 +280,7 @@ extension ThreadScreen {
                 Button { model.openNewThread(cwd: "") } label: {
                     Label("チャット", systemImage: "bubble.left.and.bubble.right")
                 }
-                ForEach(model.projects, id: \.id) { project in
+                ForEach((model.list?.projects ?? []), id: \.id) { project in
                     ForEach(project.roots, id: \.path) { root in
                         Button { model.openNewThread(cwd: root.path) } label: {
                             Label(project.roots.count == 1 ? project.name : root.path,
@@ -294,7 +288,7 @@ extension ThreadScreen {
                         }
                     }
                 }
-                if model.hasMoreProjects {
+                if model.list?.hasMoreProjects == true {
                     Button("さらにプロジェクトを読み込む") { model.expandTaskList(projects: true) }
                 }
             } label: {
@@ -323,10 +317,4 @@ extension ThreadScreen {
         .frame(minHeight: 44)
         .padding(.horizontal, 8)
     }
-}
-
-struct WorkspaceReviewSummary {
-    let files: Int
-    let additions: Int
-    let deletions: Int
 }

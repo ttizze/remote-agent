@@ -156,7 +156,7 @@ private struct ProfilesScreen: View {
                 Button { model.selectProfile(profile.id) } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(profile.name).font(.headline)
-                        Text(profile.hostIdentity).font(.caption).foregroundColor(.secondary)
+                        Text(profile.id).font(.caption).foregroundColor(.secondary)
                     }
                 }
                 .accessibilityIdentifier("profiles.\(profile.id)")

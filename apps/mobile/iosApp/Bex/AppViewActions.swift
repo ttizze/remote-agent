@@ -19,22 +19,6 @@ extension BexAppViewModel {
         selectedThreadId == nil && screen == .thread
     }
 
-    var projects: [Project] {
-        list?.projects ?? []
-    }
-
-    var threads: [ThreadSummary] {
-        list?.threads ?? []
-    }
-
-    var hasMoreProjects: Bool {
-        list?.hasMoreProjects ?? false
-    }
-
-    var hasMoreChats: Bool {
-        list?.hasMoreChats ?? false
-    }
-
     var threadLoadState: LoadState {
         loadingThreads ? .loading : list != nil ? .ready : notice != nil ? .failed : .idle
     }
@@ -58,12 +42,6 @@ extension BexAppViewModel {
     var draft: String {
         get { snapshot.draft(key: coreDraftKey).text }
         set { perform(.setDraftText(threadId: coreDraftKey, text: newValue)) }
-    }
-
-    var attachments: [StagedAttachment] {
-        snapshot.draft(key: coreDraftKey).attachments.enumerated().map {
-            StagedAttachment(id: $0.offset, name: $0.element.name, path: $0.element.path, isImage: $0.element.isImage)
-        }
     }
 
     func openPairing() {
@@ -92,16 +70,10 @@ extension BexAppViewModel {
     }
 
     func expandTaskList(projects: Bool = false, projectId: String? = nil) {
-        var query = snapshot.listQuery()
-        if let projectId {
-            query.projectThreadLimits[projectId, default: 5] += 10
-        } else if projects {
-            query.projectLimit += 10
-        } else {
-            query.chatLimit += 10
-        }
         loadingThreads = true
-        perform(.listThreads(ListThreads(query: query))) { [weak self] _ in self?.loadingThreads = false }
+        perform(.expandThreadList(projectId: projectId, projects: projects)) { [weak self] _ in
+            self?.loadingThreads = false
+        }
     }
 
     func searchTaskList(_ term: String) {
@@ -130,11 +102,9 @@ extension BexAppViewModel {
     }
 
     func loadOlderHistory(_ turnId: String?) {
-        guard !loadingHistory, let thread = conversation else { return }
-        let cursor = turnId.flatMap { id in thread.source.turns().first { $0.id() == id }?.itemsCursor() } ?? thread
-            .source.historyCursor()
+        guard !loadingHistory, let id = selectedThreadId else { return }
         loadingHistory = true
-        perform(.readOlder(ReadOlder(threadId: thread.id, turnId: turnId, cursor: cursor))) { [weak self] _ in
+        perform(.readOlder(ReadOlder(threadId: id, turnId: turnId))) { [weak self] _ in
             self?.loadingHistory = false
         }
     }
@@ -227,18 +197,14 @@ extension BexAppViewModel {
         }
     }
 
-    func readItemDetails(threadId: String, turnId: String, itemId: String) async -> (String?, String?) {
+    func readItemDetails(threadId: String, turnId: String, itemId: String) async -> String? {
         await withCheckedContinuation { continuation in
-            perform(.readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId))) { [weak self] result in
+            perform(.readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId))) { result in
                 if case let .failure(error) = result {
-                    continuation.resume(returning: (
-                        nil,
-                        error.localizedDescription
-                    )); return
+                    continuation.resume(returning: error.localizedDescription)
+                } else {
+                    continuation.resume(returning: nil)
                 }
-                let source = self?.snapshot.conversation(id: threadId)?.turns().first { $0.id() == turnId }?
-                    .items().first { $0.id() == itemId || $0.clientId() == itemId }
-                continuation.resume(returning: (source.map { $0.expandedBody() }, nil))
             }
         }
     }

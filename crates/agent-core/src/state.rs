@@ -279,6 +279,15 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
         }
 
+        Intent::ExpandThreadList { project_id, projects } => {
+            let mut query = (*previous.list_query).clone();
+            let limit = if let Some(id) = project_id {
+                query.project_thread_limits.entry(id).or_insert(5)
+            } else if projects { &mut query.project_limit } else { &mut query.chat_limit };
+            *limit = limit.saturating_add(10);
+            return prepare(previous, next, operations::ListThreads { query });
+        }
+
         Intent::ShowThreadList => {
             next.epoch += 1;
             let watch = previous.navigation.watch_id;
@@ -441,7 +450,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
 fn prepare<O: operations::Operation>(
     previous: &Snapshot,
     mut next: Snapshot,
-    operation: O,
+    mut operation: O,
 ) -> (Snapshot, Vec<Effect>) {
     if operation.invalidates(previous) {
         next.epoch += 1;

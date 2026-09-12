@@ -1465,7 +1465,7 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
         .dispatch(Intent::ReadOlder(op::ReadOlder::new(
             "thread".into(),
             None,
-            Some("turn-page".into()),
+            None,
         )))
         .await
         .unwrap();
@@ -1473,7 +1473,7 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
         .dispatch(Intent::ReadOlder(op::ReadOlder::new(
             "thread".into(),
             Some("old".into()),
-            Some("item-page".into()),
+            None,
         )))
         .await
         .unwrap();

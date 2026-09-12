@@ -2,8 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Foundation parses block structure and inline Markdown; no HTML/web view is involved.
-struct ConversationMarkdown: View {
-    let blocks: [Block]
+struct ConversationMarkdown: View, Equatable {
+    let text: String
     let model: BexAppViewModel
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
@@ -17,7 +17,12 @@ struct ConversationMarkdown: View {
         let imageURL: URL?
     }
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.text == rhs.text && lhs.model === rhs.model
+    }
+
     var body: some View {
+        let blocks = Self.parse(text)
         VStack(alignment: .leading, spacing: 14) {
             ForEach(blocks) { block in
                 if let imageURL = block.imageURL {

@@ -7,10 +7,8 @@ use std::{cell::RefCell, rc::Rc};
 pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     let id = thread.metadata["id"].as_str().unwrap();
     let cwd = thread.metadata["cwd"].as_str().unwrap();
-    let history =
-        thread.metadata.get("name").and_then(Value::as_str) == Some("History conversation");
     let gallery = thread.metadata.get("gallery") == Some(&Value::Bool(true));
-    if id != "fixture-long-history" && !cwd.ends_with("large-history") && !history && !gallery {
+    if id != "fixture-long-history" && !cwd.ends_with("large-history") && !gallery {
         return None;
     }
     let mut turns = if id == "fixture-long-history" {
@@ -51,22 +49,6 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
             {"id":"large-command","type":"commandExecution","command":"cat output.txt","status":"completed","aggregatedOutput":"output line\n".repeat(700000) + "END_OF_LARGE_OUTPUT"},
             {"id":"large-final","type":"agentMessage","phase":"final_answer","text":"Large history is complete"}]}),
         ))]
-    } else if history {
-        thread
-            .turns
-            .iter()
-            .map(|turn| {
-                let mut turn = turn.borrow().clone();
-                for item in turn["items"].as_array_mut().unwrap() {
-                    if item["type"] == "commandExecution" {
-                        item["aggregatedOutput"] = ("DEFERRED_DETAIL_FULL_TEXT\n".to_owned()
-                            + &"fixture output\n".repeat(500))
-                            .into();
-                    }
-                }
-                Rc::new(RefCell::new(turn))
-            })
-            .collect()
     } else {
         thread.turns.clone()
     };

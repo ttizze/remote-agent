@@ -78,9 +78,10 @@ impl Desktop {
                         SidebarMenuItem::new("もっと表示する")
                             .icon(Icon::empty().size_4())
                             .on_click(cx.listener(move |s, _, _, cx| {
-                                let mut query = (*s.snapshot.list_query).clone();
-                                *query.project_thread_limits.entry(id.clone()).or_insert(5) += 10;
-                                s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                                s.dispatch(Intent::ExpandThreadList {
+                                    project_id: Some(id.clone()),
+                                    projects: false,
+                                });
                                 cx.notify();
                             })),
                     );
@@ -90,9 +91,10 @@ impl Desktop {
         if list.as_ref().is_some_and(|page| page.has_more_projects) {
             projects = projects.child(SidebarMenuItem::new("もっとプロジェクトを表示").on_click(
                 cx.listener(|s, _, _, cx| {
-                    let mut query = (*s.snapshot.list_query).clone();
-                    query.project_limit += 10;
-                    s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                    s.dispatch(Intent::ExpandThreadList {
+                        project_id: None,
+                        projects: true,
+                    });
                     cx.notify();
                 }),
             ));
@@ -110,9 +112,10 @@ impl Desktop {
         if list.as_ref().is_some_and(|page| page.has_more_chats) {
             chats = chats.child(SidebarMenuItem::new("もっと表示する").on_click(cx.listener(
                 |s, _, _, cx| {
-                    let mut query = (*s.snapshot.list_query).clone();
-                    query.chat_limit += 10;
-                    s.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                    s.dispatch(Intent::ExpandThreadList {
+                        project_id: None,
+                        projects: false,
+                    });
                     cx.notify();
                 },
             )));
@@ -221,23 +224,18 @@ impl Desktop {
     ) -> SidebarMenuItem {
         let id = thread.id.clone();
         let active = thread.active;
-        SidebarMenuItem::new(
-            Some(thread.name.as_str())
-                .filter(|name| !name.is_empty())
-                .unwrap_or("新しいチャット")
-                .to_owned(),
-        )
-        .active(id == self.selected() && self.tab != Tab::Settings)
-        .disable(self.busy > 0)
-        .when(active, |item| {
-            item.suffix(|_, _| spinner::Spinner::new().small())
-        })
-        .when(!active && thread.unread, |item| {
-            item.suffix(|_, _| div().size(px(8.)).rounded_full().bg(rgb(0xffffff)))
-        })
-        .on_click(cx.listener(move |view, _, _, cx| {
-            view.open_chat(id.clone());
-            cx.notify();
-        }))
+        SidebarMenuItem::new(thread.title.clone())
+            .active(id == self.selected() && self.tab != Tab::Settings)
+            .disable(self.busy > 0)
+            .when(active, |item| {
+                item.suffix(|_, _| spinner::Spinner::new().small())
+            })
+            .when(!active && thread.unread, |item| {
+                item.suffix(|_, _| div().size(px(8.)).rounded_full().bg(rgb(0xffffff)))
+            })
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.open_chat(id.clone());
+                cx.notify();
+            }))
     }
 }

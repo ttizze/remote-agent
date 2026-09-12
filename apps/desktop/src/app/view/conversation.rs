@@ -154,51 +154,19 @@ impl Desktop {
                     .child(body)
                     .into_any_element()
             }
-            "commandExecution" => {
-                let label = projected.data.title.clone();
-                let toggle = id.clone();
-                let mut body = v_flex().gap_2().child(
-                    self.button(
-                        format!("expand-{id}"),
-                        format!("{label} {}", if expanded { "⌄" } else { "›" }),
-                        cx,
-                        move |s, _, _| {
-                            toggle_set(&mut s.expanded_items, &toggle);
-                            if s.expanded_items.contains(&toggle) {
-                                s.detail(turn_id.clone(), toggle.clone());
-                            }
-                            s.pause_tail();
-                            s.remeasure_item(&toggle);
-                        },
-                    )
-                    .icon(IconName::SquareTerminal)
-                    .text_color(rgb(0xa0a0a0)),
-                );
-                if expanded {
-                    let output = projected.expanded_body();
-                    let content = format!(
-                        "$ {}\n\n{output}",
-                        item.command.as_deref().unwrap_or_default()
-                    );
-                    body = body
-                        .child(Self::activity_text(format!("output-{id}"), &content, ""))
-                        .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
-                                "{} {}",
-                                item.status.as_deref().unwrap_or_default(),
-                                item.extra.get("exitCode")
-                                    .map(|v| format!("exit {v}"))
-                                    .unwrap_or_default()
-                            )));
-                }
-                body.into_any_element()
-            }
             "fileChange" => {
                 let mut body = v_flex().gap_3();
-                for (i, change) in array(extra(item, "changes")).iter().enumerate() {
-                    let path = text(change, "path").to_owned();
+                let changes = match &item.changes {
+                    Some(agent_core::models::ItemChanges::Files(files)) => files.as_slice(),
+                    _ => &[],
+                };
+                for (i, change) in changes.iter().enumerate() {
+                    let path = change.path.clone().unwrap_or_default();
                     let toggle = id.clone();
                     let turn_id = turn_id.clone();
+                    let selector = format!("change-{id}-{i}");
                     let row = h_flex()
+                        .debug_selector(move || selector.clone())
                         .gap_2()
                         .child(self.button(
                             format!("change-{id}-{i}"),
@@ -224,7 +192,7 @@ impl Desktop {
                         body = body.child(Self::diff(
                             &mut self.diffs,
                             format!("diff-{id}-{i}"),
-                            text(change, "diff"),
+                            change.diff.as_deref().unwrap_or_default(),
                             cx,
                         ));
                     }
@@ -233,14 +201,13 @@ impl Desktop {
             }
             _ => {
                 let toggle = id.clone();
-                v_flex()
-                    .gap_2()
-                    .child(self.button(
-                        format!("unknown-{id}"),
+                let mut body = v_flex().gap_2().child(
+                    self.button(
+                        format!("expand-{id}"),
                         format!(
                             "{} {}",
                             if expanded { "⌄" } else { "›" },
-                            projected.data.title.clone()
+                            projected.data.title
                         ),
                         cx,
                         move |s, _, _| {
@@ -251,15 +218,41 @@ impl Desktop {
                             s.pause_tail();
                             s.remeasure_item(&toggle);
                         },
-                    ))
-                    .when(expanded, |body| {
-                        body.child(Self::activity_text(
-                            format!("json-{id}"),
-                            &projected.expanded_body(),
-                            "json",
-                        ))
+                    )
+                    .when(kind == "commandExecution", |button| {
+                        button.icon(IconName::SquareTerminal)
                     })
-                    .into_any_element()
+                    .text_color(rgb(0xa0a0a0)),
+                );
+                if expanded {
+                    let output = projected.expanded_body();
+                    let command = kind == "commandExecution";
+                    let content = if command {
+                        format!(
+                            "$ {}\n\n{output}",
+                            item.command.as_deref().unwrap_or_default()
+                        )
+                    } else {
+                        output
+                    };
+                    body = body.child(Self::activity_text(
+                        format!("output-{id}"),
+                        &content,
+                        if command { "" } else { "json" },
+                    ));
+                    if command {
+                        body =
+                            body.child(div().text_sm().text_color(rgb(0x999999)).child(format!(
+                                "{} {}",
+                                item.status.as_deref().unwrap_or_default(),
+                                item.extra
+                                    .get("exitCode")
+                                    .map(|v| format!("exit {v}"))
+                                    .unwrap_or_default()
+                            )));
+                    }
+                }
+                body.into_any_element()
             }
         }
     }
@@ -307,8 +300,10 @@ impl Desktop {
                         .child(label.clone())
                         .into_any_element()
                 };
+                let selector = format!("work-{id}");
                 body = body.child(
                     h_flex()
+                        .debug_selector(move || selector.clone())
                         .gap_2()
                         .child(header)
                         .when(row.is_in_progress, |row| {
@@ -329,15 +324,11 @@ impl Desktop {
             }
             for item in &row.responses {
                 body = body.child(self.projected_item(item, turn, cx));
-                if let agent_core::presentation::conversation::ItemSource::Native(native) =
-                    &item.source
-                    && native.kind.as_deref() == Some("agentMessage")
-                    && extra(native, "phase") != "commentary"
-                {
-                    let native = native.clone();
+                if item.data.kind == "agent" {
+                    let item = item.clone();
                     body = body.child(
                         h_flex().child(
-                            Button::new(format!("copy-{}", native.id))
+                            Button::new(format!("copy-{}", item.data.id))
                                 .icon(IconName::Copy)
                                 .small()
                                 .ghost()
@@ -345,7 +336,7 @@ impl Desktop {
                                 .accessibility_label("回答をコピー")
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
-                                        native.text.clone().unwrap_or_default(),
+                                        item.data.body.clone(),
                                     ));
                                 }),
                         ),
@@ -382,12 +373,7 @@ impl Desktop {
         draft: &Draft,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut body = v_flex()
-            .gap_3()
-            .max_w(px(560.))
-            .p_4()
-            .rounded(px(18.))
-            .bg(rgb(0x303030));
+        let mut body = user_message_bubble();
         if !draft.text.is_empty() {
             body = body.child(
                 TextView::markdown(
@@ -599,5 +585,111 @@ impl Desktop {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod file_change_tests {
+    use super::{Desktop, Mode, Snapshot};
+    use agent_core::presentation::conversation::{RenderedConversation, project_conversation};
+    use gpui_kit as gpui;
+    use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, TestAppContext, Window, px};
+    use std::sync::Arc;
+
+    struct FileActivity {
+        desktop: Entity<Desktop>,
+        conversation: Arc<RenderedConversation>,
+    }
+    impl Render for FileActivity {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.desktop.update(cx, |desktop, cx| {
+                desktop.turn(&self.conversation.turns[0], cx)
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn file_changes_render_and_expand_in_the_desktop_view(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::new(crate::platform::Connections::default()),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let source = Arc::new(serde_json::from_value(serde_json::json!({
+            "id":"fixture", "turns":[{"id":"turn", "status":"completed", "items":[{
+                "id":"files", "type":"fileChange", "status":"completed", "changes":[
+                    {"path":"/fixture/a.txt", "kind":"update", "diff":"@@ -1 +1 @@\n-old\n+new"},
+                    {"path":"/fixture/b.txt", "kind":"add", "diff":"@@ -0,0 +1 @@\n+second"}
+                ]
+            }]}]
+        })).unwrap());
+        let conversation = project_conversation(&Snapshot::default(), source, &None);
+        let (view, window) = cx.add_window_view(|window, cx| FileActivity {
+            desktop: cx.new(|cx| {
+                Desktop::new(
+                    Mode::SideChat {
+                        // Reject before reading preferences or connecting to a real Host.
+                        remote: Some(agent_core::models::RemoteHost {
+                            id: "fixture".into(),
+                            name: "fixture".into(),
+                            ticket: "invalid-fixture-ticket".into(),
+                            extra: Default::default(),
+                        }),
+                        cwd: "/fixture".into(),
+                    },
+                    window,
+                    cx,
+                )
+            }),
+            conversation,
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("change-files-0").is_none(),
+            "completed work starts collapsed"
+        );
+        let group = window.debug_bounds("work-turn").unwrap();
+        window.simulate_click(
+            gpui_kit::point(group.left() + px(20.), group.center().y),
+            gpui_kit::Modifiers::default(),
+        );
+        view.update(window, |_, cx| cx.notify());
+        window.run_until_parked();
+        for selector in ["change-files-0", "change-files-1"] {
+            assert!(
+                window.debug_bounds(selector).is_some(),
+                "file header must be visible"
+            );
+        }
+        let before = window.debug_bounds("change-files-1").unwrap().top();
+        let bounds = window.debug_bounds("change-files-0").unwrap();
+        window.simulate_click(
+            gpui_kit::point(bounds.left() + px(20.), bounds.center().y),
+            gpui_kit::Modifiers::default(),
+        );
+        view.update(window, |view, cx| {
+            assert!(view.desktop.read(cx).expanded_items.contains("files"));
+            cx.notify();
+        });
+        window.run_until_parked();
+        assert!(
+            window.debug_bounds("change-files-1").unwrap().top() > before,
+            "expanded diff must occupy space in the rendered conversation"
+        );
+        view.update(window, |view, cx| {
+            view.desktop.update(cx, |desktop, _| {
+                assert_eq!(desktop.diffs.len(), 2);
+                assert!(desktop.diffs.contains_key("diff-files-0"));
+                assert!(desktop.diffs.contains_key("diff-files-1"));
+            });
+        });
     }
 }

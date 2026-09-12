@@ -7,16 +7,17 @@ import UniformTypeIdentifiers
 /// Composer and dictation
 extension ThreadScreen {
     var composer: some View {
-        VStack(spacing: 12) {
+        let attachments = model.snapshot.draft(key: model.coreDraftKey).attachments
+        return VStack(spacing: 12) {
             if model.isNewThread {
                 newThreadContext
             }
-            if !model.isNewThread, let review, review.files > 0 {
+            if !model.isNewThread, let review = model.snapshot.review(), review.fileCount() > 0 {
                 Button { opensDiff = true; showingFiles = true } label: {
                     HStack(spacing: 10) {
-                        Text("\(review.files)件のファイル")
-                        Text("+\(review.additions)").foregroundColor(.green)
-                        Text("−\(review.deletions)").foregroundColor(.red)
+                        Text("\(review.fileCount())件のファイル")
+                        Text("+\(review.additions())").foregroundColor(.green)
+                        Text("−\(review.deletions())").foregroundColor(.red)
                     }
                     .font(.subheadline.monospacedDigit())
                 }
@@ -35,11 +36,12 @@ extension ThreadScreen {
                 ProgressView(sendRecordedText ? "文字起こしして送信中…" : "文字起こし中…").font(.caption)
                     .accessibilityIdentifier("dictation.processing")
             }
-            ForEach(model.attachments) { attachment in
+            ForEach(attachments.indices, id: \.self) { index in
+                let attachment = attachments[index]
                 HStack {
                     Label(attachment.name, systemImage: attachment.isImage ? "photo" : "doc")
                         .lineLimit(1)
-                    Button { model.removeAttachment(attachment.id) } label: { Image(systemName: "xmark.circle.fill") }
+                    Button { model.removeAttachment(index) } label: { Image(systemName: "xmark.circle.fill") }
                         .accessibilityLabel("\(attachment.name)を外す")
                 }
                 .font(.subheadline).padding(10)
@@ -101,19 +103,19 @@ extension ThreadScreen {
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if let running = conversation?.turns.last(where: { $0.isInProgress }),
+                    if let runningTurnId,
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
-                       model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, model.attachments
+                       model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, attachments
                        .isEmpty {
-                        Button { model.interrupt(running.turnId) } label: {
+                        Button { model.interrupt(runningTurnId) } label: {
                             Image(systemName: "stop.fill").font(.system(size: 15))
                         }
                         .buttonStyle(.borderedProminent)
                         .buttonBorderShape(.capsule)
                         .controlSize(.large)
-                        .disabled(model.interruptingTurnId == running.turnId)
-                        .accessibilityLabel(model.interruptingTurnId == running.turnId ? "停止中" : "停止")
-                        .accessibilityIdentifier("turn.interrupt.\(running.id)")
+                        .disabled(model.interruptingTurnId == runningTurnId)
+                        .accessibilityLabel(model.interruptingTurnId == runningTurnId ? "停止中" : "停止")
+                        .accessibilityIdentifier("turn.interrupt.\(runningTurnId)")
                     } else {
                         Button {
                             // Commit native text before Store can clear the accepted draft.
@@ -141,7 +143,7 @@ extension ThreadScreen {
                             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
                             .transcribing ||
                             (!dictation.isRecording && model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                                .isEmpty && model.attachments.isEmpty))
+                                .isEmpty && attachments.isEmpty))
                         .accessibilityIdentifier("task.send")
                     }
                 }
@@ -217,16 +219,5 @@ struct ScrollViewportPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
-    }
-}
-
-struct ThreadConversationRow: Identifiable {
-    let id: String
-    let content: Content
-    enum Content {
-        case olderTurns, olderItems(String)
-        case user(ConversationItem), response(ConversationItem, String?), queued(ConversationItem)
-        case activityHeader(TurnPresentation), activity(ConversationItem, String)
-        case request(Request), error(TurnErrorPresentation)
     }
 }

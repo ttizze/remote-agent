@@ -19,12 +19,8 @@ struct ThreadsScreen: View {
     }
 
     @ViewBuilder private var taskList: some View {
-        let knownProjects = Set(model.projects.map(\.id))
-        let groupedThreads = Dictionary(grouping: visibleThreads) { thread in
-            thread.projectId.flatMap { knownProjects.contains($0) ? $0 : nil }
-        }
-        let projects = search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? model.projects : model.projects.filter { groupedThreads[$0.id] != nil }
+        let groupedThreads = Dictionary(grouping: model.list?.threads ?? [], by: \.projectId)
+        let projects = model.list?.projects ?? []
         let chats = groupedThreads[nil] ?? []
         List {
             if model.threadLoadState == .failed {
@@ -105,7 +101,7 @@ struct ThreadsScreen: View {
                 .listSectionSeparator(.hidden)
             }
 
-            if model.hasMoreProjects {
+            if model.list?.hasMoreProjects == true {
                 Section {
                     Button("もっと見る") { model.expandTaskList(projects: true) }
                         .disabled(model.loadingThreads)
@@ -115,7 +111,7 @@ struct ThreadsScreen: View {
                 .listSectionSeparator(.hidden)
             }
 
-            if model.threadLoadState == .ready, model.projects.isEmpty {
+            if model.threadLoadState == .ready, (model.list?.projects ?? []).isEmpty {
                 Section {
                     Text("Codexに登録されたプロジェクトはありません")
                         .font(.subheadline)
@@ -136,7 +132,7 @@ struct ThreadsScreen: View {
                     ForEach(chats, id: \.id) { thread in
                         ThreadListRow(thread: thread) { model.openThread(thread.id) }
                     }
-                    if model.hasMoreChats {
+                    if model.list?.hasMoreChats == true {
                         Button("もっと見る") { model.expandTaskList() }
                             .disabled(model.loadingThreads)
                             .accessibilityIdentifier("tasks.chats.more")
@@ -221,15 +217,6 @@ struct ThreadsScreen: View {
         }
         .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(model: model, host: host) }
     }
-
-    private var visibleThreads: [ThreadSummary] {
-        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return model.threads }
-        return model.threads.filter {
-            $0.title.localizedCaseInsensitiveContains(query) ||
-                $0.preview.localizedCaseInsensitiveContains(query)
-        }
-    }
 }
 
 extension View {
@@ -250,10 +237,10 @@ private struct ThreadListRow: View {
             HStack(spacing: 10) {
                 Text(thread.title).font(.title3).foregroundColor(.primary).lineLimit(1)
                 Spacer()
-                if thread.isActive {
+                if thread.active {
                     ProgressView().controlSize(.small)
                         .accessibilityIdentifier("tasks.running.\(thread.id)")
-                } else if thread.hasUnreadCompletion {
+                } else if thread.unread {
                     Circle().fill(Color.white).frame(width: 8, height: 8)
                         .accessibilityLabel("完了・未確認")
                         .accessibilityIdentifier("tasks.completed.\(thread.id)")
@@ -263,7 +250,7 @@ private struct ThreadListRow: View {
             .contentShape(Rectangle())
         }
         .accessibilityIdentifier("tasks.row.\(thread.id)")
-        .accessibilityValue(thread.isActive ? "実行中" : thread.hasUnreadCompletion ? "完了・未確認" : "")
+        .accessibilityValue(thread.active ? "実行中" : thread.unread ? "完了・未確認" : "")
         .taskListRowStyle()
     }
 }
