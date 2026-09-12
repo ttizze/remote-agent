@@ -751,18 +751,13 @@ impl CodexRpcService {
                         Ok(line) => line,
                         Err(error) => return Err(error.into()),
                     };
-                    let history: RpcResponse<HistoryPage<Arc<Turn>>> = RpcResponse::parse(&line)?;
-                    let mut page = match history.into_result() {
+                    let response: RpcResponse<HistoryPage<Arc<Turn>>> = RpcResponse::parse(&line)?;
+                    let mut page = match response.into_result() {
                         Ok(page) => page,
                         Err(response) => return Ok(response),
                     };
                     if params.paginate_history
-                        && let Err(error) = self
-                            .hydrate_turn_page(
-                                &mut page,
-                                result.thread.id.as_deref().unwrap_or_default(),
-                            )
-                            .await
+                        && let Err(error) = self.hydrate_turn_page(&mut page, &history).await
                     {
                         return Err(Failure::new("invalid_thread_history", error));
                     }
@@ -825,10 +820,44 @@ impl CodexRpcService {
     async fn hydrate_turn_page(
         &self,
         page: &mut HistoryPage<Arc<Turn>>,
-        thread_id: &str,
+        query: &HistoryParams<'_>,
     ) -> Result<(), String> {
         if page.data.len() > MOBILE_THREAD_PAGE_SIZE {
             return Err("turn page exceeds requested size".into());
+        }
+        let thread_id = query.thread_id;
+        let mut ids = std::collections::HashSet::new();
+        let repeated = page.data.iter().any(|turn| !ids.insert(turn.id.as_str()));
+        if repeated {
+            // Item pagination is keyed only by turn ID, so it cannot preserve
+            // boundaries between historical occurrences sharing that ID.
+            let full = self
+                .history_request::<Arc<Turn>>(
+                    "thread/turns/list",
+                    &HistoryParams {
+                        items_view: Some("full"),
+                        ..*query
+                    },
+                )
+                .await?;
+            if full.next_cursor != page.next_cursor
+                || !full
+                    .data
+                    .iter()
+                    .map(|turn| &turn.id)
+                    .eq(page.data.iter().map(|turn| &turn.id))
+            {
+                return Err("turn history changed while loading repeated IDs".into());
+            }
+            if full
+                .data
+                .iter()
+                .any(|turn| turn.items.is_none() || turn.items_view.as_deref() == Some("notLoaded"))
+            {
+                return Err("full turn history omitted repeated-turn items".into());
+            }
+            *page = full;
+            return Ok(());
         }
         let mut budget = MOBILE_THREAD_PAGE_SIZE * 100;
         for turn in &mut page.data {
@@ -979,7 +1008,7 @@ impl CodexRpcService {
             if cursor.is_some() && page.next_cursor.as_deref() == cursor {
                 return Err(invalid("history cursor repeated"));
             }
-            self.hydrate_turn_page(&mut page, thread_id)
+            self.hydrate_turn_page(&mut page, &upstream)
                 .await
                 .map_err(|error| Failure::new("invalid_thread_history", error))?;
             result.thread.apply_history_page(page);

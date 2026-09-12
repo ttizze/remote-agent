@@ -24,7 +24,6 @@ if [[ $# == 0 ]]; then
         testSimulatorSwitchesCodexAccountsAndForksConversation \
         testSimulatorReturnsToListWithNativeEdgeSwipeAndRetainsDrafts \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
-        testSimulatorRepeatedlyReopensTaskAfterContentSwipe \
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \

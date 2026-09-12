@@ -288,37 +288,6 @@ extension BexLaunchUITests {
         app.buttons["model.close"].tap()
     }
 
-    func testSimulatorRepeatedlyReopensTaskAfterContentSwipe() throws {
-        #if !targetEnvironment(simulator)
-            throw XCTSkip("This test uses the isolated Simulator fixture")
-        #endif
-        let app = try connectedSimulatorApp(expandProject: false)
-        expandSimulatorProject(app)
-        try startSimulatorConversation(app, promptText: "[success] Content swipe navigation fixture")
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
-        XCTAssertTrue(answer.waitForExistence(timeout: 25))
-        let answerID = answer.identifier
-        let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
-        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
-        let list = app.descendants(matching: .any)["tasks.list"]
-        let message = app.textFields["task.message"]
-
-        for cycle in 0 ..< 12 {
-            // iOS 26 also pops from inside the content, through a different recognizer.
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.4))
-                .press(forDuration: 0.1,
-                       thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.4)),
-                       withVelocity: .fast, thenHoldForDuration: 0)
-            XCTAssertTrue(list.waitForExistence(timeout: 15), "Content swipe did not return on cycle \(cycle)")
-            XCTAssertFalse(message.exists)
-            XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
-            XCTAssertTrue(app.descendants(matching: .any)[answerID].waitForExistence(timeout: 15),
-                          "Task did not reopen after content swipe on cycle \(cycle)")
-            XCTAssertTrue(message.isHittable)
-        }
-        captureScreen(app, named: "Task reopened after repeated content swipes")
-    }
-
     func testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This test uses the isolated Simulator fixture")

@@ -415,6 +415,49 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnecting_during_session_cleanup_keeps_host_requests_available() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let mut session = endpoint.connect(&fixture.ticket).await.unwrap();
+        let mut peer = session
+            .open_peer(Duration::from_secs(10), 16)
+            .await
+            .unwrap();
+        for attempt in 0..128 {
+            assert_eq!(
+                rpc(&peer, "thread/list", json!({})).await["data"],
+                json!([])
+            );
+            let close = async {
+                tokio::task::yield_now().await;
+                peer.close().await.unwrap();
+                session.close();
+            };
+            let (_, opened) = tokio::join!(close, endpoint.connect(&fixture.ticket));
+            session = opened.unwrap_or_else(|error| panic!("reconnect {attempt}: {error}"));
+            peer = session
+                .open_peer(Duration::from_secs(10), 16)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            rpc(&peer, "thread/list", json!({})).await["data"],
+            json!([])
+        );
+        peer.close().await.unwrap();
+        session.close();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("reconnection cleanup deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconnect() {
     use agent_core::{state::Intent, store::Store};
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -846,6 +889,126 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
         local.close().await.unwrap();
         fixture.close().await.unwrap();
     }).await.expect("opening a task exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_turn_history_preserves_both_responses_after_reopening_and_restoration() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: key,
+                text: "[duplicate] Preserve both persisted responses".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "duplicate-message".into(),
+            })
+            .await
+            .unwrap();
+        let id = store.snapshot().navigation.thread_id.clone().unwrap();
+        let mut updates = store.subscribe();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if snapshot.conversations[&id]
+                .turns
+                .as_ref()
+                .is_some_and(|turns| {
+                    turns
+                        .first()
+                        .is_some_and(|turn| turn.status.as_deref() == Some("completed"))
+                })
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+        let mut store = store;
+        for restore in [false, true] {
+            store.dispatch(Intent::ShowThreadList).await.unwrap();
+            if restore {
+                let saved = serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap())
+                    .unwrap();
+                store.close().await.unwrap();
+                store = Store::connect(&endpoint, &fixture.ticket, saved, None)
+                    .await
+                    .unwrap();
+            }
+            store
+                .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+                .await
+                .unwrap();
+            let snapshot = store.snapshot();
+            let items: Vec<_> = snapshot.conversations[&id]
+                .turns
+                .as_ref()
+                .unwrap()
+                .iter()
+                .flat_map(|turn| turn.items.as_ref().unwrap())
+                .collect();
+            let mut unique_items = std::collections::HashSet::new();
+            assert!(
+                items.iter().all(|item| unique_items.insert(&item.id)),
+                "turn hydration duplicated another occurrence's items"
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.id.starts_with("fixture-final-")),
+                "latest response missing after restore={restore}"
+            );
+            assert!(
+                items.iter().any(|item| item.id == "duplicate-history-old"),
+                "older response missing after restore={restore}"
+            );
+            let rendered = agent_core::presentation::conversation::project_conversation(
+                &snapshot,
+                snapshot.conversations[&id].clone(),
+                &None,
+            );
+            let responses: Vec<_> = rendered
+                .turns
+                .iter()
+                .flat_map(|turn| &turn.rows)
+                .filter_map(|row| match &row.content {
+                    agent_core::presentation::conversation::ConversationRowContent::Response {
+                        item,
+                        ..
+                    } => Some(item.data.id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                responses.iter().any(|id| id.starts_with("fixture-final-")),
+                "latest response collapsed after restore={restore}"
+            );
+            assert!(responses.contains(&"duplicate-history-old"));
+            assert!(snapshot.pending_submissions.is_empty());
+            assert!(snapshot.drafts[&id].text.is_empty());
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        }
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("repeated-turn history exceeded its deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

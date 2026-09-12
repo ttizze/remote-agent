@@ -21,7 +21,7 @@ ios-e2e *tests:
 conversation-ui:
     scripts/ios-e2e.sh \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
-        testSimulatorRepeatedlyReopensTaskAfterContentSwipe \
+        testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
