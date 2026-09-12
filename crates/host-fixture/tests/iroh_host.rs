@@ -1815,7 +1815,12 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 };
                 git(&["init", "--quiet"]);
                 git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "fixture"]);
-                std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[project]}}})).unwrap()).unwrap();
+                let configured_project = root.join("project-alias");
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&project, &configured_project).unwrap();
+                #[cfg(not(unix))]
+                let configured_project = project.clone();
+                std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[configured_project]}}})).unwrap()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
                 let program = host_fixture::fixture::Config { deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();

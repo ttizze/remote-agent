@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Match saved project roots through filesystem aliases when assigning worktree conversations, including macOS `/var` and `/private/var` paths.
+
 - Preserve individual history occurrences when turn IDs repeat, so opening a conversation keeps both responses visible instead of duplicating and collapsing their contents.
 
 - Keep new Host connection handshakes alive while prior sessions finish, preventing intermittent reconnection failures.

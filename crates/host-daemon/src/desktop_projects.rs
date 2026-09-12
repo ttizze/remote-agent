@@ -130,6 +130,15 @@ impl DesktopProjectStore {
 
     async fn load_uncached(&self) -> Result<state::Snapshot, DesktopProjectError> {
         let mut snapshot = self.read_desktop_state().await?;
+        for root in snapshot.projects.iter().flat_map(|project| &project.roots) {
+            match tokio::fs::canonicalize(&root.path).await {
+                Ok(path) => {
+                    snapshot.resolved_roots.insert(root.path.clone(), path);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(DesktopProjectError::Read(error)),
+            }
+        }
         snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path)
             .await
             .map_err(|error| DesktopProjectError::Read(io::Error::other(error)))?;
