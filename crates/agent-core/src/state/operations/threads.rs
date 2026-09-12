@@ -28,6 +28,17 @@ impl Operation for ListThreads {
     }
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
+        for summary in &threads.data {
+            if let Some(id) = &summary.id
+                && snapshot
+                    .conversations
+                    .get(id)
+                    .is_some_and(|thread| thread.name != summary.name)
+                && let Some(thread) = shared_mut(&mut snapshot.conversations, id)
+            {
+                thread.name = summary.name.clone();
+            }
+        }
         snapshot.threads = Some(Arc::new(threads));
         Vec::new()
     }

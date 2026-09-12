@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Refresh conversation lists and titles after submitted messages and completed turns. Show elapsed execution time and the current action from core presentation, and provide command-output copying. Open the desktop diff from change summaries and file rows, with file navigation, readable Git paths, and expandable unchanged context.
+
+- Place desktop dictation controls in the composer with a live microphone waveform, cancel/Escape, stop, and send. Preserve drafts on cancellation and show readable failure reasons.
+
+- List Bex-managed worktrees and their conversations in desktop settings. Confirm removal and refuse modified, ignored-file, locked, detached, or actively used worktrees; retain branches and conversation history. Requires the updated Host.
+
 - Share flat conversation rows, stable row IDs, fork eligibility, and activity expansion defaults across Desktop, iOS, and Android through core presentation. Keep native turn/item and Markdown caches while removing Swift record copies. Restore Desktop file-change headers and diffs by reading typed change fields, shared with expanded activity text.
 
 - Share one normal local Host across desktop and mobile independently of their state directories. Reuse and remember its credential directory and key-storage backend, reject competing starts before provisioning, verify discovered tickets, and require explicit isolation for separate test Hosts. Report conflicting legacy Hosts without stopping active work.

@@ -99,6 +99,16 @@ impl RenderedTurn {
     pub fn conversation_rows(&self) -> Vec<ConversationRow> {
         self.rows.clone()
     }
+
+    pub fn progress_label(&self, include_action: bool, now_seconds: f64) -> String {
+        let action = self.rows.iter().rev().find_map(|row| match &row.content {
+            ConversationRowContent::Activity { item, .. } if include_action => {
+                Some(item.data.title.as_str())
+            }
+            _ => None,
+        });
+        progress_label(&self.source, action, now_seconds)
+    }
 }
 
 impl RenderedTurn {
@@ -911,5 +921,50 @@ mod tests {
             assert!(error.is_reconnecting);
             assert_eq!(error.message, "retry");
         }
+    }
+}
+
+fn progress_label(turn: &models::Turn, action: Option<&str>, now_seconds: f64) -> String {
+    let started = turn
+        .started_at
+        .as_ref()
+        .and_then(Option::as_ref)
+        .and_then(serde_json::Number::as_f64)
+        .or_else(|| {
+            turn.extra
+                .get("startedAtMs")?
+                .as_f64()
+                .map(|milliseconds| milliseconds / 1000.)
+        });
+    let elapsed = started
+        .map(|started| format!("{}秒 ", (now_seconds - started).max(0.) as u64))
+        .unwrap_or_default();
+    match action.filter(|action| !action.is_empty()) {
+        Some(action) => format!("{elapsed}作業中 · {action}"),
+        None => format!("{elapsed}作業中…"),
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[test]
+    fn elapsed_work_uses_provider_time_and_describes_the_current_tool() {
+        for value in [
+            serde_json::json!({"id":"t","startedAt":100.5}),
+            serde_json::json!({"id":"t","startedAtMs":100500}),
+        ] {
+            let turn = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                progress_label(&turn, Some("cargo test"), 108.5),
+                "8秒 作業中 · cargo test"
+            );
+            assert_eq!(progress_label(&turn, None, 110.5), "10秒 作業中…");
+            assert_eq!(progress_label(&turn, None, 99.), "0秒 作業中…");
+        }
+        assert_eq!(
+            progress_label(&models::Turn::default(), None, 100.),
+            "作業中…"
+        );
     }
 }

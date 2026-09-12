@@ -509,6 +509,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
             review: Some(review.clone()),
             review_cwd: Some("/old".into()),
             settings: Some(Arc::default()),
+            worktrees: None,
         }),
         file_drafts: Arc::new(BTreeMap::from([(
             "/old/file".into(),

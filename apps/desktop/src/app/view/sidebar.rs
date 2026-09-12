@@ -193,13 +193,10 @@ impl Desktop {
                                     .to_owned(),
                                 cx,
                                 |s, _, cx| {
-                                    s.tab = Tab::Settings;
+                                    s.open_settings();
                                     if let Some(hosts) = &s.hosts {
                                         hosts.update(cx, |hosts, _| hosts.refresh());
                                     }
-                                    s.dispatch(Intent::ReadWorktreeSettings(
-                                        op::ReadWorktreeSettings {},
-                                    ));
                                 },
                             )
                             .accessibility_label("設定を開く")

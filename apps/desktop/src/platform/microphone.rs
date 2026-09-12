@@ -66,6 +66,15 @@ fn capture(
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err("recording cancelled".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        let level = {
+            let samples = samples.lock().unwrap();
+            let recent = &samples[samples.len().saturating_sub(sample_rate as usize / 20)..];
+            (recent.iter().map(|sample| sample * sample).sum::<f32>() / recent.len().max(1) as f32)
+                .sqrt()
+        };
+        events
+            .send_blocking(RecordingEvent::Level(level))
+            .map_err(|_| "recording cancelled")?;
     }
     drop(stream);
     if let Ok(error) = failed.try_recv() {

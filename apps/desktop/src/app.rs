@@ -180,6 +180,8 @@ pub(crate) struct Desktop {
     worktree_saved: bool,
     worktree_saving: bool,
     worktree_save_pending: bool,
+    worktree_removal: Option<String>,
+    worktree_busy: bool,
     expanded_projects: HashSet<String>,
     expanded_items: HashSet<String>,
     expanded_work: HashMap<String, ActivityExpansion>,
@@ -224,6 +226,25 @@ impl Desktop {
             while let Ok(update) = incoming.recv().await {
                 if view
                     .update_in(cx, |view, window, cx| view.receive(update, window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn_in(window, async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if view
+                    .update(cx, |view, cx| {
+                        if let Some(turn) = view.active_turn() {
+                            view.remeasure_item(&turn.id);
+                            cx.notify();
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -442,6 +463,8 @@ impl Desktop {
             worktree_saved: false,
             worktree_saving: false,
             worktree_save_pending: false,
+            worktree_removal: None,
+            worktree_busy: false,
             expanded_projects: HashSet::new(),
             expanded_items: HashSet::new(),
             expanded_work: HashMap::new(),
@@ -480,6 +503,8 @@ impl Desktop {
         self.epoch += 1;
         self.connecting = true;
         self.busy = 0;
+        self.worktree_removal = None;
+        self.worktree_busy = false;
         self.error = self.runtime.logging_error.clone().unwrap_or_default();
         let epoch = self.epoch;
         let remote = self.remote.clone();
@@ -620,6 +645,9 @@ impl Desktop {
                             self.explain_selection(&text, cx);
                         }
                         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
+                        if self.tab == Tab::Settings {
+                            self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
+                        }
                     }
                     Err(error) => self.set_error(error),
                 }
@@ -659,6 +687,22 @@ impl Desktop {
                 .get(self.draft_key())
                 .map(|draft| &draft.attachments);
         let navigated = previous.navigation.draft_key != self.snapshot.navigation.draft_key;
+        let project_for_selected = |snapshot: &Snapshot| {
+            snapshot
+                .threads
+                .as_ref()?
+                .data
+                .iter()
+                .find(|thread| thread.id == snapshot.navigation.thread_id)?
+                .project_id
+                .clone()
+                .flatten()
+        };
+        if (navigated || project_for_selected(&previous) != project_for_selected(&self.snapshot))
+            && let Some(project) = project_for_selected(&self.snapshot)
+        {
+            self.expanded_projects.insert(project);
+        }
         if navigated {
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));
@@ -1365,7 +1409,7 @@ impl Desktop {
             return;
         }
         cx.stop_propagation();
-        if self.busy > 0 {
+        if self.busy > 0 || self.dictation.is_some() {
             return;
         }
         self.attach_sources(move || {

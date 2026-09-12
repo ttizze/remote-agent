@@ -1,6 +1,13 @@
 use super::*;
 
 impl Desktop {
+    pub(super) fn open_settings(&mut self) {
+        self.tab = Tab::Settings;
+        self.worktree_removal = None;
+        self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
+        self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
+    }
+
     pub(super) fn settings(&self, cx: &Context<Self>) -> AnyElement {
         let mut body = v_flex()
             .gap_4()
@@ -45,6 +52,7 @@ impl Desktop {
                     "スイッチは切り替え時、入力欄は入力を終えると自動保存します。"
                 }))
         );
+        body = body.child(self.managed_worktrees(cx));
         div()
             .id("settings-scroll")
             .flex_1()
@@ -170,12 +178,7 @@ impl Desktop {
                                     .map_or(0, |review| review.deletions)
                             ),
                             cx,
-                            |s, _, _| {
-                                s.panel = Panel::Diff;
-                                s.panel_open = true;
-                                s.tab = Tab::Chat;
-                                s.refresh_review();
-                            },
+                            |s, _, cx| s.open_review(None, cx),
                         )
                         .icon(IconName::Replace)
                         .w_full()
@@ -213,5 +216,132 @@ impl Desktop {
                     ),
             )
             .into_any_element()
+    }
+}
+
+impl Desktop {
+    fn managed_worktrees(&self, cx: &Context<Self>) -> AnyElement {
+        let mut body = v_flex().gap_3().child(
+            h_flex()
+                .justify_between()
+                .child(div().text_xl().child("作成済みのワークツリー"))
+                .child(
+                    self.icon_button(
+                        "refresh-worktrees",
+                        IconName::RotateCw,
+                        "ワークツリー一覧を更新",
+                        cx,
+                        |s, _, _| {
+                            s.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
+                        },
+                    )
+                    .disabled(!self.snapshot.connected || self.worktree_busy),
+                ),
+        );
+        let Some(worktrees) = &self.snapshot.workspace.worktrees else {
+            return body.child("一覧を読み込み中…").into_any_element();
+        };
+        if worktrees.is_empty() {
+            body = body.child("Bexで作成したワークツリーはありません。");
+        }
+        for (index, worktree) in worktrees.iter().enumerate() {
+            let path = worktree.path.clone();
+            let current = Path::new(&self.snapshot.navigation.cwd).starts_with(&worktree.path);
+            let reason = worktree.blocked_reason.as_deref().or(current.then_some(
+                "現在開いている会話の作業場所です。別の会話に移動してから削除してください。",
+            ));
+            let confirming = self.worktree_removal.as_deref() == Some(path.as_str());
+            let mut entry = v_flex()
+                .p_4()
+                .gap_2()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(rgb(0x383838))
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().child(format!(
+                            "{} · {}",
+                            file_name(&worktree.project_path),
+                            worktree.branch
+                        )))
+                        .child(
+                            self.button(
+                                format!("remove-worktree-{index}"),
+                                "削除…",
+                                cx,
+                                move |s, _, _| {
+                                    s.worktree_removal = Some(path.clone());
+                                },
+                            )
+                            .disabled(
+                                reason.is_some() || !self.snapshot.connected || self.worktree_busy,
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xaaaaaa))
+                        .child(worktree.path.clone()),
+                );
+            for (thread_index, thread) in worktree.threads.iter().enumerate() {
+                let id = thread.id.clone();
+                entry = entry.child(
+                    self.button(
+                        format!("worktree-thread-{index}-{thread_index}"),
+                        format!(
+                            "{}{}",
+                            if thread.active { "実行中 · " } else { "" },
+                            thread.name
+                        ),
+                        cx,
+                        move |s, _, _| s.open_chat(id.clone()),
+                    )
+                    .icon(IconName::FileText)
+                    .disabled(!self.snapshot.connected || self.worktree_busy),
+                );
+            }
+            if let Some(reason) = reason {
+                entry = entry.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xaaaaaa))
+                        .child(reason.to_owned()),
+                );
+            }
+            if confirming {
+                let path = worktree.path.clone();
+                entry = entry.child(div().text_sm().child("この作業ディレクトリを削除します。ブランチと会話履歴は残りますが、この場所での作業再開はできなくなります。"))
+                    .child(h_flex().gap_2()
+                        .child(self.button(format!("cancel-remove-worktree-{index}"), "取消", cx, |s, _, _| s.worktree_removal = None).disabled(self.worktree_busy))
+                        .child(self.button(format!("confirm-remove-worktree-{index}"), "ワークツリーを削除", cx, move |s, _, _| s.remove_worktree(path.clone()))
+                            .disabled(reason.is_some() || !self.snapshot.connected || self.worktree_busy)));
+            }
+            body = body.child(entry);
+        }
+        body.into_any_element()
+    }
+
+    fn remove_worktree(&mut self, path: String) {
+        if self.worktree_busy || !self.snapshot.connected {
+            return;
+        }
+        self.worktree_busy = true;
+        self.perform(
+            Intent::RemoveWorktree(op::RemoveWorktree { path }),
+            |s, result, window, cx| {
+                s.worktree_busy = false;
+                match result {
+                    Ok(_) => s.worktree_removal = None,
+                    Err(error) => {
+                        s.set_error(error);
+                        s.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
+                    }
+                }
+                s.accept_snapshot(window, cx);
+            },
+        );
     }
 }

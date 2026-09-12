@@ -180,11 +180,33 @@ impl Desktop {
                 );
                 if expanded {
                     let output = projected.expanded_body();
+                    let copied = output.clone();
                     let content = format!(
                         "$ {}\n\n{output}",
                         item.command.as_deref().unwrap_or_default()
                     );
                     body = body
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(0x999999))
+                                        .child("プレーンテキスト"),
+                                )
+                                .child(
+                                    Button::new(format!("copy-output-{id}"))
+                                        .label("出力をコピー")
+                                        .small()
+                                        .ghost()
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copied.clone(),
+                                            ))
+                                        }),
+                                ),
+                        )
                         .child(Self::activity_text(format!("output-{id}"), &content, ""))
                         .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
                                 "{} {}",
@@ -285,7 +307,14 @@ impl Desktop {
                 ConversationRowContent::ActivityHeader { activity } => {
                     let id = &activity.id;
                     expanded = activity_is_expanded(activity, self.expanded_work.get(id).cloned());
-                    let label = &activity.activity_summary;
+                    let label = if activity.is_in_progress {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0., |duration| duration.as_secs_f64());
+                        projected.progress_label(!expanded, now)
+                    } else {
+                        activity.activity_summary.clone()
+                    };
                     let header = if activity.activity_can_collapse {
                         let toggle = id.clone();
                         let status = activity.status.clone();

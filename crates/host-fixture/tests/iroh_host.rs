@@ -1646,3 +1646,142 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
     .await
     .expect("shared Host conversation synchronization deadline");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for automatic in [false, true] {
+            for scoped in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path().canonicalize().unwrap();
+                let project = root.join("project");
+                std::fs::create_dir(&project).unwrap();
+                let git = |args: &[&str]| {
+                    let result = std::process::Command::new("git").current_dir(&project).args(args).output().unwrap();
+                    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+                };
+                git(&["init", "--quiet"]);
+                git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "fixture"]);
+                std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[project]}}})).unwrap()).unwrap();
+                std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
+                let program = host_fixture::fixture::Config { deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
+                    .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();
+                let fixture = HostFixture::start(&root, AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated", false).await.unwrap();
+                let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
+                let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+                store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                let key = store.snapshot().navigation.draft_key.clone();
+                store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] list automatically".into() }).await.unwrap();
+                store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "sidebar-message".into() }).await.unwrap();
+                let id = store.snapshot().navigation.thread_id.clone().unwrap();
+                let mut updates = store.subscribe();
+                let reflected = tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let snapshot = updates.borrow_and_update().clone();
+                        let complete = snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns.first().is_some_and(|turn| turn.status.as_deref() == Some("completed")));
+                        let listed = snapshot.thread_list().is_some_and(|list| list.threads.iter().any(|thread| thread.id == id && thread.name == "Completed conversation" && thread.project_id == scoped.then(|| "project".into())));
+                        if complete && listed {
+                            assert!(snapshot.pending_submissions.is_empty());
+                            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+                            assert!(snapshot.drafts[&id].text.is_empty());
+                            break;
+                        }
+                        updates.changed().await.unwrap();
+                    }
+                }).await;
+                store.close().await.unwrap();
+                drop(store);
+                endpoint.close().await;
+                fixture.close().await.unwrap();
+                assert!(reflected.is_ok(), "completed conversation and title did not appear automatically (worktree={automatic}, scoped={scoped})");
+            }
+        }
+    }).await.expect("sidebar regression exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn worktree_management_lists_conversations_refuses_active_work_and_persists_removal() {
+    use agent_core::{state::Intent, store::Store};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&project).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            output.stdout
+        };
+        git(&["init", "--quiet"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "fixture"]);
+        let fixture = Fixture::start(&root).await;
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+        store.dispatch(Intent::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings: agent_core::models::WorktreeSettings { create_on_new_session: true, ..Default::default() } })).await.unwrap();
+        store.dispatch(Intent::NewChat { cwd: project.to_str().unwrap().into() }).await.unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] [delayed-input] keep running".into() }).await.unwrap();
+        store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "managed".into() }).await.unwrap();
+        let id = store.snapshot().navigation.thread_id.clone().unwrap();
+        let path = store.snapshot().navigation.cwd.clone();
+        let mut updates = store.subscribe();
+        let turn_id = loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if let Some(turn) = snapshot.conversations[&id].turns.as_ref().and_then(|turns| turns.first()) { break turn.id.clone(); }
+            updates.changed().await.unwrap();
+        };
+        store.dispatch(Intent::ListWorktrees(op::ListWorktrees {})).await.unwrap();
+        let snapshot = store.snapshot();
+        let entries = snapshot.workspace.worktrees.as_ref().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, path);
+        assert_eq!(entries[0].project_path, project.to_str().unwrap());
+        assert_eq!(entries[0].threads[0].id, id);
+        assert!(entries[0].threads[0].active && entries[0].blocked_reason.is_some());
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        assert!(Path::new(&path).is_dir());
+        store.dispatch(Intent::Interrupt(op::Interrupt { thread_id: id.clone(), turn_id })).await.unwrap();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns[0].status.as_deref() == Some("interrupted")) { break; }
+            updates.changed().await.unwrap();
+        }
+        let local = fixture.local().await;
+        // Failed process starts must not leave a permanent "terminal open" block.
+        assert!(local.peer.request::<_, Value>("host/terminal/start", &json!({"processHandle":"failed-terminal","cwd":root.join("missing"),"size":{"rows":24,"cols":80}})).await.is_err());
+        let terminal_directory = {
+            #[cfg(unix)]
+            {
+                let alias = root.join("worktree-alias");
+                std::os::unix::fs::symlink(&path, &alias).unwrap();
+                alias
+            }
+            #[cfg(not(unix))]
+            { PathBuf::from(&path) }
+        };
+        rpc(&local.peer, "host/terminal/start", json!({"processHandle":"managed-terminal","cwd":terminal_directory,"size":{"rows":24,"cols":80}})).await;
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        assert!(Path::new(&path).is_dir());
+        assert!(local.peer.request::<_, Value>("host/terminal/start", &json!({"processHandle":"managed-terminal","cwd":path,"size":{"rows":24,"cols":80}})).await.is_err());
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        rpc(&local.peer, "process/kill", json!({"processHandle":"managed-terminal"})).await;
+        store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
+        store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.unwrap();
+        assert!(!Path::new(&path).exists());
+        assert!(store.snapshot().workspace.worktrees.as_ref().unwrap().is_empty());
+        store.disconnect().await.unwrap();
+        store.reconnect(&endpoint, &fixture.ticket, None).await.unwrap();
+        store.dispatch(Intent::ListWorktrees(op::ListWorktrees {})).await.unwrap();
+        assert!(store.snapshot().workspace.worktrees.as_ref().unwrap().is_empty());
+        assert!(store.snapshot().error.is_none());
+        assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
+        let listed = rpc(&local.peer, "thread/list", json!({})).await;
+        assert!(listed["data"].as_array().unwrap().iter().any(|thread| thread["id"] == id), "removal must preserve conversation history");
+        local.close().await;
+        store.close().await.unwrap();
+        drop(store);
+        endpoint.close().await;
+        fixture.close().await;
+    }).await.expect("worktree management exceeded its deadline");
+}

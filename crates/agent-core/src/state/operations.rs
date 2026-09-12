@@ -35,6 +35,8 @@ pub enum Intent {
     ReviewWorkspace(ReviewWorkspace),
     ReadWorktreeSettings(ReadWorktreeSettings),
     UpdateWorktreeSettings(UpdateWorktreeSettings),
+    ListWorktrees(ListWorktrees),
+    RemoveWorktree(RemoveWorktree),
     ListThreads(ListThreads),
     StartThread(StartThread),
     ReadThread(ReadThread),

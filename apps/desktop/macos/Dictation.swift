@@ -8,6 +8,7 @@ final class Dictation: NSObject, AVAudioRecorderDelegate {
     private let directory: URL
     private var recorder: AVAudioRecorder?
     private var finished = false
+    private var meter: Timer?
 
     init(directory: URL) {
         self.directory = directory
@@ -35,11 +36,17 @@ final class Dictation: NSObject, AVAudioRecorderDelegate {
                     )
                     self.recorder = recorder
                     recorder.delegate = self
+                    recorder.isMeteringEnabled = true
                     guard recorder.record() else {
                         self.complete(error: "録音を開始できませんでした。マイクの接続を確認してください。")
                         return
                     }
                     self.emit(["recording": true])
+                    self.meter = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+                        guard let self, let recorder = self.recorder, recorder.isRecording else { return }
+                        recorder.updateMeters()
+                        emit(["level": pow(10, recorder.averagePower(forChannel: 0) / 20)])
+                    }
                 } catch { self.complete(error: error.localizedDescription) }
             }
         }
@@ -102,6 +109,8 @@ final class Dictation: NSObject, AVAudioRecorderDelegate {
     private func complete(error: String?) {
         guard !finished else { return }
         finished = true
+        meter?.invalidate()
+        meter = nil
         recorder?.delegate = nil
         recorder?.stop()
         if let error {

@@ -98,7 +98,7 @@ pub(super) async fn run(
         fs::write(path, "fixture rollout initializing\n")?;
     }
     if prompt.contains("[delayed-input]") && !wait_for_release(&context.home, &stop).await {
-        return Ok(());
+        return context.finish(&thread, &turn, "interrupted", None);
     }
     context.stream_item(
         &thread_id,

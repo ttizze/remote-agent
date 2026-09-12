@@ -48,6 +48,9 @@ pub(super) fn notification(
             Event::RequestResolved(params["requestId"].clone()),
         );
     }
+    if method == "thread/name/updated" {
+        return (previous.clone(), refresh_list(previous));
+    }
     let kind = match method {
         "host/thread/changed" => Kind::WatchChanged,
         "host/thread/watchFailed" => Kind::WatchFailed,
@@ -135,7 +138,19 @@ pub(super) fn notification(
             }
         }
     }
-    let mut effects = Vec::new();
+    let mut effects = if kind == Kind::TurnCompleted
+        || (method == "item/completed"
+            && params
+                .item
+                .as_ref()
+                .is_some_and(|item| item.kind.as_deref() == Some("userMessage")))
+    {
+        // A newly started thread need not be present in the provider's state DB
+        // until its first turn is persisted. The pre-submission list is too early.
+        refresh_list(previous)
+    } else {
+        Vec::new()
+    };
     if active == Some(false)
         && previous.activity.active.get(&params.thread_id) == Some(&true)
         && current.is_some_and(|thread| thread.cwd.as_deref() == Some(&next.navigation.cwd))
@@ -214,6 +229,16 @@ pub(super) fn notification(
         effects.extend(op::review_workspace(&mut next));
     }
     (next, effects)
+}
+
+fn refresh_list(snapshot: &Snapshot) -> Vec<Effect> {
+    if snapshot.connected {
+        vec![Effect::execute(op::ListThreads::new(
+            (*snapshot.list_query).clone(),
+        ))]
+    } else {
+        Vec::new()
+    }
 }
 
 fn item(

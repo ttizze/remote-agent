@@ -64,6 +64,10 @@ On Mac and iPhone, select assistant text to quote it into the draft or ask about
 
 The composer gauge opens **アカウントとモデル**. On Mac, **Codex アカウント** selects a saved account; opening the menu refreshes the account list, and switching refreshes the model catalog while retaining the conversation and draft. Add accounts through **Codex アカウントを追加** on iPhone. The Host owns authentication and persists the selected account across restarts; account switching shares the existing Codex process and conversation history.
 
+Desktop conversation lists and titles refresh after messages and completed turns. The execution header shows elapsed time and the latest action; command output has a copy control. Click the change summary or a changed file to open the diff, choose files from its selector, and expand long unchanged sections. During dictation the composer shows a microphone waveform with cancel, stop, and send controls; Escape cancels recording and preserves the draft.
+
+Mac settings list Bex-created worktrees and their conversations. Move to another conversation before deleting its worktree, then confirm removal. The Host refuses removal when turns or tracked terminal processes are active, files have changes (including untracked or ignored files), the worktree is locked, or HEAD is detached. Removal retains branches and conversation history, but the working directory is unavailable for resuming work. This requires the updated Host (`host/worktree/list` and `host/worktree/remove`).
+
 Voice input appends recognized text on Stop or submits it with the draft and attachments on Send. Successful transcription with no recognized text ends quietly and leaves drafts and attachments unchanged, even if Send was pressed. Recording, connection, malformed-response, and transcription failures still report errors without discarding the draft.
 
 ## Headless CLI

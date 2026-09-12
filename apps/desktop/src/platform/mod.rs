@@ -28,6 +28,7 @@ mod microphone;
 pub(crate) use os::{Recording, start_recording};
 pub(crate) enum RecordingEvent {
     Started,
+    Level(f32),
     Finished(Result<Vec<u8>, String>),
 }
 

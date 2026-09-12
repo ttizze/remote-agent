@@ -1122,6 +1122,9 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
         snapshot.activity.active.get("thread") == Some(&false)
     })
     .await;
+    let refresh = read(&mut reader).await;
+    assert_eq!(refresh["method"], "host/thread/list");
+    // Sending must not wait for the catalogue refresh to complete.
     store
         .dispatch(Intent::SetDraft {
             thread_id: "thread".into(),

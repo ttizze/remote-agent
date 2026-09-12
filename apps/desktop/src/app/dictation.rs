@@ -14,8 +14,87 @@ pub(super) struct Dictation {
     pub(super) phase: Phase,
     send: bool,
     control: Option<platform::Recording>,
+    pub(super) levels: std::collections::VecDeque<f32>,
 }
 impl Desktop {
+    pub(super) fn dictation_bar(&self, cx: &Context<Self>) -> AnyElement {
+        let Some(state) = &self.dictation else {
+            return div().into_any_element();
+        };
+        let recording = state.phase == Phase::Recording;
+        h_flex()
+            .h(px(88.))
+            .px_2()
+            .gap_3()
+            .child(
+                self.icon_button(
+                    "cancel-dictation",
+                    IconName::Close,
+                    "録音を取り消す (Esc)",
+                    cx,
+                    |s, _, _| s.cancel_recording(),
+                )
+                .disabled(state.phase == Phase::Transcribing),
+            )
+            .child(if recording {
+                h_flex()
+                    .id("recording-waveform")
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(48.))
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.))
+                    .overflow_hidden()
+                    .children(state.levels.iter().map(|level| {
+                        div()
+                            .w(px(3.))
+                            .flex_shrink_0()
+                            .h(px(3. + level.sqrt() * 45.))
+                            .rounded_full()
+                            .bg(rgb(0xececec))
+                    }))
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .flex_1()
+                    .gap_2()
+                    .child(spinner::Spinner::new().small())
+                    .child(if state.phase == Phase::Permission {
+                        "マイクの許可を確認中…"
+                    } else {
+                        "文字起こし中…"
+                    })
+                    .into_any_element()
+            })
+            .child(
+                self.icon_button(
+                    "stop-dictation",
+                    IconName::Pause,
+                    "録音を終了して文字起こし",
+                    cx,
+                    |s, _, cx| s.finish_dictation(false, cx),
+                )
+                .icon(Icon::default().path("bex/stop.svg"))
+                .disabled(!recording),
+            )
+            .child(
+                self.icon_button(
+                    "send-dictation",
+                    IconName::ArrowUp,
+                    "文字起こしして送信",
+                    cx,
+                    |s, _, cx| s.send(cx),
+                )
+                .primary()
+                .large()
+                .rounded_full()
+                .w(px(44.))
+                .h(px(44.))
+                .disabled(!recording || !self.snapshot.connected),
+            )
+            .into_any_element()
+    }
     pub(super) fn start_dictation(&mut self) {
         if self.dictation.is_some() || !self.snapshot.connected || self.busy > 0 {
             return;
@@ -39,6 +118,7 @@ impl Desktop {
                     phase: Phase::Permission,
                     send: false,
                     control: Some(control),
+                    levels: std::collections::VecDeque::from(vec![0.; 40]),
                 });
                 self.error.clear();
             }
@@ -81,6 +161,12 @@ impl Desktop {
         };
         match event {
             platform::RecordingEvent::Started => state.phase = Phase::Recording,
+            platform::RecordingEvent::Level(level) => {
+                if state.phase == Phase::Recording && level.is_finite() {
+                    state.levels.pop_front();
+                    state.levels.push_back(level.clamp(0., 1.));
+                }
+            }
             platform::RecordingEvent::Finished(Err(error)) => {
                 self.dictation = None;
                 self.set_error(error);

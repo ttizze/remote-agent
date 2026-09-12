@@ -172,7 +172,11 @@ impl Context {
         let mut thread = thread.borrow_mut();
         let mut turn = turn.borrow_mut();
         turn["status"] = status.into();
-        turn["completedAt"] = 4.into();
+        turn["completedAt"] = if self.config.live_clock {
+            (turn["startedAt"].as_f64().unwrap_or(1.) + 3.).into()
+        } else {
+            4.into()
+        };
         turn["durationMs"] = 3000.into();
         if let Some(error) = error {
             turn["error"] = error;
@@ -180,6 +184,11 @@ impl Context {
         thread
             .metadata
             .insert("status".into(), json!({"type":"idle"}));
+        if self.config.deferred_thread_metadata {
+            thread
+                .metadata
+                .insert("name".into(), "Completed conversation".into());
+        }
         let id = thread.metadata["id"].as_str().unwrap();
         self.turn_event("turn/completed", id, &turn)?;
         self.notify(
@@ -227,6 +236,9 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
         let mut saved_threads = None;
         let mut list_contents = None;
         let mut next_thread = 0;
+        // Only the provider's process lifecycle protocol is modeled here. No
+        // shell commands are executed by this deterministic Codex double.
+        let mut processes = std::collections::HashSet::<String>::new();
         loop {
             let line = tokio::select! {
                 result = &mut writer => { result??; break; }
@@ -244,6 +256,25 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             let method = message["method"].as_str().unwrap_or("");
             let params = &mut owned_params;
             match method {
+                "process/spawn" => {
+                    let handle = params["processHandle"].as_str().unwrap_or("");
+                    if handle.is_empty() || !params["cwd"].as_str().is_some_and(|cwd| std::path::Path::new(cwd).is_dir())
+                        || !params["command"].as_array().is_some_and(|command| !command.is_empty())
+                        || processes.contains(handle)
+                    {
+                        context.error(id, -32602, "invalid process start")?;
+                    } else {
+                        processes.insert(handle.to_owned());
+                        context.respond(id, &json!({}))?;
+                    }
+                }
+                "process/kill" => {
+                    let handle = params["processHandle"].as_str().unwrap_or("");
+                    if processes.remove(handle) {
+                        context.notify("process/exited", &json!({"processHandle":handle,"exitCode":0}))?;
+                        context.respond(id, &json!({}))?;
+                    } else { context.error(id, -32602, "process not found")?; }
+                }
                 "initialize" => {
                     if let Some(gate) = &context.config.initialize_gate {
                         fs::write(gate.with_extension("entered"), [])?;
@@ -300,6 +331,8 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     }
                     let term = params["searchTerm"].as_str().unwrap_or("").to_lowercase();
                     let mut ordered: Vec<_> = threads.values().map(|thread| thread.borrow()).filter(|thread| {
+                        !context.config.deferred_thread_metadata || thread.turns.iter().any(|turn| turn.borrow()["status"] != "inProgress")
+                    }).filter(|thread| {
                         term.is_empty() || thread.metadata.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())
                             .or_else(|| thread.metadata.get("preview").and_then(Value::as_str)).unwrap_or("").to_lowercase().contains(&term)
                     }).collect();
@@ -329,6 +362,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     next_thread += 1;
                     let thread_id = format!("fixture-thread-{next_thread}");
                     let mut thread = Thread::new(thread_id.clone(), cwd);
+                    if context.config.deferred_thread_metadata { thread.metadata.insert("name".into(), Value::Null); }
                     thread.metadata.insert("path".into(), context.home.join(format!("{thread_id}.jsonl")).into_os_string().into_string().unwrap().into());
                     thread.metadata.insert("historyMode".into(), "paginated".into());
                     thread.metadata.insert("model".into(), params["model"].take());
@@ -379,7 +413,10 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     }
                     let suffix = format!("{}-{}", thread_id.rsplit('-').next().unwrap(), thread.borrow().turns.len() + 1);
                     let turn_id = format!("fixture-turn-{suffix}");
-                    let turn = Rc::new(RefCell::new(json!({"id":turn_id,"status":"inProgress","items":[],"startedAt":1})));
+                    let started = if context.config.live_clock {
+                        json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64())
+                    } else { json!(1) };
+                    let turn = Rc::new(RefCell::new(json!({"id":turn_id,"status":"inProgress","items":[],"startedAt":started})));
                     thread.borrow_mut().turns.push(turn.clone());
                     thread.borrow_mut().metadata.insert("status".into(), json!({"type":"active","activeFlags":[]}));
                     context.respond(id, &json!({"turn":{"id":turn_id}}))?;

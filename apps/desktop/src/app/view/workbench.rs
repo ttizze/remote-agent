@@ -1,6 +1,27 @@
 use super::*;
 
 impl Desktop {
+    pub(super) fn open_review(&mut self, path: Option<&str>, cx: &mut Context<Self>) {
+        self.panel = Panel::Diff;
+        self.panel_open = true;
+        self.tab = Tab::Chat;
+        if let Some(path) = path {
+            let source = self
+                .snapshot
+                .workspace
+                .review
+                .as_ref()
+                .map_or("", |review| review.diff.as_str());
+            Self::diff(&mut self.diffs, "workspace-patch".into(), source, cx);
+            if let Some(diff) = self.diffs.get("workspace-patch") {
+                diff.update(cx, |diff, cx| {
+                    diff.reveal_path(path, cx);
+                });
+            }
+        }
+        self.refresh_review();
+    }
+
     pub(super) fn review_card(&self, cx: &Context<Self>) -> AnyElement {
         let review = self.snapshot.workspace.review.as_deref();
         let files = review
@@ -20,6 +41,12 @@ impl Desktop {
             .bg(rgb(0x191919))
             .child(
                 h_flex()
+                    .id("review-summary")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|s, _, _, cx| {
+                        s.open_review(None, cx);
+                        cx.notify();
+                    }))
                     .gap_3()
                     .p_3()
                     .bg(rgb(0x232323))
@@ -48,11 +75,9 @@ impl Desktop {
                             )),
                     )
                     .child(
-                        self.button("review-changes", "レビューする", cx, |s, _, _| {
-                            s.panel = Panel::Diff;
-                            s.panel_open = true;
-                            s.tab = Tab::Chat;
-                            s.refresh_review();
+                        self.button("review-changes", "レビューする", cx, |s, _, cx| {
+                            cx.stop_propagation();
+                            s.open_review(None, cx);
                         })
                         .border_1()
                         .rounded(px(8.))
@@ -66,7 +91,14 @@ impl Desktop {
                     .overflow_y_scroll()
                     .py_1()
                     .children(files.iter().take(visible).map(|file| {
+                        let path = file.path.clone();
                         h_flex()
+                            .id(SharedString::from(format!("review-file-{}", file.path)))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |s, _, _, cx| {
+                                s.open_review(Some(&path), cx);
+                                cx.notify();
+                            }))
                             .px_3()
                             .h(px(36.))
                             .flex_shrink_0()
@@ -411,6 +443,7 @@ impl Desktop {
                             |s, _, _| s.refresh_review(),
                         )),
                 )
+                .child(self.diff_file_menu(cx))
                 .child(
                     div().flex_1().min_h_0().child(Self::diff(
                         &mut self.diffs,
@@ -461,6 +494,41 @@ impl Desktop {
             .min_w_0()
             .child(toolbar)
             .child(div().flex_1().min_h_0().flex().child(body))
+            .into_any_element()
+    }
+}
+
+impl Desktop {
+    fn diff_file_menu(&self, cx: &Context<Self>) -> AnyElement {
+        let entity = cx.entity().downgrade();
+        Button::new("diff-file-navigation")
+            .label(format!(
+                "ファイルを選択 ({})",
+                self.snapshot
+                    .workspace
+                    .review
+                    .as_ref()
+                    .map_or(0, |review| review.files.len())
+            ))
+            .accessibility_label("差分のファイルを選択")
+            .dropdown_caret(true)
+            .ghost()
+            .dropdown_menu(move |mut menu, _, cx| {
+                if let Some(owner) = entity.upgrade()
+                    && let Some(review) = &owner.read(cx).snapshot.workspace.review
+                {
+                    for file in &review.files {
+                        let path = file.path.clone();
+                        let entity = entity.clone();
+                        menu = menu.item(PopupMenuItem::new(path.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = entity.update(cx, |s, cx| s.open_review(Some(&path), cx));
+                            },
+                        ));
+                    }
+                }
+                menu
+            })
             .into_any_element()
     }
 }

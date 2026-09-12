@@ -427,9 +427,7 @@ impl Desktop {
         let running = self.active_turn();
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
         let phase = self.dictation.as_ref().map(|d| d.phase);
-        let recording = phase == Some(Phase::Recording);
-        let processing = matches!(phase, Some(Phase::Permission | Phase::Transcribing));
-        let send = if let Some(turn) = running.filter(|_| empty && phase.is_none()) {
+        let send = if let Some(turn) = running.filter(|_| empty) {
             let id = turn.id.clone();
             self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
                 s.dispatch(Intent::Interrupt(op::Interrupt {
@@ -440,60 +438,39 @@ impl Desktop {
             .icon(Icon::default().path("bex/stop.svg"))
             .disabled(!self.snapshot.connected || self.busy > 0)
         } else {
-            self.icon_button(
-                "send",
-                IconName::ArrowUp,
-                if recording {
-                    "文字起こしして送信"
-                } else {
-                    "送信"
-                },
-                cx,
-                |s, _, cx| s.send(cx),
-            )
-            .disabled(
-                !self.snapshot.connected || self.busy > 0 || (empty && !recording) || processing,
-            )
+            self.icon_button("send", IconName::ArrowUp, "送信", cx, |s, _, cx| {
+                s.send(cx)
+            })
+            .disabled(!self.snapshot.connected || self.busy > 0 || empty)
         };
         let microphone = Button::new("dictation-toggle")
-            .icon(
-                Icon::default()
-                    .path(if recording {
-                        "bex/stop.svg"
-                    } else {
-                        "bex/microphone.svg"
-                    })
-                    .size(px(23.)),
-            )
+            .icon(Icon::default().path("bex/microphone.svg").size(px(23.)))
             .ghost()
             .w(px(40.))
             .h(px(40.))
             .large()
-            .tooltip(if recording {
-                "録音を終了して文字起こし"
-            } else {
-                "音声をCodexで文字起こし"
-            })
-            .accessibility_label(if recording {
-                "録音を終了して文字起こし"
-            } else {
-                "音声をCodexで文字起こし"
-            })
-            .when(recording, |button| button.text_color(rgb(0xff6666)))
-            .disabled(!self.snapshot.connected || self.busy > 0 || processing)
-            .on_click(cx.listener(|s, _, _, cx| {
-                if s.dictation
-                    .as_ref()
-                    .is_some_and(|d| d.phase == Phase::Recording)
-                {
-                    s.finish_dictation(false, cx);
-                } else {
-                    s.start_dictation();
-                }
+            .tooltip("音声をCodexで文字起こし")
+            .accessibility_label("音声をCodexで文字起こし")
+            .disabled(!self.snapshot.connected || self.busy > 0)
+            .on_click(cx.listener(|s, _, window, cx| {
+                s.composer.read(cx).focus_handle(cx).focus(window, cx);
+                s.start_dictation();
                 cx.notify();
             }));
         let composer = v_flex()
             .key_context("ChatComposer")
+            .track_focus(&self.composer.read(cx).focus_handle(cx))
+            .capture_key_down(cx.listener(|s, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape"
+                    && s.dictation
+                        .as_ref()
+                        .is_some_and(|state| state.phase != Phase::Transcribing)
+                {
+                    s.cancel_recording();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .capture_action(cx.listener(Self::paste_image))
             .capture_action(cx.listener(Self::composer_enter))
             .w_full()
@@ -504,49 +481,56 @@ impl Desktop {
             .bg(rgb(0x2b2b2b))
             .border_1()
             .border_color(rgb(0x363636))
-            .child(
-                div().px_2().pt(px(10.)).pb_1().child(
-                    Textarea::new(&self.composer)
-                        .appearance(false)
-                        .bordered(false)
-                        .text_size(px(18.))
-                        .aria_label("Codex に依頼する")
-                        .readonly(!self.snapshot.connected),
-                ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        self.icon_button(
-                            "attach",
-                            IconName::Plus,
-                            "ファイルを添付",
-                            cx,
-                            |s, _, _| s.attach(),
-                        )
-                        .w(px(40.))
-                        .h(px(40.))
-                        .large()
-                        .disabled(
-                            !self.snapshot.connected
-                                || (!self.remote.is_none()
-                                    && self.snapshot.navigation.cwd.is_empty())
-                                || self.busy > 0
-                                || phase.is_some(),
-                        ),
-                    )
-                    .child(div().flex_1())
-                    .child(self.model_menu(cx))
-                    .child(microphone)
-                    .child(
-                        send.large()
-                            .rounded(px(22.))
-                            .w(px(44.))
-                            .h(px(44.))
-                            .primary(),
+            .when(phase.is_none(), |composer| {
+                composer.child(
+                    div().px_2().pt(px(10.)).pb_1().child(
+                        Textarea::new(&self.composer)
+                            .appearance(false)
+                            .bordered(false)
+                            .text_size(px(18.))
+                            .aria_label("Codex に依頼する")
+                            .readonly(!self.snapshot.connected),
                     ),
-            );
+                )
+            })
+            .when(phase.is_none(), |composer| {
+                composer.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            self.icon_button(
+                                "attach",
+                                IconName::Plus,
+                                "ファイルを添付",
+                                cx,
+                                |s, _, _| s.attach(),
+                            )
+                            .w(px(40.))
+                            .h(px(40.))
+                            .large()
+                            .disabled(
+                                !self.snapshot.connected
+                                    || (!self.remote.is_none()
+                                        && self.snapshot.navigation.cwd.is_empty())
+                                    || self.busy > 0
+                                    || phase.is_some(),
+                            ),
+                        )
+                        .child(div().flex_1())
+                        .child(self.model_menu(cx))
+                        .child(microphone)
+                        .child(
+                            send.large()
+                                .rounded(px(22.))
+                                .w(px(44.))
+                                .h(px(44.))
+                                .primary(),
+                        ),
+                )
+            })
+            .when(phase.is_some(), |composer| {
+                composer.child(self.dictation_bar(cx))
+            });
         let controls = v_flex()
             .w_full()
             .max_w(px(CHAT_WIDTH))
@@ -570,22 +554,6 @@ impl Desktop {
                         .is_some_and(|review| !review.files.is_empty()),
                 |column| column.child(self.review_card(cx)),
             )
-            .when(phase.is_some(), |column| {
-                column.child(
-                    div()
-                        .text_sm()
-                        .text_color(if recording {
-                            rgb(0xff6666)
-                        } else {
-                            rgb(0xaaaaaa)
-                        })
-                        .child(match phase {
-                            Some(Phase::Permission) => "マイクの許可を確認中…",
-                            Some(Phase::Recording) => "録音中",
-                            _ => "文字起こし中…",
-                        }),
-                )
-            })
             .child(files)
             .child(composer);
         body.child(
