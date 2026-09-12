@@ -414,6 +414,49 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reconnecting_during_session_cleanup_keeps_host_requests_available() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let mut session = endpoint.connect(&fixture.ticket).await.unwrap();
+        let mut peer = session
+            .open_peer(Duration::from_secs(10), 16)
+            .await
+            .unwrap();
+        for attempt in 0..128 {
+            assert_eq!(
+                rpc(&peer, "thread/list", json!({})).await["data"],
+                json!([])
+            );
+            let close = async {
+                tokio::task::yield_now().await;
+                peer.close().await.unwrap();
+                session.close();
+            };
+            let (_, opened) = tokio::join!(close, endpoint.connect(&fixture.ticket));
+            session = opened.unwrap_or_else(|error| panic!("reconnect {attempt}: {error}"));
+            peer = session
+                .open_peer(Duration::from_secs(10), 16)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            rpc(&peer, "thread/list", json!({})).await["data"],
+            json!([])
+        );
+        peer.close().await.unwrap();
+        session.close();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("reconnection cleanup deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconnect() {
     use agent_core::{state::Intent, store::Store};
     tokio::time::timeout(Duration::from_secs(30), async {
