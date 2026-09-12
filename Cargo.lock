@@ -976,9 +976,12 @@ dependencies = [
 name = "bex-desktop"
 version = "0.1.0"
 dependencies = [
+ "aes 0.8.4",
  "agent-core",
  "async-channel",
  "base64 0.23.1",
+ "block2 0.6.2",
+ "cbc 0.1.2",
  "chrono",
  "cpal",
  "directories",
@@ -989,18 +992,27 @@ dependencies = [
  "host-daemon",
  "image",
  "lb-wry",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
+ "pbkdf2",
  "pulldown-cmark",
  "qrcode",
  "rfd",
  "rubato",
+ "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
  "similar",
  "tempfile",
  "tokio",
  "tokio-util",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2709,6 +2721,18 @@ dependencies = [
  "smallvec",
  "zune-inflate",
 ]
+
+[[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fancy-regex"
@@ -4437,6 +4461,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashlink"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "heapless"
 version = "0.7.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5751,6 +5784,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.35.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -8843,6 +8887,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusqlite"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+dependencies = [
+ "bitflags 2.13.1",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9452,6 +9510,17 @@ checksum = "d52aa42f8fdf0fed91e5ce7f23d8138441002fa31dca008acf47e6fd4721f741"
 dependencies = [
  "nodrop",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -11111,7 +11180,7 @@ dependencies = [
  "rand 0.10.2",
  "rustls",
  "rustls-pki-types",
- "sha1",
+ "sha1 0.11.0",
  "thiserror 2.0.20",
 ]
 
@@ -11515,6 +11584,12 @@ dependencies = [
  "sval_ref",
  "sval_serde",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version-compare"

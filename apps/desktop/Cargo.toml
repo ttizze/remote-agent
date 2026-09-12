@@ -34,9 +34,28 @@ similar = { version = "2", features = ["inline"] }
 cpal = "0.18.2"
 rubato = { version = "5", default-features = false }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+zeroize = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+security-framework = "3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSHTTPCookie", "NSDictionary", "NSString", "NSDate"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKHTTPCookieStore", "WKWebsiteDataStore", "WKWebView", "WKWebViewConfiguration"] }
+block2 = "0.6"
+
 [dev-dependencies]
 gpui-kit = { version = "=0.6.0", features = ["test-support"] }
 
 [[bin]]
 name = "bex-desktop"
 path = "src/main.rs"
+
+[[test]]
+name = "chrome_cookie_webview"
+path = "tests/chrome_cookie_webview.rs"
+harness = false

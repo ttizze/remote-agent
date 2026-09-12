@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Mac browser cookie import from a selected Chrome profile, including Keychain decryption, live SQLite/WAL reads, preserved domain scope and cookie attributes, verified writes, and page reload. Keep persistent and session-only lifetimes, report excluded expired/partitioned cookies, and allow retry after denied access. Cover encrypted v23/v24 fixtures, native attributes, authenticated WebView requests, and fresh-process persistence with isolated tests.
+
 - Explicitly release local Host and discovery locks on shutdown, so a child process retaining an inherited descriptor cannot keep a stopped Host registered as running. Verify restart and duplicate-start rejection with a real child holding the descriptor.
 
 - Remove four unreferenced root screenshots and the unused Desktop SVG icon (1.93 MB).

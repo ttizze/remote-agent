@@ -1346,9 +1346,14 @@ impl Desktop {
                 cx,
             )
             .map(|view| self.terminal = Some(view)),
-            Panel::Browser if self.browser.is_none() => {
-                crate::browser::Browser::new(window, cx).map(|view| self.browser = Some(view))
-            }
+            Panel::Browser if self.browser.is_none() => crate::browser::Browser::new(
+                wry::WebViewBuilder::new(),
+                #[cfg(target_os = "macos")]
+                crate::browser::ChromeProfileSource::default(),
+                window,
+                cx,
+            )
+            .map(|view| self.browser = Some(view)),
             _ => Ok(()),
         };
         if let Err(error) = result {

@@ -1,3 +1,8 @@
+#[cfg(target_os = "macos")]
+use gpui_kit::component::{
+    Disableable,
+    menu::{DropdownMenu, PopupMenuItem},
+};
 use gpui_kit::{
     component::{
         IconName, Sizable,
@@ -16,18 +21,58 @@ enum Event {
     Navigate(String),
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) struct ChromeProfileSource {
+    pub(crate) root: Option<std::path::PathBuf>,
+    pub(crate) password: fn() -> Result<Vec<u8>, String>,
+}
+
+#[cfg(target_os = "macos")]
+impl Default for ChromeProfileSource {
+    fn default() -> Self {
+        Self {
+            root: directories::BaseDirs::new().map(|dirs| {
+                dirs.home_dir()
+                    .join("Library/Application Support/Google/Chrome")
+            }),
+            password: || {
+                security_framework::passwords::get_generic_password("Chrome Safe Storage", "Chrome")
+                    .map_err(|_| {
+                        "ChromeのKeychainにアクセスできません。アクセスを許可して再試行してください"
+                            .into()
+                    })
+            },
+        }
+    }
+}
+
 pub(crate) struct Browser {
     webview: Entity<WebView>,
     address: Entity<InputState>,
     error: String,
+    #[cfg(target_os = "macos")]
+    importing: bool,
+    #[cfg(target_os = "macos")]
+    import_notice: String,
+    #[cfg(target_os = "macos")]
+    chrome: ChromeProfileSource,
+    #[cfg(target_os = "macos")]
+    visible: bool,
+    #[cfg(target_os = "macos")]
+    profile_menu_open: bool,
     _subscription: Subscription,
 }
 
 impl Browser {
-    pub(crate) fn new(window: &mut Window, cx: &mut App) -> Result<Entity<Self>, String> {
+    pub(crate) fn new(
+        builder: wry::WebViewBuilder<'_>,
+        #[cfg(target_os = "macos")] chrome: ChromeProfileSource,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<Self>, String> {
         let (tx, rx) = async_channel::unbounded();
         let navigation = tx.clone();
-        let raw = wry::WebViewBuilder::new()
+        let raw = builder
             .with_url("about:blank")
             .with_background_color((24, 24, 24, 255))
             .with_focused(false)
@@ -86,11 +131,27 @@ impl Browser {
                 webview,
                 address,
                 error: String::new(),
+                #[cfg(target_os = "macos")]
+                importing: false,
+                #[cfg(target_os = "macos")]
+                import_notice: String::new(),
+                #[cfg(target_os = "macos")]
+                chrome,
+                #[cfg(target_os = "macos")]
+                visible: true,
+                #[cfg(target_os = "macos")]
+                profile_menu_open: false,
                 _subscription: subscription,
             }
         }))
     }
-    pub(crate) fn set_visible(&self, visible: bool, cx: &mut App) {
+    pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut App) {
+        #[cfg(target_os = "macos")]
+        {
+            self.visible = visible;
+        }
+        #[cfg(target_os = "macos")]
+        let visible = visible && !self.profile_menu_open;
         self.webview.update(cx, |view, _| {
             if view.visible() != visible {
                 if visible {
@@ -112,6 +173,114 @@ impl Browser {
             Err(e) => self.error = e,
         }
         cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn import_chrome(
+        &mut self,
+        profile: std::path::PathBuf,
+        password: impl FnOnce() -> Result<Vec<u8>, String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        use futures_util::{FutureExt, future::Either};
+        use wry::WebViewExtMacOS;
+        if self.importing {
+            return;
+        }
+        self.importing = true;
+        self.error.clear();
+        self.import_notice =
+            "ChromeのCookieを読み込み中… Keychainの確認が出たら許可してください".into();
+        let read = cx.background_executor().spawn(async move {
+            read_chrome_cookies(&profile, chrono::Utc::now().timestamp(), password)
+        });
+        cx.spawn(async move |owner, cx| {
+            let result = async {
+                let (cookies, skipped) = read.await?;
+                let count = cookies.len();
+                if count == 0 {
+                    return Ok(format!("取り込めるCookieがありません（期限切れなど{skipped}件を除外）"));
+                }
+                let store = owner.update(cx, |s, cx| unsafe {
+                    s.webview.read(cx).raw().webview().configuration().websiteDataStore().httpCookieStore()
+                }).map_err(|_| "ブラウザが閉じられました".to_string())?;
+                let timer = cx.background_executor().timer(std::time::Duration::from_secs(30));
+                match futures_util::future::select(install_chrome_cookies(&store, cookies).boxed_local(), timer.boxed_local()).await {
+                    Either::Left((result, _)) => result?,
+                    Either::Right(_) => return Err("Cookieの保存が時間内に完了しませんでした。一部保存された可能性があります。再試行してください".into()),
+                }
+                owner.update(cx, |s, cx| s.webview.read(cx).raw().reload())
+                    .map_err(|_| "ブラウザが閉じられました".to_string())?
+                    .map_err(|_| "Cookieは保存しましたが再読み込みに失敗しました。再読み込みしてください".to_string())?;
+                Ok(format!("Cookieを{count}件取り込みました（期限切れなど{skipped}件を除外）。ログイン状態はサイトで確認してください"))
+            }.await;
+            let _ = owner.update(cx, |s, cx| {
+                s.importing = false;
+                match result {
+                    Ok(notice) => s.import_notice = notice,
+                    Err(error) => { s.import_notice.clear(); s.error = error; }
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn chrome_import_button(&self, cx: &Context<Self>) -> impl IntoElement {
+        let owner = cx.entity().downgrade();
+        let visibility = owner.clone();
+        let root = self.chrome.root.clone();
+        let password = self.chrome.password;
+        Button::new("import-chrome-cookies")
+            .label(if self.importing {
+                "取り込み中…"
+            } else {
+                "Chromeから取り込む"
+            })
+            .accessibility_label("ChromeからCookieを取り込む")
+            .small()
+            .ghost()
+            .disabled(self.importing)
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                let profiles = root
+                    .as_deref()
+                    .ok_or_else(|| "ホームフォルダを取得できません".to_string())
+                    .and_then(chrome_profiles);
+                match profiles {
+                    Ok(profiles) => {
+                        for (name, path) in profiles {
+                            let owner = owner.clone();
+                            menu = menu.item(PopupMenuItem::new(name).on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |s, cx| {
+                                    s.import_chrome(path.clone(), password, cx)
+                                });
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        let owner = owner.clone();
+                        menu = menu.item(PopupMenuItem::new(error.clone()).on_click(
+                            move |_, _, cx| {
+                                let _ = owner.update(cx, |s, cx| {
+                                    s.error = error.clone();
+                                    cx.notify();
+                                });
+                            },
+                        ));
+                    }
+                }
+                menu
+            })
+            .on_open_change(move |open, _, cx| {
+                let _ = visibility.update(cx, |s, cx| {
+                    // Native WebViews sit above GPUI popovers; retain the panel's requested visibility.
+                    s.profile_menu_open = *open;
+                    s.set_visible(s.visible, cx);
+                    cx.notify();
+                });
+            })
     }
 }
 
@@ -204,6 +373,21 @@ impl Render for Browser {
                             .on_click(cx.listener(|s, _, _, cx| s.navigate(cx))),
                     ),
             )
+            .map(|body| {
+                #[cfg(target_os = "macos")]
+                let body = body
+                    .child(h_flex().px_2().pb_2().child(self.chrome_import_button(cx)))
+                    .when(!self.import_notice.is_empty(), |body| {
+                        body.child(
+                            div()
+                                .px_3()
+                                .pb_2()
+                                .text_sm()
+                                .child(self.import_notice.clone()),
+                        )
+                    });
+                body
+            })
             .when(!self.error.is_empty(), |body| {
                 body.child(
                     div()
@@ -215,5 +399,517 @@ impl Render for Browser {
                 )
             })
             .child(div().flex_1().min_h_0().pl_1().child(self.webview.clone()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn chrome_profiles(root: &std::path::Path) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let bytes = std::fs::read(root.join("Local State")).map_err(|_| {
+        "Chromeのプロファイルが見つかりません。Chromeを一度起動してください".to_string()
+    })?;
+    let state: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "Chromeのプロファイル情報を読み取れません".to_string())?;
+    let profiles = state
+        .pointer("/profile/info_cache")
+        .and_then(|v| v.as_object())
+        .ok_or("Chromeのプロファイル情報がありません")?;
+    let mut result = Vec::new();
+    for (directory, info) in profiles {
+        // Local State must not redirect the importer outside Chrome's profile root.
+        let mut components = std::path::Path::new(directory).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            continue;
+        }
+        let profile = root.join(directory);
+        if chrome_cookie_path(&profile).is_some() {
+            let name = info
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(directory);
+            result.push((format!("{name} ({directory})"), profile));
+        }
+    }
+    if result.is_empty() {
+        return Err("CookieのあるChromeプロファイルが見つかりません".into());
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "macos")]
+fn chrome_cookie_path(profile: &std::path::Path) -> Option<std::path::PathBuf> {
+    ["Network/Cookies", "Cookies"]
+        .into_iter()
+        .map(|name| profile.join(name))
+        .find(|path| path.is_file())
+}
+
+#[cfg(target_os = "macos")]
+struct ChromeCookie {
+    domain: String,
+    name: String,
+    value: zeroize::Zeroizing<String>,
+    path: String,
+    secure: bool,
+    http_only: bool,
+    same_site: i64,
+    expires: Option<i64>,
+}
+
+#[cfg(target_os = "macos")]
+fn read_chrome_cookies(
+    profile: &std::path::Path,
+    now: i64,
+    password: impl FnOnce() -> Result<Vec<u8>, String>,
+) -> Result<(Vec<ChromeCookie>, usize), String> {
+    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+    use sha2::{Digest, Sha256};
+    use zeroize::Zeroizing;
+    let path = chrome_cookie_path(profile).ok_or("ChromeのCookieファイルが見つかりません")?;
+    let mut db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|_| {
+                "ChromeのCookieを開けません。ファイルのアクセス権を確認してください".to_string()
+            })?;
+    db.busy_timeout(std::time::Duration::from_secs(3))
+        .map_err(|_| "Cookieの読み込み設定に失敗しました")?;
+    // One read transaction includes committed WAL rows without copying or modifying Chrome's DB.
+    let transaction = db
+        .transaction()
+        .map_err(|_| "ChromeのCookieを読み取れません。再試行してください")?;
+    let schema: i64 = transaction
+        .query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
+            row.get::<_, String>(0)?
+                .parse::<i64>()
+                .map_err(|_| rusqlite::Error::InvalidQuery)
+        })
+        .map_err(|_| "ChromeのCookie形式を確認できません")?;
+    if !matches!(schema, 23 | 24) {
+        return Err("このChromeのCookie形式にはまだ対応していません".into());
+    }
+    let mut statement = transaction.prepare("SELECT host_key, name, value, encrypted_value, path, is_secure, is_httponly, samesite, expires_utc, has_expires, top_frame_site_key FROM cookies")
+        .map_err(|_| "ChromeのCookie形式を読み取れません")?;
+    let rows = statement
+        .query_map([], |row| {
+            let expires: i64 = row.get(8)?;
+            Ok((
+                ChromeCookie {
+                    domain: row.get(0)?,
+                    name: row.get(1)?,
+                    value: Zeroizing::new(row.get(2)?),
+                    path: row.get(4)?,
+                    secure: row.get(5)?,
+                    http_only: row.get(6)?,
+                    same_site: row.get(7)?,
+                    expires: if row.get::<_, bool>(9)? {
+                        Some(expires / 1_000_000 - 11_644_473_600)
+                    } else {
+                        None
+                    },
+                },
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(10)?,
+            ))
+        })
+        .map_err(|_| "ChromeのCookieを読み取れません")?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "ChromeのCookieに読み取れないデータがあります")?;
+    drop(statement);
+    drop(transaction);
+    drop(db);
+    let mut password = Some(password);
+    let mut key = None;
+    let mut cookies = Vec::new();
+    let mut skipped = 0;
+    let mut identities = std::collections::HashSet::new();
+    for (mut cookie, encrypted, partition) in rows {
+        if !partition.is_empty() || cookie.expires.is_some_and(|expires| expires <= now) {
+            skipped += 1;
+            continue;
+        }
+        if !encrypted.is_empty() {
+            if !cookie.value.is_empty() {
+                return Err("ChromeのCookieに矛盾する値があります".into());
+            }
+            let encrypted = encrypted
+                .strip_prefix(b"v10")
+                .ok_or("未対応のCookie暗号化方式です。取り込みは行いませんでした")?;
+            if key.is_none() {
+                let secret = Zeroizing::new(password.take().expect("key requested once")()?);
+                let mut derived = Zeroizing::new([0u8; 16]);
+                pbkdf2::pbkdf2_hmac::<sha1::Sha1>(&secret, b"saltysalt", 1003, derived.as_mut());
+                key = Some(derived);
+            }
+            let key = key.as_ref().expect("derived key");
+            let clear = Zeroizing::new(
+                cbc::Decryptor::<aes::Aes128>::new((&**key).into(), (&[b' '; 16]).into())
+                    .decrypt_padded_vec_mut::<Pkcs7>(encrypted)
+                    .map_err(|_| "ChromeのCookieを復号できません。取り込みは行いませんでした")?,
+            );
+            let value = if schema >= 24 {
+                if clear.len() < 32 || clear[..32] != Sha256::digest(cookie.domain.as_bytes())[..] {
+                    return Err(
+                        "ChromeのCookieのドメイン検証に失敗しました。取り込みは行いませんでした"
+                            .into(),
+                    );
+                }
+                &clear[32..]
+            } else {
+                &clear[..]
+            };
+            cookie.value = Zeroizing::new(
+                std::str::from_utf8(value)
+                    .map_err(|_| "ChromeのCookieの文字コードに対応していません")?
+                    .to_owned(),
+            );
+        }
+        if !matches!(cookie.same_site, -1..=2)
+            || cookie.domain.is_empty()
+            || !cookie.path.starts_with('/')
+            || cookie
+                .name
+                .bytes()
+                .any(|b| b <= 0x20 || b >= 0x7f || b"()<>@,;:\\\"/[]?={}".contains(&b))
+            || cookie
+                .value
+                .bytes()
+                .any(|b| b < 0x20 || b == 0x7f || b == b';')
+            || url::Host::parse(cookie.domain.trim_start_matches('.')).is_err()
+        {
+            return Err(
+                "ChromeのCookieに未対応の属性があります。取り込みは行いませんでした".into(),
+            );
+        }
+        if !identities.insert((
+            cookie.domain.clone(),
+            cookie.name.clone(),
+            cookie.path.clone(),
+        )) {
+            return Err(
+                "WebViewで区別できないCookieが重複しています。取り込みは行いませんでした".into(),
+            );
+        }
+        cookies.push(cookie);
+    }
+    Ok((cookies, skipped))
+}
+
+#[cfg(target_os = "macos")]
+fn native_chrome_cookie(
+    cookie: &ChromeCookie,
+) -> Result<objc2::rc::Retained<objc2_foundation::NSHTTPCookie>, String> {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::*;
+    // Preserve Chrome's leading dot: cookie::Cookie::domain() strips it and changes host scope.
+    unsafe {
+        let properties: objc2::rc::Retained<
+            NSMutableDictionary<NSHTTPCookiePropertyKey, AnyObject>,
+        > = NSMutableDictionary::from_slices(
+            &[
+                NSHTTPCookieName,
+                NSHTTPCookieValue,
+                NSHTTPCookieDomain,
+                NSHTTPCookiePath,
+            ],
+            &[
+                &*NSString::from_str(&cookie.name),
+                &*NSString::from_str(&cookie.value),
+                &*NSString::from_str(&cookie.domain),
+                &*NSString::from_str(&cookie.path),
+            ],
+        );
+        if cookie.secure {
+            properties.insert(NSHTTPCookieSecure, ns_string!("TRUE"));
+        }
+        if cookie.http_only {
+            properties.insert(ns_string!("HttpOnly"), ns_string!("TRUE"));
+        }
+        if let Some(expires) = cookie.expires {
+            properties.insert(
+                NSHTTPCookieExpires,
+                &*NSDate::dateWithTimeIntervalSince1970(expires as f64),
+            );
+        } else {
+            properties.insert(NSHTTPCookieDiscard, ns_string!("TRUE"));
+        }
+        match cookie.same_site {
+            0 => {
+                properties.insert(NSHTTPCookieSameSitePolicy, ns_string!("none"));
+            }
+            // WebKit interprets nil as unrestricted; preserve Chrome's Lax-by-default policy.
+            -1 | 1 => {
+                properties.insert(NSHTTPCookieSameSitePolicy, NSHTTPCookieSameSiteLax);
+            }
+            2 => {
+                properties.insert(NSHTTPCookieSameSitePolicy, NSHTTPCookieSameSiteStrict);
+            }
+            _ => {}
+        }
+        NSHTTPCookie::cookieWithProperties(&properties)
+            .ok_or_else(|| "WebViewに渡せないCookieがあります。取り込みは行いませんでした".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn install_chrome_cookies(
+    store: &objc2_web_kit::WKHTTPCookieStore,
+    cookies: Vec<ChromeCookie>,
+) -> Result<(), String> {
+    // Validate the whole batch before updating any existing browser cookie.
+    let native = cookies
+        .into_iter()
+        .map(|cookie| native_chrome_cookie(&cookie))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (tx, rx) = async_channel::unbounded();
+    for cookie in &native {
+        let tx = tx.clone();
+        unsafe {
+            store.setCookie_completionHandler(
+                cookie,
+                Some(&block2::RcBlock::new(move || {
+                    let _ = tx.try_send(());
+                })),
+            );
+        }
+        rx.recv()
+            .await
+            .map_err(|_| "Cookieの保存完了を確認できません")?;
+    }
+    let (tx, rx) = async_channel::bounded(1);
+    unsafe {
+        store.getAllCookies(&block2::RcBlock::new(
+            move |stored: std::ptr::NonNull<
+                objc2_foundation::NSArray<objc2_foundation::NSHTTPCookie>,
+            >| {
+                let identity = |cookie: &objc2_foundation::NSHTTPCookie| {
+                    (
+                        cookie.domain().to_string(),
+                        cookie.path().to_string(),
+                        cookie.name().to_string(),
+                    )
+                };
+                let stored: std::collections::HashMap<_, _> = stored
+                    .as_ref()
+                    .iter()
+                    .map(|cookie| (identity(&cookie), cookie))
+                    .collect();
+                let matches = native.iter().all(|expected| {
+                    stored.get(&identity(expected)).is_some_and(|actual| {
+                        actual.value() == expected.value()
+                            && actual.isHTTPOnly() == expected.isHTTPOnly()
+                            && actual.isSecure() == expected.isSecure()
+                            && actual.isSessionOnly() == expected.isSessionOnly()
+                            && actual.expiresDate() == expected.expiresDate()
+                            && actual.sameSitePolicy() == expected.sameSitePolicy()
+                    })
+                });
+                let _ = tx.try_send(matches);
+            },
+        ));
+    }
+    if !rx
+        .recv()
+        .await
+        .map_err(|_| "Cookieの保存結果を確認できません")?
+    {
+        return Err("一部のCookieを元の属性で保存できませんでした。保存済みのCookieもあります。再試行してください".into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod chrome_tests {
+    use rusqlite::Connection;
+
+    pub(super) fn fixture() -> (tempfile::TempDir, Connection) {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Connection::open(directory.path().join("Cookies")).unwrap();
+        db.execute_batch(include_str!("../tests/fixtures/chrome-cookies.sql"))
+            .unwrap();
+        (directory, db)
+    }
+    pub(super) fn password() -> Result<Vec<u8>, String> {
+        Ok(b"fixture-password".to_vec())
+    }
+
+    #[test]
+    fn decrypts_chrome_v24_and_preserves_native_cookie_attributes() {
+        use super::{native_chrome_cookie, read_chrome_cookies};
+        let (directory, db) = fixture();
+        let original = std::fs::read(directory.path().join("Cookies")).unwrap();
+        let (cookies, skipped) =
+            read_chrome_cookies(directory.path(), 1_700_000_000, password).unwrap();
+        assert_eq!((cookies.len(), skipped), (1, 0));
+        let cookie = &cookies[0];
+        assert_eq!(&**cookie.value, "fixture-login");
+        assert_eq!(cookie.expires, Some(1_800_000_000));
+        let native = native_chrome_cookie(cookie).unwrap();
+        assert_eq!(native.domain().to_string(), ".example.test");
+        assert_eq!(native.name().to_string(), "login");
+        assert_eq!(native.value().to_string(), "fixture-login");
+        assert_eq!(native.path().to_string(), "/account");
+        assert!(native.isHTTPOnly());
+        assert!(native.isSecure());
+        assert!(!native.isSessionOnly());
+        assert_eq!(native.sameSitePolicy().unwrap().to_string(), "lax");
+        assert_eq!(
+            native.expiresDate().unwrap().timeIntervalSince1970(),
+            1_800_000_000.0
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("Cookies")).unwrap(),
+            original
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM cookies", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn reads_committed_wal_session_cookies_without_reading_keychain_or_uncommitted_rows() {
+        use super::{native_chrome_cookie, read_chrome_cookies};
+        let (directory, db) = fixture();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            UPDATE cookies SET value='session', encrypted_value=X'', host_key='example.test',
+            has_expires=0, is_persistent=0, expires_utc=0, is_secure=0, is_httponly=0, samesite=2;
+            BEGIN IMMEDIATE; UPDATE cookies SET value='uncommitted';",
+        )
+        .unwrap();
+        let (cookies, skipped) = read_chrome_cookies(directory.path(), 1_900_000_000, || {
+            panic!("plaintext needs no Keychain")
+        })
+        .unwrap();
+        assert_eq!((cookies.len(), skipped), (1, 0));
+        let native = native_chrome_cookie(&cookies[0]).unwrap();
+        assert_eq!(native.value().to_string(), "session");
+        assert_eq!(native.domain().to_string(), "example.test");
+        assert!(!native.isHTTPOnly());
+        assert!(!native.isSecure());
+        assert!(native.isSessionOnly());
+        assert!(native.expiresDate().is_none());
+        assert_eq!(native.sameSitePolicy().unwrap().to_string(), "strict");
+        db.execute_batch("ROLLBACK;").unwrap();
+    }
+
+    #[test]
+    fn supports_v23_ciphertext_and_empty_values_and_samesite_none() {
+        use super::{native_chrome_cookie, read_chrome_cookies};
+        let (directory, db) = fixture();
+        db.execute_batch("UPDATE meta SET value='23' WHERE key='version';
+            UPDATE cookies SET encrypted_value=X'7631309d53da233d3900ecc985316cd65cae4a', samesite=0;").unwrap();
+        let (cookies, _) = read_chrome_cookies(directory.path(), 0, password).unwrap();
+        assert_eq!(&**cookies[0].value, "fixture-login");
+        // Foundation represents unrestricted cookies as nil, which WebKit maps to None.
+        assert!(
+            native_chrome_cookie(&cookies[0])
+                .unwrap()
+                .sameSitePolicy()
+                .is_none()
+        );
+        db.execute_batch("UPDATE cookies SET encrypted_value=X'', value='', samesite=-1;")
+            .unwrap();
+        let (cookies, _) =
+            read_chrome_cookies(directory.path(), 0, || panic!("empty plaintext")).unwrap();
+        assert_eq!(cookies.len(), 1);
+        assert!(cookies[0].value.is_empty());
+        assert_eq!(
+            native_chrome_cookie(&cookies[0])
+                .unwrap()
+                .sameSitePolicy()
+                .unwrap()
+                .to_string(),
+            "lax"
+        );
+    }
+
+    #[test]
+    fn excludes_expired_and_partitioned_cookies_without_decrypting_them() {
+        use super::read_chrome_cookies;
+        let (directory, db) = fixture();
+        let (cookies, skipped) =
+            read_chrome_cookies(directory.path(), 1_800_000_000, || panic!("expired")).unwrap();
+        assert!(cookies.is_empty());
+        assert_eq!(skipped, 1);
+        db.execute_batch("UPDATE cookies SET top_frame_site_key='https://other.test';")
+            .unwrap();
+        let (cookies, skipped) =
+            read_chrome_cookies(directory.path(), 0, || panic!("partitioned")).unwrap();
+        assert!(cookies.is_empty());
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn rejects_wrong_key_domain_hash_and_unknown_format_without_exposing_values() {
+        use super::read_chrome_cookies;
+        let (directory, db) = fixture();
+        for password in [b"wrong".to_vec(), Vec::new()] {
+            let error = read_chrome_cookies(directory.path(), 0, || Ok(password))
+                .err()
+                .unwrap();
+            assert!(!error.contains("fixture-login"));
+        }
+        db.execute_batch("UPDATE cookies SET host_key='.elsewhere.test';")
+            .unwrap();
+        assert!(
+            read_chrome_cookies(directory.path(), 0, password)
+                .err()
+                .unwrap()
+                .contains("ドメイン検証")
+        );
+        db.execute_batch("UPDATE cookies SET encrypted_value=X'763230001122';")
+            .unwrap();
+        assert!(read_chrome_cookies(directory.path(), 0, || panic!("unknown cipher")).is_err());
+        db.execute_batch("UPDATE meta SET value='25' WHERE key='version';")
+            .unwrap();
+        assert!(read_chrome_cookies(directory.path(), 0, || panic!("unknown schema")).is_err());
+    }
+
+    #[test]
+    fn can_retry_after_denied_keychain_and_missing_database() {
+        use super::read_chrome_cookies;
+        let directory = tempfile::tempdir().unwrap();
+        assert!(read_chrome_cookies(directory.path(), 0, password).is_err());
+        assert!(!directory.path().join("Cookies").exists());
+        let db = Connection::open(directory.path().join("Cookies")).unwrap();
+        db.execute_batch(include_str!("../tests/fixtures/chrome-cookies.sql"))
+            .unwrap();
+        assert_eq!(
+            read_chrome_cookies(directory.path(), 0, || Err("denied".into()))
+                .err()
+                .unwrap(),
+            "denied"
+        );
+        let (cookies, skipped) = read_chrome_cookies(directory.path(), 0, password).unwrap();
+        assert_eq!((cookies.len(), skipped), (1, 0));
+    }
+
+    #[test]
+    fn lists_named_profiles_with_both_cookie_locations_and_rejects_path_traversal() {
+        use super::chrome_profiles;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("Default/Network")).unwrap();
+        std::fs::create_dir_all(directory.path().join("Profile 2")).unwrap();
+        std::fs::write(directory.path().join("Default/Network/Cookies"), []).unwrap();
+        std::fs::write(directory.path().join("Profile 2/Cookies"), []).unwrap();
+        std::fs::write(directory.path().join("Local State"), r#"{"profile":{"info_cache":{"Default":{"name":"個人用"},"Profile 2":{"name":"仕事用"},"Missing":{"name":"removed"},"../escape":{"name":"invalid"}}}}"#).unwrap();
+        let profiles = chrome_profiles(directory.path()).unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles[0],
+            ("個人用 (Default)".into(), directory.path().join("Default"))
+        );
+        assert_eq!(
+            profiles[1],
+            (
+                "仕事用 (Profile 2)".into(),
+                directory.path().join("Profile 2")
+            )
+        );
+        std::fs::write(directory.path().join("Local State"), "broken").unwrap();
+        assert!(chrome_profiles(directory.path()).is_err());
     }
 }
