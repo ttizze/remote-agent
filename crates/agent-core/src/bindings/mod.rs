@@ -85,8 +85,43 @@ impl AgentStore {
     }
 
     pub async fn reconnect(&self, connection: Connection) -> Result<(), AgentError> {
-        self.store.disconnect().await.map_err(error)?;
         let secret = Zeroizing::new(connection.identity);
+        let snapshot = self.store.snapshot();
+        if snapshot.connected() {
+            use crate::{peer::PeerError, state::operations as op};
+            let list = self
+                .store
+                .dispatch(Intent::ListThreads(op::ListThreads::new(
+                    (*snapshot.list_query).clone(),
+                )));
+            let history = async {
+                if let Some(id) = &snapshot.navigation.thread_id {
+                    self.store
+                        .dispatch(Intent::ReadThread(op::ReadThread::new(id.clone())))
+                        .await?;
+                }
+                Ok(Outcome::Applied)
+            };
+            let (list, history) = tokio::join!(list, history);
+            let errors = [list.err(), history.err()];
+            if !errors
+                .iter()
+                .flatten()
+                .any(|error| matches!(error, PeerError::ConnectionClosed(_)))
+            {
+                // Navigation can supersede an in-flight refresh and its errors.
+                return if self.store.snapshot().epoch != snapshot.epoch {
+                    Ok(())
+                } else {
+                    errors
+                        .into_iter()
+                        .flatten()
+                        .next()
+                        .map_or(Ok(()), |failure| Err(error(failure)))
+                };
+            }
+        }
+        self.store.disconnect().await.map_err(error)?;
         let bytes = Zeroizing::new(
             <[u8; 32]>::try_from(secret.as_slice())
                 .map_err(|_| error("identity must contain 32 bytes"))?,
@@ -196,7 +231,8 @@ mod tests {
         use crate::peer::{JsonlReader, JsonlWriter};
         use crate::transport::Trust;
         use serde_json::{Value, json};
-        tokio::time::timeout(Duration::from_secs(10), async {
+        for recovery in ["disconnected", "closed", "silent"] {
+            tokio::time::timeout(Duration::from_secs(40), async {
             let identity = Identity::generate();
             let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
             let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
@@ -230,6 +266,12 @@ mod tests {
             }
             assert_eq!(methods, ["host/thread/list", "host/thread/read", "model/list"].map(str::to_owned).into());
             let server = async {
+                if recovery != "disconnected" {
+                    for _ in 0..2 {
+                        assert!(old.read_line().await.unwrap().is_some());
+                    }
+                    if recovery == "closed" { first.close(); }
+                }
                 assert!(!matches!(old.read_line().await, Ok(Some(_))));
                 let next = host.accept().await.unwrap().unwrap().authorize(&trust).unwrap();
                 let (read, write) = tokio::io::split(next.accept_stream().await.unwrap());
@@ -256,6 +298,7 @@ mod tests {
                 next.close();
             };
             let client = async {
+                if recovery == "disconnected" { store.store.disconnect().await.unwrap(); }
                 store.reconnect(connection()).await.unwrap();
                 let mut updates = store.store.subscribe();
                 loop {
@@ -267,6 +310,8 @@ mod tests {
                     updates.changed().await.unwrap();
                 }
                 let snapshot = store.store.snapshot();
+                assert!(snapshot.connected());
+                assert!(snapshot.error.is_none());
                 assert_eq!(snapshot.navigation.thread_id.as_deref(), Some("thread"));
                 assert!(snapshot.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_deref() == Some("thread")));
                 assert_eq!(snapshot.conversations["thread"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref(), Some("after reconnect"));
@@ -277,5 +322,83 @@ mod tests {
             tokio::join!(server, client);
             first.close(); host.close().await;
         }).await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn connected_refresh_retains_transport_navigation_and_draft_after_error() {
+        use crate::peer::{JsonlReader, JsonlWriter};
+        use crate::transport::Trust;
+        use serde_json::{Value, json};
+        for selected in [false, true] {
+            tokio::time::timeout(Duration::from_secs(40), async {
+                let identity = Identity::generate();
+                let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
+                let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+                let connection = || Connection { ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(), invitation: None, use_relays: false };
+                let cached = Snapshot {
+                    navigation: Arc::new(crate::state::Navigation { thread_id: selected.then(|| "thread".into()), draft_key: "thread".into(), ..Default::default() }),
+                    ..Default::default()
+                };
+                let store = AgentStore::offline(serde_json::to_vec(&cached).unwrap()).await.unwrap();
+                let (connected, incoming) = tokio::join!(store.reconnect(connection()), host.accept());
+                connected.unwrap();
+                let session = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+                let (read, write) = tokio::io::split(session.accept_stream().await.unwrap());
+                let mut reader = JsonlReader::new(read);
+                let mut writer = JsonlWriter::new(write);
+                assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+                let server = async {
+                    for round in 0..(3 + usize::from(selected)) {
+                        let mut requests = Vec::new();
+                        for _ in 0..(1 + usize::from(selected) + usize::from(round == 0)) {
+                            requests.push(serde_json::from_str::<Value>(&reader.read_line().await.unwrap().expect("refresh must retain the existing stream")).unwrap());
+                        }
+                        for request in requests {
+                            let result = match request["method"].as_str().unwrap() {
+                                "host/thread/list" => json!({"data":[{"id":"thread","name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                                "host/thread/read" => json!({"thread":{"id":"thread","turns":[]}}),
+                                "model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
+                                method => panic!("unexpected refresh request {method}"),
+                            };
+                            if round == 2 && selected && request["method"] == "host/thread/read" { continue; }
+                            let response = if round == 1 && request["method"] == "host/thread/list" {
+                                json!({"id":request["id"],"error":{"code":-32000,"message":"temporary read error"}})
+                            } else { json!({"id":request["id"],"result":result}) };
+                            writer.write_line(&response.to_string()).await.unwrap();
+                        }
+                    }
+                    assert!(!matches!(reader.read_line().await, Ok(Some(_))));
+                };
+                let client = async {
+                    let mut updates = store.store.subscribe();
+                    loop {
+                        let ready = { let snapshot = updates.borrow_and_update(); snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
+                        if ready { break; }
+                        updates.changed().await.unwrap();
+                    }
+                    store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "preserved".into() }).unwrap().wait().await.unwrap();
+                    let before = store.snapshot();
+                    assert!(store.reconnect(connection()).await.is_err());
+                    assert!(store.snapshot().connected());
+                    assert!(store.snapshot().error.as_ref().unwrap().contains("temporary read error"));
+                    if selected {
+                        assert!(store.reconnect(connection()).await.unwrap_err().to_string().contains("timed out"));
+                        assert!(store.snapshot().connected());
+                    }
+                    store.reconnect(connection()).await.unwrap();
+                    let after = store.snapshot();
+                    assert!(after.connected());
+                    assert!(after.error.is_none());
+                    assert_eq!(after.epoch, before.epoch);
+                    assert_eq!(after.navigation, before.navigation);
+                    assert_eq!(after.drafts["thread"].text, "preserved");
+                    assert_eq!(after.threads.as_ref().unwrap().data[0].name.as_deref(), Some(if selected { "round 3" } else { "round 2" }));
+                    store.shutdown().await.unwrap();
+                };
+                tokio::join!(server, client);
+                session.close();
+                host.close().await;
+            }).await.unwrap();
+        }
     }
 }

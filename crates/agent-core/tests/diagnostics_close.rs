@@ -14,14 +14,15 @@ async fn expected_close_is_quiet_but_disconnects_and_timeouts_are_retained() {
         "test-application",
     )
     .unwrap();
-    for cause in ["intentional", "eof", "timeout"] {
+    for cause in ["intentional", "eof", "timeout", "silent"] {
         let (client, server) = tokio::io::duplex(8192);
+        let (server, mut server_writer) = tokio::io::split(server);
         let (reader, writer) = tokio::io::split(client);
         let peer = Arc::new(
             RpcPeer::open(
                 JsonlReader::new(reader),
                 writer,
-                Some(if cause == "timeout" {
+                Some(if matches!(cause, "timeout" | "silent") {
                     Duration::from_millis(200)
                 } else {
                     Duration::from_secs(2)
@@ -40,11 +41,19 @@ async fn expected_close_is_quiet_but_disconnects_and_timeouts_are_retained() {
             .unwrap()
             .unwrap()
             .unwrap();
+        if cause == "timeout" {
+            use tokio::io::AsyncWriteExt;
+            server_writer
+                .write_all(b"{\"method\":\"progress\",\"params\":{}}\n")
+                .await
+                .unwrap();
+        }
         if cause == "intentional" {
             peer.close().await.unwrap();
         }
         if cause == "eof" {
             drop(server);
+            drop(server_writer);
         }
         let error = tokio::time::timeout(Duration::from_secs(3), request)
             .await
@@ -78,6 +87,7 @@ async fn expected_close_is_quiet_but_disconnects_and_timeouts_are_retained() {
         [
             ("eof", "JSONL stream reached EOF"),
             ("timeout", "RPC request timed out waiting for response"),
+            ("silent", "no peer traffic before silent timed out"),
         ]
     );
 }

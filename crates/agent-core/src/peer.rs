@@ -105,6 +105,7 @@ struct Pending {
     complete: oneshot::Sender<Result<Reply<String>, PeerError>>,
 }
 struct State {
+    sequence: u64,
     pending: HashMap<u64, Pending>,
     closed: Option<String>,
     events: Option<broadcast::Sender<PeerEvent>>,
@@ -145,6 +146,7 @@ impl RpcPeer {
         }
         let (events, initial) = broadcast::channel(QUEUE_CAPACITY);
         let state = Arc::new(Mutex::new(State {
+            sequence: 0,
             pending: HashMap::new(),
             closed: None,
             events: Some(events),
@@ -267,7 +269,7 @@ impl RpcPeer {
             },
         };
         let (tx, mut rx) = oneshot::channel();
-        {
+        let received = {
             let mut state = self.state.lock().unwrap();
             if let Some(reason) = &state.closed {
                 let error = PeerError::ConnectionClosed(reason.clone());
@@ -282,7 +284,8 @@ impl RpcPeer {
                     complete: tx,
                 },
             );
-        }
+            state.sequence
+        };
         let _cleanup = scopeguard::guard((&self.state, id), |(state, id)| {
             state.lock().unwrap().pending.remove(&id);
         });
@@ -299,10 +302,23 @@ impl RpcPeer {
                 let error = match failure {
                     Ok(Err(error)) => error,
                     Err(_) => {
-                        crate::diagnostics::error(
-                            &method,
-                            "RPC request timed out waiting for response",
-                        );
+                        // Other replies or notifications prove the connection still works.
+                        // A silent peer must release Store so clients can reconnect.
+                        if self.state.lock().unwrap().sequence == received {
+                            terminate(
+                                &self.state,
+                                &self.permits,
+                                &self.stop,
+                                Termination::Failed(format!(
+                                    "no peer traffic before {method} timed out"
+                                )),
+                            );
+                        } else {
+                            crate::diagnostics::error(
+                                &method,
+                                "RPC request timed out waiting for response",
+                            );
+                        }
                         PeerError::RequestTimeout { method, id }
                     }
                     _ => unreachable!(),
@@ -476,7 +492,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
     permits: Arc<Semaphore>,
     stop: CancellationToken,
 ) {
-    let mut sequence = 0u64;
     let reason = loop {
         let line = tokio::select! {
             _ = stop.cancelled() => break Termination::Requested,
@@ -489,15 +504,16 @@ async fn read_loop<R: AsyncRead + Unpin>(
             Ok(message) => message,
             Err(error) => break Termination::Failed(error.to_string()),
         };
-        sequence += 1;
+        let mut received = state.lock().unwrap();
+        received.sequence += 1;
+        let sequence = received.sequence;
         if message.kind() == RpcMessageKind::Response {
             let id = message
                 .raw_id()
                 .and_then(|id| serde_json::from_str::<u64>(id).ok());
             let pending = {
-                let mut state = state.lock().unwrap();
-                let pending = id.and_then(|id| state.pending.remove(&id));
-                if let Some(events) = &state.events {
+                let pending = id.and_then(|id| received.pending.remove(&id));
+                if let Some(events) = &received.events {
                     let _ = events.send(PeerEvent::Response {
                         sequence,
                         request_id: id,
@@ -506,6 +522,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 }
                 pending
             };
+            drop(received);
             if let Some(pending) = pending {
                 if let Some(error) = message.raw_error() {
                     crate::diagnostics::rpc_error(&pending.method, id, error);
@@ -522,8 +539,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
         } else {
             crate::diagnostics::notification(&message);
-            let state = state.lock().unwrap();
-            if let Some(events) = &state.events {
+            if let Some(events) = &received.events {
                 let _ = events.send(PeerEvent::Message(Reply {
                     sequence,
                     value: Arc::from(line.as_str()),
@@ -885,26 +901,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_removes_pending_request() {
-        let (client_io, server_io) = duplex(32 * 1024);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (server_reader, _server_writer) = tokio::io::split(server_io);
-        let peer = Arc::new(
-            RpcPeer::open(
+    async fn timeout_closes_only_a_silent_peer() {
+        for traffic in [false, true] {
+            let (client_io, server_io) = duplex(32 * 1024);
+            let (client_reader, client_writer) = tokio::io::split(client_io);
+            let (server_reader, mut server_writer) = tokio::io::split(server_io);
+            let peer = RpcPeer::open(
                 JsonlReader::new(client_reader),
                 client_writer,
-                Some(Duration::from_millis(10)),
-                1024,
+                Some(Duration::from_millis(50)),
+                1,
             )
-            .unwrap(),
-        );
-        let mut lines = BufReader::new(server_reader);
-        let error = peer
-            .request_raw(r#"{"id":"timeout","method":"blocked","params":{}}"#)
-            .await
-            .unwrap_err();
-        let _ = read_line(&mut lines).await;
-        assert!(matches!(error, Error::RequestTimeout { method, .. } if method == "blocked"));
+            .unwrap();
+            let mut events = peer.subscribe();
+            let mut lines = BufReader::new(server_reader);
+            let server = async {
+                let _ = read_line(&mut lines).await;
+                if traffic {
+                    server_writer
+                        .write_all(b"{\"method\":\"progress\",\"params\":{}}\n")
+                        .await
+                        .unwrap();
+                }
+            };
+            let (result, ()) =
+                tokio::join!(peer.request_raw(r#"{"id":1,"method":"blocked"}"#), server);
+            assert!(peer.state.lock().unwrap().pending.is_empty());
+            if traffic {
+                assert!(matches!(result, Err(Error::RequestTimeout { .. })));
+                assert!(peer.state.lock().unwrap().closed.is_none());
+                let server = async {
+                    let request: Value =
+                        serde_json::from_str(&read_line(&mut lines).await).unwrap();
+                    server_writer
+                        .write_all(
+                            format!("{{\"id\":{},\"result\":{{}}}}\n", request["id"]).as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                };
+                let (result, ()) =
+                    tokio::join!(peer.request_raw(r#"{"id":2,"method":"retry"}"#), server);
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(Error::ConnectionClosed(_))));
+                assert!(matches!(events.try_recv().unwrap(), PeerEvent::Closed(_)));
+            }
+            peer.close().await.unwrap();
+        }
     }
 
     #[tokio::test]

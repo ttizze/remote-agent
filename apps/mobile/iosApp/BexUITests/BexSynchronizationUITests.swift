@@ -157,12 +157,14 @@ extension BexLaunchUITests {
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         composer.tap(); composer.typeText("Keep this foreground draft")
         XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
         try simulatorFixture("background-reply")
         app.activate()
         XCTAssertTrue(detail.waitForExistence(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)["item.fixture-external-final"].waitForExistence(timeout: 20),
                       "Foreground return did not fetch the conversation changed by another client")
         XCTAssertEqual(composer.value as? String, "Keep this foreground draft")
+        XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Latest conversation fetched on foreground")
     }
 
@@ -172,6 +174,7 @@ extension BexLaunchUITests {
         #endif
         let app = try connectedSimulatorApp()
         XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
         let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
         let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
         let identifier = try XCTUnwrap(created?["threadId"])
@@ -179,6 +182,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.descendants(matching: .any)["tasks.row.\(identifier)"].waitForExistence(timeout: 20),
                       "Foreground return did not fetch the conversation created by another client")
+        XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "New conversation fetched on foreground")
     }
 

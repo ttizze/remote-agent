@@ -23,6 +23,7 @@ impl Operation for ListThreads {
         self.query != *snapshot.list_query
     }
     fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+        snapshot.error = None;
         snapshot.list_query = Arc::new(self.query.clone());
         Ok(())
     }
@@ -150,8 +151,8 @@ impl Operation for ReadThread {
                 .cloned()
                 .unwrap_or_default();
             select_thread(snapshot, self.thread_id.clone(), cwd);
-            snapshot.error = None;
         }
+        snapshot.error = None;
         Ok(())
     }
     const ORDERED: bool = true;

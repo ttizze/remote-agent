@@ -253,16 +253,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    fun connect(force: Boolean = false) {
+    fun connect() {
         val store = owner
         val profile = profiles.firstOrNull { it.id == profileId }
         if (store == null || profile == null || busy) return
-        notice = null
-        if (!force && snapshot.connected()) {
-            refresh()
-            snapshot.navigation().threadId?.let { perform(Intent.ReadThread(ReadThread(it))) }
-            return
-        }
         busy = true
         connection = scope.launch {
             try {
@@ -277,6 +271,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 if (profileId != profile.id) return@launch
                 publish(store.snapshot())
+                notice = snapshot.error()
                 busy = false
             } catch (error: AgentException) {
                 connectionFailed(profile.id, error)
@@ -306,6 +301,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 if (profileId != id) return@launch
                 val latest = store.snapshot()
                 publish(latest)
+                if (previous.connected() && !latest.connected() && !busy) connect()
                 previous = latest
             }
         }
@@ -369,7 +365,7 @@ internal fun RemoteAgentApp(
     requestQrScan: ((onContents: (String) -> Unit) -> Unit)?,
 ) {
     DisposableEffect(model, activity) {
-        val observer = AndroidConnectionLifecycle({ model.connect(force = true) }, model::persist)
+        val observer = AndroidConnectionLifecycle(model::connect, model::persist)
         activity.lifecycle.addObserver(observer)
         onDispose { activity.lifecycle.removeObserver(observer) }
     }

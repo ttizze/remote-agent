@@ -191,19 +191,11 @@ final class BexAppViewModel: ObservableObject {
         } catch { pairingError = error.localizedDescription }
     }
 
-    func connect(force: Bool = false) {
+    func connect() {
         guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
               !isConnecting else { return }
-        if !force, snapshot.connected() {
-            refreshTaskList()
-            if let id = snapshot.navigation().threadId {
-                perform(.readThread(ReadThread(threadId: id)))
-            }
-            return
-        }
         isConnecting = true
         connectionError = nil
-        notice = nil
         connection = Task { [weak self] in
             do {
                 try await owner.reconnect(connection: Connection(ticket: profile.ticket,
@@ -211,11 +203,13 @@ final class BexAppViewModel: ObservableObject {
                                                                  invitation: nil, useRelays: true))
                 guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
                 publish(owner.snapshot())
+                notice = snapshot.error()
                 isConnecting = false
             } catch {
                 guard self?.selectedProfileId == profile.id else { return }
                 self?.isConnecting = false
                 self?.connectionError = error.localizedDescription
+                self?.notice = error.localizedDescription
             }
         }
     }
@@ -343,9 +337,5 @@ extension BexAppViewModel {
         }
         persist()
         await persistenceWrite?.value
-    }
-
-    func restoreAfterForeground() {
-        connect(force: true)
     }
 }

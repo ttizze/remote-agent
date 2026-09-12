@@ -4,6 +4,8 @@
 
 - Open iPhone change summaries in a tabbed Changes/All Files sheet. Show per-file diff cards with line numbers, wrapping, and addition/deletion backgrounds, reusing the desktop Git patch parser from core. Closing returns to the conversation.
 
+- Share mobile foreground refresh and recovery in agent-core: retain live connections, reconnect after a disconnect or a request deadline with no incoming RPC traffic, and preserve individual request timeouts while other replies or notifications arrive. Clear stale notices after successful recovery. Verify retained navigation and drafts, refresh retries on the same transport, disconnected/silent transport recovery with real iroh sessions, and foreground list/history refresh in iOS Simulator.
+
 - Match saved project roots through filesystem aliases when assigning worktree conversations, including macOS `/var` and `/private/var` paths.
 
 - Preserve individual history occurrences when turn IDs repeat, so opening a conversation keeps both responses visible instead of duplicating and collapsing their contents.
