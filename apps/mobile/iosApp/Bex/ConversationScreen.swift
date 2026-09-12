@@ -23,7 +23,7 @@ struct ThreadScreen: View {
     @State var historyRequestPending = false
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
-    @State var opensDiff = false
+    @State var showingDiff = false
     @FocusState var composerFocused: Bool
 
     var review: WorkspaceReviewSummary? {
@@ -193,7 +193,7 @@ struct ThreadScreen: View {
                 }
             },
             content: {
-                WorkspaceSheet(model: model, root: model.cwd, opensDiff: opensDiff)
+                WorkspaceSheet(model: model, root: model.cwd, showingDiff: $showingDiff)
             }
         )
         .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
@@ -252,10 +252,10 @@ extension ThreadScreen {
                 Image(systemName: "square.and.pencil").font(.title2).frame(width: 44, height: 44)
             }.accessibilityLabel("新しい会話").accessibilityIdentifier("task.new")
             Menu {
-                Button { opensDiff = false; showingFiles = true } label: {
+                Button { showingDiff = false; showingFiles = true } label: {
                     Label("ファイル", systemImage: "folder")
                 }.accessibilityIdentifier("task.files")
-                Button { opensDiff = true; showingFiles = true } label: {
+                Button { showingDiff = true; showingFiles = true } label: {
                     Label("変更を表示", systemImage: "plus.forwardslash.minus")
                 }
                 Button {

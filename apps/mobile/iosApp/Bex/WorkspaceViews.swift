@@ -20,14 +20,31 @@ private struct SharedFile: Identifiable {
 struct WorkspaceSheet: View {
     @ObservedObject var model: BexAppViewModel
     let root: String
-    var opensDiff = false
+    @Binding var showingDiff: Bool
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationView {
-            WorkspaceDirectoryScreen(model: model, root: root, directory: root, opensDiff: opensDiff) { dismiss() }
+        VStack(spacing: 0) {
+            HStack {
+                Text("作業中の変更").font(.headline)
+                Spacer()
+                Button("閉じる") { dismiss() }.accessibilityIdentifier("files.close")
+            }.padding()
+            Picker("表示", selection: $showingDiff) {
+                Text("変更済み").tag(true).accessibilityIdentifier("files.diff")
+                Text("すべてのファイル").tag(false).accessibilityIdentifier("files.all")
+            }
+            .pickerStyle(.segmented).padding(.horizontal).padding(.bottom)
+            Divider()
+            if showingDiff {
+                WorkspaceDiffScreen(model: model, root: root)
+            } else {
+                NavigationView {
+                    WorkspaceDirectoryScreen(model: model, root: root, directory: root) { dismiss() }
+                }.navigationViewStyle(StackNavigationViewStyle())
+            }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
+        .background(Color(uiColor: .systemGroupedBackground))
     }
 }
 
@@ -35,7 +52,6 @@ private struct WorkspaceDirectoryScreen: View {
     @ObservedObject var model: BexAppViewModel
     let root: String
     let directory: String
-    var opensDiff = false
     let close: () -> Void
     @State private var destinationPath: String?
     @State private var path = ""
@@ -43,8 +59,6 @@ private struct WorkspaceDirectoryScreen: View {
     @State private var error: String?
     @State private var busy = false
     @State private var selected: WorkspaceEntry?
-    @State private var diff: [String] = []
-    @State private var showingDiff = false
     @State private var sharedFile: SharedFile?
 
     var body: some View {
@@ -108,21 +122,9 @@ private struct WorkspaceDirectoryScreen: View {
         )
         .navigationTitle(directory == root ? "ファイル" : URL(fileURLWithPath: directory).lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("閉じる", action: close).accessibilityIdentifier("files.close")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button("差分") {
-                    loadDiff()
-                }.accessibilityIdentifier("files.diff")
-            }
-        }
         .onAppear {
             if path.isEmpty {
-                load(directory); if opensDiff {
-                    loadDiff()
-                }
+                load(directory)
             }
         }
         .sheet(item: $selected) { entry in
@@ -132,38 +134,8 @@ private struct WorkspaceDirectoryScreen: View {
                 close()
             }
         }
-        .sheet(isPresented: $showingDiff) {
-            NavigationView {
-                ScrollView([.horizontal, .vertical]) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(diff.enumerated()), id: \.offset) { _, line in
-                            Text(line.isEmpty ? " " : line).font(.caption.monospaced())
-                                .foregroundColor(line.hasPrefix("+") ? .green : line.hasPrefix("-") ? .red : .primary)
-                                .textSelection(.enabled)
-                        }
-                    }.padding()
-                }
-                .navigationTitle("作業中の差分")
-                .toolbar {
-                    Button("閉じる") { showingDiff = false }.accessibilityIdentifier("files.diff.close")
-                }
-            }
-        }
         .sheet(item: $sharedFile, onDismiss: cleanupDownload) { item in
             FileShareSheet(url: item.url)
-        }
-    }
-
-    private func loadDiff() {
-        busy = true; error = nil
-        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) { result in
-            busy = false
-            if case let .failure(failure) = result {
-                error = failure.localizedDescription; return
-            }
-            if let value = model.snapshot.review() {
-                diff = value.diff().components(separatedBy: "\n"); showingDiff = true
-            }
         }
     }
 
@@ -199,6 +171,110 @@ private struct WorkspaceDirectoryScreen: View {
             try? FileManager.default.removeItem(at: directory)
         }
         sharedFile = nil
+    }
+}
+
+private struct WorkspaceDiffScreen: View {
+    @ObservedObject var model: BexAppViewModel
+    let root: String
+    @State private var files: [WorkspaceDiffFile] = []
+    @State private var error: String?
+    @State private var busy = true
+
+    var body: some View {
+        Group {
+            if busy {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let error {
+                VStack {
+                    BexNotice(text: error).padding()
+                    Button("再試行", action: loadDiff).accessibilityIdentifier("files.diff.retry")
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if files.isEmpty {
+                Text("変更はありません").foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 16) {
+                        ForEach(files, id: \.path) { file in
+                            WorkspaceDiffCard(file: file)
+                        }
+                    }.padding(12)
+                }
+            }
+        }
+        .onAppear(perform: loadDiff)
+    }
+
+    private func loadDiff() {
+        busy = true; error = nil
+        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) { result in
+            busy = false
+            if case let .failure(failure) = result {
+                error = model.snapshot.error() ?? failure.localizedDescription
+                if model.notice == error {
+                    model.notice = nil
+                }
+                return
+            }
+            guard let review = model.snapshot.review() else {
+                error = "差分を取得できませんでした。再試行してください。"; return
+            }
+            files = review.diffFiles()
+        }
+    }
+}
+
+private struct WorkspaceDiffCard: View {
+    let file: WorkspaceDiffFile
+    @State private var expanded = true
+
+    var body: some View {
+        LazyVStack(spacing: 0) {
+            Button { expanded.toggle() } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    Text(file.path).fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
+                    if let additions = file.additions {
+                        Text("+\(additions)").foregroundColor(.green)
+                    }
+                    if let deletions = file.deletions {
+                        Text("−\(deletions)").foregroundColor(.red)
+                    }
+                }.font(.subheadline).padding(12).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("diff.file.\(file.path)")
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            if expanded {
+                if file.rows.isEmpty {
+                    Text("テキスト差分はありません").font(.caption).foregroundColor(.secondary).padding()
+                }
+                ForEach(file.rows.indices, id: \.self) { index in
+                    let row = file.rows[index]
+                    HStack(alignment: .top, spacing: 0) {
+                        if row.kind == "+" || row.kind == "-" || row.kind == " " {
+                            Text((row.new ?? row.old).map(String.init) ?? "")
+                                .foregroundColor(.secondary).frame(width: 40, alignment: .trailing).padding(
+                                    .trailing,
+                                    8
+                                )
+                        }
+                        Text(row.text.isEmpty ? " " : row.text)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    .font(.system(.footnote, design: .monospaced))
+                    .padding(.vertical, 3).padding(.horizontal, 8)
+                    .background(row.kind == "+" ? Color.green.opacity(0.18) :
+                        row.kind == "-" ? Color.red.opacity(0.18) :
+                        row.kind == "@" ? Color.secondary.opacity(0.12) : Color.clear)
+                }
+            }
+        }
+        .background(Color(uiColor: .systemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
 

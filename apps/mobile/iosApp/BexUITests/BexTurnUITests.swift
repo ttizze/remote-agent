@@ -228,9 +228,10 @@ extension BexLaunchUITests {
         XCTAssertTrue(editor.waitForExistence(timeout: 10))
         XCTAssertTrue((editor.value as? String ?? "").contains("Saved from iPhone"))
         app.buttons["file.close"].tap()
-        app.buttons["files.diff"].tap()
-        XCTAssertTrue(app.staticTexts["作業中の差分"].waitForExistence(timeout: 10))
-        app.buttons["files.diff.close"].tap()
+        app.buttons["変更済み"].tap()
+        let savedDiff = app.staticTexts
+            .matching(NSPredicate(format: "label BEGINSWITH '+' AND label CONTAINS 'Saved from iPhone'")).firstMatch
+        XCTAssertTrue(savedDiff.waitForExistence(timeout: 10))
         app.buttons["files.close"].tap()
         XCTAssertEqual(message.value as? String, "Keep this draft")
 

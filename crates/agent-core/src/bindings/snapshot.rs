@@ -204,7 +204,4 @@ impl WorkspaceReview {
     pub fn deletions(&self) -> u64 {
         self.deletions
     }
-    pub fn diff(&self) -> String {
-        self.diff.clone()
-    }
 }

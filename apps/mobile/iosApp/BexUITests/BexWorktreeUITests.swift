@@ -134,17 +134,15 @@ extension BexLaunchUITests {
         XCTAssertTrue(changes.label.contains("1件のファイル"), changes.label)
         XCTAssertTrue(changes.label.contains("+2"), changes.label)
         XCTAssertTrue(changes.label.contains("−1"), changes.label)
+        try openDiffAfterRetry(app)
+        assertWorkspaceDiffTabs(app)
+        app.buttons["files.close"].tap()
+        XCTAssertTrue(changes.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["notice"].exists)
         openFiles(app)
-        let diff = app.buttons["files.diff"]
-        XCTAssertTrue(diff.waitForExistence(timeout: 10)); diff.tap()
+        XCTAssertTrue(app.buttons["files.open-path"].waitForExistence(timeout: 10))
+        app.buttons["変更済み"].tap()
         XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["+Session worktree second"].exists)
-        XCTAssertTrue(app.staticTexts["-original"].exists)
-        XCTAssertFalse(app.staticTexts["+Project-only change"].exists)
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Open session worktree diff"
-        screenshot.lifetime = .keepAlways; add(screenshot)
-        app.buttons["files.diff.close"].tap()
         app.buttons["files.close"].tap()
         let input = app.descendants(matching: .any)["task.message"]
         input.tap(); input.typeText("[workspace-edit] Update the worktree while running")
@@ -161,5 +159,33 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Live worktree counts before turn completion")
         try simulatorFixture("release-inputs")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 10))
+    }
+
+    private func assertWorkspaceDiffTabs(_ app: XCUIApplication) {
+        XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["files.open-path"].exists)
+        let card = app.buttons["diff.file.tracked.txt"]
+        card.tap()
+        XCTAssertFalse(app.staticTexts["+Session worktree first"].exists)
+        card.tap()
+        XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
+        app.buttons["すべてのファイル"].tap()
+        XCTAssertTrue(app.buttons["files.open-path"].waitForExistence(timeout: 10))
+        app.buttons["変更済み"].tap()
+        XCTAssertTrue(app.staticTexts["+Session worktree first"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["+Session worktree second"].exists)
+        XCTAssertTrue(app.staticTexts["-original"].exists)
+        XCTAssertFalse(app.staticTexts["+Project-only change"].exists)
+        captureScreen(app, named: "Tabbed session worktree diff")
+    }
+
+    private func openDiffAfterRetry(_ app: XCUIApplication) throws {
+        try simulatorFixture("worktree/unavailable")
+        app.buttons["task.diff"].tap()
+        let retry = app.buttons["files.diff.retry"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["files.open-path"].exists)
+        try simulatorFixture("worktree/restore")
+        retry.tap()
     }
 }

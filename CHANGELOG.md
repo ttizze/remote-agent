@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Open iPhone change summaries in a tabbed Changes/All Files sheet. Show per-file diff cards with line numbers, wrapping, and addition/deletion backgrounds, reusing the desktop Git patch parser from core. Closing returns to the conversation.
+
 - Match saved project roots through filesystem aliases when assigning worktree conversations, including macOS `/var` and `/private/var` paths.
 
 - Preserve individual history occurrences when turn IDs repeat, so opening a conversation keeps both responses visible instead of duplicating and collapsing their contents.

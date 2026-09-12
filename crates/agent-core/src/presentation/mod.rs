@@ -2,6 +2,8 @@
 //! Grouping borrows item metadata; body formatting runs only for changed items
 //! or explicit expansion. Native views own rendering and local expansion state.
 
+pub mod diff;
+
 use crate::models::{Item, Turn};
 use serde::Serialize;
 use serde_json::Value;

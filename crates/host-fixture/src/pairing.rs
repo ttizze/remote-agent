@@ -133,6 +133,14 @@ fn route(
             }
         }
         "/worktree-conversation" => worktree_conversation(root)?,
+        "/worktree/unavailable" => fs::rename(
+            root.join("review-worktree"),
+            root.join("review-worktree-unavailable"),
+        )?,
+        "/worktree/restore" => fs::rename(
+            root.join("review-worktree-unavailable"),
+            root.join("review-worktree"),
+        )?,
         "/completed-history" => write_json(
             root.join("list-fixture.json"),
             &json!([{"id":"fixture-thread-persisted","cwd":root.join("project"),
