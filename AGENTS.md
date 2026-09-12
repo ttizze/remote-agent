@@ -13,6 +13,13 @@ For every debugging run:
 - Preserve unrelated work-in-progress changes.
 - Report the exact surfaces verified and the surfaces that remain unverified.
 
+# Change quality
+
+- Optimize for the smallest codebase after the change, not the smallest diff. A change that deletes more than it adds is preferred; a change that adds a parallel path, a flag, or a per-client workaround is wrong when the rule can live in one place (usually the Store) and the clients can lose code.
+- Additions that delete nothing (new UI states, retries, extra guards) need a reported symptom. Otherwise list them as follow-ups.
+- Count product code only. Tests prove the change at the lowest layer that can fail for its cause; do not add fixture, Host or UI layers unless the cause lives there.
+- Before editing, state what will be deleted and where the rule will live. Stop for approval if nothing is deleted and the product diff exceeds 40 lines.
+
 # Test acceptance and coverage
 
 - Define success and failure from the user's complete operation before writing a test. A request reaching the Host, an attachment appearing in the composer, a thread being created, or an answer row appearing is an intermediate state. Successful submission requires the intended input to reach the conversation, the turn to complete successfully, the sent draft/attachments to clear, and no unexpected error to remain. Reopen the conversation when persistence is part of the contract.
