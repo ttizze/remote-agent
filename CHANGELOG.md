@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Open iPhone tasks immediately while Host history loads, using cached history and the selected task directory when available. Preserve drafts after a failed read, restore the original conversation when side-chat preparation fails, offer retry, and disable submission and attachments until the conversation is ready.
+
+- Share isolated Host and JSONL connection ownership across integration and UI fixtures. Run the UI Host and loopback pairing controls in one process, remove the separate pairing executable and on-disk key exchange. Remove the redundant iOS screen identifier that overrode the existing detail, loading and retry identifiers.
+
 - Open Mac conversation file links in the Files panel using the selected Host, preserving file drafts and revision checks. Show Files and Diff within Side Chat and return to its existing draft.
 
 - Gate native conversation changes with repeated content-swipe reopening, all activity families, long-history paging, and repeated turn IDs. Keep the current Swift navigation implementation.

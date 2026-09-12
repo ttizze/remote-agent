@@ -97,7 +97,10 @@ struct ConversationSideChat: View {
                 restoreOriginal(); return
             }
             model.composerFocusRequest = UUID()
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            self.error = model.snapshot.error() ?? error.localizedDescription
+            restoreOriginal()
+        }
         preparing = false
     }
 

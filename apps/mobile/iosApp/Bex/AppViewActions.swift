@@ -120,11 +120,9 @@ extension BexAppViewModel {
     }
 
     func openThread(_ id: String) {
-        let host = selectedProfileId
-        let previousScreen = screen
-        perform(.readThread(ReadThread(threadId: id, open: true))) { [weak self] result in
-            guard let self, case .success = result, selectedProfileId == host,
-                  screen == previousScreen, snapshot.navigation().threadId == id else { return }
+        notice = nil
+        perform(.readThread(ReadThread(threadId: id, open: true)))
+        if selectedThreadId == id {
             screen = .thread
         }
     }

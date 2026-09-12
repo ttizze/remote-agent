@@ -1079,6 +1079,129 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
 }
 
 #[tokio::test]
+async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
+    for cached in [false, true] {
+        for restored in [false, true] {
+            let mut initial = if cached {
+                snapshot()
+            } else {
+                Snapshot::default()
+            };
+            initial.threads = Some(Arc::new(
+                serde_json::from_value(json!({
+                    "data":[{"id":"thread","cwd":"/listed","name":"Selected task"}],
+                    "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+                }))
+                .unwrap(),
+            ));
+            Arc::make_mut(&mut initial.drafts).insert(
+                "thread".into(),
+                Arc::new(Draft {
+                    text: "Keep this draft".into(),
+                    ..Default::default()
+                }),
+            );
+            if restored {
+                initial = serde_json::from_slice(&serde_json::to_vec(&initial).unwrap()).unwrap();
+            }
+            let (store, mut reader, mut writer) = setup(initial).await;
+            let refresh = store.dispatch(Intent::ListThreads(op::ListThreads::new(
+                Default::default(),
+            )));
+            let list_request = read(&mut reader).await;
+            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
+            let selected = store.snapshot();
+            assert_eq!(
+                selected.navigation.thread_id.as_deref(),
+                Some("thread"),
+                "selection must not wait for either RPC (cached={cached}, restored={restored})"
+            );
+            assert_eq!(selected.navigation.draft_key, "thread");
+            assert_eq!(
+                selected.navigation.cwd,
+                if cached { "/fixture" } else { "/listed" }
+            );
+            assert_eq!(selected.drafts["thread"].text, "Keep this draft");
+            assert_eq!(loaded_text(&selected), cached.then_some("old"));
+            let request = read(&mut reader).await;
+            assert_eq!(request["method"], "host/thread/read");
+            writer
+                .write_line(
+                    &json!({"id":request["id"],"result":{"thread":thread("latest")}}).to_string(),
+                )
+                .await
+                .unwrap();
+            opening.await.unwrap();
+            assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
+            assert_eq!(store.snapshot().navigation.cwd, "/fixture");
+            writer.write_line(&json!({"id":list_request["id"],"result":{
+                "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+            }}).to_string()).await.unwrap();
+            refresh.await.unwrap();
+            assert_eq!(
+                store.snapshot().navigation.thread_id.as_deref(),
+                Some("thread")
+            );
+            assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
+            assert_eq!(store.snapshot().drafts["thread"].text, "Keep this draft");
+            assert!(store.snapshot().error.is_none());
+            store.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failed_open_keeps_selection_and_draft_and_can_retry() {
+    for cached in [false, true] {
+        let (store, mut reader, mut writer) = setup(if cached {
+            snapshot()
+        } else {
+            Snapshot::default()
+        })
+        .await;
+        let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: "thread".into(),
+                text: "Written while loading".into(),
+            })
+            .await
+            .unwrap();
+        let request = read(&mut reader).await;
+        writer.write_line(&json!({"id":request["id"],"error":{"code":-32000,"message":"history unavailable"}}).to_string()).await.unwrap();
+        assert!(opening.await.is_err());
+        assert_eq!(
+            store.snapshot().navigation.thread_id.as_deref(),
+            Some("thread")
+        );
+        assert_eq!(loaded_text(&store.snapshot()), cached.then_some("old"));
+        assert!(
+            store
+                .snapshot()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("history unavailable")
+        );
+        let retry = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
+        assert!(store.snapshot().error.is_none());
+        let request = read(&mut reader).await;
+        writer
+            .write_line(
+                &json!({"id":request["id"],"result":{"thread":thread("recovered")}}).to_string(),
+            )
+            .await
+            .unwrap();
+        retry.await.unwrap();
+        let recovered = store.snapshot();
+        assert_eq!(loaded_text(&recovered), Some("recovered"));
+        assert_eq!(recovered.drafts["thread"].text, "Written while loading");
+        assert!(recovered.error.is_none());
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let opening = tokio::spawn({

@@ -1,8 +1,14 @@
 use agent_core::peer::{JsonlReader, JsonlWriter};
-use host_fixture::{fixture::Config, pairing::PairingServer};
+use agent_core::transport::Identity;
+use host_fixture::{
+    fixture::Config,
+    pairing::PairingServer,
+    test_support::{HostFixture, Memory},
+};
 use serde_json::{Value, json};
-use std::{fs, path::Path, process::Stdio, time::Duration};
+use std::{fs, path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::process::Command;
+mod codex_fixture;
 
 #[tokio::test]
 async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configuration() {
@@ -68,16 +74,23 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
 }
 
 #[tokio::test]
-async fn pairing_controls_restore_the_original_project_store_and_survive_unavailable_host_requests()
-{
+async fn pairing_controls_restore_the_original_project_store_and_survive_rejected_host_requests() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().canonicalize().unwrap();
-        let state = root.join("state");
-        fs::create_dir(&state).unwrap();
         let original = b"{\"local-projects\":{},\"project-order\":[],\"preserve\":true}\n";
         fs::write(root.join("projects.json"), original).unwrap();
-        let server = PairingServer::start(&state, 0).unwrap();
+        let host = HostFixture::start(
+            &root,
+            codex_fixture::config(&root),
+            Arc::new(Memory::default()),
+            "isolated Host",
+            false,
+        )
+        .await
+        .unwrap();
+        let server =
+            PairingServer::start(&root, host.ticket.clone(), Identity::generate()).unwrap();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -156,6 +169,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_unavail
             404
         );
         server.shutdown().unwrap();
+        host.close().await.unwrap();
     })
     .await
     .expect("pairing controls exceeded their deadline");

@@ -140,9 +140,14 @@ struct ThreadScreen: View {
             } else if model.isNewThread {
                 Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("task.empty")
+            } else if let id = model.selectedThreadId, model.notice != nil {
+                Button("再試行") { model.openThread(id) }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("task.retry")
             } else {
                 ProgressView("タスクを読み込み中…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("task.loading")
             }
         }
         .background(Color(UIColor.systemBackground))
@@ -254,7 +259,7 @@ extension ThreadScreen {
                     Label("変更を表示", systemImage: "plus.forwardslash.minus")
                 }
                 Button {
-                    if let id = conversation?.id {
+                    if let id = model.selectedThreadId {
                         model.openThread(id)
                     }
                 } label: { Label("更新", systemImage: "arrow.clockwise") }

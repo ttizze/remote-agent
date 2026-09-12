@@ -31,6 +31,8 @@ conversation-ui:
         testSimulatorAsksAboutAssistantSelectionInSideChatAndRestoresOriginalDraft \
         testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorCanStartAConversationInAProject \
+        testSimulatorOpensTasksBeforeHistoryReadFinishes \
+        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
         testSimulatorKeepsInterruptedWorkCollapsed \

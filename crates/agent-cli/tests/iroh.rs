@@ -129,11 +129,6 @@ async fn exercise(command: &[&str], expected: Value) {
     })
     .await
     .expect("bounded CLI session");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         expected

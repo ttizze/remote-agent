@@ -1,5 +1,8 @@
 //! Real isolated Host startup shared by UI and transport tests.
-use agent_core::transport::{Endpoint, Relays, Ticket};
+use agent_core::{
+    peer::RpcPeer,
+    transport::{Endpoint, Identity, Relays, Session, Ticket},
+};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{
     CodexRpcService, CredentialStore, DesktopProjectStore, HostCredentials, HostRuntime,
@@ -7,8 +10,9 @@ use host_daemon::{
 use std::{
     path::Path,
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use zeroize::Zeroizing;
 
 #[derive(Default)]
@@ -32,6 +36,7 @@ pub struct HostFixture {
     pub ticket: Ticket,
     pub stop: CancellationToken,
     pub running: tokio::task::JoinHandle<Result<(), String>>,
+    _stop_on_drop: DropGuard,
 }
 impl HostFixture {
     pub async fn start(
@@ -71,9 +76,18 @@ impl HostFixture {
             credentials,
             memory,
             ticket,
+            _stop_on_drop: stop.clone().drop_guard(),
             stop,
             running,
         })
+    }
+
+    pub async fn connect(&self, identity: Identity) -> crate::Result<Connection> {
+        Connection::open(&self.ticket, identity).await
+    }
+
+    pub async fn local(&self) -> crate::Result<Connection> {
+        self.connect(self.credentials.local_identity().await).await
     }
 
     pub async fn close(self) -> Result<(), String> {
@@ -84,5 +98,41 @@ impl HostFixture {
             .shutdown()
             .await
             .map_err(|error| error.to_string())
+    }
+}
+
+pub struct Connection {
+    pub endpoint: Endpoint,
+    pub session: Session,
+    pub peer: RpcPeer,
+}
+
+impl Connection {
+    pub async fn open(ticket: &Ticket, identity: Identity) -> crate::Result<Self> {
+        let endpoint = Endpoint::bind(identity, Relays::Disabled).await?;
+        let opened: crate::Result<_> = async {
+            let session = endpoint.connect(ticket).await?;
+            let peer = session.open_peer(Duration::from_secs(10), 128).await?;
+            Ok((session, peer))
+        }
+        .await;
+        match opened {
+            Ok((session, peer)) => Ok(Self {
+                endpoint,
+                session,
+                peer,
+            }),
+            Err(error) => {
+                endpoint.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn close(self) -> crate::Result<()> {
+        let closed = self.peer.close().await;
+        self.session.close();
+        self.endpoint.close().await;
+        Ok(closed?)
     }
 }

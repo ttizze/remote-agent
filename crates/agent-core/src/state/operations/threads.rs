@@ -131,6 +131,29 @@ impl Operation for ReadThread {
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
         self.open
     }
+    fn prepare(&self, snapshot: &mut Snapshot) -> Result<(), String> {
+        if self.open {
+            let cwd = snapshot
+                .conversations
+                .get(&self.thread_id)
+                .and_then(|thread| thread.cwd.as_ref())
+                .or_else(|| {
+                    snapshot
+                        .threads
+                        .as_ref()?
+                        .data
+                        .iter()
+                        .find(|thread| thread.id.as_ref() == Some(&self.thread_id))?
+                        .cwd
+                        .as_ref()
+                })
+                .cloned()
+                .unwrap_or_default();
+            select_thread(snapshot, self.thread_id.clone(), cwd);
+            snapshot.error = None;
+        }
+        Ok(())
+    }
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         if self.open {
@@ -148,6 +171,16 @@ impl Operation for ReadThread {
     }
 }
 
+fn select_thread(snapshot: &mut Snapshot, id: String, cwd: String) {
+    if snapshot.navigation.cwd != cwd {
+        clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
+    }
+    let navigation = Arc::make_mut(&mut snapshot.navigation);
+    navigation.thread_id = Some(id.clone());
+    navigation.draft_key = id;
+    navigation.cwd = cwd;
+}
+
 pub(super) fn open_thread(
     snapshot: &mut Snapshot,
     thread: Thread,
@@ -162,9 +195,7 @@ pub(super) fn open_thread(
         .is_some_and(|status| status.kind == "notLoaded");
     let mut effects = refresh_thread(snapshot, thread);
     if let Some(id) = id {
-        if snapshot.navigation.cwd != cwd {
-            clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
-        }
+        select_thread(snapshot, id.clone(), cwd);
         let navigation = Arc::make_mut(&mut snapshot.navigation);
         if let Some(watch_id) = navigation.watch_id.take() {
             effects.push(Effect::execute(Unwatch {
@@ -173,12 +204,9 @@ pub(super) fn open_thread(
             }));
         }
         navigation.watch_thread_id = None;
-        navigation.thread_id = Some(id.clone());
         if snapshot.activity.unread.contains(&id) {
             Arc::make_mut(&mut snapshot.activity).unread.remove(&id);
         }
-        navigation.draft_key = id.clone();
-        navigation.cwd = cwd;
         // Loaded threads stream native events. Their advertised rollout may
         // not be materialized yet, so file changes must not trigger hydration.
         if external && path.is_some() {

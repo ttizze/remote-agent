@@ -1,22 +1,9 @@
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{CodexRpcService, CodexSession, DesktopProjectStore};
 use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 
-fn fixture_program(directory: &Path) -> PathBuf {
-    host_fixture::fixture::Config {
-        stream_delay_ms: 5,
-        ..Default::default()
-    }
-    .install(
-        Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")),
-        directory,
-    )
-    .unwrap()
-}
+mod codex_fixture;
 
 async fn rpc(server: &CodexAppServer, method: &str, params: Value) -> Value {
     let response = server
@@ -88,7 +75,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let home = directory.path().join("codex");
         std::fs::create_dir(&home).unwrap();
         std::fs::write(home.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
-        let config = AppServerConfig { program: fixture_program(&home), codex_home: Some(home.clone()), ..Default::default() };
+        let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(home.join("projects.json")));
         let accounts_dir = directory.path().join("accounts");
@@ -179,9 +166,8 @@ async fn fork_inherits_only_through_selected_completed_turn_and_preserves_origin
     tokio::time::timeout(std::time::Duration::from_secs(45), async {
         let directory = tempfile::tempdir().unwrap();
         let config = AppServerConfig {
-            program: fixture_program(directory.path()),
             codex_home: Some(directory.path().to_owned()),
-            ..Default::default()
+            ..codex_fixture::config(directory.path())
         };
         let server = Arc::new(CodexAppServer::spawn(config).await.unwrap());
         let service = CodexRpcService::new(
@@ -260,10 +246,7 @@ async fn helper_initialization_does_not_block_completed_turns() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path();
-        let config = AppServerConfig {
-            program: fixture_program(home),
-            ..Default::default()
-        };
+        let config = codex_fixture::config(home);
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let service = CodexRpcService::new(
             server.clone(),

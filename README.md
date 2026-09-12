@@ -95,6 +95,6 @@ nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop t
 
 Linux CI uses the `nix develop .#native` shell. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
 
-The Simulator runner rejects failed, skipped, and missing tests. It removes its temporary Host, pairing server, Simulator, and Xcode build products; result bundles remain under `target/qa`.
+`crates/host-fixture::test_support` shares isolated Host startup, connections and shutdown. `bex-ui-fixture DIRECTORY CODEX PORT_FILE [STREAM_DELAY_MS]` runs the Host and loopback pairing controls together with credentials in memory; Codex remains a subprocess to exercise the stdio boundary. `ios-e2e` removes this process, its fresh Simulator and Xcode build products after the run, and retains results under `target/qa`. Failed, skipped or missing tests fail the command.
 
 Simulator and fixture runs do not verify physical devices, production Keychain access, camera, or real Codex accounts.

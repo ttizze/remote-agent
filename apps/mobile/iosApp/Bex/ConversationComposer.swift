@@ -67,7 +67,8 @@ extension ThreadScreen {
                     } label: {
                         Image(systemName: "plus").font(.title2.weight(.regular)).frame(width: 40, height: 40)
                     }
-                    .disabled(model.transferring || preparingMedia || model.sending || dictation
+                    .disabled((!model.isNewThread && conversation == nil) || model
+                        .transferring || preparingMedia || model.sending || dictation
                         .isRecording || dictation.requestingPermission || model.transcribing)
                     .accessibilityLabel("添付").accessibilityIdentifier("task.attach")
                     if model.transferring || preparingMedia {
