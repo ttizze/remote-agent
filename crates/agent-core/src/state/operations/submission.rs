@@ -71,9 +71,7 @@ pub struct Respond {
 }
 impl Operation for Respond {
     type Output = ();
-    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        self.apply(snapshot, output)
-    }
+    const APPLY_WHEN_STALE: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let request = context
             .snapshot
@@ -98,6 +96,9 @@ pub struct StartSubmission {
     pub draft: Arc<Draft>,
 }
 impl Operation for StartSubmission {
+    fn submission_id(&self) -> Option<&str> {
+        Some(&self.client_user_message_id)
+    }
     type Output = crate::models::ThreadResponse;
     const ORDERED: bool = true;
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -160,7 +161,7 @@ impl StartSubmission {
         {
             Arc::make_mut(pending).draft_key = id.clone();
         }
-        effects.push(Effect::Submit(SendSubmission {
+        effects.push(Effect::execute(SendSubmission {
             thread_id: id,
             client_user_message_id,
             draft,
@@ -180,10 +181,11 @@ pub struct SendSubmission {
     pub draft: Arc<Draft>,
 }
 impl Operation for SendSubmission {
-    type Output = Option<String>;
-    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        self.apply(snapshot, output)
+    fn submission_id(&self) -> Option<&str> {
+        Some(&self.client_user_message_id)
     }
+    type Output = Option<String>;
+    const APPLY_WHEN_STALE: bool = true;
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::Submitted {
             turn_id: output.clone(),
@@ -307,4 +309,35 @@ pub struct UploadAttachment {
     pub draft_key: String,
     pub attachment: Attachment,
     pub directory: String,
+}
+
+impl Operation for UploadAttachment {
+    type Output = String;
+    const APPLY_WHEN_STALE: bool = true;
+    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        let session = context.session.ok_or_else(|| {
+            PeerError::InvalidMessage("binary transfers require an iroh session".into())
+        })?;
+        let uploaded = crate::transfers::upload_file(
+            context.peer,
+            || async { session.open_stream().await.map_err(std::io::Error::other) },
+            std::path::Path::new(&self.attachment.path),
+            std::path::Path::new(&self.directory),
+            &self.attachment.name,
+        )
+        .await
+        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+        #[derive(Deserialize)]
+        struct Uploaded {
+            path: String,
+        }
+        let uploaded: Uploaded = serde_json::from_value(uploaded)
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+        Ok(uploaded.path)
+    }
+    fn apply(mut self, snapshot: &mut Snapshot, path: Self::Output) -> Vec<Effect> {
+        self.attachment.path = path;
+        add_attachment(snapshot, self.draft_key, self.attachment);
+        Vec::new()
+    }
 }

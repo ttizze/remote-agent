@@ -23,6 +23,16 @@ pub trait RpcMethod: Serialize {
         Ok(())
     }
 }
+macro_rules! rpc_method {
+    ($name:ty, $output:ty, $method:expr) => {
+        impl $crate::client::RpcMethod for $name {
+            type Output = $output;
+            const METHOD: &'static str = $method;
+        }
+    };
+}
+pub(crate) use rpc_method;
+
 struct Params<'a, O>(&'a O);
 impl<O: RpcMethod> Serialize for Params<'_, O> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -34,33 +44,29 @@ impl<O: RpcMethod> Serialize for Params<'_, O> {
 pub struct Pair {
     pub invitation: uuid::Uuid,
 }
-impl RpcMethod for Pair {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/pair";
-}
+rpc_method!(Pair, Map<String, Value>, "host/pair");
 
 #[derive(Debug, Serialize)]
 pub struct ReadHostStatus {}
-impl RpcMethod for ReadHostStatus {
-    type Output = crate::models::HostStatus;
-    const METHOD: &'static str = "host/status";
-}
+rpc_method!(ReadHostStatus, crate::models::HostStatus, "host/status");
 
 #[derive(Debug, Serialize)]
 pub struct ListRemoteHosts {}
-impl RpcMethod for ListRemoteHosts {
-    type Output = Vec<crate::models::RemoteHost>;
-    const METHOD: &'static str = "host/listRemotes";
-}
+rpc_method!(
+    ListRemoteHosts,
+    Vec<crate::models::RemoteHost>,
+    "host/listRemotes"
+);
 #[derive(Debug, Serialize)]
 pub struct RegisterRemoteHost<'a> {
     pub ticket: &'a str,
     pub name: &'a str,
 }
-impl RpcMethod for RegisterRemoteHost<'_> {
-    type Output = crate::models::RemoteHost;
-    const METHOD: &'static str = "host/registerRemote";
-}
+rpc_method!(
+    RegisterRemoteHost<'_>,
+    crate::models::RemoteHost,
+    "host/registerRemote"
+);
 
 pub struct Client {
     peer: Arc<RpcPeer>,
@@ -172,15 +178,6 @@ pub(crate) fn validate_thread(
     }
 }
 
-macro_rules! operation {
-    ($name:ident, $output:ty, $method:literal) => {
-        impl RpcMethod for $name<'_> {
-            type Output = $output;
-            const METHOD: &'static str = $method;
-        }
-    };
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ItemResponse {
     pub item: crate::models::Item,
@@ -195,7 +192,7 @@ pub struct ResumeThread<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<&'a str>,
 }
-operation!(ResumeThread, Map<String, Value>, "thread/resume");
+rpc_method!(ResumeThread<'_>, Map<String, Value>, "thread/resume");
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SteerTurn<'a> {
@@ -204,7 +201,7 @@ pub struct SteerTurn<'a> {
     pub input: &'a [Input<'a>],
     pub expected_turn_id: &'a str,
 }
-operation!(SteerTurn, Map<String, Value>, "turn/steer");
+rpc_method!(SteerTurn<'_>, Map<String, Value>, "turn/steer");
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueTurn<'a> {
@@ -246,7 +243,7 @@ pub struct ModelPage {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
-operation!(ListModels, ModelPage, "model/list");
+rpc_method!(ListModels<'_>, ModelPage, "model/list");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transcribe<T = String> {
@@ -276,7 +273,7 @@ pub struct WriteFile<'a> {
     pub revision: &'a str,
     pub text: &'a str,
 }
-operation!(WriteFile, crate::models::FileContent, "host/file/write");
+rpc_method!(WriteFile<'_>, crate::models::FileContent, "host/file/write");
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -7,6 +7,13 @@ use crate::{
 use rpc::{Input, Submission, submission_target};
 
 macro_rules! rpc_operation {
+    ($parent:ident.$field:ident) => {
+        rpc_operation!();
+        fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+            Arc::make_mut(&mut snapshot.$parent).$field = Some(Arc::new(output));
+            Vec::new()
+        }
+    };
     () => {
         type Output = <Self as rpc::RpcMethod>::Output;
         async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
@@ -103,10 +110,16 @@ pub enum Intent {
 }
 
 /// Typed state application after the Store has checked its single epoch.
-/// Only operations with durable side effects override `stale`.
+/// Only operations with durable side effects apply stale results or override `stale`.
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     type Output: Send + std::fmt::Debug + 'static;
     const ORDERED: bool = false;
+    const INVALIDATES: bool = false;
+    const APPLY_WHEN_STALE: bool = false;
+    /// Identifies a submission step whose completion and failure belong to the same dispatch.
+    fn submission_id(&self) -> Option<&str> {
+        None
+    }
     fn terminal_handle(&self) -> Option<&str> {
         None
     }
@@ -118,7 +131,7 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
         context: &mut Execution<'_>,
     ) -> impl Future<Output = Result<Self::Output, PeerError>> + Send;
     fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        false
+        Self::INVALIDATES
     }
     fn prepare(&mut self, _snapshot: &mut Snapshot) -> Result<(), String> {
         Ok(())
@@ -126,8 +139,12 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     fn apply(self, _snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         Vec::new()
     }
-    fn stale(self, _snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
-        Vec::new()
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        if Self::APPLY_WHEN_STALE {
+            self.apply(snapshot, output)
+        } else {
+            Vec::new()
+        }
     }
     fn outcome(_output: &mut Self::Output) -> Outcome {
         Outcome::Applied

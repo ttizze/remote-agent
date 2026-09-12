@@ -12,10 +12,7 @@ impl ListThreads {
         Self { query }
     }
 }
-impl rpc::RpcMethod for ListThreads {
-    type Output = ThreadList;
-    const METHOD: &'static str = "host/thread/list";
-}
+rpc::rpc_method!(ListThreads, ThreadList, "host/thread/list");
 
 impl Operation for ListThreads {
     rpc_operation!();
@@ -231,9 +228,7 @@ impl rpc::RpcMethod for ForkThread {
 
 impl Operation for ForkThread {
     rpc_operation!();
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        true
-    }
+    const INVALIDATES: bool = true;
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let mut effects = open_thread(snapshot, output.thread, output.model);
@@ -278,9 +273,7 @@ impl Operation for StartThread {
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         refresh_thread(snapshot, output.thread)
     }
-    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        self.apply(snapshot, output)
-    }
+    const APPLY_WHEN_STALE: bool = true;
     fn outcome(output: &mut Self::Output) -> Outcome {
         ForkThread::outcome(output)
     }
@@ -292,10 +285,7 @@ pub struct Interrupt {
     pub thread_id: String,
     pub turn_id: String,
 }
-impl rpc::RpcMethod for Interrupt {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "turn/interrupt";
-}
+rpc::rpc_method!(Interrupt, Map<String, Value>, "turn/interrupt");
 
 impl Operation for Interrupt {
     rpc_operation!();
@@ -311,10 +301,7 @@ pub struct Watch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
-impl rpc::RpcMethod for Watch {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/thread/watch";
-}
+rpc::rpc_method!(Watch, Map<String, Value>, "host/thread/watch");
 
 impl Operation for Watch {
     rpc_operation!();
@@ -333,10 +320,7 @@ pub struct Unwatch {
     pub watch_key: u64,
     pub watch_id: u64,
 }
-impl rpc::RpcMethod for Unwatch {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/thread/unwatch";
-}
+rpc::rpc_method!(Unwatch, Map<String, Value>, "host/thread/unwatch");
 
 impl Operation for Unwatch {
     rpc_operation!();

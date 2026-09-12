@@ -747,3 +747,43 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
     assert_eq!(replay(events.clone()), replay(decoded));
     assert_eq!(replay(events).drafts["new:/fixture"].text, "再生する下書き");
 }
+
+#[test]
+fn durable_upload_and_pairing_results_survive_navigation() {
+    let mut snapshot = reduce(
+        &Snapshot::default(),
+        Event::Intent(agent_core::state::Intent::NewChat { cwd: "/new".into() }),
+    )
+    .0;
+    op::UploadAttachment {
+        draft_key: "old".into(),
+        attachment: agent_core::state::Attachment {
+            path: "/local".into(),
+            name: "image.png".into(),
+            is_image: true,
+        },
+        directory: "/old".into(),
+    }
+    .stale(&mut snapshot, "/uploaded".into());
+    assert_eq!(snapshot.drafts["old"].attachments[0].path, "/uploaded");
+    for name in ["first", "updated"] {
+        op::PairRemoteHost {
+            invitation: serde_json::from_value(json!({
+                "endpoint":"unused", "invitation":uuid::Uuid::nil(), "expiresAt":0
+            }))
+            .unwrap(),
+            name: name.into(),
+        }
+        .stale(
+            &mut snapshot,
+            serde_json::from_value(json!({
+                "id":"remote", "name":name, "ticket":"unused"
+            }))
+            .unwrap(),
+        );
+        assert_eq!(snapshot.management.remotes.len(), 1);
+        assert_eq!(snapshot.management.remotes[0].name, name);
+    }
+    assert_eq!(snapshot.navigation.cwd, "/new");
+    assert!(snapshot.error.is_none());
+}

@@ -8,10 +8,7 @@ pub struct StartTerminal {
     pub cwd: String,
     pub size: rpc::TerminalSize,
 }
-impl rpc::RpcMethod for StartTerminal {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/terminal/start";
-}
+rpc::rpc_method!(StartTerminal, Map<String, Value>, "host/terminal/start");
 
 impl Operation for StartTerminal {
     rpc_operation!();
@@ -44,9 +41,7 @@ impl Operation for StartTerminal {
         }
         Vec::new()
     }
-    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        self.apply(snapshot, output)
-    }
+    const APPLY_WHEN_STALE: bool = true;
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -55,10 +50,7 @@ pub struct CloseTerminal {
     #[serde(rename = "processHandle")]
     pub handle: String,
 }
-impl rpc::RpcMethod for CloseTerminal {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "process/kill";
-}
+rpc::rpc_method!(CloseTerminal, Map<String, Value>, "process/kill");
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,10 +59,7 @@ pub struct ResizeTerminal {
     pub handle: String,
     pub size: rpc::TerminalSize,
 }
-impl rpc::RpcMethod for ResizeTerminal {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "process/resizePty";
-}
+rpc::rpc_method!(ResizeTerminal, Map<String, Value>, "process/resizePty");
 
 impl Operation for ResizeTerminal {
     rpc_operation!();
@@ -102,10 +91,7 @@ impl Serialize for TerminalInput<'_> {
         params.end()
     }
 }
-impl rpc::RpcMethod for TerminalInput<'_> {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "process/writeStdin";
-}
+rpc::rpc_method!(TerminalInput<'_>, Map<String, Value>, "process/writeStdin");
 
 impl Operation for WriteTerminal {
     fn terminal_handle(&self) -> Option<&str> {

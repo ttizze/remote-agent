@@ -5,20 +5,11 @@ use super::*;
 pub struct ListFiles {
     pub path: String,
 }
-impl rpc::RpcMethod for ListFiles {
-    type Output = FileList;
-    const METHOD: &'static str = "host/file/list";
-}
+rpc::rpc_method!(ListFiles, FileList, "host/file/list");
 
 impl Operation for ListFiles {
-    rpc_operation!();
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        true
-    }
-    fn apply(self, snapshot: &mut Snapshot, files: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.workspace).directory = Some(Arc::new(files));
-        Vec::new()
-    }
+    rpc_operation!(workspace.directory);
+    const INVALIDATES: bool = true;
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -39,20 +30,14 @@ impl rpc::RpcMethod for ReadFile {
 }
 
 impl Operation for ReadFile {
-    rpc_operation!();
+    rpc_operation!(workspace.file);
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if self.discard_draft {
             Arc::make_mut(&mut snapshot.file_drafts).remove(&self.path);
         }
         Ok(())
     }
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        true
-    }
-    fn apply(self, snapshot: &mut Snapshot, file: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.workspace).file = Some(Arc::new(file));
-        Vec::new()
-    }
+    const INVALIDATES: bool = true;
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -112,10 +97,7 @@ impl SaveFile {
 pub struct ReviewWorkspace {
     pub cwd: String,
 }
-impl rpc::RpcMethod for ReviewWorkspace {
-    type Output = WorkspaceReview;
-    const METHOD: &'static str = "host/workspace/review";
-}
+rpc::rpc_method!(ReviewWorkspace, WorkspaceReview, "host/workspace/review");
 
 /// Navigation and notifications already belong to an epoch. Their review read
 /// shares it instead of dispatching a second intent that invalidates siblings.
@@ -162,17 +144,14 @@ impl Operation for ReviewWorkspace {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadWorktreeSettings {}
-impl rpc::RpcMethod for ReadWorktreeSettings {
-    type Output = super::WorktreeSettings;
-    const METHOD: &'static str = "host/worktree/settings/read";
-}
+rpc::rpc_method!(
+    ReadWorktreeSettings,
+    super::WorktreeSettings,
+    "host/worktree/settings/read"
+);
 
 impl Operation for ReadWorktreeSettings {
-    rpc_operation!();
-    fn apply(self, snapshot: &mut Snapshot, settings: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.workspace).settings = Some(Arc::new(settings));
-        Vec::new()
-    }
+    rpc_operation!(workspace.settings);
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -181,17 +160,14 @@ impl Operation for ReadWorktreeSettings {
 pub struct UpdateWorktreeSettings {
     pub settings: WorktreeSettings,
 }
-impl rpc::RpcMethod for UpdateWorktreeSettings {
-    type Output = super::WorktreeSettings;
-    const METHOD: &'static str = "host/worktree/settings/update";
-}
+rpc::rpc_method!(
+    UpdateWorktreeSettings,
+    super::WorktreeSettings,
+    "host/worktree/settings/update"
+);
 
 impl Operation for UpdateWorktreeSettings {
-    rpc_operation!();
-    fn apply(self, snapshot: &mut Snapshot, settings: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.workspace).settings = Some(Arc::new(settings));
-        Vec::new()
-    }
+    rpc_operation!(workspace.settings);
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Remove four unreferenced root screenshots and the unused Desktop SVG icon (1.93 MB).
+
+- Run submissions, attachment uploads, and remote Host pairing through the shared operation queue, preserving chained submission completion, failure recovery, and durable results after navigation. Remove the specialized effect variants and completion events.
+
+- Share typed RPC declarations and simple operation result assignment; express constant invalidation and stale-result application policies alongside operation ordering.
+
 - Establish the descriptor budget inside isolated Host fixture startup so the full 80-client admission test also runs under macOS's inherited 256-descriptor limit. Fail before opening endpoints if the process hard limit prevents the required budget.
 
 - Share navigation reset and history-watch release in core. Route already-classified Host RPC messages through one dispatcher, remove unused routing error enums and repeated envelope parsing, and share Desktop connection-failure delivery.

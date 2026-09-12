@@ -151,44 +151,18 @@ use operations::add_attachment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    TerminalFailed {
-        handle: String,
-        reason: String,
-    },
+    TerminalFailed { handle: String, reason: String },
     Intent(Intent),
-    AttachmentUploaded {
-        draft_key: String,
-        attachment: Attachment,
-    },
-
-    RemoteHostPaired(RemoteHost),
-
     SubmissionFailed(String),
 
     ServerRequest(ServerRequest),
     RequestResolved(Value),
-    Notification {
-        method: String,
-        params: Value,
-    },
+    Notification { method: String, params: Value },
     Connected,
     Disconnected(String),
     Failed(String),
 }
-#[derive(Debug)]
-pub enum Effect {
-    Execute(crate::store::PendingOperation),
-    UploadAttachment(operations::UploadAttachment),
-    PairRemoteHost(operations::PairRemoteHost),
-    StartSubmission(operations::StartSubmission),
-    Submit(operations::SendSubmission),
-}
-
-impl Effect {
-    pub fn execute(operation: impl operations::Operation) -> Self {
-        Self::Execute(crate::store::PendingOperation::new(operation))
-    }
-}
+pub use crate::store::Effect;
 
 // Invalidate both displayed content and responses still in flight. File drafts
 // remain keyed by absolute path so navigation never discards unsaved edits.
@@ -229,7 +203,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Interrupt, Watch, Unwatch,
         WriteTerminal, DownloadFile, LoadSessionImages,
         LoadHostManagement, ReadOlder, LoadModels,
-        Respond, Transcribe,
+        Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
         Intent::AcknowledgeTerminal { handle, sequence } => {
             if previous.terminals.get(&handle).is_some_and(|terminal| {
@@ -410,12 +384,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
             }
         }
-        Intent::UploadAttachment(operation) => {
-            return (next, vec![Effect::UploadAttachment(operation)]);
-        }
-        Intent::PairRemoteHost(operation) => {
-            return (next, vec![Effect::PairRemoteHost(operation)]);
-        }
     });
     (next, Vec::new())
 }
@@ -475,26 +443,6 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 append_transcript(&mut draft.text, text);
             }
         }
-        Event::AttachmentUploaded {
-            draft_key,
-            attachment,
-        } => {
-            add_attachment(&mut next, draft_key, attachment);
-        }
-
-        Event::RemoteHostPaired(host) => {
-            let management = Arc::make_mut(&mut next.management);
-            if let Some(current) = management
-                .remotes
-                .iter_mut()
-                .find(|current| current.id == host.id)
-            {
-                *current = host;
-            } else {
-                management.remotes.push(host);
-            }
-        }
-
         Event::ServerRequest(request) => {
             Arc::make_mut(&mut next.requests).insert(request.id.to_string(), Arc::new(request));
         }
@@ -986,12 +934,12 @@ fn submission(
         }),
     );
     let effect = match thread_id {
-        Some(thread_id) => Effect::Submit(op::SendSubmission {
+        Some(thread_id) => Effect::execute(op::SendSubmission {
             thread_id,
             client_user_message_id,
             draft,
         }),
-        None => Effect::StartSubmission(op::StartSubmission {
+        None => Effect::execute(op::StartSubmission {
             draft_key,
             cwd: (!previous.navigation.cwd.trim().is_empty())
                 .then(|| previous.navigation.cwd.clone()),

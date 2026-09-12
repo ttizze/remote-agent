@@ -3,17 +3,10 @@ use super::*;
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListAccounts {}
-impl rpc::RpcMethod for ListAccounts {
-    type Output = rpc::Accounts;
-    const METHOD: &'static str = "host/account/list";
-}
+rpc::rpc_method!(ListAccounts, rpc::Accounts, "host/account/list");
 
 impl Operation for ListAccounts {
-    rpc_operation!();
-    fn apply(self, snapshot: &mut Snapshot, accounts: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(accounts));
-        Vec::new()
-    }
+    rpc_operation!(account.accounts);
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -22,16 +15,11 @@ pub struct SelectAccount {
     #[serde(rename = "accountId")]
     pub id: String,
 }
-impl rpc::RpcMethod for SelectAccount {
-    type Output = rpc::AccountSelection;
-    const METHOD: &'static str = "host/account/select";
-}
+rpc::rpc_method!(SelectAccount, rpc::AccountSelection, "host/account/select");
 
 impl Operation for SelectAccount {
     rpc_operation!();
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        true
-    }
+    const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let rpc::AccountSelection {
             selected_id,
@@ -49,16 +37,15 @@ impl Operation for SelectAccount {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartAccountLogin {}
-impl rpc::RpcMethod for StartAccountLogin {
-    type Output = rpc::AccountLogin;
-    const METHOD: &'static str = "host/account/login/start";
-}
+rpc::rpc_method!(
+    StartAccountLogin,
+    rpc::AccountLogin,
+    "host/account/login/start"
+);
 
 impl Operation for StartAccountLogin {
     rpc_operation!();
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        true
-    }
+    const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, login: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
         account.login = Some(Arc::new(login));
@@ -73,10 +60,11 @@ pub struct ReadAccountLogin {
     #[serde(rename = "loginId")]
     pub id: String,
 }
-impl rpc::RpcMethod for ReadAccountLogin {
-    type Output = rpc::AccountLoginStatus;
-    const METHOD: &'static str = "host/account/login/status";
-}
+rpc::rpc_method!(
+    ReadAccountLogin,
+    rpc::AccountLoginStatus,
+    "host/account/login/status"
+);
 
 impl Operation for ReadAccountLogin {
     rpc_operation!();
@@ -104,16 +92,11 @@ pub struct CancelAccountLogin {
     #[serde(rename = "loginId")]
     pub id: String,
 }
-impl rpc::RpcMethod for CancelAccountLogin {
-    type Output = Map<String, Value>;
-    const METHOD: &'static str = "host/account/login/cancel";
-}
+rpc::rpc_method!(CancelAccountLogin, Map<String, Value>, "host/account/login/cancel");
 
 impl Operation for CancelAccountLogin {
     rpc_operation!();
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        true
-    }
+    const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
         account.login = None;

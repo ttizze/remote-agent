@@ -432,6 +432,29 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         let snapshot = store.snapshot();
         assert!(snapshot.workspace.review.as_ref().unwrap().files.is_empty());
         assert!(snapshot.error.is_none());
+        let retained = store.snapshot().drafts["transfer-draft"].clone();
+        assert!(
+            store
+                .dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                    draft_key: "transfer-draft".into(),
+                    attachment: Attachment {
+                        path: directory
+                            .path()
+                            .join("missing.bin")
+                            .to_str()
+                            .unwrap()
+                            .into(),
+                        name: "missing.bin".into(),
+                        is_image: false,
+                    },
+                    directory: directory.path().to_str().unwrap().into(),
+                }))
+                .await
+                .is_err()
+        );
+        assert_eq!(store.snapshot().drafts["transfer-draft"], retained);
+        assert!(store.snapshot().error.is_some());
+
         store.close().await.unwrap();
         assert!(!store.snapshot().connected);
         client.close().await;
@@ -762,6 +785,9 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
                 .unwrap(),
             Outcome::RemoteHostPaired { id: id.clone() }
         );
+        assert_eq!(manager_a.snapshot().management.remotes.len(), 1);
+        assert_eq!(manager_a.snapshot().management.remotes[0].id, id);
+        assert!(manager_a.snapshot().error.is_none());
         let direct_session = endpoint_a.connect(&second.ticket).await.unwrap();
         let direct_peer = direct_session
             .open_peer(Duration::from_secs(10), 128)

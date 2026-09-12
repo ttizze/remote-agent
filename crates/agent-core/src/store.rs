@@ -3,7 +3,7 @@ use crate::peer::{RpcMessage, RpcMessageKind};
 use crate::{
     client::*,
     peer::{PeerError, PeerEvent, RpcPeer},
-    state::{Effect, Event, Intent, Snapshot, operations as op, reduce},
+    state::{Event, Intent, Snapshot, operations as op, reduce},
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::{
@@ -56,10 +56,9 @@ struct Dispatch {
     snapshot: Arc<Snapshot>,
     complete: oneshot::Sender<Result<Outcome, PeerError>>,
 }
-#[derive(Default)]
 struct Applied {
     sequence: Option<u64>,
-    application: Option<Box<dyn Application>>,
+    application: Box<dyn Application>,
     outcome: Outcome,
 }
 struct Completed {
@@ -372,9 +371,7 @@ fn finish(
         let mut next = snapshot.as_ref().clone();
         result = match completed.result {
             Ok(applied) => {
-                if let Some(event) = applied.application {
-                    effects = event.apply(&mut next, current);
-                }
+                effects = applied.application.apply(&mut next, current);
                 Ok(applied.outcome)
             }
             Err(error) => {
@@ -408,13 +405,9 @@ fn finish(
             .collect();
         changed
     });
-    let continuation = scheduled.iter().position(|scheduled| {
-        matches!(
-            scheduled.effect,
-            Effect::StartSubmission(op::StartSubmission { .. })
-                | Effect::Submit(op::SendSubmission { .. })
-        )
-    });
+    let continuation = scheduled
+        .iter()
+        .position(|scheduled| scheduled.effect.0.submission_id().is_some());
     let mut complete = completed.complete;
     if continuation.is_none()
         && let Some(complete) = complete.take()
@@ -474,7 +467,7 @@ async fn run(
             complete,
         } in effects.drain(..)
         {
-            if terminal_handle(&effect).is_some() {
+            if effect.0.terminal_handle().is_some() {
                 terminal_commands.push_back(Scheduled {
                     effect,
                     snapshot: captured,
@@ -641,8 +634,7 @@ async fn run_offline(
         let mut complete = Some(command.complete);
         for effect in command.effects {
             // Disconnect already removed the subscription on the Host.
-            if matches!(&effect, Effect::Execute(operation) if operation.0.disconnected_is_complete())
-            {
+            if effect.0.disconnected_is_complete() {
                 continue;
             }
             let result = perform(
@@ -664,13 +656,6 @@ async fn run_offline(
     None
 }
 
-fn terminal_handle(effect: &Effect) -> Option<&str> {
-    match effect {
-        Effect::Execute(operation) => operation.0.terminal_handle(),
-        _ => None,
-    }
-}
-
 async fn perform(
     client: Option<&Client>,
     peer: Option<&RpcPeer>,
@@ -680,18 +665,8 @@ async fn perform(
     effect: Effect,
     complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
 ) -> Completed {
-    let terminal = terminal_handle(&effect).map(str::to_owned);
-    let failed_submission = match &effect {
-        Effect::StartSubmission(op::StartSubmission {
-            client_user_message_id,
-            ..
-        })
-        | Effect::Submit(op::SendSubmission {
-            client_user_message_id,
-            ..
-        }) => Some(client_user_message_id.clone()),
-        _ => None,
-    };
+    let terminal = effect.0.terminal_handle().map(str::to_owned);
+    let failed_submission = effect.0.submission_id().map(str::to_owned);
     let mut request_id = None;
     let result = async {
         let client =
@@ -707,98 +682,7 @@ async fn perform(
             sequence: None,
             ordered_call: false,
         };
-        let applied = match effect {
-            Effect::StartSubmission(operation) => {
-                PendingOperation::new(operation).0.run(&mut context).await?
-            }
-            Effect::Submit(operation) => {
-                PendingOperation::new(operation).0.run(&mut context).await?
-            }
-            Effect::Execute(operation) => operation.0.run(&mut context).await?,
-            Effect::UploadAttachment(op::UploadAttachment {
-                draft_key,
-                mut attachment,
-                directory,
-            }) => {
-                let session = session.ok_or_else(|| {
-                    PeerError::InvalidMessage("binary transfers require an iroh session".into())
-                })?;
-                let uploaded = crate::transfers::upload_file(
-                    peer,
-                    || async { session.open_stream().await.map_err(std::io::Error::other) },
-                    std::path::Path::new(&attachment.path),
-                    std::path::Path::new(&directory),
-                    &attachment.name,
-                )
-                .await
-                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                #[derive(serde::Deserialize)]
-                struct Uploaded {
-                    path: String,
-                }
-                let uploaded: Uploaded = serde_json::from_value(uploaded)
-                    .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-                attachment.path = uploaded.path;
-                Applied {
-                    application: Some(Box::new(Published(Event::AttachmentUploaded {
-                        draft_key,
-                        attachment,
-                    }))),
-                    ..Applied::default()
-                }
-            }
-            Effect::PairRemoteHost(op::PairRemoteHost { invitation, name }) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                if now >= invitation.expires_at {
-                    return Err(PeerError::InvalidMessage("invitation expired".into()));
-                }
-                let local = session.ok_or_else(|| {
-                    PeerError::InvalidMessage("pairing requires an iroh session".into())
-                })?;
-                let ticket = invitation.endpoint.parse().map_err(
-                    |error: crate::transport::TransportError| {
-                        PeerError::InvalidMessage(error.to_string())
-                    },
-                )?;
-                {
-                    let remote = scopeguard::guard(
-                        local
-                            .connect(&ticket)
-                            .await
-                            .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
-                        |session| session.close(),
-                    );
-                    let peer = remote
-                        .open_peer(std::time::Duration::from_secs(20), 8)
-                        .await
-                        .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
-                    peer.request::<_, <Pair as RpcMethod>::Output>(
-                        Pair::METHOD,
-                        &Pair {
-                            invitation: invitation.invitation,
-                        },
-                    )
-                    .await?;
-                    peer.close().await?;
-                }
-                let reply = client
-                    .call(&RegisterRemoteHost {
-                        ticket: &invitation.endpoint,
-                        name: &name,
-                    })
-                    .await?;
-                let id = reply.value.id.clone();
-                Applied {
-                    application: Some(Box::new(Published(Event::RemoteHostPaired(reply.value)))),
-                    outcome: Outcome::RemoteHostPaired { id },
-                    ..Applied::default()
-                }
-            }
-        };
-        Ok(applied)
+        effect.0.run(&mut context).await
     }
     .await;
     Completed {
@@ -834,9 +718,9 @@ impl<O: op::Operation> Application for Completion<O> {
 // Intent is replayable data. Only the effect queue erases an operation's type;
 // the same allocation carries its output until the response marker is applied.
 #[derive(Debug)]
-pub struct PendingOperation(Box<dyn Pending>);
-impl PendingOperation {
-    pub(crate) fn new<O: op::Operation>(operation: O) -> Self {
+pub struct Effect(Box<dyn Pending>);
+impl Effect {
+    pub fn execute<O: op::Operation>(operation: O) -> Self {
         Self(Box::new(Completion {
             operation,
             output: None,
@@ -844,6 +728,7 @@ impl PendingOperation {
     }
 }
 trait Pending: Application {
+    fn submission_id(&self) -> Option<&str>;
     fn terminal_handle(&self) -> Option<&str>;
     fn disconnected_is_complete(&self) -> bool;
     fn run<'a>(
@@ -852,6 +737,9 @@ trait Pending: Application {
     ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>>;
 }
 impl<O: op::Operation> Pending for Completion<O> {
+    fn submission_id(&self) -> Option<&str> {
+        self.operation.submission_id()
+    }
     fn terminal_handle(&self) -> Option<&str> {
         self.operation.terminal_handle()
     }
@@ -870,19 +758,9 @@ impl<O: op::Operation> Pending for Completion<O> {
             Ok(Applied {
                 sequence: context.sequence,
                 outcome,
-                application: Some(self),
+                application: self,
             })
         })
-    }
-}
-// Pairing and upload have completed durable effects even if the view changed.
-#[derive(Debug)]
-struct Published(Event);
-impl Application for Published {
-    fn apply(self: Box<Self>, snapshot: &mut Snapshot, _current: bool) -> Vec<Effect> {
-        let (next, effects) = reduce(snapshot, self.0);
-        *snapshot = next;
-        effects
     }
 }
 pub struct Execution<'a> {
