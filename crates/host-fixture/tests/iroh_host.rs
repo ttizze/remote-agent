@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 mod codex_fixture;
 use host_fixture::test_support::{HostFixture, Memory};
