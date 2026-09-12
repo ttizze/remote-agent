@@ -254,10 +254,8 @@ struct ThreadItemRow: View {
     let model: BexAppViewModel
     let isExpanded: Bool
     let toggleExpanded: () -> Void
-    let loadDetails: () async -> (String?, String?)
-    @State private var loadedBody: String?
+    let loadDetails: () async -> String?
     @State private var detailError: String?
-    @State private var loadedVersion: String?
     @State private var retry = 0
 
     private var icon: String {
@@ -281,8 +279,8 @@ struct ThreadItemRow: View {
                     }
                 )) {
                     if isExpanded {
-                        let body = item.data.deferred ? loadedBody ?? "" : item.source.expandedBody()
-                        if item.data.deferred, loadedBody == nil {
+                        let body = item.data.deferred ? "" : item.source.expandedBody()
+                        if item.data.deferred {
                             if let detailError {
                                 Text(detailError).font(.caption).foregroundColor(.red)
                                 Button("再読み込み") { retry += 1 }
@@ -318,16 +316,11 @@ struct ThreadItemRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .task(id: "\(isExpanded):\(item.contentVersion):\(retry)") {
-            if loadedVersion != item.contentVersion {
-                loadedBody = nil; detailError = nil
-            }
-            guard isExpanded, item.data.deferred, loadedBody == nil else { return }
+            guard isExpanded, item.data.deferred else { return }
             detailError = nil
-            let (body, error) = await loadDetails()
+            let error = await loadDetails()
             guard !Task.isCancelled else { return }
-            loadedBody = body
             detailError = error
-            loadedVersion = item.contentVersion
         }
     }
 }

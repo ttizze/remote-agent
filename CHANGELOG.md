@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Explicitly release local Host and discovery locks on shutdown, so a child process retaining an inherited descriptor cannot keep a stopped Host registered as running. Verify restart and duplicate-start rejection with a real child holding the descriptor.
+
 - Remove four unreferenced root screenshots and the unused Desktop SVG icon (1.93 MB).
 
 - Run submissions, attachment uploads, and remote Host pairing through the shared operation queue, preserving chained submission completion, failure recovery, and durable results after navigation. Remove the specialized effect variants and completion events.

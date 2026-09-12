@@ -43,7 +43,18 @@ pub struct HostLease {
     directory: PathBuf,
     key_storage: KeyStorage,
     registry: LocalHostRegistry,
-    _lock: File,
+    _lock: FileLock,
+}
+
+struct FileLock(File);
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // A concurrently forked child can retain this open file description
+        // until exec. Releasing ownership must not wait for its descriptor.
+        if let Err(error) = self.0.unlock() {
+            agent_core::diagnostics::error("release local Host lock", &error.to_string());
+        }
+    }
 }
 
 impl LocalHostRegistry {
@@ -112,15 +123,15 @@ impl LocalHostRegistry {
             directory,
             key_storage,
             registry: self.clone(),
-            _lock: lock,
+            _lock: FileLock(lock),
         })
     }
 
-    fn coordinate(&self) -> Result<File, String> {
+    fn coordinate(&self) -> Result<FileLock, String> {
         crate::platform::create_state_directory(&self.directory).map_err(|e| e.to_string())?;
         let lock = open_lock(&self.directory.join("host-instance.lock"))?;
         lock.lock().map_err(|e| e.to_string())?;
-        Ok(lock)
+        Ok(FileLock(lock))
     }
 
     fn resolve_locked(&self, preferred: &Path) -> Result<LocalHost, String> {
@@ -302,7 +313,10 @@ fn running(directory: &Path) -> Result<bool, String> {
         Err(error) => return Err(error.to_string()),
     };
     match lock.try_lock() {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            lock.unlock().map_err(|error| error.to_string())?;
+            Ok(false)
+        }
         Err(fs::TryLockError::WouldBlock) => Ok(true),
         Err(fs::TryLockError::Error(error)) => Err(error.to_string()),
     }
@@ -312,6 +326,36 @@ fn running(directory: &Path) -> Result<bool, String> {
 mod tests {
     use super::*;
     use agent_core::transport::{Endpoint, Identity, Relays};
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_host_releases_lock_even_with_an_inherited_descriptor() {
+        let fixture = tempfile::tempdir().unwrap();
+        let registry = LocalHostRegistry::new(fixture.path().join("registry"));
+        let host = fixture.path().join("host");
+        let lease = registry.acquire(&host, Some(KeyStorage::File)).unwrap();
+        let inherited = lease._lock.0.try_clone().unwrap();
+        let mut child = scopeguard::guard(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::from(inherited))
+                .spawn()
+                .unwrap(),
+            |mut child| {
+                let _ = child.kill();
+                let _ = child.wait();
+            },
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        drop(lease);
+        assert!(matches!(
+            registry.resolve(&host).unwrap().state,
+            LocalHostState::Stopped
+        ));
+        let replacement = registry.acquire(&host, None).unwrap();
+        assert!(registry.acquire(&host, None).is_err());
+        drop(replacement);
+    }
 
     #[tokio::test]
     async fn discovery_restores_the_hosts_file_backend_and_identity_after_restart() {

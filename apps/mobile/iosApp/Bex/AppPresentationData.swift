@@ -13,24 +13,6 @@ struct HostProfile: Codable, Identifiable {
     }
 }
 
-extension ThreadSummary {
-    var title: String {
-        name.isEmpty ? (preview.isEmpty ? "無題のタスク" : preview) : name
-    }
-
-    var workingDirectory: String {
-        cwd
-    }
-
-    var isActive: Bool {
-        active
-    }
-
-    var hasUnreadCompletion: Bool {
-        unread
-    }
-}
-
 extension JsonValue {
     var string: String? {
         switch self {
