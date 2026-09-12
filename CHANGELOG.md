@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Open iPhone tasks immediately while Host history loads, using cached history and the selected task directory when available. Preserve drafts after a failed read, offer retry, and disable submission and attachments until the conversation is ready.
+
 - Share isolated Host and JSONL connection ownership across integration and UI fixtures. Run the UI Host and loopback pairing controls in one process, remove the separate pairing executable and on-disk key exchange. Remove the redundant iOS screen identifier that overrode the existing detail, loading and retry identifiers.
 
 - Keep chats without a selected project unassigned after sending, reopening, and restarting the Host. Use a dedicated `bex-chats` working directory beside the Codex project state instead of inheriting the App Server's checkout, while retaining the real directory for attachments and file operations. Preserve unsent drafts when that directory cannot be prepared, and skip automatic Git reviews for unassigned chats so a parent repository’s changes do not appear.
