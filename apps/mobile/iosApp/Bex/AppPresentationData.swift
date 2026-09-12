@@ -105,7 +105,7 @@ final class ConversationItem: Sendable {
     let kind: String
     let title: String
     let collapsedBody: String
-    let markdown: [ConversationMarkdown.Block]
+    let markdown: [ConversationMarkdown.Part]
     let isCollapsible: Bool
     let isDeferred: Bool
     let imageSources: [String]

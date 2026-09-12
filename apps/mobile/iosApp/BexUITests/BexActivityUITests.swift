@@ -23,7 +23,7 @@ extension BexLaunchUITests {
         let activity = prefixedElement(app, prefix: "turn.activity.fixture-turn-")
         let streamedCommand = prefixedElement(app, prefix: "item.fixture-command-")
         XCTAssertTrue(activity.waitForExistence(timeout: 10), "Streaming activity header did not appear")
-        XCTAssertTrue(streamedCommand.exists, "Live commands must remain visible while work is running")
+        XCTAssertFalse(streamedCommand.exists, "Live commands must stay collapsed until explicitly expanded")
         XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-commentary-").exists,
                       "Commentary must remain visible outside the work group")
@@ -82,7 +82,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-next-command-").exists)
         XCTAssertFalse(progress.exists, "Completed work must hide interim commentary")
         let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
-        XCTAssertTrue(completed.label.contains("3秒 作業しました"))
+        XCTAssertTrue(completed.label.contains("件の過去のメッセージ"))
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.activity.")).count, 1)
         captureScreen(app, named: "Completed work automatically collapsed")
         completed.tap()

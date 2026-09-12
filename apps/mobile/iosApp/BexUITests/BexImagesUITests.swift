@@ -24,7 +24,7 @@ extension BexLaunchUITests {
             XCTAssertTrue(image.isHittable)
         }
         func openLink(_ label: String) {
-            let link = app.staticTexts[label]
+            let link = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
             for _ in 0 ..< 12 {
                 if link.exists, link.isHittable {
                     break

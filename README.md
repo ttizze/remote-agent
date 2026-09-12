@@ -53,6 +53,12 @@ nix develop . --command ./gradlew :apps:mobile:assembleDebug
 
 Rerun the iOS library build after changing Rust sources. The desktop `BEX_STATE_DIR` and `BEX_KEY_STORAGE=file` mirror the Host flags.
 
+## Conversation controls
+
+On Mac and iPhone, select assistant text to quote it into the draft or ask about it in a side chat. Closing an iPhone side chat restores the original conversation and draft. Mac also supports right-click Copy and Google Search, and own-message hover actions for copying or returning text to the composer. Command activity starts collapsed while running and after reopening; explicit expansion is preserved. See the [conversation display contract](docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md).
+
+The composer gauge opens **アカウントとモデル**. On Mac, **Codex アカウント** selects a saved account; opening the menu refreshes the account list, and switching refreshes the model catalog while retaining the conversation and draft. Add accounts through **Codex アカウントを追加** on iPhone. The Host owns authentication and persists the selected account across restarts; account switching shares the existing Codex process and conversation history.
+
 ## Headless CLI
 
 ```sh
@@ -70,9 +76,12 @@ agent-cli <connection> approve '"request-id"' --decision 2   # string request ID
 nix develop . --command cargo test --workspace            # Rust, including the behavior corpus
 nix develop . --command just iroh-e2e                     # real daemon over isolated iroh sessions
 nix develop . --command just ios-e2e [TestMethod…]        # Simulator XCUITest against a fixture Host
-nix develop . --command just quality [rust|kotlin|swift]  # fmt, clippy -D warnings, ktfmt, detekt, swiftformat, swiftlint
+nix develop . --command just conversation-ui             # selection, side chat, and activity regressions
+nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop tests, and conversation-ui
 ```
 
 Linux CI uses the `nix develop .#native` shell. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
+
+The Simulator runner rejects failed, skipped, and missing tests. It removes its temporary Host, pairing server, Simulator, and Xcode build products; result bundles remain under `target/qa`.
 
 Simulator and fixture runs do not verify physical devices, production Keychain access, camera, or real Codex accounts.

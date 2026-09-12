@@ -2,7 +2,7 @@
 //! directory, never the user's Codex home or the parent process environment.
 
 mod accounts;
-mod history;
+pub(crate) mod history;
 mod scenario;
 mod server;
 

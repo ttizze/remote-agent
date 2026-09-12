@@ -147,11 +147,12 @@ impl Desktop {
                         .selectable(true),
                     );
                 }
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .my_4()
-                    .child(body)
+                let text = projected.data.body.clone();
+                let edit = self.button(format!("edit-{id}"), "", cx, move |s, window, cx| {
+                    selection::set_composer_text(&s.composer, text.clone().into(), window, cx);
+                });
+                let timestamp = turn.and_then(|turn| turn.started_at.as_ref()?.as_ref()?.as_i64());
+                user_message_row(&id, &projected.data.body, body, timestamp, edit)
                     .into_any_element()
             }
             "commandExecution" => {
@@ -599,5 +600,106 @@ impl Desktop {
                 },
             );
         }
+    }
+}
+
+fn user_message_row(
+    id: &str,
+    text: &str,
+    body: Div,
+    timestamp: Option<i64>,
+    edit: Button,
+) -> impl IntoElement {
+    let time = timestamp
+        .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+        .map(|value| {
+            value
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        });
+    let copy_text = text.to_owned();
+    let group = SharedString::from(format!("user-message-{id}"));
+    h_flex().w_full().justify_end().my_4().child(
+        v_flex()
+            .group(group.clone())
+            .items_end()
+            .gap_1()
+            .child(body)
+            .child(
+                h_flex()
+                    .debug_selector(|| "user-message-actions".into())
+                    .invisible()
+                    .group_hover(group, |style| style.visible())
+                    .children(
+                        time.map(|time| {
+                            div().text_xs().text_color(rgb(0x999999)).mr_2().child(time)
+                        }),
+                    )
+                    .child(
+                        Button::new(format!("copy-{id}"))
+                            .debug_selector(|| "user-message-copy".into())
+                            .icon(IconName::Copy)
+                            .small()
+                            .ghost()
+                            .tooltip("発言をコピー")
+                            .accessibility_label("発言をコピー")
+                            .disabled(copy_text.is_empty())
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            }),
+                    )
+                    .child(
+                        edit.icon(Icon::default().path("bex/pencil.svg"))
+                            .small()
+                            .ghost()
+                            .debug_selector(|| "user-message-edit".into())
+                            .tooltip("入力欄で編集")
+                            .accessibility_label("入力欄で編集")
+                            .disabled(text.is_empty()),
+                    ),
+            ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{user_message_bubble, user_message_row};
+    use gpui_kit as gpui;
+    use gpui_kit::{
+        ClipboardItem, Context, IntoElement, Modifiers, ParentElement, Render, TestAppContext,
+        Window,
+    };
+
+    struct Message;
+    impl Render for Message {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            user_message_row(
+                "test",
+                "一行目\nsecond line",
+                user_message_bubble().child("一行目\nsecond line"),
+                Some(1),
+                gpui::component::button::Button::new("edit"),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn hovering_own_message_allows_copying_the_complete_text(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_, cx) = cx.add_window_view(|_, _| Message);
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("user-message-actions").unwrap();
+        cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("previous".into())));
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::default());
+        cx.run_until_parked();
+        let copy = cx.debug_bounds("user-message-copy").unwrap().center();
+        cx.simulate_click(copy, Modifiers::default());
+        cx.update(|_, cx| {
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "一行目\nsecond line"
+            );
+        });
     }
 }

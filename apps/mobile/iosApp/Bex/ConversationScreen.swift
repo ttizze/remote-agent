@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
     let conversation: ConversationPresentation?
+    var isSideChat = false
     @StateObject var dictation = DictationRecorder()
     @State var sendRecordedText = false
     @State var importing = false
@@ -147,6 +148,11 @@ struct ThreadScreen: View {
         .background(Color(UIColor.systemBackground))
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .onDisappear { dictation.cancel() }
+        .onChange(of: model.composerFocusRequest) { _ in
+            if (model.sideChatRequest != nil) == isSideChat {
+                composerFocused = true
+            }
+        }
         .onChange(of: model.draftKey) { _ in dictation.cancel() }
         .onChange(of: model.isConnected) {
             if !$0 {
@@ -199,12 +205,12 @@ struct ThreadScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                if !model.isNewThread {
+                if !isSideChat, !model.isNewThread {
                     conversationTitle
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                if !model.isNewThread {
+                if !isSideChat, !model.isNewThread {
                     conversationActions
                 }
             }

@@ -29,6 +29,11 @@ if [[ $# == 0 ]]; then
         testSimulatorMarksUnseenCompletionUntilOpened \
         testSimulatorDictationPermissionDenialPreservesDraftAndSend \
         testSimulatorDictationContinuesPastThirtySecondsAndReachesHost \
+        testSimulatorCopiesOwnMessageIntoComposer \
+        testSimulatorCopiesOnlySelectedMessageText \
+        testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
+        testSimulatorAsksAboutAssistantSelectionInSideChatAndRestoresOriginalDraft \
+        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorApprovalEditorAndDraftSurviveReconnect \
         testSimulatorKeepsInputRequestVisibleUntilResolved \
@@ -114,7 +119,7 @@ xcrun simctl addmedia "$simulator" apps/mobile/iosApp/Bex/Assets.xcassets/AppIco
 result_bundle=${BEX_RELAY_RESULT_BUNDLE:-"$target/qa/Bex-$(date +%s)-$$.xcresult"}
 xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex -sdk iphonesimulator \
     -configuration Debug -derivedDataPath "$build" CODE_SIGNING_ALLOWED=YES \
-    CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=YES build-for-testing
+    CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=YES BEX_CARGO_TARGET_DIR="$target" build-for-testing
 products="$build/Build/Products"
 xcrun simctl install "$simulator" "$products/Debug-iphonesimulator/Bex.app"
 xcrun simctl privacy "$simulator" grant photos-add dev.remoteagent.mobile.ios

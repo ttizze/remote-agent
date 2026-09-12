@@ -7,6 +7,9 @@ struct BexSwiftUIRoot: View {
 
     var body: some View {
         BexScreen(model: model)
+            .sheet(item: $model.sideChatRequest) { request in
+                ConversationSideChat(model: model, request: request)
+            }
             .sheet(isPresented: $model.isScanning) {
                 BexQrScannerSheet { model.scanned($0) }
                     .interactiveDismissDisabled()
@@ -66,7 +69,10 @@ private struct BexScreen: View {
                         }
                     }
                 )) {
-                    ThreadScreen(model: model, conversation: model.conversation)
+                    ThreadScreen(
+                        model: model,
+                        conversation: model.sideChatRequest?.originalConversation ?? model.conversation
+                    )
                 } label: { EmptyView() }
             )
     }
