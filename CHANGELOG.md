@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Gate native conversation changes with repeated content-swipe reopening, all activity families, long-history paging, and repeated turn IDs. Keep the current Swift navigation implementation.
+
 - Refresh conversation lists and titles after submitted messages and completed turns. Show elapsed execution time and the current action from core presentation, and provide command-output copying. Open the desktop diff from change summaries and file rows, with file navigation, readable Git paths, and expandable unchanged context.
 
 - Place desktop dictation controls in the composer with a live microphone waveform, cancel/Escape, stop, and send. Preserve drafts on cancellation and show readable failure reasons.
