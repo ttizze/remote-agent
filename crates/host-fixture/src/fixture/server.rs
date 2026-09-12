@@ -285,14 +285,11 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                 },
                 "account/read" | "getAuthStatus" | "account/login/start" | "account/login/cancel" | "account/logout" | "fixture/account/current" | "fixture/account/refresh" => accounts.request(&context, id, method, params)?,
                 "model/list" => {
-                    let path = context.home.join("models-fixture.json");
-                    let models = if path.exists() { serde_json::from_slice(&fs::read(path)?)? } else {
-                        json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
+                    let models = json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
                             "defaultReasoningEffort":"medium","supportedReasoningEfforts":[
                                 {"reasoningEffort":"medium","description":"Balanced"},
                                 {"reasoningEffort":"high","description":"Detailed"}],
-                            "isDefault":true,"hidden":false,"description":"Isolated test model"}])
-                    };
+                            "isDefault":true,"hidden":false,"description":"Isolated test model"}]);
                     context.respond(id, &json!({"data":models,"nextCursor":null}))?;
                 }
                 "thread/list" => {

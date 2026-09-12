@@ -1,4 +1,7 @@
-use host_fixture::test_support::{HostFixture, Memory};
+use host_fixture::{
+    pairing::PairingServer,
+    test_support::{HostFixture, Memory},
+};
 use std::{path::PathBuf, sync::Arc};
 
 #[tokio::main]
@@ -34,17 +37,18 @@ async fn main() {
         .current_dir(&workspace)
         .status()
         .unwrap();
-    let state = directory.join("state");
-    std::fs::create_dir_all(&state).unwrap();
     let fixture = PathBuf::from(
         std::env::args_os()
             .nth(2)
             .expect("Codex fixture executable required"),
     );
+    let port_file = std::env::args_os()
+        .nth(3)
+        .expect("port output file required");
     let program = host_fixture::fixture::Config {
         trace: true,
         stream_delay_ms: std::env::args()
-            .nth(3)
+            .nth(4)
             .map(|value| value.parse().expect("stream delay must be milliseconds"))
             .unwrap_or(8000),
         ..Default::default()
@@ -67,22 +71,15 @@ async fn main() {
     )
     .await
     .unwrap();
-    std::fs::write(state.join("host.ticket"), host.ticket.to_string()).unwrap();
-    std::fs::write(
-        state.join("local.key"),
-        host.credentials.local_identity().await.to_bytes(),
+    let pairing = PairingServer::start(
+        &directory,
+        host.ticket.clone(),
+        host.credentials.local_identity().await,
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            state.join("local.key"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-    }
-    println!("UI fixture ready: {}", state.display());
+    std::fs::write(port_file, pairing.port.to_string()).unwrap();
+    println!("UI fixture ready: {}", directory.display());
     tokio::signal::ctrl_c().await.unwrap();
+    pairing.shutdown().unwrap();
     host.close().await.unwrap();
 }

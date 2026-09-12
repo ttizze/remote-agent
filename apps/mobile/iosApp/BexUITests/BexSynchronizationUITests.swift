@@ -13,9 +13,8 @@ extension BexLaunchUITests {
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         try simulatorFixture("hold-history-reads")
         row.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["task.screen"].waitForExistence(timeout: 2),
+        XCTAssertTrue(app.descendants(matching: .any)["task.loading"].waitForExistence(timeout: 2),
                       "Navigation must finish while the Host is still holding the history response")
-        XCTAssertTrue(app.descendants(matching: .any)["task.loading"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["task.empty"].exists)
         XCTAssertFalse(app.buttons["task.send"].isEnabled)
         XCTAssertFalse(app.buttons["task.attach"].isEnabled)

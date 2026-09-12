@@ -61,23 +61,20 @@ build=$(mktemp -d "$target/qa/ios-build.XXXXXX")
 fixture=$(mktemp -d /tmp/bex-ios.XXXXXX)
 simulator=''
 host=''
-pairing=''
 # Job control assigns every background job its own process group, including
 # descendants. The final group kill covers abrupt fixture shutdown failures.
 set -m
 cleanup() {
     result=$?
-    for pid in "$pairing" "$host"; do
-        if [[ -n $pid ]]; then
-            kill -INT "$pid" 2>/dev/null || true
-            for ((attempt=0; attempt<100; attempt++)); do
-                kill -0 "$pid" 2>/dev/null || break
-                sleep 0.1
-            done
-            kill -KILL -- "-$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-        fi
-    done
+    if [[ -n $host ]]; then
+        kill -INT "$host" 2>/dev/null || true
+        for ((attempt=0; attempt<100; attempt++)); do
+            kill -0 "$host" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-$host" 2>/dev/null || true
+        wait "$host" 2>/dev/null || true
+    fi
     if [[ -n $simulator ]]; then
         xcrun simctl shutdown "$simulator" >/dev/null 2>&1 || true
         xcrun simctl delete "$simulator" || result=1
@@ -89,24 +86,15 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 scripts/build-agent-ios.sh simulator
-cargo build --locked --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture --bin bex-pairing-fixture
-"$target/debug/bex-ui-fixture" "$fixture/host" "$target/debug/bex-codex-fixture" 8000 >"$fixture/host.log" 2>&1 &
+cargo build --locked --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture
+"$target/debug/bex-ui-fixture" "$fixture/host" "$target/debug/bex-codex-fixture" "$fixture/pairing.port" 8000 >"$fixture/host.log" 2>&1 &
 host=$!
-state="$fixture/host/state"
-for ((attempt=0; attempt<300; attempt++)); do
-    [[ -f $state/host.ticket && -f $state/local.key ]] && break
-    kill -0 "$host" 2>/dev/null || { echo 'UI fixture exited before publishing its identity' >&2; exit 1; }
-    sleep 0.1
-done
-[[ -f $state/host.ticket && -f $state/local.key ]] || { echo 'Host identity timed out' >&2; exit 1; }
-"$target/debug/bex-pairing-fixture" "$state" "$fixture/pairing.port" >"$fixture/pairing.log" 2>&1 &
-pairing=$!
 for ((attempt=0; attempt<300; attempt++)); do
     [[ -s $fixture/pairing.port ]] && break
-    kill -0 "$pairing" 2>/dev/null || { echo 'Pairing fixture exited' >&2; exit 1; }
+    kill -0 "$host" 2>/dev/null || { echo 'UI fixture exited before publishing its port' >&2; exit 1; }
     sleep 0.1
 done
-[[ -s $fixture/pairing.port ]] || { echo 'Pairing fixture timed out' >&2; exit 1; }
+[[ -s $fixture/pairing.port ]] || { echo 'UI fixture timed out' >&2; exit 1; }
 runtime=$(xcrun simctl list runtimes -j | jq -er '[.runtimes[] | select(.isAvailable and .platform == "iOS")][0].identifier')
 simulator=$(xcrun simctl create 'Bex isolated E2E' com.apple.CoreSimulator.SimDeviceType.iPhone-17 "$runtime")
 xcrun simctl boot "$simulator"

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Share isolated Host and JSONL connection ownership across integration and UI fixtures. Run the UI Host and loopback pairing controls in one process, remove the separate pairing executable and on-disk key exchange. Remove the redundant iOS screen identifier that overrode the existing detail, loading and retry identifiers.
+
 - Keep chats without a selected project unassigned after sending, reopening, and restarting the Host. Use a dedicated `bex-chats` working directory beside the Codex project state instead of inheriting the App Server's checkout, while retaining the real directory for attachments and file operations. Preserve unsent drafts when that directory cannot be prepared, and skip automatic Git reviews for unassigned chats so a parent repository’s changes do not appear.
 
 - Render desktop approval labels, queued requests, images and thread summaries from core presentation. Share Store session subscription, shutdown and snapshot persistence across desktop windows; split desktop views and core operations by responsibility, and remove the Swift presentation mirror.

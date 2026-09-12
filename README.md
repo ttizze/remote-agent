@@ -172,9 +172,9 @@ The fixture runner starts an isolated iroh Host with a deterministic Codex proce
 nix develop . --command just ios-e2e
 ```
 
-The Codex subprocess and pairing HTTP fixtures live in `crates/host-fixture`. Run `just --list` inside the Nix shell for build, integration and quality commands; `cargo xtask --help` lists the quality queue commands. Scripts build the generated mobile bindings and Apple libraries; Gradle builds the Android app.
+The Host, Codex subprocess and pairing HTTP fixtures live in `crates/host-fixture`. The `test_support` module owns Host startup, client connections and shutdown for integration and UI tests. `bex-ui-fixture DIRECTORY CODEX PORT_FILE [STREAM_DELAY_MS]` starts the Host and loopback controls together, keeps their credentials in memory, and publishes the port once both are ready. Its Codex subprocess exercises the production stdio boundary. Run `just --list` inside the Nix shell for build, integration and quality commands; `cargo xtask --help` lists the quality queue commands. Scripts build the generated mobile bindings and Apple libraries; Gradle builds the Android app.
 
-`ios-e2e` runs the 40-test selection by default. Append Simulator test method names to run a specific selection. Each run builds the app once and owns one fresh Host, loopback pairing server, and Simulator shared by the selected tests, matching the former shell runner. The runner removes these fixtures and its Xcode build products on completion or interruption. Results and their JSON summaries remain under `target/qa`; `BEX_RELAY_RESULT_BUNDLE` selects an explicit result bundle path. A nonzero Xcode exit, failed or skipped test, or unexpected pass count fails the command.
+`ios-e2e` runs its full selection by default. Append Simulator test method names to run a specific selection. Each run builds the app once and owns one fresh UI fixture process and Simulator shared by the selected tests. The runner stops the Host and loopback controls together and removes the fixture directory and Xcode build products on completion or interruption. Results and their JSON summaries remain under `target/qa`; `BEX_RELAY_RESULT_BUNDLE` selects an explicit result bundle path. A nonzero Xcode exit, failed or skipped test, or unexpected pass count fails the command.
 
 The headless command runs the real daemon over isolated iroh sessions:
 

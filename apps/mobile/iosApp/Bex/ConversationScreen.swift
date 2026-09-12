@@ -149,7 +149,6 @@ struct ThreadScreen: View {
                     .accessibilityIdentifier("task.loading")
             }
         }
-        .accessibilityIdentifier("task.screen")
         .background(Color(UIColor.systemBackground))
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
         .onDisappear { dictation.cancel() }
