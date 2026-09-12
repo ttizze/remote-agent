@@ -1392,3 +1392,257 @@ async fn unpaired_connections_cannot_exhaust_authorized_session_slots() {
     .await
     .expect("authorized admission deadline");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect() {
+    use agent_core::{
+        client::Answer,
+        state::{Intent, Snapshot},
+        store::Store,
+    };
+    use host_daemon::{
+        FileKeyStore, HostRuntime, KeyStorage,
+        local_host::{LocalHostRegistry, LocalHostState},
+    };
+
+    async fn wait_for(store: &Store, condition: impl Fn(&Snapshot) -> bool) {
+        let mut updates = store.subscribe();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            if condition(&snapshot) {
+                return;
+            }
+            updates.changed().await.unwrap();
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(40), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mobile_state = root.join("mobile-host");
+        let desktop_state = root.join("desktop");
+        let registry = LocalHostRegistry::new(desktop_state.clone());
+        let lease = registry
+            .acquire(&mobile_state, Some(KeyStorage::File))
+            .unwrap();
+        let credentials = Arc::new(
+            HostCredentials::load(
+                Arc::new(FileKeyStore(mobile_state.join("identity.keys"))),
+                mobile_state.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let host_endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(AppServerConfig {
+                program: fixture_program(&root),
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let service = CodexRpcService::new(
+            server.clone(),
+            DesktopProjectStore::new(root.join("projects.json")),
+        );
+        let runtime = Arc::new(
+            HostRuntime::new(service, host_endpoint, credentials, "shared Host".into()).await,
+        );
+        lease.publish(&runtime.ticket()).unwrap();
+        let stop = CancellationToken::new();
+        let running = tokio::spawn(runtime.clone().run(stop.clone()));
+
+        // Fresh desktop state must discover the mobile Host and read *its* keys,
+        // without provisioning a second identity in the desktop directory.
+        let location = registry.resolve(&desktop_state).unwrap();
+        assert_eq!(location.directory, mobile_state);
+        let LocalHostState::Ready(ticket) = location.state else {
+            panic!("Host is not ready")
+        };
+        assert!(ticket == runtime.ticket());
+        assert!(!desktop_state.join("identity.keys").exists());
+        assert!(!desktop_state.join("trust.json").exists());
+        let desktop_endpoint = Endpoint::bind(
+            host_daemon::load_local_identity(&FileKeyStore(
+                location.directory.join("identity.keys"),
+            ))
+            .unwrap(),
+            Relays::Disabled,
+        )
+        .await
+        .unwrap();
+        let mut desktop = Store::connect(&desktop_endpoint, &ticket, Snapshot::default(), None)
+            .await
+            .unwrap();
+        desktop
+            .dispatch(Intent::CreateInvitation(op::CreateInvitation {}))
+            .await
+            .unwrap();
+        let invitation = desktop
+            .snapshot()
+            .management
+            .invitation
+            .as_ref()
+            .unwrap()
+            .invitation;
+        let mobile_endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let mobile = Store::connect(
+            &mobile_endpoint,
+            &ticket,
+            Snapshot::default(),
+            Some(invitation),
+        )
+        .await
+        .unwrap();
+        mobile
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+
+        for (index, final_status) in ["completed", "interrupted"].into_iter().enumerate() {
+            let previous_id = mobile.snapshot().navigation.thread_id.clone();
+            let draft_key = previous_id.clone().unwrap_or_else(|| "new:".into());
+            let prompt = format!("[approval] shared turn {index}");
+            mobile
+                .dispatch(Intent::SetDraftText {
+                    thread_id: draft_key,
+                    text: prompt.clone(),
+                })
+                .await
+                .unwrap();
+            mobile
+                .dispatch(Intent::Submit {
+                    thread_id: previous_id,
+                    client_user_message_id: format!("shared-{index}"),
+                })
+                .await
+                .unwrap();
+            let id = mobile.snapshot().navigation.thread_id.clone().unwrap();
+            wait_for(&mobile, |snapshot| !snapshot.requests.is_empty()).await;
+            desktop
+                .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+                .await
+                .unwrap();
+            let active = |snapshot: &Snapshot| {
+                snapshot
+                    .conversations
+                    .get(&id)
+                    .and_then(|thread| thread.turns.as_ref())
+                    .and_then(|turns| turns.last())
+                    .is_some_and(|turn| turn.status.as_deref() == Some("inProgress"))
+            };
+            assert!(active(&mobile.snapshot()));
+            assert!(active(&desktop.snapshot()));
+
+            // Restore the stale interrupted status from the formerly separate
+            // desktop Host. Reconnecting must replace it with the owner's live turn.
+            let mut saved = serde_json::to_value(desktop.snapshot()).unwrap();
+            saved["conversations"][&id]["turns"][index]["status"] = "interrupted".into();
+            desktop.close().await.unwrap();
+            let registry = LocalHostRegistry::new(desktop_state.clone());
+            let location = registry.resolve(&desktop_state).unwrap();
+            let LocalHostState::Ready(reloaded_ticket) = location.state else {
+                panic!("Host disappeared")
+            };
+            assert!(reloaded_ticket == ticket);
+            desktop = Store::connect(
+                &desktop_endpoint,
+                &reloaded_ticket,
+                serde_json::from_value(saved).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+            wait_for(&desktop, |snapshot| {
+                active(snapshot) && !snapshot.requests.is_empty()
+            })
+            .await;
+            let request = desktop
+                .snapshot()
+                .requests
+                .values()
+                .next()
+                .unwrap()
+                .id
+                .clone();
+            desktop
+                .dispatch(Intent::Respond(op::Respond {
+                    request_id: request,
+                    answer: Answer::Decision {
+                        index: if final_status == "completed" { 0 } else { 3 },
+                    },
+                }))
+                .await
+                .unwrap();
+            for store in [&mobile, &desktop] {
+                wait_for(store, |snapshot| {
+                    snapshot.conversations[&id]
+                        .turns
+                        .as_ref()
+                        .unwrap()
+                        .last()
+                        .is_some_and(|turn| turn.status.as_deref() == Some(final_status))
+                        && snapshot.requests.is_empty()
+                })
+                .await;
+                store.dispatch(Intent::ShowThreadList).await.unwrap();
+                store
+                    .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+                    .await
+                    .unwrap();
+                let snapshot = store.snapshot();
+                assert!(snapshot.error.is_none());
+                let turns = snapshot.conversations[&id].turns.as_ref().unwrap();
+                assert_eq!(turns.len(), index + 1);
+                let turn = turns.last().unwrap();
+                assert_eq!(turn.status.as_deref(), Some(final_status));
+                assert!(
+                    turn.items
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item.text.as_deref() == Some(&prompt))
+                );
+                if final_status == "completed" {
+                    assert!(
+                        turn.items
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .any(|item| item.kind.as_deref() == Some("agentMessage")
+                                && item.extra.get("phase") == Some(&json!("final_answer")))
+                    );
+                }
+            }
+            assert!(mobile.snapshot().pending_submissions.is_empty());
+            let snapshot = mobile.snapshot();
+            assert!(snapshot.drafts[&id].text.is_empty());
+            assert!(snapshot.drafts[&id].attachments.is_empty());
+        }
+        mobile.close().await.unwrap();
+        desktop.close().await.unwrap();
+        mobile_endpoint.close().await;
+        desktop_endpoint.close().await;
+        stop.cancel();
+        running.await.unwrap().unwrap();
+        drop(runtime);
+        Arc::try_unwrap(server)
+            .ok()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+        drop(lease);
+        assert!(matches!(
+            registry.resolve(&desktop_state).unwrap().state,
+            LocalHostState::Stopped
+        ));
+    })
+    .await
+    .expect("shared Host conversation synchronization deadline");
+}

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Share one normal local Host across desktop and mobile independently of their state directories. Reuse and remember its credential directory and key-storage backend, reject competing starts before provisioning, verify discovered tickets, and require explicit isolation for separate test Hosts. Report conflicting legacy Hosts without stopping active work.
+
 - End successful dictation with no recognized text without an error or submission. Preserve drafts and attachments, including after navigation; malformed responses and failed transcription still report errors.
 
 - Add iPhone PC-list connection removal with confirmation and credential deletion, preventing automatic reconnection after relaunch. Refresh Mac device management when opening settings, place removal above pairing QR codes, and fix the revoke request’s `nodeId` field so removing access closes active sessions and rejects reconnection.

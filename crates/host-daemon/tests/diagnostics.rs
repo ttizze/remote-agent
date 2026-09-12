@@ -19,7 +19,13 @@ async fn fatal_startup_errors_survive_process_exit_and_restart() {
         let output = tokio::time::timeout(
             Duration::from_secs(20),
             tokio::process::Command::new(env!("CARGO_BIN_EXE_host-daemon"))
-                .args(["--key-storage", "file", "--no-relay", "--state-dir"])
+                .args([
+                    "--isolated",
+                    "--key-storage",
+                    "file",
+                    "--no-relay",
+                    "--state-dir",
+                ])
                 .arg(&state)
                 .arg("--codex-home")
                 .arg(&codex_home)

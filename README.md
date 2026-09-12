@@ -28,10 +28,13 @@ nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
 
 | Flag | Meaning |
 | --- | --- |
-| `--state-dir` | Overrides the platform application-data directory (macOS: `~/Library/Application Support/app.bex.BEX/`). |
+| `--state-dir` | Credential directory for a new Host; otherwise the remembered directory is used (initial macOS default: `~/Library/Application Support/app.bex.BEX/`). It does not permit a second normal Host. |
 | `--codex-home` | Selects a separate Codex store. |
 | `--key-storage keyring\|file` | Where the 64-byte Host and local-client identity lives. Use `file` on headless Linux without a keyring service. |
 | `--relay-url <url>…` / `--no-relay` | Custom iroh relays, or local addresses only for isolated fixtures. |
+| `--isolated --state-dir <directory>` | Explicitly separate development/test Host. It still locks its own directory. |
+
+Normal launches share one Host per OS user, including when desktop and daemon state directories differ. The platform data directory holds `host-instance.json` and a short discovery lock; each Host retains its directory lock for its lifetime. Discovery reuses the Host's identity and key-storage backend and remembers them after restart. Competing starts are rejected before creating credentials. Upgrades check the platform directory, the desktop's `BEX_STATE_DIR`, and the former `~/.bex` directory for a running Host; conflicting legacy Hosts are reported without stopping active work. Desktop verifies the live management route before using a discovered ticket.
 
 State that must be backed up and never committed: the identity keys (keyring entry `app.bex.host`, or `identity.keys` with `--key-storage file`) and `trust.json` (invitations, allowlist, remote tickets). Errors append to `logs/host.jsonl` (desktop: `logs/desktop.jsonl`), rotated at 5 MiB with four archives and best-effort credential redaction.
 
@@ -53,7 +56,7 @@ open apps/mobile/iosApp/Bex.xcodeproj
 nix develop . --command ./gradlew :apps:mobile:assembleDebug
 ```
 
-Rerun the iOS library build after changing Rust sources. The desktop `BEX_STATE_DIR` and `BEX_KEY_STORAGE=file` mirror the Host flags.
+Rerun the iOS library build after changing Rust sources. Desktop drafts and logs use `BEX_STATE_DIR`; Host discovery may select a different credential directory. `BEX_KEY_STORAGE=file` selects file keys for a new Host. An isolated desktop requires both `BEX_ISOLATED_HOST=1` and `BEX_STATE_DIR`; use a separate Codex home or fixture executable as well so tests cannot read personal provider state.
 
 ## Conversation controls
 
