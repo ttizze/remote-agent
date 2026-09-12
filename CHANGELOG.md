@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- End successful dictation with no recognized text without an error or submission. Preserve drafts and attachments, including after navigation; malformed responses and failed transcription still report errors.
+
 - Add iPhone PC-list connection removal with confirmation and credential deletion, preventing automatic reconnection after relaunch. Refresh Mac device management when opening settings, place removal above pairing QR codes, and fix the revoke request’s `nodeId` field so removing access closes active sessions and rejects reconnection.
 
 - Add saved Codex account switching to the Mac composer’s account/model menu, with current-account selection and model refresh after switching.

@@ -215,8 +215,8 @@ async fn transcribe_recording(
         .await
         .map_err(|_| "文字起こしの応答が無効です。")?;
     match result["text"].take() {
-        Value::String(text) if !text.trim().is_empty() => Ok(text),
-        _ => Err("音声を認識できませんでした。もう一度録音してください。".into()),
+        Value::String(text) => Ok(text),
+        _ => Err("文字起こしの応答が無効です。".into()),
     }
 }
 
@@ -280,7 +280,7 @@ where
                         // The desktop resolves finish on this event, without
                         // waiting for the server to close the WebSocket.
                         let _ = socket.close(None).await;
-                        return transcript_text(transcripts);
+                        return Ok(transcript_text(transcripts));
                     }
                     Some("transcript.failed") => return Err("Codexで文字起こしできませんでした。".into()),
                     Some("session.error") if event["fatal"] == true => return Err("Codexで文字起こしできませんでした。".into()),
@@ -289,7 +289,7 @@ where
             }
             Message::Ping(_) => socket.flush().await.map_err(|_| "音声処理との接続が切れました。")?,
             Message::Close(frame) if started && frame.as_ref().is_some_and(|frame| frame.code == async_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal) => {
-                return transcript_text(transcripts);
+                return Ok(transcript_text(transcripts));
             }
             Message::Close(_) => return Err("文字起こしが完了する前に接続が切れました。".into()),
             _ => {}
@@ -298,7 +298,7 @@ where
     Err("文字起こしが完了する前に接続が切れました。".into())
 }
 
-fn transcript_text(transcripts: Vec<(String, u64, String)>) -> Result<String, String> {
+fn transcript_text(transcripts: Vec<(String, u64, String)>) -> String {
     let mut text = String::new();
     for (_, _, segment) in transcripts {
         let segment = segment.trim();
@@ -310,10 +310,7 @@ fn transcript_text(transcripts: Vec<(String, u64, String)>) -> Result<String, St
         }
         text.push_str(segment);
     }
-    if text.is_empty() {
-        return Err("音声を認識できませんでした。もう一度録音してください。".into());
-    }
-    Ok(text)
+    text
 }
 
 #[cfg(test)]
@@ -434,10 +431,40 @@ mod tests {
                 .is_err()
         );
         assert!(
-            recording_result("AQD/fw==", vec![], CloseCode::Normal)
+            recording_result("AQD/fw==", vec![], CloseCode::Error)
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn silence_completes_without_an_error() {
+        for events in [
+            vec![],
+            vec![json!({"type":"session.updated", "session":{"status":"closed"}})],
+            vec![
+                json!({"type":"transcript.final", "utterance_id":"silent", "revision":1, "text":"  "}),
+            ],
+        ] {
+            assert_eq!(
+                recording_result("AAAAAA==", events, CloseCode::Normal)
+                    .await
+                    .unwrap(),
+                ""
+            );
+        }
+        for text in ["", "  "] {
+            assert_eq!(
+                recording_fallback("200 OK", &json!({"text":text}).to_string(), false)
+                    .await
+                    .unwrap()
+                    .trim(),
+                ""
+            );
+        }
+        for body in ["{}", r#"{"text":null}"#, r#"{"text":42}"#] {
+            assert!(recording_fallback("200 OK", body, false).await.is_err());
+        }
     }
 
     #[tokio::test]

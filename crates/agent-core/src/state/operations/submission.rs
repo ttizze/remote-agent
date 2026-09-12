@@ -29,6 +29,9 @@ impl Operation for Dictate {
         ))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        if output.1.text.trim().is_empty() {
+            return Vec::new();
+        }
         if !self.send {
             return self.stale(snapshot, output);
         }
@@ -53,6 +56,9 @@ impl Operation for Dictate {
         effects
     }
     fn stale(self, snapshot: &mut Snapshot, (_, output): Self::Output) -> Vec<Effect> {
+        if output.text.trim().is_empty() {
+            return Vec::new();
+        }
         let draft = Arc::make_mut(
             Arc::make_mut(&mut snapshot.drafts)
                 .entry(self.draft_key)

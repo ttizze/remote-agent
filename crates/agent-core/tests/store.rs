@@ -891,6 +891,72 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
 }
 
 #[tokio::test]
+async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
+    for existing in [false, true] {
+        for send in [false, true] {
+            for navigate in [false, true] {
+                for transcript in ["", " \n"] {
+                    let mut initial = snapshot();
+                    let key = if existing { "thread" } else { "new:/fixture" };
+                    let navigation = Arc::make_mut(&mut initial.navigation);
+                    navigation.thread_id = existing.then(|| "thread".into());
+                    navigation.cwd = "/fixture".into();
+                    navigation.draft_key = key.into();
+                    Arc::make_mut(&mut initial.drafts).insert(
+                        key.into(),
+                        Arc::new(Draft {
+                            text: "keep this draft".into(),
+                            attachments: vec![agent_core::state::Attachment {
+                                path: "/fixture/photo.png".into(),
+                                name: "photo.png".into(),
+                                is_image: true,
+                            }],
+                            ..Default::default()
+                        }),
+                    );
+                    let (store, mut reader, mut writer) = setup(initial).await;
+                    let operation = store.dispatch(Intent::Transcribe(op::Dictate {
+                        draft_key: key.into(),
+                        audio: vec![0, 0],
+                        send,
+                        client_user_message_id: "silent".into(),
+                    }));
+                    let request = read(&mut reader).await;
+                    assert_eq!(request["method"], "host/dictation/transcribe");
+                    if navigate {
+                        new_chat(&store, &mut reader, &mut writer, "/other").await;
+                    }
+                    let before = store.snapshot();
+                    writer
+                        .write_line(
+                            &json!({"id":request["id"], "result":{"text":transcript}}).to_string(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(operation.await.unwrap(), Outcome::Applied);
+                    let after = store.snapshot();
+                    assert_eq!(after.drafts, before.drafts);
+                    assert_eq!(after.conversations, before.conversations);
+                    assert_eq!(after.pending_submissions, before.pending_submissions);
+                    assert_eq!(after.navigation, before.navigation);
+                    assert!(after.error.is_none());
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(50), reader.read_line())
+                            .await
+                            .is_err(),
+                        "silent dictation must not submit or create a conversation"
+                    );
+                    let restored: Snapshot =
+                        serde_json::from_slice(&serde_json::to_vec(&after).unwrap()).unwrap();
+                    assert_eq!(restored.drafts, after.drafts);
+                    store.close().await.unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn file_navigation_ignores_a_late_reply_from_the_previous_file() {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let first = tokio::spawn({
