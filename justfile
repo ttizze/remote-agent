@@ -17,6 +17,10 @@ build-desktop-macos:
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
+# Run Store and model recovery checks against an owned Android emulator and Host.
+android-e2e:
+    nix develop .#android-test --command scripts/android-e2e.sh
+
 # Native conversation contracts used by the post-commit Swift check.
 conversation-ui:
     scripts/ios-e2e.sh \

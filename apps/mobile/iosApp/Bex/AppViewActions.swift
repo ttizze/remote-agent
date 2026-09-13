@@ -2,7 +2,13 @@ import AgentCore
 import Foundation
 import UniformTypeIdentifiers
 
+typealias SnapshotRequest = (Intent, @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) -> Void
+
 extension BexAppViewModel {
+    func requestSnapshot(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
+        perform(intent) { [self] result in completion(snapshot, result) }
+    }
+
     var isConnected: Bool {
         snapshot.connected()
     }
@@ -185,56 +191,73 @@ extension BexAppViewModel {
         }
     }
 
-    func forkThread(_ threadId: String, through turnId: String, completion: @escaping (String?, String?) -> Void) {
-        perform(.forkThread(ForkThread(threadId: threadId, lastTurnId: turnId))) { result in
-            switch result {
-            case let .success(.startedThread(id)): completion(id, nil)
-            case let .failure(error): completion(nil, error.localizedDescription)
-            default: completion(nil, "会話を分岐できませんでした。")
-            }
-        }
-    }
-
     func readItemDetails(threadId: String, turnId: String, itemId: String) async -> String? {
-        await withCheckedContinuation { continuation in
-            perform(.readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId))) { result in
-                if case let .failure(error) = result {
-                    continuation.resume(returning: error.localizedDescription)
-                } else {
-                    continuation.resume(returning: nil)
-                }
-            }
-        }
+        do {
+            _ = try await outcome(for: .readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId)))
+            return nil
+        } catch { return error.localizedDescription }
     }
 
-    func readSessionImages(_ threadId: String, completion: @escaping ([String]?, String?) -> Void) {
-        perform(.loadSessionImages(LoadSessionImages(threadId: threadId))) { result in
-            switch result {
-            case let .success(.sessionImages(images)): completion(
-                    images.map { $0.encoded ? "data:image/png;base64," + $0.source : $0.source },
-                    nil
-                )
-            case let .failure(error): completion(nil, error.localizedDescription)
-            default: completion(nil, "画像の応答が無効です。")
-            }
-        }
-    }
-
-    func download(_ path: String, completion: @escaping (URL?, String?) -> Void) {
+    func download(_ path: String) async throws -> URL {
+        let host = selectedProfileId
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString,
             isDirectory: true
         )
+        let target = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        } catch { completion(nil, error.localizedDescription); return }
-        let target = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
-        perform(.downloadFile(DownloadFile(source: path, destination: target.path))) { result in
+            _ = try await outcome(for: .downloadFile(DownloadFile(source: path, destination: target.path)))
+            guard selectedProfileId == host else { throw CancellationError() }
+            try Task.checkCancellation()
+            return target
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    private func outcome(for intent: Intent) async throws -> Outcome {
+        try await withCheckedThrowingContinuation { continuation in
+            perform(intent) { continuation.resume(with: $0) }
+        }
+    }
+
+    var selectionActions: ConversationSelectionActions {
+        let ask: ((String) -> Void)? = sideChatRequest == nil ? { [self] text in askSelectionInSideChat(text) } : nil
+        return ConversationSelectionActions(addToChat: addSelectionToChat, askInSideChat: ask)
+    }
+
+    var mediaAccess: ConversationMediaAccess {
+        let host = selectedProfileId
+        let images: (@MainActor () async throws -> [SessionImage])? = conversation.map { thread in
+            { [self] in
+                guard selectedProfileId == host else { throw CancellationError() }
+                let result = try await outcome(for: .loadSessionImages(LoadSessionImages(threadId: thread.id)))
+                guard selectedProfileId == host else { throw CancellationError() }
+                guard case let .sessionImages(images) = result else {
+                    throw NSError(domain: "BexImage", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "画像の応答が無効です。"])
+                }
+                return images
+            }
+        }
+        return ConversationMediaAccess(host: host, cwd: cwd, download: { [self] path in
+            guard selectedProfileId == host else { throw CancellationError() }
+            return try await download(path)
+        }, sessionImages: images)
+    }
+
+    func forkAndOpen(through turnId: String, completion: @escaping (String?) -> Void) {
+        guard let threadId = selectedThreadId, let host = selectedProfileId else { completion(nil); return }
+        perform(.forkThread(ForkThread(threadId: threadId, lastTurnId: turnId))) { [self] result in
+            guard selectedProfileId == host, selectedThreadId == threadId else { completion(nil); return }
             switch result {
-            case .success: completion(target, nil)
-            case let .failure(error):
-                try? FileManager.default.removeItem(at: directory)
-                completion(nil, error.localizedDescription)
+            case let .success(.startedThread(id)):
+                openThread(id)
+                completion(nil)
+            case let .failure(error): completion(error.localizedDescription)
+            default: completion("会話を分岐できませんでした。")
             }
         }
     }

@@ -7,21 +7,65 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.Attachment
+import dev.remoteagent.core.ConversationRowContent
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.Snapshot
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class StorePersistenceTest {
+    @Test
+    fun projectionRetainsBothAnswersAndPublishedValuesAcrossDraftEdits() = runBlocking {
+        val persisted =
+            JSONObject(Snapshot.empty().serialize().decodeToString())
+                .put("navigation", JSONObject("""{"thread_id":"thread","draft_key":"thread","cwd":"/fixture"}"""))
+                .put(
+                    "conversations",
+                    JSONObject(
+                        """{"thread":{"id":"thread","turns":[
+                {"id":"repeated","items":[{"id":"first","type":"agentMessage","text":"first answer"}]},
+                {"id":"repeated","items":[{"id":"second","type":"agentMessage","text":"second answer"}]}
+            ]}}"""
+                    ),
+                )
+        val store = AgentStore.offline(persisted.toString().encodeToByteArray())
+        try {
+            val snapshot = store.snapshot()
+            val first = requireNotNull(projectConversationRows(snapshot, snapshot.conversation("thread"), null))
+            fun answers(projection: ConversationProjection) =
+                projection.rows.mapNotNull {
+                    (it.content as? ConversationRowContent.Response)?.item?.presentation()?.body
+                }
+            assertEquals(listOf("first answer", "second answer"), answers(first))
+            val edit = store.dispatch(Intent.SetDraftText("thread", "new draft"))
+            val latest = store.snapshot()
+            assertEquals("new draft", latest.draft("thread").text)
+            assertEquals("", snapshot.draft("thread").text)
+            edit.wait()
+            val second = projectConversationRows(latest, latest.conversation("thread"), first)
+            assertSame(first, second)
+            assertEquals(listOf("first answer", "second answer"), answers(first))
+            assertNull(projectConversationRows(latest, null, first))
+            val reopened = requireNotNull(projectConversationRows(latest, latest.conversation("thread"), null))
+            assertEquals(answers(first), answers(reopened))
+        } finally {
+            store.shutdown()
+        }
+    }
+
     @Test
     fun nativeDraftsRoundTripAcrossIndependentHosts() = runBlocking {
         val base = InstrumentationRegistry.getInstrumentation().targetContext

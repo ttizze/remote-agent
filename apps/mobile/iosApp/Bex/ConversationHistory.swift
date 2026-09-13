@@ -1,27 +1,10 @@
 import AgentCore
-import AVFoundation
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// History and row presentation
 extension ThreadScreen {
     func activityIsExpanded(_ activity: ActivityPresentation) -> Bool {
         AgentCore.activityIsExpanded(activity: activity, choice: activityExpansionOverrides[activity.id])
-    }
-
-    func conversationRows(_ thread: ConversationPresentation) -> [ThreadConversationRow] {
-        var expanded = false
-        return thread.rows.filter { row in
-            guard case let .native(native, _) = row.content else { return true }
-            switch native.content {
-            case let .activityHeader(activity):
-                expanded = activityIsExpanded(activity)
-                return true
-            case .activity: return expanded
-            case .inProgress: return false
-            default: return true
-            }
-        }
     }
 
     @ViewBuilder
@@ -32,7 +15,7 @@ extension ThreadScreen {
         case let .queued(item):
             VStack(alignment: .leading, spacing: 6) {
                 Text("順番待ち").font(.caption).foregroundColor(.secondary)
-                ThreadMessageRow(item: item, isUser: true, model: model)
+                ThreadMessageRow(item: item, isUser: true, media: model.mediaAccess, selection: model.selectionActions)
             }
         }
     }
@@ -42,31 +25,46 @@ extension ThreadScreen {
         switch (row.content, item) {
         case let (.olderItems(turnId), _): historyBoundary(turnId)
         case let (.user, item?):
-            ThreadMessageRow(item: item, isUser: true, model: model).padding(.top, 16)
+            ThreadMessageRow(item: item, isUser: true, media: model.mediaAccess, selection: model.selectionActions)
+                .padding(
+                    .top,
+                    16
+                )
         case (let .response(_, turnId), let item?):
-            ThreadMessageRow(item: item, isUser: false, model: model, forkTurnId: turnId)
+            ThreadMessageRow(item: item, isUser: false, media: model.mediaAccess, selection: model.selectionActions,
+                             fork: turnId
+                                 .map { id in { complete in model.forkAndOpen(through: id, completion: complete) } })
         case let (.activityHeader(activity), _): activityHeader(activity)
         case (let .activity(_, turnId), let item?): activityItem(item, turnId: turnId)
-        case let (.pendingRequest(request), _): ThreadRequestRow(request: request, model: model)
+        case let (.pendingRequest(request), _): ThreadRequestRow(request: request) { answer, complete in model.respond(
+                request,
+                answer: answer,
+                completion: complete
+            ) }
         case let (.error(error), _): ThreadErrorRow(error: error)
         case (.inProgress, _), (_, nil): EmptyView()
         }
     }
 
     func activityItem(_ item: ConversationItem, turnId: String) -> some View {
-        ThreadItemRow(item: item, model: model, isExpanded: expandedItemIds.contains(item.data.id),
-                      toggleExpanded: {
-                          isFollowingLatest = false
-                          if expandedItemIds.contains(item.data.id) {
-                              expandedItemIds.remove(item.data.id)
-                          } else {
-                              expandedItemIds.insert(item.data.id)
-                          }
-                      },
-                      loadDetails: { await model.readItemDetails(
-                          threadId: conversation?.id ?? "", turnId: turnId,
-                          itemId: item.data.nativeId ?? item.data.id
-                      ) })
+        ThreadItemRow(
+            item: item,
+            media: model.mediaAccess,
+            selection: model.selectionActions,
+            isExpanded: expandedItemIds.contains(item.data.id),
+            toggleExpanded: {
+                isFollowingLatest = false
+                if expandedItemIds.contains(item.data.id) {
+                    expandedItemIds.remove(item.data.id)
+                } else {
+                    expandedItemIds.insert(item.data.id)
+                }
+            },
+            loadDetails: { await model.readItemDetails(
+                threadId: conversation?.id ?? "", turnId: turnId,
+                itemId: item.data.nativeId ?? item.data.id
+            ) }
+        )
     }
 
     @ViewBuilder
@@ -129,5 +127,21 @@ extension ThreadScreen {
             }
         }.count
         return "turns=\(thread.source.turnCount());items=\(itemCount)"
+    }
+}
+
+func conversationRows(_ thread: ConversationPresentation,
+                      expansion: [String: ActivityExpansion]) -> [ThreadConversationRow] {
+    var expanded = false
+    return thread.rows.filter { row in
+        guard case let .native(native, _) = row.content else { return true }
+        switch native.content {
+        case let .activityHeader(activity):
+            expanded = AgentCore.activityIsExpanded(activity: activity, choice: expansion[activity.id])
+            return true
+        case .activity: return expanded
+        case .inProgress: return false
+        default: return true
+        }
     }
 }

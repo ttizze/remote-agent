@@ -1,10 +1,15 @@
 import SwiftUI
 import UIKit
 
+struct ConversationSelectionActions {
+    let addToChat: (String) -> Void
+    let askInSideChat: ((String) -> Void)?
+}
+
 /// Assistant prose stays selectable in place; user bubbles have their own long-press menu.
 struct AssistantSelectableText: UIViewRepresentable {
     let blocks: [ConversationMarkdown.Block]
-    let model: BexAppViewModel
+    let actions: ConversationSelectionActions
     @Environment(\.openURL) private var openURL
     @Environment(\.sizeCategory) private var sizeCategory
 
@@ -131,18 +136,18 @@ struct AssistantSelectableText: UIViewRepresentable {
             guard range.length > 0, NSMaxRange(range) <= (textView.text as NSString).length else { return nil }
             let text = (textView.text as NSString).substring(with: range)
             let add = UIAction(title: "チャットに追加", image: UIImage(systemName: "bubble")) { [weak self] _ in
-                self?.parent.model.addSelectionToChat(text)
+                self?.parent.actions.addToChat(text)
             }
             let copy = UIAction(title: "コピー", image: UIImage(systemName: "doc.on.doc")) { _ in
                 UIPasteboard.general.string = text
             }
             var actions: [UIMenuElement] = [add, copy]
-            if parent.model.sideChatRequest == nil {
+            if parent.actions.askInSideChat != nil {
                 actions.append(UIAction(
                     title: "サイドチャットで質問",
                     image: UIImage(systemName: "bubble.left.and.bubble.right")
                 ) { [weak self] _ in
-                    self?.parent.model.askSelectionInSideChat(text)
+                    self?.parent.actions.askInSideChat?(text)
                 })
             }
             return UIMenu(children: actions + suggestedActions.compactMap(Self.removingCopy))

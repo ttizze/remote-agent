@@ -20,24 +20,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.Respond
 import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.Answer
-import dev.remoteagent.core.Intent
 import dev.remoteagent.core.JsonValue
 import dev.remoteagent.core.Request
 import dev.remoteagent.core.RequestKind
 import dev.remoteagent.core.parseJsonValue
 
 @Composable
-internal fun RequestCard(request: Request, model: AndroidAppModel) {
+internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -> Unit) {
     var busy by remember(request.key) { mutableStateOf(false) }
     var error by remember(request.key) { mutableStateOf<String?>(null) }
     fun respond(answer: Answer) {
         busy = true
-        model.perform(Intent.Respond(Respond(request.id, answer))) {
+        submit(answer) {
             busy = false
-            error = it.exceptionOrNull()?.message
+            error = it
         }
     }
     Card(Modifier.fillMaxWidth()) {
@@ -48,9 +46,7 @@ internal fun RequestCard(request: Request, model: AndroidAppModel) {
                 RequestKind.COMMAND_APPROVAL,
                 RequestKind.FILE_APPROVAL ->
                     request.decisionLabels.forEachIndexed { index, label ->
-                        Button(onClick = { respond(Answer.Decision(index.toUInt())) }, enabled = !busy) {
-                            Text(label)
-                        }
+                        Button(onClick = { respond(Answer.Decision(index.toUInt())) }, enabled = !busy) { Text(label) }
                     }
                 RequestKind.PERMISSIONS ->
                     Row {
@@ -110,4 +106,3 @@ private fun RawAnswer(busy: Boolean, respond: (Answer) -> Unit, onError: (String
         Text("応答を送信")
     }
 }
-

@@ -215,7 +215,12 @@ struct ThreadsScreen: View {
                     .accessibilityIdentifier("tasks.menu")
             }
         }
-        .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(model: model, host: host) }
+        .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(
+            connected: model.isConnected && model.selectedProfileId == host.id,
+            request: model.requestSnapshot,
+            settings: model.snapshot.worktreeSettings(),
+            host: host
+        ) }
     }
 }
 

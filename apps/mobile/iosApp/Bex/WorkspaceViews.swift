@@ -2,19 +2,10 @@ import AgentCore
 import SwiftUI
 import UIKit
 
-private struct WorkspaceEntry: Identifiable {
-    var id: String {
+extension FileEntry: @retroactive Identifiable {
+    public var id: String {
         path
     }
-
-    let name: String
-    let path: String
-    let directory: Bool
-}
-
-private struct SharedFile: Identifiable {
-    let id = UUID()
-    let url: URL
 }
 
 struct WorkspaceSheet: View {
@@ -37,28 +28,61 @@ struct WorkspaceSheet: View {
             .pickerStyle(.segmented).padding(.horizontal).padding(.bottom)
             Divider()
             if showingDiff {
-                WorkspaceDiffScreen(model: model, root: root)
+                WorkspaceDiffScreen { complete in
+                    model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) { result in
+                        if case let .failure(failure) = result {
+                            let error = model.snapshot.error() ?? failure.localizedDescription
+                            if model.notice == error {
+                                model.notice = nil
+                            }
+                            complete(.failure(NSError(domain: "BexWorkspace", code: 1,
+                                                      userInfo: [NSLocalizedDescriptionKey: error])))
+                        } else if let review = model.snapshot.review() {
+                            complete(.success(review.diffFiles()))
+                        } else {
+                            complete(.failure(NSError(domain: "BexWorkspace", code: 1,
+                                                      userInfo: [
+                                                          NSLocalizedDescriptionKey: "差分を取得できませんでした。再試行してください。"
+                                                      ])))
+                        }
+                    }
+                }
             } else {
                 NavigationView {
-                    WorkspaceDirectoryScreen(model: model, root: root, directory: root) { dismiss() }
+                    WorkspaceDirectoryScreen(snapshot: model.snapshot, root: root, directory: root,
+                                             perform: model.requestSnapshot, fileDraft: fileDraft,
+                                             downloadFile: model.download,
+                                             aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
+                                             close: { dismiss() })
                 }.navigationViewStyle(StackNavigationViewStyle())
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
     }
+
+    private func fileDraft(_ path: String) -> Binding<String> {
+        Binding(get: {
+            model.snapshot.fileDraft(path: path)?.text ??
+                model.snapshot.file().flatMap { $0.path == path ? $0.text : nil } ?? ""
+        }, set: { model.perform(.setFileDraft(path: path, text: $0)) })
+    }
 }
 
 private struct WorkspaceDirectoryScreen: View {
-    @ObservedObject var model: BexAppViewModel
+    let snapshot: AgentCore.Snapshot
     let root: String
     let directory: String
+    let perform: SnapshotRequest
+    let fileDraft: (String) -> Binding<String>
+    let downloadFile: @MainActor (String) async throws -> URL
+    let aiEdit: (String) -> Void
     let close: () -> Void
     @State private var destinationPath: String?
     @State private var path = ""
-    @State private var entries: [WorkspaceEntry] = []
+    @State private var entries: [FileEntry] = []
     @State private var error: String?
     @State private var busy = false
-    @State private var selected: WorkspaceEntry?
+    @State private var selected: FileEntry?
     @State private var sharedFile: SharedFile?
 
     var body: some View {
@@ -79,17 +103,20 @@ private struct WorkspaceDirectoryScreen: View {
             List {
                 NavigationLink("親ディレクトリ") {
                     WorkspaceDirectoryScreen(
-                        model: model,
+                        snapshot: snapshot,
                         root: root,
                         directory: (path as NSString).deletingLastPathComponent,
-                        close: close
+                        perform: perform, fileDraft: fileDraft, downloadFile: downloadFile, aiEdit: aiEdit, close: close
                     )
                 }
                 ForEach(entries) { entry in
                     HStack {
                         if entry.directory {
                             NavigationLink {
-                                WorkspaceDirectoryScreen(model: model, root: root, directory: entry.path, close: close)
+                                WorkspaceDirectoryScreen(snapshot: snapshot, root: root, directory: entry.path,
+                                                         perform: perform, fileDraft: fileDraft,
+                                                         downloadFile: downloadFile, aiEdit: aiEdit,
+                                                         close: close)
                             } label: { Label(entry.name, systemImage: "folder") }
                                 .accessibilityIdentifier("file.\(entry.name)")
                         } else {
@@ -116,7 +143,9 @@ private struct WorkspaceDirectoryScreen: View {
                 }
             )) {
                 if let destinationPath {
-                    WorkspaceDirectoryScreen(model: model, root: root, directory: destinationPath, close: close)
+                    WorkspaceDirectoryScreen(snapshot: snapshot, root: root, directory: destinationPath,
+                                             perform: perform, fileDraft: fileDraft, downloadFile: downloadFile,
+                                             aiEdit: aiEdit, close: close)
                 }
             } label: { EmptyView() }
         )
@@ -128,8 +157,14 @@ private struct WorkspaceDirectoryScreen: View {
             }
         }
         .sheet(item: $selected) { entry in
-            FileEditorSheet(model: model, entry: entry, download: download) { path in
-                model.draft = "このファイルを編集してください: \(path)\n変更内容: "
+            FileEditorSheet(
+                snapshot: snapshot,
+                text: fileDraft(entry.path),
+                perform: perform,
+                entry: entry,
+                download: download
+            ) { path in
+                aiEdit(path)
                 selected = nil
                 close()
             }
@@ -141,14 +176,14 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func load(_ directory: String) {
         busy = true; error = nil
-        model.perform(.listFiles(ListFiles(path: directory))) { result in
+        perform(.listFiles(ListFiles(path: directory))) { snapshot, result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
             }
-            guard let result = model.snapshot.directory(), result.path == directory else { return }
+            guard let result = snapshot.directory(), result.path == directory else { return }
             path = result.path
-            entries = result.entries.map { WorkspaceEntry(name: $0.name, path: $0.path, directory: $0.directory) }
+            entries = result.entries
             if result.truncated {
                 error = "先頭 2,000 件を表示しています。パスを指定して開けます。"
             }
@@ -157,11 +192,12 @@ private struct WorkspaceDirectoryScreen: View {
 
     private func download(_ path: String) {
         busy = true; error = nil
-        model.download(path) { url, message in
-            busy = false; error = message
-            if let url {
+        Task {
+            defer { busy = false }
+            do {
+                let url = try await downloadFile(path)
                 selected = nil; sharedFile = SharedFile(url: url)
-            }
+            } catch { self.error = error.localizedDescription }
         }
     }
 
@@ -175,8 +211,7 @@ private struct WorkspaceDirectoryScreen: View {
 }
 
 private struct WorkspaceDiffScreen: View {
-    @ObservedObject var model: BexAppViewModel
-    let root: String
+    let load: (@escaping (Result<[WorkspaceDiffFile], Error>) -> Void) -> Void
     @State private var files: [WorkspaceDiffFile] = []
     @State private var error: String?
     @State private var busy = true
@@ -208,19 +243,12 @@ private struct WorkspaceDiffScreen: View {
 
     private func loadDiff() {
         busy = true; error = nil
-        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) { result in
+        load { result in
             busy = false
-            if case let .failure(failure) = result {
-                error = model.snapshot.error() ?? failure.localizedDescription
-                if model.notice == error {
-                    model.notice = nil
-                }
-                return
+            switch result {
+            case let .success(result): files = result
+            case let .failure(failure): error = failure.localizedDescription
             }
-            guard let review = model.snapshot.review() else {
-                error = "差分を取得できませんでした。再試行してください。"; return
-            }
-            files = review.diffFiles()
         }
     }
 }
@@ -276,117 +304,4 @@ private struct WorkspaceDiffCard: View {
         .background(Color(uiColor: .systemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
-}
-
-private struct FileEditorSheet: View {
-    @ObservedObject var model: BexAppViewModel
-    let entry: WorkspaceEntry
-    let download: (String) -> Void
-    let aiEdit: (String) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var error: String?
-    @State private var busy = false
-    @State private var initialized = false
-    @State private var confirmReload = false
-    private var file: FileContent? {
-        model.snapshot.file().flatMap { $0.path == entry.path ? $0 : nil }
-    }
-
-    private var text: String {
-        model.snapshot.fileDraft(path: entry.path)?.text ?? file?.text ?? ""
-    }
-
-    private var revision: String {
-        model.snapshot.fileDraft(path: entry.path)?.revision ?? file?.revision ?? ""
-    }
-
-    private var savedText: String {
-        file?.text ?? ""
-    }
-
-    var body: some View {
-        NavigationView {
-            VStack(alignment: .leading) {
-                Text(entry.path).font(.caption).foregroundColor(.secondary).textSelection(.enabled).padding(.horizontal)
-                if let error {
-                    BexNotice(text: error).padding(.horizontal)
-                }
-                if busy {
-                    ProgressView().padding()
-                }
-                TextEditor(text: Binding(
-                    get: { text },
-                    set: { model.perform(.setFileDraft(path: entry.path, text: $0)) }
-                )).font(.body.monospaced())
-                    .textInputAutocapitalization(.never).disableAutocorrection(true)
-                    .accessibilityIdentifier("file.editor")
-                    .disabled(revision.isEmpty)
-                HStack {
-                    Button("再読込") {
-                        if text != savedText {
-                            confirmReload = true
-                        } else {
-                            load(restoreDraft: false)
-                        }
-                    }
-                    Button("ダウンロード") { download(entry.path) }
-                    Button("AIで編集") { aiEdit(entry.path) }.accessibilityIdentifier("file.ai-edit")
-                }.padding()
-            }
-            .navigationTitle(entry.name)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { dismiss() }.accessibilityIdentifier("file.close")
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") {
-                        busy = true; error = nil
-                        model.perform(.saveFile(SaveFile(path: entry.path))) { result in
-                            busy = false
-                            if case let .failure(failure) = result {
-                                error = failure.localizedDescription
-                            }
-                        }
-                    }.disabled(busy || revision.isEmpty || text == savedText).accessibilityIdentifier("file.save")
-                }
-            }
-            .onAppear {
-                if !initialized {
-                    load(restoreDraft: true)
-                }
-            }
-            .confirmationDialog("保存していない編集を破棄して再読込しますか？", isPresented: $confirmReload, titleVisibility: .visible) {
-                Button("編集を破棄して再読込", role: .destructive) {
-                    load(restoreDraft: false)
-                }
-            }
-        }
-    }
-
-    private func load(restoreDraft: Bool) {
-        busy = true; error = nil
-        model.perform(.readFile(ReadFile(path: entry.path, discardDraft: !restoreDraft))) { result in
-            busy = false
-            if case let .failure(failure) = result {
-                error = failure.localizedDescription; return
-            }
-            initialized = true
-            if let file, revision != file.revision {
-                error = "ホストのファイルが変更されています。下書きは保持しました。再読込すると下書きを破棄します。"
-            }
-        }
-    }
-}
-
-private struct FileShareSheet: UIViewControllerRepresentable {
-    let url: URL
-    func makeUIViewController(context _: Context) -> UIActivityViewController {
-        let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-        controller.completionWithItemsHandler = { _, _, _, _ in
-            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-        }
-        return controller
-    }
-
-    func updateUIViewController(_: UIActivityViewController, context _: Context) {}
 }

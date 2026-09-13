@@ -24,9 +24,11 @@ private struct BexScreen: View {
         NavigationView {
             Group {
                 if model.profiles.isEmpty {
-                    PairingScreen(model: model)
+                    PairingScreen(canCancel: !model.profiles.isEmpty, error: model.pairingError,
+                                  scan: { model.isScanning = true }, pair: model.pair, cancel: model.dismissPairing)
                 } else {
-                    ProfilesScreen(model: model)
+                    ProfilesScreen(profiles: model.profiles, notice: model.notice,
+                                   select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
                         .background(
                             NavigationLink(isActive: Binding(
                                 get: { model.screen == .threads || model.screen == .thread },
@@ -47,8 +49,14 @@ private struct BexScreen: View {
                                 }
                             }
                         )) {
-                            NavigationView { PairingScreen(model: model) }
-                                .navigationViewStyle(StackNavigationViewStyle())
+                            NavigationView { PairingScreen(
+                                canCancel: !model.profiles.isEmpty,
+                                error: model.pairingError,
+                                scan: { model.isScanning = true },
+                                pair: model.pair,
+                                cancel: model.dismissPairing
+                            ) }
+                            .navigationViewStyle(StackNavigationViewStyle())
                         }
                 }
             }
@@ -79,7 +87,11 @@ private struct BexScreen: View {
 }
 
 private struct PairingScreen: View {
-    @ObservedObject var model: BexAppViewModel
+    let canCancel: Bool
+    let error: String?
+    let scan: () -> Void
+    let pair: (String) -> Void
+    let cancel: () -> Void
     @State private var contents = ""
     @State private var showsManualPairing = false
 
@@ -101,7 +113,7 @@ private struct PairingScreen: View {
                         .foregroundColor(.secondary)
                 }
 
-                Button { model.isScanning = true } label: {
+                Button { scan() } label: {
                     Label("QRコードを読み取る", systemImage: "qrcode.viewfinder")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
@@ -117,7 +129,7 @@ private struct PairingScreen: View {
                             .frame(minHeight: 44)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityIdentifier("pairing.contents")
-                        Button("入力内容でペアリング") { model.pair(contents) }
+                        Button("入力内容でペアリング") { pair(contents) }
                             .buttonStyle(.bordered)
                             .disabled(contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             .accessibilityIdentifier("pairing.submit")
@@ -133,7 +145,7 @@ private struct PairingScreen: View {
                     .multilineTextAlignment(.center)
                     .foregroundColor(.secondary)
 
-                if let error = model.pairingError {
+                if let error {
                     BexNotice(text: error)
                 }
             }
@@ -144,8 +156,8 @@ private struct PairingScreen: View {
         .navigationTitle("Bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
-                if !model.profiles.isEmpty {
-                    Button("キャンセル") { model.dismissPairing() }
+                if canCancel {
+                    Button("キャンセル") { cancel() }
                         .accessibilityIdentifier("pairing.cancel")
                 }
             }
@@ -154,17 +166,21 @@ private struct PairingScreen: View {
 }
 
 private struct ProfilesScreen: View {
-    @ObservedObject var model: BexAppViewModel
+    let profiles: [HostProfile]
+    let notice: String?
+    let select: (String) -> Void
+    let remove: (String) -> Void
+    let add: () -> Void
     @State private var removing: HostProfile?
 
     var body: some View {
         List {
-            if let notice = model.notice {
+            if let notice {
                 BexNotice(text: notice)
             }
-            ForEach(model.profiles, id: \.id) { profile in
+            ForEach(profiles, id: \.id) { profile in
                 HStack {
-                    Button { model.selectProfile(profile.id) } label: {
+                    Button { select(profile.id) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(profile.name).font(.headline)
                             Text(profile.hostIdentity).font(.caption).foregroundColor(.secondary)
@@ -179,7 +195,7 @@ private struct ProfilesScreen: View {
                 }
             }
             Section {
-                Button("PCを追加") { model.openPairing() }
+                Button("PCを追加") { add() }
                     .accessibilityIdentifier("profiles.add")
             }
         }
@@ -192,7 +208,7 @@ private struct ProfilesScreen: View {
             }
         )) {
             if let removing {
-                Button("接続を解除", role: .destructive) { model.removeProfile(removing.id) }
+                Button("接続を解除", role: .destructive) { remove(removing.id) }
             }
             Button("キャンセル", role: .cancel) { removing = nil }
         } message: {
@@ -244,4 +260,30 @@ private struct BexQrScannerController: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_: BexQrCaptureViewController, context _: Context) {}
+}
+
+/// Keep native editing ahead of Store publication; every edit still dispatches synchronously.
+struct BufferedTextInput<Content: View>: View {
+    @Binding private var value: String
+    @State private var text: String
+    let content: (Binding<String>) -> Content
+
+    init(value: Binding<String>, @ViewBuilder content: @escaping (Binding<String>) -> Content) {
+        _value = value
+        _text = State(initialValue: value.wrappedValue)
+        self.content = content
+    }
+
+    var body: some View {
+        let input = Binding(get: { text }, set: {
+            guard text != $0 else { return }
+            text = $0
+            value = $0
+        })
+        content(input).onChange(of: value) { _ in
+            if text != value {
+                text = value
+            }
+        }
+    }
 }

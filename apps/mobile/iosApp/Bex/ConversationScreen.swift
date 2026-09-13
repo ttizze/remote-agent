@@ -45,7 +45,7 @@ struct ThreadScreen: View {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
-                let rows = conversationRows(thread)
+                let rows = conversationRows(thread, expansion: activityExpansionOverrides)
                 let latestRowId = rows.last?.id
                 ScrollViewReader { proxy in
                     ScrollView {

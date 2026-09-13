@@ -1,10 +1,12 @@
+import AgentCore
 import SwiftUI
 import UniformTypeIdentifiers
 
 /// Foundation parses block structure and inline Markdown; no HTML/web view is involved.
 struct ConversationMarkdown: View {
     let blocks: [Part]
-    let model: BexAppViewModel
+    let media: ConversationMediaAccess
+    let selection: ConversationSelectionActions
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
     @State private var previewDirectory: URL?
@@ -34,18 +36,19 @@ struct ConversationMarkdown: View {
             ForEach(blocks) { part in
                 if let block = part.image, let imageURL = block.imageURL {
                     ConversationImage(
-                        source: imageURL.scheme == nil ? imageURL.path : imageURL.absoluteString,
+                        source: SessionImage(reference: imageURL.scheme == nil ? imageURL.path : imageURL
+                            .absoluteString),
                         label: String(block.content.characters),
                         identifier: "markdown.image.\(block.id)",
-                        model: model
+                        media: media
                     )
                 } else if part.isCode {
                     ScrollView(.horizontal) {
-                        AssistantSelectableText(blocks: part.blocks, model: model)
+                        AssistantSelectableText(blocks: part.blocks, actions: selection)
                             .fixedSize(horizontal: true, vertical: false).padding(12)
                     }.background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 } else {
-                    AssistantSelectableText(blocks: part.blocks, model: model)
+                    AssistantSelectableText(blocks: part.blocks, actions: selection)
                 }
             }
             if let linkError {
@@ -60,7 +63,7 @@ struct ConversationMarkdown: View {
             }
             do {
                 linkError = nil
-                linkTarget = try conversationFileURL(url.absoluteString, cwd: model.cwd)
+                linkTarget = try conversationFileURL(url.absoluteString, cwd: media.cwd)
             } catch { linkError = "リンクを開けません: \(error.localizedDescription)" }
             return .handled
         })
@@ -73,8 +76,8 @@ struct ConversationMarkdown: View {
                 ConversationPreview(
                     url: url,
                     isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true,
-                    model: model,
-                    source: previewSource
+                    media: media,
+                    source: previewSource.map(SessionImage.init(reference:))
                 ) {
                     previewURL = nil
                 }
@@ -88,22 +91,19 @@ struct ConversationMarkdown: View {
         }
         .task(id: linkTarget) {
             guard let target = linkTarget else { return }
-            let host = model.selectedProfileId
-            let (downloaded, error) = await withCheckedContinuation { continuation in
-                model.download(target.path) { url, error in continuation.resume(returning: (url, error)) }
-            }
-            guard !Task.isCancelled, host == model.selectedProfileId else {
-                if let downloaded {
+            do {
+                let downloaded = try await media.download(target.path)
+                guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: downloaded.deletingLastPathComponent())
+                    return
                 }
-                return
-            }
-            if let downloaded {
                 previewDirectory = downloaded.deletingLastPathComponent()
                 previewSource = target.path
                 previewURL = downloaded
-            } else {
-                linkError = error ?? "ファイルを取得できません"
+            } catch {
+                if !Task.isCancelled {
+                    linkError = error.localizedDescription
+                }
             }
             linkTarget = nil
         }

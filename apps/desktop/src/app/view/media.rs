@@ -77,23 +77,9 @@ impl Desktop {
                         .map_err(|error| error.to_string())?;
                     Ok(destination.to_string_lossy().into_owned())
                 },
-                move |view, result, _, _| {
-                    if let Some(image) = view.images.get_mut(&returned) {
-                        match result {
-                            Ok(path) => {
-                                image.path = Some(if Path::new(&path).is_absolute() {
-                                    PathBuf::from(path).into()
-                                } else {
-                                    ImageSource::from(path)
-                                })
-                            }
-                            Err(error) => {
-                                agent_core::diagnostics::error("image.load", &error);
-                                image.error = Some(error);
-                            }
-                        }
-                    }
-                    view.list.remeasure();
+                move |result| Update::Image {
+                    key: returned,
+                    result,
                 },
             );
         }
@@ -252,42 +238,7 @@ impl Desktop {
             Intent::LoadSessionImages(op::LoadSessionImages {
                 thread_id: self.selected().into(),
             }),
-            move |view, result, _, _| {
-                let Some(gallery) = view
-                    .image_gallery
-                    .as_mut()
-                    .filter(|gallery| gallery.id == id)
-                else {
-                    return;
-                };
-                gallery.loading = false;
-                match result {
-                    Ok(Outcome::SessionImages { images }) => {
-                        let initial = gallery.current_image().clone();
-                        let mut seen = HashSet::new();
-                        let entries: Vec<_> = images
-                            .into_iter()
-                            .filter_map(|image| {
-                                let entry = (Arc::new(image.source), image.encoded);
-                                seen.insert(entry.clone()).then_some(entry)
-                            })
-                            .collect();
-                        gallery.selected = entries.iter().position(|entry| entry == &initial);
-                        gallery
-                            .list
-                            .splice(0..gallery.list.item_count(), entries.len());
-                        gallery.entries = entries;
-                        if let Some(index) = gallery.selected {
-                            gallery.list.scroll_to_reveal_item(index);
-                        }
-                    }
-                    Err(error) => {
-                        agent_core::diagnostics::error("gallery.load", &error);
-                        gallery.error = error;
-                    }
-                    _ => unreachable!("session image outcome"),
-                }
-            },
+            OperationCompletion::Gallery(id),
         );
         cx.notify();
     }

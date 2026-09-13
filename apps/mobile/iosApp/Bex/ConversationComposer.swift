@@ -199,10 +199,10 @@ extension ThreadScreen {
     }
 
     var messageField: some View {
-        ConversationMessageField(
-            placeholder: model.isNewThread ? "メッセージを入力" : "追加の指示を入力",
-            draft: Binding(get: { model.draft }, set: { model.draft = $0 })
-        )
+        BufferedTextInput(value: Binding(get: { model.draft }, set: { model.draft = $0 })) { input in
+            TextField(model.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: input, axis: .vertical)
+                .lineLimit(1 ... 6)
+        }
         .id(model.draftKey)
     }
 }
@@ -218,36 +218,6 @@ private struct ComposerSendButtonStyle: ButtonStyle {
             .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.3)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
-    }
-}
-
-/// Keep native editing ahead of the Store notification triggered by each keystroke.
-/// The buffer belongs to this control; every edit still dispatches synchronously.
-private struct ConversationMessageField: View {
-    let placeholder: String
-    @Binding private var draft: String
-    @State private var text: String
-
-    init(placeholder: String, draft: Binding<String>) {
-        self.placeholder = placeholder
-        _draft = draft
-        _text = State(initialValue: draft.wrappedValue)
-    }
-
-    var body: some View {
-        let input = Binding(get: { text }, set: {
-            guard text != $0 else { return }
-            text = $0
-            draft = $0
-        })
-        TextField(placeholder, text: input, axis: .vertical)
-            .lineLimit(1 ... 6)
-            .onChange(of: draft) { _ in
-                // Read the latest Store value, including send clears and transcription.
-                if text != draft {
-                    text = draft
-                }
-            }
     }
 }
 
