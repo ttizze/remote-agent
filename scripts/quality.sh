@@ -12,6 +12,7 @@ if [[ $language == all || $language == rust ]]; then
 fi
 if [[ $language == all || $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1
+    just android-e2e || failed=1
 fi
 if [[ $language == all || $language == swift ]]; then
     swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/desktop/macos || failed=1

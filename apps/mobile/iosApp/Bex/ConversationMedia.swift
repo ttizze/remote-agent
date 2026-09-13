@@ -197,7 +197,7 @@ struct ConversationPreview: View {
     @State private var saveError: String?
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             HStack(spacing: 0) {
                 if isImage, let model, !sources.isEmpty {
                     ScrollView {

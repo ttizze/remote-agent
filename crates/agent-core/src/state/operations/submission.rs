@@ -320,6 +320,10 @@ pub struct UploadAttachment {
 impl Operation for UploadAttachment {
     type Output = String;
     const APPLY_WHEN_STALE: bool = true;
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        snapshot.error = None;
+        Ok(())
+    }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let session = context.session.ok_or_else(|| {
             PeerError::InvalidMessage("binary transfers require an iroh session".into())

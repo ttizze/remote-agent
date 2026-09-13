@@ -251,13 +251,6 @@ private struct ConversationMessageField: View {
     }
 }
 
-struct ScrollViewportPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 struct ThreadConversationRow: Identifiable, Sendable {
     let id: String
     let content: Content

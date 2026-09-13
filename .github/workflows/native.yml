@@ -23,6 +23,7 @@ jobs:
       - id: rust
         name: Read the pinned flake toolchain
         run: echo "version=$(nix eval --raw .#devShells.x86_64-linux.native.RUST_TOOLCHAIN_VERSION)" >> "$GITHUB_OUTPUT"
+  # Linux intentionally retains the existing self-hosted environment.
   linux:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, x64, nix-ci]
@@ -43,6 +44,7 @@ jobs:
         run: nix develop .#native --command cargo test --locked -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
   windows:
     needs: toolchain
+    # Latest stable Windows Server major; Windows 11 UI acceptance is separate.
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
