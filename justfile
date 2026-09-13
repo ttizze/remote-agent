@@ -5,6 +5,10 @@ set positional-arguments
 default:
     @just --list
 
+# Prune inactive Cargo outputs older than 3 days or over the 32 GiB idle budget.
+clean-builds *args:
+    python3 scripts/clean-builds.py {{args}}
+
 # Build and verify the certificate-signed Host executable.
 build-host-macos:
     scripts/build-macos.sh host

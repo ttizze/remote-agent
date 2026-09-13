@@ -85,12 +85,11 @@ android {
 
 dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.11.2")
-    // Compose's transitive Espresso 3.5.0 calls an API removed in Android 17.
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.11.2")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("net.java.dev.jna:jna:5.19.1@aar")

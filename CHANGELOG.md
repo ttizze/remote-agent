@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Use Espresso 3.7.0 for Android Compose tests so input injection works on Android 17. Preserve the Markdown rendering, scrolling, streaming, and reopening assertions.
+- Reduce development/test debug information to filename and line-number backtraces, disable incremental compilation in quality checks, and replace unbounded inactive Cargo output retention with a 3-day/32-GiB cleanup after checks. Preserve live builds, running executables, application backups, and verification records; verify cleanup and subsequent rebuilds with real isolated Cargo projects.
+
+- Use Espresso 3.7.0 for Android instrumentation, replacing Compose's transitive 3.5.0 dependency and its removed reflective `InputManager.getInstance` call. Preserve the API 37 Markdown, permission, persistence and Host-recovery acceptance tests.
 
 - Redisplay repeated iOS operation errors after a retry clears the notice. Keep the existing dictation regression through cancellation, 32-second recording, repeated transcription failure, draft recovery, and completed text submission.
 
