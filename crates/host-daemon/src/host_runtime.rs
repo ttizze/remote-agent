@@ -1,4 +1,4 @@
-use crate::{CodexRpcService, HostCredentials, SessionId};
+use crate::{HostCredentials, HostRpcService, SessionId};
 use agent_core::peer::{RpcMessage, RpcMessageKind};
 use agent_core::{
     models::{HostStatus, Invitation, RemoteHost},
@@ -16,7 +16,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub struct HostRuntime {
-    pub(crate) service: CodexRpcService,
+    pub(crate) service: HostRpcService,
     endpoint: Endpoint,
     credentials: Arc<HostCredentials>,
     local_node: NodeId,
@@ -25,7 +25,7 @@ pub struct HostRuntime {
 }
 impl HostRuntime {
     pub async fn new(
-        service: CodexRpcService,
+        service: HostRpcService,
         endpoint: Endpoint,
         credentials: Arc<HostCredentials>,
         name: String,
@@ -55,7 +55,6 @@ impl HostRuntime {
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break Ok(()),
-                    _ = self.service.stopped() => break Err("Codex App Server event stream stopped".into()),
                     incoming = &mut accept => {
                         accept.set(self.endpoint.accept());
                         match incoming {
@@ -86,6 +85,7 @@ impl HostRuntime {
         };
         shutdown.cancel();
         while sessions.join_next().await.is_some() {}
+        self.service.shutdown_claude().await;
         self.endpoint.close().await;
         result
     }
@@ -263,7 +263,10 @@ impl HostRuntime {
                         .iter()
                         .map(ToString::to_string)
                         .collect(),
-                    extra: Default::default(),
+                    extra: serde_json::Map::from_iter([(
+                        "providerErrors".into(),
+                        self.service.provider_errors(),
+                    )]),
                 })
                 .map_err(|error| error.to_string())
             }

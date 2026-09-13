@@ -6,7 +6,7 @@ use agent_core::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{CodexRpcService, DesktopProjectStore, HostCredentials};
+use host_daemon::{DesktopProjectStore, HostCredentials, HostRpcService};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -26,6 +26,7 @@ async fn start_host(directory: &Path) -> HostFixture {
         Arc::new(Memory::default()),
         "isolated Host",
         false,
+        None,
     )
     .await
     .unwrap()
@@ -1250,9 +1251,9 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
             "local-projects":{"workspace":{"id":"workspace","name":"Workspace","rootPaths":[workspace]}}
         })).unwrap()).unwrap();
         let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
-        let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
+        let service = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(&project_state));
         let mut session = service.open_session(64);
-        async fn request(service: &CodexRpcService, session: &mut host_daemon::CodexSession, method: &str, params: Value) -> Value {
+        async fn request(service: &HostRpcService, session: &mut host_daemon::HostSession, method: &str, params: Value) -> Value {
             service.dispatch(session.id(), &agent_core::peer::RpcMessage::parse(&json!({"id":42,"method":method,"params":params}).to_string()).unwrap()).await.unwrap();
             loop {
                 let response: Value = serde_json::from_str(&session.recv().await.unwrap()).unwrap();
@@ -1296,7 +1297,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
                 chat_ids.push(global["thread"]["id"].clone());
             }
         }
-        let restarted = CodexRpcService::new(server.clone(), DesktopProjectStore::new(&project_state));
+        let restarted = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(&project_state));
         let mut restarted_session = restarted.open_session(64);
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
         for id in &chat_ids {
@@ -1318,7 +1319,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         service.close_session(session.id());
         restarted.close_session(restarted_session.id());
         drop(session); drop(restarted_session); drop(service); drop(restarted);
-        Arc::try_unwrap(server).ok().unwrap().shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
     }).await.expect("worktree integration exceeded 40 seconds");
 }
 
@@ -1427,7 +1428,7 @@ async fn failed_handshakes_do_not_stop_the_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn upstream_exit_disconnects_store_and_stops_host() {
+async fn upstream_exit_keeps_host_management_connected() {
     use agent_core::{
         state::{Intent, Snapshot},
         store::Store,
@@ -1444,7 +1445,6 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
             .await
             .unwrap();
         assert!(store.snapshot().connected);
-        let mut updates = store.subscribe();
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
         assert!(
             store
@@ -1454,27 +1454,19 @@ async fn upstream_exit_disconnects_store_and_stops_host() {
                 .await
                 .is_err()
         );
-        while updates.borrow_and_update().connected {
-            updates.changed().await.unwrap();
-        }
-        assert!(updates.borrow().error.is_some());
-        assert!(
-            fixture
-                .running
-                .await
-                .unwrap()
-                .unwrap_err()
-                .contains("event stream stopped")
-        );
-        store.close().await.ok();
+        assert!(store.snapshot().error.is_some());
+        let management = fixture
+            .local()
+            .await
+            .expect("Codex exit must not close the Host");
+        assert!(rpc(&management.peer, "host/status", json!({})).await["nodeId"].is_string());
+        assert!(store.snapshot().connected);
+        assert!(!fixture.running.is_finished());
+        management.close().await.unwrap();
+        store.close().await.unwrap();
         local.session.close();
         local.endpoint.close().await;
-        Arc::try_unwrap(fixture.server)
-            .ok()
-            .unwrap()
-            .shutdown()
-            .await
-            .unwrap();
+        fixture.close().await.unwrap();
     })
     .await
     .expect("upstream shutdown deadline");
@@ -1503,6 +1495,7 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
             saved_keys,
             "isolated Host",
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1637,8 +1630,8 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
                 .await
                 .unwrap(),
         );
-        let service = CodexRpcService::new(
-            server.clone(),
+        let service = HostRpcService::new(
+            Ok(server.clone()),
             DesktopProjectStore::new(root.join("projects.json")),
         );
         let runtime = Arc::new(
@@ -1824,12 +1817,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         stop.cancel();
         running.await.unwrap().unwrap();
         drop(runtime);
-        Arc::try_unwrap(server)
-            .ok()
-            .unwrap()
-            .shutdown()
-            .await
-            .unwrap();
+        server.shutdown().await.unwrap();
         drop(lease);
         assert!(matches!(
             registry.resolve(&desktop_state).unwrap().state,
@@ -1865,7 +1853,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
                 let program = host_fixture::fixture::Config { deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();
-                let fixture = HostFixture::start(&root, AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated", false).await.unwrap();
+                let fixture = HostFixture::start(&root, AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated", false, None).await.unwrap();
                 let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
                 let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
                 store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();

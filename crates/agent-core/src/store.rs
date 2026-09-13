@@ -302,6 +302,7 @@ fn publish_locked(
         conversations,
         threads,
         models,
+        model_errors,
         requests,
         drafts,
         pending_submissions,
@@ -325,6 +326,7 @@ fn publish_locked(
         && Arc::ptr_eq(&current.conversations, conversations)
         && same_threads
         && Arc::ptr_eq(&current.models, models)
+        && Arc::ptr_eq(&current.model_errors, model_errors)
         && Arc::ptr_eq(&current.requests, requests)
         && Arc::ptr_eq(&current.drafts, drafts)
         && Arc::ptr_eq(&current.pending_submissions, pending_submissions)

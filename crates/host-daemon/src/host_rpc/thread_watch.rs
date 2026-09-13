@@ -30,7 +30,7 @@ mod tests {
         file.sync_all().unwrap();
     }
 
-    async fn changed(session: &mut super::super::routing::CodexSession, revision: u64) -> Value {
+    async fn changed(session: &mut super::super::routing::HostSession, revision: u64) -> Value {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let value: Value = serde_json::from_str(&session.recv().await.unwrap()).unwrap();
@@ -276,12 +276,6 @@ impl ThreadWatches {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&session);
-        drop(previous);
-    }
-
-    pub(super) fn clear_all(&self) {
-        let previous =
-            std::mem::take(&mut *self.slots.lock().unwrap_or_else(|error| error.into_inner()));
         drop(previous);
     }
 }

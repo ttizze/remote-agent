@@ -449,7 +449,8 @@ impl Client {
         }
     }
 
-    pub async fn models(&self) -> Result<Vec<crate::models::Model>, PeerError> {
+    pub async fn models(&self) -> Result<ModelPage, PeerError> {
+        let mut extra = Map::<String, Value>::new();
         let mut models: Vec<crate::models::Model> = Vec::new();
         let mut cursor = None;
         let mut seen = std::collections::HashSet::new();
@@ -461,6 +462,21 @@ impl Client {
                 })
                 .await?
                 .value;
+            for (key, value) in page.extra {
+                if key == "providerErrors" {
+                    let Value::Object(errors) = value else {
+                        return Err(PeerError::InvalidMessage("invalid provider errors".into()));
+                    };
+                    extra
+                        .entry(key)
+                        .or_insert_with(|| serde_json::json!({}))
+                        .as_object_mut()
+                        .expect("provider errors are an object")
+                        .extend(errors);
+                } else {
+                    extra.insert(key, value);
+                }
+            }
             for model in page.data {
                 if let Some(index) = models.iter().position(|previous| previous.id == model.id) {
                     models[index] = model;
@@ -470,7 +486,11 @@ impl Client {
             }
             cursor = page.next_cursor;
             let Some(next) = &cursor else {
-                return Ok(models);
+                return Ok(ModelPage {
+                    data: models,
+                    next_cursor: None,
+                    extra,
+                });
             };
             if !seen.insert(next.clone()) {
                 return Err(PeerError::InvalidMessage(

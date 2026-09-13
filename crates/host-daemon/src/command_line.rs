@@ -6,11 +6,14 @@ use std::path::PathBuf;
 #[command(
     name = "host-daemon",
     no_binary_name = true,
-    about = "Codex Host over authenticated iroh sessions"
+    about = "Agent Host over authenticated iroh sessions"
 )]
 pub(crate) struct StartupConfig {
     #[arg(long, default_value = "codex")]
     pub(crate) codex: PathBuf,
+    /// Claude Code executable. Uses the Host user's Claude subscription login.
+    #[arg(long, default_value = "claude")]
+    pub(crate) claude: PathBuf,
     #[arg(long)]
     pub(crate) codex_home: Option<PathBuf>,
     /// Credential directory; defaults to the remembered Host or platform data directory.
