@@ -28,14 +28,6 @@ extension ThreadScreen {
             if let error = model.transferError {
                 BexNotice(text: error)
             }
-            if dictation.isRecording {
-                Text("録音中").font(.caption).foregroundColor(.red)
-                    .accessibilityIdentifier("dictation.recording")
-            }
-            if model.transcribing {
-                ProgressView(sendRecordedText ? "文字起こしして送信中…" : "文字起こし中…").font(.caption)
-                    .accessibilityIdentifier("dictation.processing")
-            }
             ForEach(Array(attachments.enumerated()), id: \.offset) { index, attachment in
                 HStack {
                     Label(attachment.name, systemImage: attachment.isImage ? "photo" : "doc")
@@ -47,31 +39,61 @@ extension ThreadScreen {
                 .background(Color(UIColor.secondarySystemBackground), in: Capsule())
             }
             VStack(alignment: .leading, spacing: 8) {
-                messageField
-                    .font(.system(size: 18))
-                    .focused($composerFocused)
-                    .padding(.horizontal, 8)
-                    .padding(.top, 10)
-                    .padding(.bottom, 4)
-                    .accessibilityIdentifier("task.message")
-                HStack(spacing: 8) {
-                    Menu {
-                        Button { composerFocused = false; showingPhotos = true } label: {
-                            Label("写真・動画", systemImage: "photo.on.rectangle")
-                        }.accessibilityIdentifier("task.attach.photos")
-                        Button { openCamera() } label: {
-                            Label("カメラ", systemImage: "camera")
-                        }.accessibilityIdentifier("task.attach.camera")
-                        Button { composerFocused = false; importing = true } label: {
-                            Label("ファイル", systemImage: "doc")
-                        }.accessibilityIdentifier("task.attach.file")
-                    } label: {
-                        Image(systemName: "plus").font(.title2.weight(.regular)).frame(width: 40, height: 40)
+                Group {
+                    if dictation.isRecording {
+                        Canvas { context, size in
+                            let spacing = size.width / CGFloat(dictation.levels.count)
+                            for (index, level) in dictation.levels.enumerated() {
+                                let height = 3 + CGFloat(level.squareRoot()) * (size.height - 3)
+                                let bar = CGRect(x: CGFloat(index) * spacing, y: (size.height - height) / 2,
+                                                 width: 3, height: height)
+                                context.fill(Path(roundedRect: bar, cornerRadius: 1.5), with: .foreground)
+                            }
+                        }
+                        .frame(height: 48)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("録音中")
+                        .accessibilityIdentifier("dictation.recording")
+                    } else if dictation.requestingPermission {
+                        ProgressView("マイクの許可を確認中…")
+                    } else if model.transcribing {
+                        ProgressView(sendRecordedText ? "文字起こしして送信中…" : "文字起こし中…")
+                            .accessibilityIdentifier("dictation.processing")
+                    } else {
+                        messageField
+                            .font(.system(size: 18))
+                            .focused($composerFocused)
+                            .accessibilityIdentifier("task.message")
                     }
-                    .disabled((!model.isNewThread && conversation == nil) || model
-                        .transferring || preparingMedia || model.sending || dictation
-                        .isRecording || dictation.requestingPermission || model.transcribing)
-                    .accessibilityLabel("添付").accessibilityIdentifier("task.attach")
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+                HStack(spacing: 8) {
+                    if dictation.isRecording || dictation.requestingPermission {
+                        Button { dictation.cancel() } label: {
+                            Image(systemName: "xmark").frame(width: 40, height: 40)
+                        }
+                        .accessibilityLabel("録音を取り消す")
+                        .accessibilityIdentifier("dictation.cancel")
+                    } else {
+                        Menu {
+                            Button { composerFocused = false; showingPhotos = true } label: {
+                                Label("写真・動画", systemImage: "photo.on.rectangle")
+                            }.accessibilityIdentifier("task.attach.photos")
+                            Button { openCamera() } label: {
+                                Label("カメラ", systemImage: "camera")
+                            }.accessibilityIdentifier("task.attach.camera")
+                            Button { composerFocused = false; importing = true } label: {
+                                Label("ファイル", systemImage: "doc")
+                            }.accessibilityIdentifier("task.attach.file")
+                        } label: {
+                            Image(systemName: "plus").font(.title2.weight(.regular)).frame(width: 40, height: 40)
+                        }
+                        .disabled((!model.isNewThread && conversation == nil) || model
+                            .transferring || preparingMedia || model.sending || model.transcribing)
+                        .accessibilityLabel("添付").accessibilityIdentifier("task.attach")
+                    }
                     if model.transferring || preparingMedia {
                         ProgressView().frame(height: 40)
                     }
@@ -93,9 +115,12 @@ extension ThreadScreen {
                         if dictation.requestingPermission {
                             ProgressView().frame(width: 40, height: 40)
                         } else {
-                            Image(systemName: dictation.isRecording ? "stop.circle.fill" : "mic")
-                                .font(.system(size: 23)).foregroundColor(dictation.isRecording ? .red : .primary)
-                                .frame(width: 40, height: 40)
+                            Image(systemName: dictation.isRecording ? "stop.fill" : "mic")
+                                .font(.system(size: dictation.isRecording ? 13 : 23))
+                                .foregroundColor(dictation.isRecording ? .white : .primary)
+                                .frame(width: 34, height: 34)
+                                .background(dictation.isRecording ? Color(white: 0.2) : .clear, in: Circle())
+                                .frame(width: 44, height: 44)
                         }
                     }
                     .disabled(!model.isConnected || (!model.isNewThread && conversation == nil) || model
@@ -110,9 +135,7 @@ extension ThreadScreen {
                         Button { model.interrupt(runningTurnId) } label: {
                             Image(systemName: "stop.fill").font(.system(size: 15))
                         }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.capsule)
-                        .controlSize(.large)
+                        .buttonStyle(ComposerSendButtonStyle())
                         .disabled(model.interruptingTurnId == runningTurnId)
                         .accessibilityLabel(model.interruptingTurnId == runningTurnId ? "停止中" : "停止")
                         .accessibilityIdentifier("turn.interrupt.\(runningTurnId)")
@@ -133,11 +156,9 @@ extension ThreadScreen {
                                 model.send()
                             }
                         } label: {
-                            Image(systemName: "arrow.up").font(.title2.weight(.semibold))
+                            Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold))
                         }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.capsule)
-                        .controlSize(.large)
+                        .buttonStyle(ComposerSendButtonStyle())
                         .accessibilityLabel(dictation.isRecording ? "文字起こしして送信" : "送信")
                         .disabled(!model.isConnected || (!model.isNewThread && conversation == nil) || model
                             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
@@ -164,6 +185,7 @@ extension ThreadScreen {
     func startDictation() {
         composerFocused = false
         model.transferError = nil
+        model.notice = nil
         sendRecordedText = false
         let sendIntent = $sendRecordedText
         let key = model.draftKey
@@ -182,6 +204,20 @@ extension ThreadScreen {
             draft: Binding(get: { model.draft }, set: { model.draft = $0 })
         )
         .id(model.draftKey)
+    }
+}
+
+private struct ComposerSendButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(.black)
+            .frame(width: 36, height: 36)
+            .background(.white, in: Circle())
+            .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.3)
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
     }
 }
 

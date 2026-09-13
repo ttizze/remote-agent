@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Use compact white send buttons with black arrows for both typed and recorded iOS messages, and a neutral gray recording stop button. Keep 44-point tap targets and visible disabled states.
+
+- Replace the iOS composer text field with a live microphone waveform while recording, and show permission/transcription progress inside the input. Add recording cancellation that retains the draft and clear stale error notices when retrying recording. Extend isolated Simulator coverage for cancellation/restart, recording beyond 30 seconds, permission denial, and draft recovery after transcription failure.
+
 - Add Mac browser cookie import from a selected Chrome profile, including Keychain decryption, live SQLite/WAL reads, preserved domain scope and cookie attributes, verified writes, and page reload. Keep persistent and session-only lifetimes, report excluded expired/partitioned cookies, and allow retry after denied access. Cover encrypted v23/v24 fixtures, native attributes, authenticated WebView requests, and fresh-process persistence with isolated tests.
 
 - Explicitly release local Host and discovery locks on shutdown, so a child process retaining an inherited descriptor cannot keep a stopped Host registered as running. Verify restart and duplicate-start rejection with a real child holding the descriptor.

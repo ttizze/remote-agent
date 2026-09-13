@@ -71,6 +71,8 @@ enum DeviceIdentity {
 final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
     @Published private(set) var isRecording = false
     @Published private(set) var requestingPermission = false
+    @Published private(set) var levels: [Float] = Array(repeating: 0, count: 40)
+    private var meteringTimer: Timer?
     private var recorder: AVAudioRecorder?
     private var fileURL: URL?
     private var requestID: UUID?
@@ -96,6 +98,7 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        meteringTimer?.invalidate()
         recorder?.stop()
         if let fileURL {
             try? FileManager.default.removeItem(at: fileURL)
@@ -144,8 +147,17 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
                     ])
                     self.recorder = recorder
                     recorder.delegate = self
+                    recorder.isMeteringEnabled = true
                     guard recorder.record() else { throw Self.error("録音を開始できませんでした。") }
                     self.isRecording = true
+                    self.meteringTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+                        Task { @MainActor [weak self] in
+                            guard let self, isRecording, let recorder = self.recorder else { return }
+                            recorder.updateMeters()
+                            levels.removeFirst()
+                            levels.append(pow(10, min(0, recorder.averagePower(forChannel: 0)) / 20))
+                        }
+                    }
                 } catch { self.complete(.failure(error)) }
             }
         }
@@ -202,6 +214,9 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
 
     private func cleanup() {
         requestID = nil
+        meteringTimer?.invalidate()
+        meteringTimer = nil
+        levels = Array(repeating: 0, count: 40)
         recorder?.delegate = nil
         recorder?.stop()
         recorder = nil
