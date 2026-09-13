@@ -81,7 +81,7 @@ extension BexLaunchUITests {
         wait(for: [atBottom], timeout: 5)
         let anchor = app.descendants(matching: .any)["item.long-latest-message"]
         let beforeDrag = anchor.frame.minY
-        // Start in the gutter: a long press on assistant text begins text selection.
+        // Start in the horizontal padding so the press cannot begin text selection.
         let start = detail.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.55))
         start.press(forDuration: 0.4, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 25)),
                     withVelocity: XCUIGestureVelocity(rawValue: 40), thenHoldForDuration: 0.5)

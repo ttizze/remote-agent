@@ -21,7 +21,7 @@ struct WorktreeSettingsSheet: View {
     @State private var error: String?
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
                 Section {
                     Text(host.name).font(.headline)
@@ -77,7 +77,6 @@ struct WorktreeSettingsSheet: View {
                 }
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         .interactiveDismissDisabled(busy)
         .onAppear(perform: load)
     }

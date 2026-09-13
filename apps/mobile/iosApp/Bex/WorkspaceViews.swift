@@ -48,13 +48,13 @@ struct WorkspaceSheet: View {
                     }
                 }
             } else {
-                NavigationView {
+                NavigationStack {
                     WorkspaceDirectoryScreen(snapshot: model.snapshot, root: root, directory: root,
                                              perform: model.requestSnapshot, fileDraft: fileDraft,
                                              downloadFile: model.download,
                                              aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
                                              close: { dismiss() })
-                }.navigationViewStyle(StackNavigationViewStyle())
+                }
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
@@ -133,22 +133,11 @@ private struct WorkspaceDirectoryScreen: View {
                 }
             }
         }
-        .background(
-            NavigationLink(isActive: Binding(
-                get: { destinationPath != nil },
-                set: {
-                    if !$0 {
-                        destinationPath = nil
-                    }
-                }
-            )) {
-                if let destinationPath {
-                    WorkspaceDirectoryScreen(snapshot: snapshot, root: root, directory: destinationPath,
-                                             perform: perform, fileDraft: fileDraft, downloadFile: downloadFile,
-                                             aiEdit: aiEdit, close: close)
-                }
-            } label: { EmptyView() }
-        )
+        .navigationDestination(item: $destinationPath) { destination in
+            WorkspaceDirectoryScreen(snapshot: snapshot, root: root, directory: destination,
+                                     perform: perform, fileDraft: fileDraft, downloadFile: downloadFile,
+                                     aiEdit: aiEdit, close: close)
+        }
         .navigationTitle(directory == root ? "ファイル" : URL(fileURLWithPath: directory).lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {

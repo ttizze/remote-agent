@@ -1,2 +1,6 @@
 [alias]
 xtask = "run --package xtask --bin xtask --"
+
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "26.0", force = true }
+IPHONEOS_DEPLOYMENT_TARGET = { value = "26.0", force = true }

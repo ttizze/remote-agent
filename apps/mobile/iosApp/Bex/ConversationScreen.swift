@@ -1,5 +1,5 @@
 import AgentCore
-import AVFoundation
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -11,6 +11,7 @@ struct ThreadScreen: View {
     @State var sendRecordedText = false
     @State var importing = false
     @State var showingPhotos = false
+    @State var selectedPhotos: [PhotosPickerItem] = []
     @State var showingCamera = false
     @State var preparingMedia = false
     @State var showingFiles = false
@@ -58,10 +59,6 @@ struct ThreadScreen: View {
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
-                        .background(GeometryReader { geometry in
-                            Color.clear.preference(key: LatestMessageBottomPreferenceKey.self,
-                                                   value: geometry.frame(in: .named("thread-scroll")).maxY)
-                        })
                     }
                     .accessibilityIdentifier("task.detail")
                     .accessibilityValue(threadAccessibilityValue(thread))
@@ -76,9 +73,11 @@ struct ThreadScreen: View {
                             isFollowingLatest = true
                         }
                     })
-                    .onPreferenceChange(LatestMessageBottomPreferenceKey.self) { bottom in
-                        isNearLatest = bottom > 0 && bottom <= scrollViewportHeight + 80
-                        if isFollowingLatest, bottom > scrollViewportHeight + 1, let latestRowId {
+                    .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.contentSize.height - geometry.visibleRect.maxY
+                    } action: { _, remaining in
+                        isNearLatest = remaining <= 80
+                        if isFollowingLatest, remaining > 1, let latestRowId {
                             proxy.scrollTo(latestRowId, anchor: .bottom)
                         }
                     }
@@ -102,9 +101,6 @@ struct ThreadScreen: View {
                         }
                     }
                     .coordinateSpace(name: "thread-scroll")
-                    .background(GeometryReader { geometry in
-                        Color.clear.preference(key: ScrollViewportPreferenceKey.self, value: geometry.size.height)
-                    })
                     .onPreferenceChange(HistoryBoundaryPreferenceKey.self) { boundaries in
                         historyBoundaries = boundaries
                         loadVisibleHistory()
@@ -114,7 +110,7 @@ struct ThreadScreen: View {
                             historyRequestPending = false
                         }
                     }
-                    .onPreferenceChange(ScrollViewportPreferenceKey.self) { height in
+                    .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, height in
                         scrollViewportHeight = height
                         if isFollowingLatest, let latestRowId {
                             proxy.scrollTo(latestRowId, anchor: .bottom)
@@ -165,24 +161,31 @@ struct ThreadScreen: View {
             }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
-            switch result {
-            case let .success(url): model.attach(url)
-            case let .failure(error): model.transferError = error.localizedDescription
+            Task {
+                do { try await model.attach(result.get()) } catch { model.transferError = error.localizedDescription }
             }
         }
-        .sheet(isPresented: $showingPhotos) {
-            ChatPhotoPicker { providers in
-                showingPhotos = false
-                guard !providers.isEmpty else { return }
-                preparingMedia = true
-                model.transferError = nil
-                importPhotos(providers[...], draftKey: model.draftKey)
-            }
+        .photosPicker(isPresented: $showingPhotos, selection: $selectedPhotos,
+                      selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
+                      preferredItemEncoding: .compatible)
+        .onChange(of: selectedPhotos) { _, items in
+            guard !items.isEmpty else { return }
+            selectedPhotos = []
+            preparingMedia = true
+            model.transferError = nil
+            let draftKey = model.draftKey
+            Task { await importPhotos(items, draftKey: draftKey) }
         }
         .fullScreenCover(isPresented: $showingCamera) {
             ChatCameraPicker { result in
                 showingCamera = false
-                finishMediaImport(result)
+                Task {
+                    do {
+                        if let url = try result.get() {
+                            try await model.attach(url, temporaryDirectory: url.deletingLastPathComponent())
+                        }
+                    } catch { model.transferError = error.localizedDescription }
+                }
             }.ignoresSafeArea()
         }
         .sheet(

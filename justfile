@@ -17,9 +17,11 @@ build-desktop-macos:
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
-# Run Store and model recovery checks against an owned Android emulator and Host.
+# Build and test Store recovery and network permission on a fresh Android 17 emulator.
 android-e2e:
-    nix develop .#android-test --command scripts/android-e2e.sh
+    cargo build --locked -p host-fixture --bins
+    ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
+    nix develop .#android-test --command bash scripts/android-e2e.sh
 
 # Native conversation contracts used by the post-commit Swift check.
 conversation-ui:

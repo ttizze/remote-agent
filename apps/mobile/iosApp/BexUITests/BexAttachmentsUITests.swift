@@ -20,12 +20,13 @@ extension BexLaunchUITests {
         XCTAssertEqual(folder.label, "フォルダ: 検証プロジェクト")
         captureScreen(app, named: "New chat environment and folder above composer")
         let removals = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "を外す"))
+        selectPhotos(["写真"], in: app)
+        app.buttons["Cancel"].tap()
+        XCTAssertEqual(removals.count, 0)
+        XCTAssertTrue(app.buttons["task.attach"].isEnabled)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
         for count in 1 ... 2 {
-            app.buttons["task.attach"].tap()
-            app.buttons["task.attach.photos"].tap()
-            let photo = app.images.matching(NSPredicate(format: "label CONTAINS %@", "写真")).firstMatch
-            XCTAssertTrue(photo.waitForExistence(timeout: 15))
-            photo.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            selectPhotos(["写真"], in: app)
             app.buttons["Add"].tap()
             let attached = expectation(for: NSPredicate(format: "count == %d", count), evaluatedWith: removals)
             wait(for: [attached], timeout: 60)
@@ -36,11 +37,7 @@ extension BexLaunchUITests {
         app.buttons["task.send"].tap()
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
         XCTAssertEqual(removals.count, 0)
-        app.buttons["task.attach"].tap()
-        app.buttons["task.attach.photos"].tap()
-        let nextPhoto = app.images.matching(NSPredicate(format: "label CONTAINS %@", "写真")).firstMatch
-        XCTAssertTrue(nextPhoto.waitForExistence(timeout: 15))
-        nextPhoto.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        selectPhotos(["写真"], in: app)
         app.buttons["Add"].tap()
         let nextAttachment = expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: removals)
         wait(for: [nextAttachment], timeout: 60)
@@ -60,13 +57,7 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Photo video camera and file attachment menu")
         app.buttons["task.attach.camera"].tap()
         XCTAssertTrue(app.staticTexts["この端末ではカメラを利用できません。"].waitForExistence(timeout: 5))
-        app.buttons["task.attach"].tap()
-        app.buttons["task.attach.photos"].tap()
-        for label in ["写真", "ビデオ"] {
-            let media = app.images.matching(NSPredicate(format: "label CONTAINS %@", label)).firstMatch
-            XCTAssertTrue(media.waitForExistence(timeout: 15), app.debugDescription)
-            media.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        }
+        selectPhotos(["写真", "ビデオ"], in: app)
         captureScreen(app, named: "Photo and video selected together")
         app.buttons["Add"].tap()
         let removals = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "を外す"))
@@ -89,6 +80,64 @@ extension BexLaunchUITests {
         XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
         XCTAssertFalse(app.staticTexts["notice"].exists, "Completed attachment send must not leave a Host error")
         captureScreen(app, named: "Uploaded photo and video in chat history")
+    }
+
+    func testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery() throws {
+        let app = try connectedSimulatorApp(expandProject: false)
+        try useSimulatorListFixture("worktree-conversation")
+        app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
+        expandSimulatorProject(app)
+        let row = app.descendants(matching: .any)["tasks.row.fixture-worktree-thread"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        let prompt = app.textFields["task.message"]
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        prompt.tap(); prompt.typeText("[success] Retry selected photos")
+        try simulatorFixture("worktree/unavailable")
+        var unavailable = true
+        addTeardownBlock {
+            if unavailable {
+                try self.simulatorFixture("worktree/restore")
+            }
+        }
+        selectPhotos(["写真", "ビデオ"], in: app)
+        app.buttons["Add"].tap()
+        let notices = app.staticTexts.matching(identifier: "notice")
+        XCTAssertTrue(notices.firstMatch.waitForExistence(timeout: 30))
+        let attach = app.buttons["task.attach"]
+        let recovered = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: attach)
+        wait(for: [recovered], timeout: 10)
+        let removals = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "を外す"))
+        XCTAssertEqual(removals.count, 0)
+        XCTAssertEqual(prompt.value as? String, "[success] Retry selected photos")
+        try simulatorFixture("worktree/restore"); unavailable = false
+        selectPhotos(["写真", "ビデオ"], in: app)
+        app.buttons["Add"].tap()
+        let attached = expectation(for: NSPredicate(format: "count == 2"), evaluatedWith: removals)
+        wait(for: [attached], timeout: 60)
+        XCTAssertEqual(notices.count, 0)
+        app.buttons["task.send"].tap()
+        let final = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(final.waitForExistence(timeout: 30))
+        let finalID = final.identifier
+        XCTAssertEqual(removals.count, 0)
+        XCTAssertNotEqual(prompt.value as? String, "[success] Retry selected photos")
+        app.terminate(); _ = try connectedSimulatorApp()
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)[finalID].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image."))
+            .firstMatch.waitForExistence(timeout: 15))
+        XCTAssertEqual(notices.count, 0)
+        captureScreen(app, named: "Recovered media upload survives reopening")
+    }
+
+    private func selectPhotos(_ labels: [String], in app: XCUIApplication) {
+        app.buttons["task.attach"].tap()
+        app.buttons["task.attach.photos"].tap()
+        for label in labels {
+            let media = app.images.matching(NSPredicate(format: "label CONTAINS %@", label)).firstMatch
+            XCTAssertTrue(media.waitForExistence(timeout: 15), app.debugDescription)
+            media.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
     }
 
     func testSimulatorCanAttachDownloadAndPrepareAIEdit() throws {

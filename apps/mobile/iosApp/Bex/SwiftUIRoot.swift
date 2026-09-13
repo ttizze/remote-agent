@@ -21,7 +21,7 @@ private struct BexScreen: View {
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Group {
                 if model.profiles.isEmpty {
                     PairingScreen(canCancel: !model.profiles.isEmpty, error: model.pairingError,
@@ -29,18 +29,16 @@ private struct BexScreen: View {
                 } else {
                     ProfilesScreen(profiles: model.profiles, notice: model.notice,
                                    select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
-                        .background(
-                            NavigationLink(isActive: Binding(
-                                get: { model.screen == .threads || model.screen == .thread },
-                                set: {
-                                    if !$0, model.selectedProfileId != nil {
-                                        model.showProfiles()
-                                    }
+                        .navigationDestination(isPresented: Binding(
+                            get: { model.screen == .threads || model.screen == .thread },
+                            set: {
+                                if !$0, model.selectedProfileId != nil {
+                                    model.showProfiles()
                                 }
-                            )) {
-                                threadList
-                            } label: { EmptyView() }
-                        )
+                            }
+                        )) {
+                            threadList
+                        }
                         .sheet(isPresented: Binding(
                             get: { model.screen == .pairing },
                             set: {
@@ -49,40 +47,36 @@ private struct BexScreen: View {
                                 }
                             }
                         )) {
-                            NavigationView { PairingScreen(
+                            NavigationStack { PairingScreen(
                                 canCancel: !model.profiles.isEmpty,
                                 error: model.pairingError,
                                 scan: { model.isScanning = true },
                                 pair: model.pair,
                                 cancel: model.dismissPairing
                             ) }
-                            .navigationViewStyle(StackNavigationViewStyle())
                         }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         .preferredColorScheme(.dark)
     }
 
     private var threadList: some View {
         ThreadsScreen(model: model)
-            .background(
-                NavigationLink(isActive: Binding(
-                    get: { model.screen == .thread },
-                    set: {
-                        if !$0, model.screen == .thread {
-                            model.showThreadList()
-                        }
+            .navigationDestination(isPresented: Binding(
+                get: { model.screen == .thread },
+                set: {
+                    if !$0, model.screen == .thread {
+                        model.showThreadList()
                     }
-                )) {
-                    ThreadScreen(
-                        model: model,
-                        conversation: model.sideChatRequest?.originalConversation ?? model.conversation
-                    )
-                } label: { EmptyView() }
-            )
+                }
+            )) {
+                ThreadScreen(
+                    model: model,
+                    conversation: model.sideChatRequest?.originalConversation ?? model.conversation
+                )
+            }
     }
 }
 
@@ -231,7 +225,7 @@ private struct BexQrScannerSheet: View {
     let completion: (String?) -> Void
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             BexQrScannerController { result in
                 switch result {
                 case let .success(contents): completion(contents)
@@ -247,7 +241,6 @@ private struct BexQrScannerSheet: View {
                 }
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         .accessibilityIdentifier("scanner.sheet")
     }
 }
