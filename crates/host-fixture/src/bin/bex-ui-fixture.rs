@@ -45,16 +45,20 @@ async fn main() {
     let port_file = std::env::args_os()
         .nth(3)
         .expect("port output file required");
-    let program = host_fixture::fixture::Config {
-        trace: true,
-        stream_delay_ms: std::env::args()
-            .nth(4)
-            .map(|value| value.parse().expect("stream delay must be milliseconds"))
-            .unwrap_or(8000),
-        ..Default::default()
-    }
-    .install(&fixture, &directory)
-    .unwrap();
+    let program = if fixture == std::path::Path::new("--without-codex") {
+        directory.join("missing-codex")
+    } else {
+        host_fixture::fixture::Config {
+            trace: true,
+            stream_delay_ms: std::env::args()
+                .nth(4)
+                .map(|value| value.parse().expect("stream delay must be milliseconds"))
+                .unwrap_or(8000),
+            ..Default::default()
+        }
+        .install(&fixture, &directory)
+        .unwrap()
+    };
     let projects = directory.join("projects.json");
     std::fs::write(&projects,serde_json::to_vec(&serde_json::json!({"local-projects":{"simulator-project":{"id":"simulator-project","name":"検証プロジェクト","rootPaths":[workspace],"createdAt":1,"updatedAt":1}},"project-order":["simulator-project"]})).unwrap()).unwrap();
     std::fs::write(directory.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
@@ -68,6 +72,7 @@ async fn main() {
         Arc::new(Memory::default()),
         "検証 Host",
         true,
+        std::env::args_os().nth(5).map(PathBuf::from).as_deref(),
     )
     .await
     .unwrap();

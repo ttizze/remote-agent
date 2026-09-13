@@ -1,0 +1,710 @@
+use std::{path::Path, sync::Arc, time::Duration};
+
+use agent_core::{
+    client::Answer,
+    state::{Attachment, Intent, Snapshot, operations as op},
+    store::{Outcome, Store},
+    transport::{Endpoint, Relays},
+};
+use codex_app_server::AppServerConfig;
+use host_fixture::test_support::{HostFixture, Memory};
+use serde_json::{Value, json};
+
+mod codex_fixture;
+
+async fn host(root: &Path, memory: Arc<Memory>, program: &Path) -> HostFixture {
+    let existing = root.join("bex-codex-fixture");
+    let config = if existing.exists() {
+        AppServerConfig {
+            program: existing,
+            ..Default::default()
+        }
+    } else {
+        codex_fixture::config(root)
+    };
+    HostFixture::start(
+        root,
+        config,
+        memory,
+        "Claude fixture Host",
+        false,
+        Some(program),
+    )
+    .await
+    .unwrap()
+}
+
+async fn connect(host: &HostFixture, snapshot: Snapshot) -> (Store, Endpoint) {
+    let endpoint = Endpoint::bind(host.credentials.local_identity().await, Relays::Disabled)
+        .await
+        .unwrap();
+    let store = Store::connect(&endpoint, &host.ticket, snapshot, None)
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::LoadModels(op::LoadModels {}))
+        .await
+        .unwrap();
+    (store, endpoint)
+}
+
+async fn draft(store: &Store, text: &str) {
+    let key = store.snapshot().navigation.draft_key.clone();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: key,
+            text: text.into(),
+        })
+        .await
+        .unwrap();
+}
+
+async fn send(store: &Store, text: &str, client_id: &str) -> String {
+    draft(store, text).await;
+    let outcome = store
+        .dispatch(Intent::Submit {
+            thread_id: store.snapshot().navigation.thread_id.clone(),
+            client_user_message_id: client_id.into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, Outcome::Submitted { .. }));
+    store.snapshot().navigation.thread_id.clone().unwrap()
+}
+
+async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snapshot> {
+    let mut updates = store.subscribe();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if condition(&snapshot) {
+                return snapshot;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "Claude state did not settle: error={:?}",
+            store.snapshot().error
+        )
+    })
+}
+
+async fn completed(store: &Store, id: &str, count: usize, status: &str) -> Arc<Snapshot> {
+    until(store, |snapshot| {
+        snapshot
+            .conversations
+            .get(id)
+            .and_then(|thread| thread.turns.as_ref())
+            .is_some_and(|turns| {
+                turns.len() == count && turns.last().unwrap().status.as_deref() == Some(status)
+            })
+    })
+    .await
+}
+
+fn fixture_program() -> &'static Path {
+    Path::new(env!("CARGO_BIN_EXE_bex-claude-fixture"))
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_submission_preserves_inputs_settings_workspaces_and_history_across_host_restart() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        for automatic in [false, true] {
+            for selected in [false, true] {
+                for attachment in ["none", "image", "file"] {
+                    let root = tempfile::tempdir().unwrap();
+                    let root = root.path().canonicalize().unwrap();
+                    let workspace = root.join("project");
+                    std::fs::create_dir(&workspace).unwrap();
+                    git(&workspace, &["init", "--quiet"]);
+                    std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
+                    git(&workspace, &["add", "tracked.txt"]);
+                    git(&workspace, &["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","-c","commit.gpgsign=false","commit","--quiet","-m","fixture"]);
+                    std::fs::write(root.join("projects.json"), json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[workspace]}}}).to_string()).unwrap();
+                    std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
+                    let memory = Arc::new(Memory::default());
+                    let mut fixture = host(&root, memory.clone(), fixture_program()).await;
+                    let (mut store, mut endpoint) = connect(&fixture, Snapshot::default()).await;
+                    store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                    let key = store.snapshot().navigation.draft_key.clone();
+                    store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: "claude:default".into() }).await.unwrap();
+                    store.dispatch(Intent::SelectEffort { thread_id: key, effort: "low".into() }).await.unwrap();
+                    let mut previous_id = None;
+                    let mut previous_cwd = None;
+                    for number in 0..2 {
+                        let key = store.snapshot().navigation.draft_key.clone();
+                        if attachment != "none" {
+                            let path = root.join(if attachment == "image" { "photo.png" } else { "note.txt" });
+                            if attachment == "image" {
+                                std::fs::write(&path, include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png")).unwrap();
+                            } else { std::fs::write(&path, "attachment content").unwrap(); }
+                            store.dispatch(Intent::UploadAttachment(op::UploadAttachment {
+                                draft_key: key, directory: store.snapshot().navigation.cwd.clone(),
+                                attachment: Attachment { path: path.to_str().unwrap().into(), name: path.file_name().unwrap().to_str().unwrap().into(), is_image: attachment == "image" },
+                            })).await.unwrap();
+                        }
+                        let id = send(&store, &format!("message {number}"), &format!("client-{number}")).await;
+                        if let Some(previous) = &previous_id { assert_eq!(&id, previous); }
+                        let snapshot = completed(&store, &id, number + 1, "completed").await;
+                        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+                        assert!(snapshot.pending_submissions.is_empty());
+                        assert!(snapshot.drafts[&id].text.is_empty() && snapshot.drafts[&id].attachments.is_empty());
+                        assert_eq!(snapshot.drafts[&id].model.as_deref(), Some("claude:default"));
+                        assert_eq!(snapshot.drafts[&id].effort.as_deref(), Some("low"));
+                        let cwd = snapshot.navigation.cwd.clone();
+                        if let Some(previous) = &previous_cwd { assert_eq!(&cwd, previous); }
+                        if selected && automatic { assert_eq!(Path::new(&cwd).parent().unwrap(), root.join("worktrees")); }
+                        else { assert_eq!(Path::new(&cwd), if selected { workspace.clone() } else { root.join("bex-chats") }); }
+                        let turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[number];
+                        let items = turn.items.as_ref().unwrap();
+                        assert!(items.iter().any(|item| item.kind.as_deref() == Some("reasoning") && item.text.as_deref() == Some("Fixture reasoning")));
+                        let responses: Vec<_> = items.iter().filter(|item| item.kind.as_deref() == Some("agentMessage")).collect();
+                        assert_eq!(responses.len(), 1, "streaming and completed blocks must not duplicate");
+                        assert!(responses[0].text.as_ref().unwrap().starts_with(&format!("reply {}: message {number}", number + 1)));
+                        let user = items.iter().find(|item| item.kind.as_deref() == Some("userMessage")).unwrap();
+                        assert_eq!(user.client_id.as_deref(), Some(format!("client-{number}").as_str()));
+                        assert_eq!(user.extra["content"][0]["text"], format!("message {number}"));
+                        let session = id.strip_prefix("claude:").unwrap();
+                        let inputs: Value = serde_json::from_slice(&std::fs::read(Path::new(&cwd).join(format!("claude-session-{session}.json"))).unwrap()).unwrap();
+                        assert_eq!(inputs.as_array().unwrap().len(), number + 1);
+                        assert_eq!(inputs[number]["effort"], "low");
+                        assert_eq!(inputs[number]["content"].as_array().unwrap().len(), if attachment == "none" { 1 } else { 2 });
+                        if attachment == "image" { assert_eq!(inputs[number]["content"][1]["source"]["media_type"], "image/png"); }
+                        if attachment == "file" { assert!(inputs[number]["content"][1]["text"].as_str().unwrap().contains("note.txt")); }
+                        store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+                        assert!(store.snapshot().threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_deref() == Some(&id)));
+                        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+                        assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
+                        let saved: Snapshot = serde_json::from_slice(&serde_json::to_vec(store.snapshot().as_ref()).unwrap()).unwrap();
+                        store.close().await.unwrap();
+                        endpoint.close().await;
+                        fixture.close().await.unwrap();
+                        fixture = host(&root, memory.clone(), fixture_program()).await;
+                        (store, endpoint) = connect(&fixture, saved).await;
+                        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+                        assert_eq!(store.snapshot().conversations[&id].turns.as_ref().unwrap().len(), number + 1);
+                        previous_id = Some(id);
+                        previous_cwd = Some(cwd);
+                    }
+                    store.close().await.unwrap();
+                    endpoint.close().await;
+                    fixture.close().await.unwrap();
+                }
+            }
+        }
+    }).await.expect("Claude input and restart matrix deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_approval_replays_after_disconnect_denial_is_effective_and_interrupt_recovers() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store
+            .dispatch(Intent::SelectModel {
+                thread_id: key,
+                model: "claude:default".into(),
+            })
+            .await
+            .unwrap();
+        let id = send(&store, "permission", "permission-1").await;
+        until(&store, |snapshot| !snapshot.requests.is_empty()).await;
+        let cwd = store.snapshot().navigation.cwd.clone();
+        assert!(!Path::new(&cwd).join("approved.txt").exists());
+        store.disconnect().await.unwrap();
+        store
+            .reconnect(&endpoint, &fixture.ticket, None)
+            .await
+            .unwrap();
+        let snapshot = until(&store, |snapshot| !snapshot.requests.is_empty()).await;
+        let request = snapshot.requests.values().next().unwrap();
+        store
+            .dispatch(Intent::Respond(op::Respond {
+                request_id: request.id.clone(),
+                answer: Answer::Decision { index: 1 },
+            }))
+            .await
+            .unwrap();
+        let snapshot = completed(&store, &id, 1, "completed").await;
+        assert!(!Path::new(&cwd).join("approved.txt").exists());
+        assert!(snapshot.requests.is_empty());
+        send(&store, "permission", "permission-2").await;
+        let snapshot = until(&store, |snapshot| !snapshot.requests.is_empty()).await;
+        let request = snapshot.requests.values().next().unwrap();
+        store
+            .dispatch(Intent::Respond(op::Respond {
+                request_id: request.id.clone(),
+                answer: Answer::Decision { index: 0 },
+            }))
+            .await
+            .unwrap();
+        completed(&store, &id, 2, "completed").await;
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&cwd).join("approved.txt")).unwrap(),
+            "approved"
+        );
+        send(&store, "question", "question").await;
+        let snapshot = until(&store, |snapshot| !snapshot.requests.is_empty()).await;
+        let request = snapshot.requests.values().next().unwrap();
+        assert_eq!(request.method, "item/tool/requestUserInput");
+        store
+            .dispatch(Intent::Respond(op::Respond {
+                request_id: request.id.clone(),
+                answer: Answer::Questions {
+                    answers: [("Which color?".into(), "Blue".into())].into(),
+                },
+            }))
+            .await
+            .unwrap();
+        let snapshot = completed(&store, &id, 3, "completed").await;
+        assert!(
+            snapshot.conversations[&id].turns.as_ref().unwrap()[2]
+                .items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|item| item.text.as_deref() == Some("Blue"))
+        );
+        send(&store, "wait", "wait").await;
+        let snapshot = until(&store, |snapshot| {
+            snapshot.conversations[&id]
+                .turns
+                .as_ref()
+                .unwrap()
+                .last()
+                .unwrap()
+                .items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|item| item.text.as_deref() == Some("Waiting for interruption"))
+        })
+        .await;
+        let turn_id = snapshot.conversations[&id]
+            .turns
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        draft(&store, "retain while busy").await;
+        assert!(
+            store
+                .dispatch(Intent::Submit {
+                    thread_id: Some(id.clone()),
+                    client_user_message_id: "busy".into()
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(store.snapshot().drafts[&id].text, "retain while busy");
+        store
+            .dispatch(Intent::Interrupt(op::Interrupt {
+                thread_id: id.clone(),
+                turn_id,
+            }))
+            .await
+            .unwrap();
+        completed(&store, &id, 4, "interrupted").await;
+        send(&store, "after interruption", "recovered").await;
+        let snapshot = completed(&store, &id, 5, "completed").await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert!(snapshot.requests.is_empty() && snapshot.pending_submissions.is_empty());
+        assert!(snapshot.drafts[&id].text.is_empty());
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("Claude permission and interruption deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_claude_keeps_codex_usable() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = host(
+            root.path(),
+            Arc::new(Memory::default()),
+            &root.path().join("missing-claude"),
+        )
+        .await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        assert!(!store.snapshot().models.is_empty());
+        assert!(
+            store
+                .snapshot()
+                .models
+                .iter()
+                .all(|model| !model.model.starts_with("claude:"))
+        );
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let id = send(&store, "Codex remains available", "codex-only").await;
+        let snapshot = completed(&store, &id, 1, "completed").await;
+        assert!(snapshot.error.is_none());
+        assert!(snapshot.drafts[&id].text.is_empty() && snapshot.pending_submissions.is_empty());
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("missing Claude deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        for automatic in [false, true] {
+            for selected in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let root = root.path().canonicalize().unwrap();
+                let workspace = root.join("project");
+                std::fs::create_dir(&workspace).unwrap();
+                git(&workspace, &["init", "--quiet"]);
+                std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
+                git(&workspace, &["add", "tracked.txt"]);
+                git(&workspace, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
+                std::fs::write(root.join("projects.json"), json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[workspace]}}}).to_string()).unwrap();
+                std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
+                let config = AppServerConfig { program: root.join("missing-codex"), ..Default::default() };
+                let memory = Arc::new(Memory::default());
+                let mut saved = Snapshot::default();
+                let mut thread_id: Option<String> = None;
+                let mut cwd = None;
+                for index in 0..2 {
+                    let fixture = HostFixture::start(&root, config.clone(), memory.clone(), "Independent Host", false, Some(fixture_program())).await.unwrap();
+                    let (store, endpoint) = connect(&fixture, saved).await;
+                    assert!(store.snapshot().connected);
+                    assert!(store.snapshot().model_errors.contains_key("codex"));
+                    assert!(store.snapshot().models.iter().all(|model| model.model.starts_with("claude:")));
+                    if let Some(id) = &thread_id {
+                        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+                    } else {
+                        store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
+                        let key = store.snapshot().navigation.draft_key.clone();
+                        store.dispatch(Intent::SelectModel { thread_id: key, model: "claude:default".into() }).await.unwrap();
+                    }
+                    let id = send(&store, &format!("independent {index}"), &format!("independent-{index}")).await;
+                    let snapshot = completed(&store, &id, index + 1, "completed").await;
+                    assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+                    assert!(snapshot.drafts[&id].text.is_empty() && snapshot.pending_submissions.is_empty());
+                    let current = snapshot.conversations[&id].cwd.clone().unwrap();
+                    if let Some(previous) = &cwd { assert_eq!(previous, &current); }
+                    if selected && automatic { assert_eq!(Path::new(&current).parent().unwrap(), root.join("worktrees")); }
+                    else { assert_eq!(Path::new(&current), if selected { workspace.clone() } else { root.join("bex-chats") }); }
+                    let turns = snapshot.conversations[&id].turns.as_ref().unwrap();
+                    assert!(turns[index].items.as_ref().unwrap().iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| text.starts_with(&format!("reply {}: independent {index}", index + 1)))));
+                    store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+                    let snapshot = store.snapshot();
+                    let list = snapshot.threads.as_ref().unwrap();
+                    assert!(list.data.iter().any(|thread| thread.id.as_deref() == Some(&id)));
+                    assert!(list.extra["providerErrors"]["codex"]["message"].is_string());
+                    let management = fixture.local().await.unwrap();
+                    let status = management.peer.request::<_, Value>("host/status", &json!({})).await.unwrap().value;
+                    assert!(status["providerErrors"]["codex"]["message"].is_string());
+                    let count_worktrees = || std::fs::read_dir(root.join("worktrees")).map(|entries| entries.count()).unwrap_or_default();
+                    let before = count_worktrees();
+                    assert!(management.peer.request::<_, Value>("host/thread/start", &json!({"model":"fixture-model","cwd":current})).await.is_err());
+                    assert_eq!(count_worktrees(), before, "an unavailable backend must not create a worktree");
+                    assert!(management.peer.request::<_, Value>("host/status", &json!({})).await.is_ok());
+                    management.close().await.unwrap();
+                    saved = serde_json::from_slice(&serde_json::to_vec(snapshot.as_ref()).unwrap()).unwrap();
+                    thread_id = Some(id);
+                    cwd = Some(current);
+                    store.close().await.unwrap();
+                    endpoint.close().await;
+                    fixture.close().await.unwrap();
+                }
+            }
+        }
+    }).await.expect("independent Claude deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let codex_id = send(&store, "[approval]", "codex-approval").await;
+        until(&store, |snapshot| !snapshot.requests.is_empty()).await;
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store
+            .dispatch(Intent::SelectModel {
+                thread_id: key,
+                model: "claude:default".into(),
+            })
+            .await
+            .unwrap();
+        let id = send(&store, "permission", "claude-approval").await;
+        until(&store, |snapshot| snapshot.requests.len() == 2).await;
+        let cwd = store.snapshot().navigation.cwd.clone();
+        store
+            .dispatch(Intent::StartTerminal(
+                serde_json::from_value(json!({
+                    "processHandle":"codex-terminal", "cwd":cwd, "size":{"rows":24,"cols":80}
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.snapshot().terminals["codex-terminal"].phase,
+            agent_core::state::TerminalPhase::Running
+        );
+        let local = fixture.local().await.unwrap();
+        std::fs::write(root.path().join("exit-on-list"), "").unwrap();
+        assert!(
+            local
+                .peer
+                .request::<_, Value>("thread/list", &json!({}))
+                .await
+                .is_err()
+        );
+        until(&store, |snapshot| {
+            snapshot.requests.len() == 1
+                && snapshot.conversations[&codex_id].turns.as_ref().unwrap()[0]
+                    .status
+                    .as_deref()
+                    == Some("failed")
+        })
+        .await;
+        assert!(store.snapshot().connected);
+        assert!(!fixture.running.is_finished());
+        assert!(!store.snapshot().activity.active[&codex_id]);
+        assert!(
+            matches!(
+                store.snapshot().terminals["codex-terminal"].phase,
+                agent_core::state::TerminalPhase::Failed(_)
+            ),
+            "a lost Codex terminal must not remain running"
+        );
+        store.disconnect().await.unwrap();
+        store
+            .reconnect(&endpoint, &fixture.ticket, None)
+            .await
+            .unwrap();
+        let snapshot = until(&store, |snapshot| !snapshot.requests.is_empty()).await;
+        assert_eq!(snapshot.requests.len(), 1);
+        let request = snapshot.requests.values().next().unwrap();
+        assert_eq!(request.params["threadId"], id);
+        assert!(!Path::new(&cwd).join("approved.txt").exists());
+        store
+            .dispatch(Intent::Respond(op::Respond {
+                request_id: request.id.clone(),
+                answer: Answer::Decision { index: 0 },
+            }))
+            .await
+            .unwrap();
+        let snapshot = completed(&store, &id, 1, "completed").await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert!(snapshot.requests.is_empty() && snapshot.pending_submissions.is_empty());
+        assert!(snapshot.drafts[&id].text.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&cwd).join("approved.txt")).unwrap(),
+            "approved"
+        );
+        store
+            .dispatch(Intent::LoadModels(op::LoadModels {}))
+            .await
+            .unwrap();
+        assert!(store.snapshot().model_errors.contains_key("codex"));
+        send(&store, "after Codex exit", "claude-after-exit").await;
+        let snapshot = completed(&store, &id, 2, "completed").await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert!(snapshot.drafts[&id].text.is_empty());
+        assert!(
+            local
+                .peer
+                .request::<_, Value>("host/status", &json!({}))
+                .await
+                .is_ok()
+        );
+        local.close().await.unwrap();
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("Codex exit isolation deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_authentication_and_inference_failures_are_visible_and_retry_preserves_the_conversation()
+ {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("bex-chats");
+        std::fs::create_dir(&cwd).unwrap();
+        let config = cwd.join("claude-fixture.json");
+        std::fs::write(&config, json!({"unauthenticated":true}).to_string()).unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store
+            .dispatch(Intent::SelectModel {
+                thread_id: key,
+                model: "claude:default".into(),
+            })
+            .await
+            .unwrap();
+        draft(&store, "keep my draft").await;
+        assert!(
+            store
+                .dispatch(Intent::Submit {
+                    thread_id: None,
+                    client_user_message_id: "auth-failure".into()
+                })
+                .await
+                .is_err()
+        );
+        let snapshot = store.snapshot();
+        let id = snapshot.navigation.thread_id.clone().unwrap();
+        assert!(snapshot.error.as_ref().unwrap().contains("サブスク認証"));
+        assert_eq!(snapshot.drafts[&id].text, "keep my draft");
+        assert!(snapshot.pending_submissions.is_empty());
+        assert!(
+            snapshot.conversations[&id]
+                .turns
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::write(&config, json!({"initializeError":true}).to_string()).unwrap();
+        assert!(
+            store
+                .dispatch(Intent::Submit {
+                    thread_id: Some(id.clone()),
+                    client_user_message_id: "init-failure".into()
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .snapshot()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("fixture initialization failed")
+        );
+        assert_eq!(store.snapshot().drafts[&id].text, "keep my draft");
+        assert!(
+            store.snapshot().conversations[&id]
+                .turns
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::write(&config, json!({"resultError":true}).to_string()).unwrap();
+        send(&store, "inference failure", "failed-turn").await;
+        let snapshot = completed(&store, &id, 1, "failed").await;
+        assert_eq!(
+            snapshot.conversations[&id].turns.as_ref().unwrap()[0]
+                .error
+                .as_ref()
+                .unwrap()["message"],
+            "fixture inference failed"
+        );
+        std::fs::write(&config, "{}").unwrap();
+        send(&store, "retry", "retry").await;
+        let snapshot = completed(&store, &id, 2, "completed").await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert!(snapshot.drafts[&id].text.is_empty());
+        assert!(
+            snapshot.conversations[&id].turns.as_ref().unwrap()[1]
+                .error
+                .is_none()
+        );
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("Claude failure recovery deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "uses the Host user's authenticated Claude subscription; run explicitly"]
+async fn live_claude_subscription_completes_and_resumes_through_store_and_host() {
+    tokio::time::timeout(Duration::from_secs(150), async {
+        let program = std::env::var_os("BEX_LIVE_CLAUDE_PROGRAM").expect("set an absolute Claude Code executable path");
+        let root = tempfile::tempdir().unwrap();
+        let memory = Arc::new(Memory::default());
+        let fixture = host(root.path(), memory.clone(), Path::new(&program)).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store.dispatch(Intent::SelectModel { thread_id: key, model: "claude:haiku".into() }).await.unwrap();
+        let id = send(&store, "Remember marker BEX_CLAUDE_STORE_OK. Reply with exactly that marker. Do not use tools.", "live-1").await;
+        let snapshot = completed(&store, &id, 1, "completed").await;
+        assert!(snapshot.error.is_none());
+        assert!(snapshot.drafts[&id].text.is_empty() && snapshot.pending_submissions.is_empty());
+        assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| text.contains("BEX_CLAUDE_STORE_OK"))));
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+        let fixture = host(root.path(), memory, Path::new(&program)).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+        send(&store, "Reply with exactly the marker from my previous message. Do not use tools.", "live-2").await;
+        let snapshot = completed(&store, &id, 2, "completed").await;
+        assert!(snapshot.error.is_none());
+        assert!(snapshot.drafts[&id].text.is_empty() && snapshot.pending_submissions.is_empty());
+        assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[1].items.as_ref().unwrap().iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| text.contains("BEX_CLAUDE_STORE_OK"))));
+        send(&store, "Count from 1 to 10000, one number per line. Do not use tools.", "live-stop").await;
+        let snapshot = until(&store, |snapshot| snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 3 && turns[2].items.as_ref().is_some_and(|items| items.iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| !text.is_empty()))))).await;
+        let turn_id = snapshot.conversations[&id].turns.as_ref().unwrap()[2].id.clone();
+        store.dispatch(Intent::Interrupt(op::Interrupt { thread_id: id.clone(), turn_id })).await.unwrap();
+        let snapshot = completed(&store, &id, 3, "interrupted").await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        send(&store, "Reply with exactly BEX_CLAUDE_RECOVERED. Do not use tools.", "live-recovery").await;
+        let snapshot = completed(&store, &id, 4, "completed").await;
+        assert!(snapshot.error.is_none());
+        assert!(snapshot.drafts[&id].text.is_empty() && snapshot.pending_submissions.is_empty());
+        assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[3].items.as_ref().unwrap().iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| text.contains("BEX_CLAUDE_RECOVERED"))));
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    }).await.expect("live Claude subscription deadline");
+}

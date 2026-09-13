@@ -163,7 +163,12 @@ fn model_settings_corpus() {
                 }),
             )
         } else {
-            applied(&previous, op::LoadModels {}, models)
+            applied(
+                &previous,
+                op::LoadModels {},
+                serde_json::from_value::<agent_core::client::ModelPage>(json!({"data":models}))
+                    .unwrap(),
+            )
         };
         assert!(effects.is_empty());
         let expected: Draft = serde_json::from_value(case["expected"].clone()).unwrap();
@@ -443,7 +448,10 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
         let mut current = Snapshot::default();
         for load_catalog in [catalog_first, !catalog_first] {
             if load_catalog {
-                op::LoadModels {}.apply(&mut current, models.clone());
+                op::LoadModels {}.apply(
+                    &mut current,
+                    serde_json::from_value(json!({"data":models})).unwrap(),
+                );
             } else {
                 current = reduce(
                     &current,
@@ -787,4 +795,63 @@ fn durable_upload_and_pairing_results_survive_navigation() {
     }
     assert_eq!(snapshot.navigation.cwd, "/new");
     assert!(snapshot.error.is_none());
+}
+
+#[test]
+fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_drafts() {
+    use agent_core::state::{Draft, Intent};
+    for restored in [false, true] {
+        let draft = Draft {
+            model: Some("codex-model".into()),
+            effort: Some("high".into()),
+            service_tier: Some("priority".into()),
+            text: "keep this input".into(),
+            ..Default::default()
+        };
+        let mut state = Snapshot {
+            drafts: Arc::new(BTreeMap::from([("saved".into(), Arc::new(draft.clone()))])),
+            ..Default::default()
+        };
+        if restored {
+            state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        op::LoadModels {}.apply(
+            &mut state,
+            serde_json::from_value(json!({"data":[{
+            "id":"claude:default","model":"claude:default","displayName":"Claude",
+            "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]
+        }],"providerErrors":{"codex":{"message":"offline"}}}))
+            .unwrap(),
+        );
+        assert_eq!(*state.drafts["saved"], draft);
+        assert_eq!(state.model_error_messages(), ["codex: offline"]);
+        state = reduce(
+            &state,
+            Event::Intent(Intent::NewChat {
+                cwd: "/fresh".into(),
+            }),
+        )
+        .0;
+        assert_eq!(
+            state.drafts["new:/fresh"].model.as_deref(),
+            Some("claude:default")
+        );
+        state = reduce(
+            &state,
+            Event::Intent(Intent::SelectEffort {
+                thread_id: "saved".into(),
+                effort: "high".into(),
+            }),
+        )
+        .0;
+        assert_eq!(*state.drafts["saved"], draft);
+        let catalog = serde_json::from_value(json!({"data":[{
+            "id":"codex-model","model":"codex-model","displayName":"Codex",
+            "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}],
+            "serviceTiers":[{"id":"priority"}]
+        }]})).unwrap();
+        op::LoadModels {}.apply(&mut state, catalog);
+        assert_eq!(*state.drafts["saved"], draft);
+        assert!(state.model_errors.is_empty());
+    }
 }

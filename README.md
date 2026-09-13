@@ -1,6 +1,6 @@
 # Bex
 
-Bex controls a long-lived Codex App Server on a trusted computer from a Mac app, an iPhone app, an Android app, or a headless CLI. A Rust Host daemon owns the Codex process; every client connects to it over iroh with the same JSONL RPC peer and dispatches intents to the same Rust `Store`. Terminology is in [CONTEXT.md](CONTEXT.md); design decisions are in [docs/adr](docs/adr); behavior changes are in [CHANGELOG.md](CHANGELOG.md).
+Bex controls Codex and Claude Code on a trusted computer from a Mac app, an iPhone app, an Android app, or a headless CLI. A Rust Host daemon owns the agent processes; every client connects to it over iroh with the same JSONL RPC peer and dispatches intents to the same Rust `Store`. Terminology is in [CONTEXT.md](CONTEXT.md); design decisions are in [docs/adr](docs/adr); behavior changes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Layout
 
@@ -8,10 +8,10 @@ Bex controls a long-lived Codex App Server on a trusted computer from a Mac app,
 | --- | --- |
 | `crates/agent-core` | Models, typed RPC operations, `Snapshot`, the `Store`, conversation presentation, iroh transport, diagnostics. The single state owner for every client. |
 | `crates/agent-ffi` | UniFFI bindings for `agent-core`, consumed by Swift and Kotlin. |
-| `crates/host-daemon` | The Host: pairing, authorization, Codex RPC routing, thread watches, worktrees, dictation, file/terminal access. |
+| `crates/host-daemon` | The Host: pairing, authorization, Host RPC routing, Codex and Claude Code sessions, thread watches, worktrees, dictation, file/terminal access. |
 | `crates/codex-app-server` | Spawns and initializes the Codex App Server process. |
 | `crates/agent-cli` | Headless client for scripts and integration tests. |
-| `crates/host-fixture` | Deterministic Codex simulator and isolated iroh Host for tests. |
+| `crates/host-fixture` | Deterministic Codex and Claude subprocess fixtures and isolated iroh Host for tests. |
 | `crates/xtask` | Background quality worker driven by Lefthook. |
 | `apps/desktop` | Mac app (GPUI). xterm.js assets under `web/` are fetched at build time; no Node runtime ships. |
 | `apps/mobile` | iOS (SwiftUI, `iosApp/`) and Android (Compose, `src/`) over the UniFFI Store. |
@@ -20,7 +20,7 @@ Clients render immutable `Snapshot` values and never re-derive presentation: `ag
 
 ## Run the Host
 
-The Host needs Git and a Codex App Server. It prefers Codex bundled with ChatGPT Desktop on macOS, then `codex` on PATH; `--codex <path>` is authoritative.
+The Host needs Git and at least one available agent for conversations. Codex is optional; the Host prefers Codex bundled with ChatGPT Desktop on macOS, then `codex` on PATH; `--codex <path>` is authoritative.
 
 ```sh
 nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
@@ -30,6 +30,7 @@ nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
 | --- | --- |
 | `--state-dir` | Credential directory for a new Host; otherwise the remembered directory is used (initial macOS default: `~/Library/Application Support/app.bex.BEX/`). It does not permit a second normal Host. |
 | `--codex-home` | Selects a separate Codex store. |
+| `--claude <path>` | Claude Code executable; defaults to `claude` on PATH. Desktop passes `BEX_CLAUDE` when set. |
 | `--key-storage keyring\|file` | Where the 64-byte Host and local-client identity lives. Use `file` on headless Linux without a keyring service. |
 | `--relay-url <url>…` / `--no-relay` | Custom iroh relays, or local addresses only for isolated fixtures. |
 | `--isolated --state-dir <directory>` | Explicitly separate development/test Host. It still locks its own directory. |
@@ -64,6 +65,16 @@ On Mac and iPhone, select assistant text to quote it into the draft or ask about
 
 The composer gauge opens **アカウントとモデル**. On Mac, **Codex アカウント** selects a saved account; opening the menu refreshes the account list, and switching refreshes the model catalog while retaining the conversation and draft. Add accounts through **Codex アカウントを追加** on iPhone. The Host owns authentication and persists the selected account across restarts; account switching shares the existing Codex process and conversation history.
 
+### Claude Code
+
+Install Claude Code on the Host through its normal package configuration, then run `claude auth login` there and sign in with your Claude subscription. Start a new conversation and select a **Claude · …** model in **アカウントとモデル**. Model names and supported effort levels come from the installed CLI's initialize response, cached for the Host's lifetime. Without a Claude executable, the catalog continues to show Codex models. A failed provider is reported alongside the available models. Saved model choices survive an incomplete catalog; new drafts default to an available model.
+
+The Host runs the unmodified CLI with streaming JSON input/output and its own permission callbacks. Claude manages its credentials; Bex does not copy subscription tokens into Codex or call Anthropic's inference API directly. A turn requires subscription authentication: API-key or unauthenticated sessions are rejected before the message is submitted. If an API key is configured in the Host environment, remove that override to use the subscription. The Codex account selector affects Codex only. See Anthropic's [authentication](https://code.claude.com/docs/en/authentication), [programmatic execution](https://code.claude.com/docs/en/headless), and [embedding conditions](https://code.claude.com/docs/en/legal-and-compliance).
+
+Text, PNG/JPEG/GIF/WebP images, file references, tool approvals, user questions, interruption and subsequent turns use the same Store and authenticated transport as Codex. Working-directory selection and automatic worktree settings apply to both. Bex's Claude conversation records are private files under `<Host state-dir>/claude/`; Claude's own transcript remains in its normal Claude Code store. Keep both to resume conversations after a Host restart. Disconnecting a client leaves the turn running and unresolved approvals replay on reconnect.
+
+Create a new conversation to switch between Codex and Claude. Claude currently accepts subsequent input after the active turn completes or is interrupted; sending during a running turn reports an error and retains the draft. Claude-to-Codex delegation and Claude forks/side chats are not implemented. Codex startup failure or exit does not stop the Host, Claude turns, pairing, files, or workspace selection. Terminal, dictation, and Codex account operations require Codex. Worktree deletion is blocked while Codex conversation activity cannot be checked. The CLI integration has been exercised with Claude Code 2.1.266.
+
 Mac conversation file links open the Host's parent directory and file editor in the Files panel, retaining unsaved file drafts and revision checks. Side Chat displays files and diffs in its own panel with a return-to-chat control, preserving the conversation draft.
 
 On Mac, open **ブラウザ → Chromeから取り込む** and select a Chrome profile to copy its cookies into Bex's browser. Allow the macOS Keychain prompt for **Chrome Safe Storage** when requested. The import leaves Chrome's database unchanged, merges cookies by domain/name/path, and reloads the current page after checking the saved cookies. Persistent cookies retain their expiration across Bex restarts; session cookies remain session-only. This is a one-time copy: repeat the import to refresh a login. Expired cookies and cookies partitioned by top-level site are excluded and counted. Cookie-independent sign-in state (such as local storage or device-bound credentials) is not copied, so some sites still require signing in inside Bex.
@@ -96,6 +107,8 @@ nix develop . --command just ios-e2e [TestMethod…]        # Simulator XCUITest
 nix develop . --command just conversation-ui             # selection, side chat, and activity regressions
 nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop tests, and conversation-ui
 ```
+
+Claude contracts run with `nix develop . --command cargo test --locked -p host-fixture --test claude`. They use a deterministic external CLI boundary with real Store, iroh, Host routing, persistence and isolated Git/filesystem state. The opt-in `live_claude_subscription_completes_and_resumes_through_store_and_host` test uses the real authenticated CLI; set `BEX_LIVE_CLAUDE_PROGRAM` to its absolute path and run that test with `-- --ignored --exact` to verify subscription inference, resumption across a Host restart, interruption and successful input after interruption.
 
 Linux CI uses the `nix develop .#native` shell. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
 

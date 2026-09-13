@@ -4,14 +4,14 @@ use agent_core::{
     state::operations::ListThreads,
 };
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{CodexRpcService, DesktopProjectStore};
+use host_daemon::{DesktopProjectStore, HostRpcService};
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let projects = DesktopProjectStore::from_environment()?;
     let server = Arc::new(CodexAppServer::spawn(AppServerConfig::default()).await?);
-    let service = CodexRpcService::new(server.clone(), projects);
+    let service = HostRpcService::new(Ok(server.clone()), projects);
     let mut session = service.open_session(128);
     service
         .dispatch(
@@ -36,9 +36,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     drop(session);
     drop(service);
-    Arc::try_unwrap(server)
-        .map_err(|_| "Codex process retained")?
-        .shutdown()
-        .await?;
+    server.shutdown().await?;
     Ok(())
 }

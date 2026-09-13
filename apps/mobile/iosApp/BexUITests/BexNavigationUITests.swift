@@ -196,6 +196,40 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
     }
 
+    func testSimulatorUsesClaudeWithoutCodexAndRestoresConversation() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        XCTAssertTrue(app.buttons["model.settings"].waitForExistence(timeout: 10))
+        app.buttons["model.settings"].tap()
+        let choice = app.buttons["model.choice.claude:default"]
+        XCTAssertTrue(choice.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["model.account.desktop"].exists)
+        choice.tap()
+        captureScreen(app, named: "Claude models without Codex")
+        app.buttons["model.close"].tap()
+        let message = app.textFields["task.message"]
+        message.tap()
+        message.typeText("Claude standalone")
+        app.buttons["task.send"].tap()
+        let answer = app.textViews["reply 1: Claude standalone"]
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        XCTAssertEqual(message.value as? String, message.placeholderValue)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        app.terminate()
+        app.launch()
+        expandSimulatorProject(app)
+        let row = prefixedElement(app, prefix: "tasks.row.claude:")
+        XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
+        XCTAssertTrue(answer.waitForExistence(timeout: 20))
+        message.tap()
+        message.typeText("Follow up")
+        app.buttons["task.send"].tap()
+        XCTAssertTrue(app.textViews["reply 2: Follow up"].waitForExistence(timeout: 30))
+        XCTAssertEqual(message.value as? String, message.placeholderValue)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        captureScreen(app, named: "Claude conversation restored and continued")
+    }
+
     func chooseFixtureModel(_ app: XCUIApplication) {
         app.buttons["model.settings"].tap()
         let choice = app.buttons["model.choice.fixture-model"]

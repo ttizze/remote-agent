@@ -39,6 +39,23 @@ pub(super) fn notification(
     method: &str,
     params: Value,
 ) -> (Snapshot, Vec<Effect>) {
+    if method == "host/terminal/failed" {
+        let (Some(handle), Some(reason)) =
+            (params["processHandle"].as_str(), params["message"].as_str())
+        else {
+            return reduce(
+                previous,
+                Event::Failed("invalid terminal failure notification".into()),
+            );
+        };
+        return reduce(
+            previous,
+            Event::TerminalFailed {
+                handle: handle.into(),
+                reason: reason.into(),
+            },
+        );
+    }
     if matches!(method, "process/outputDelta" | "process/exited") {
         return process(previous, method, params);
     }

@@ -86,6 +86,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
             Arc::new(Memory::default()),
             "isolated Host",
             false,
+            None,
         )
         .await
         .unwrap();

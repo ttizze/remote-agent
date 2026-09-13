@@ -270,6 +270,9 @@ extension BexAppViewModel {
     }
 
     private func publish(_ next: AgentCore.Snapshot) {
+        if let error = snapshot.error(), notice == error, next.error() != error {
+            notice = next.error()
+        }
         let listChanged = !next.listUnchanged(other: snapshot)
         if listChanged {
             list = next.threadList()
