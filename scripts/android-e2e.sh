@@ -70,9 +70,9 @@ with socketserver.TCPServer(('127.0.0.1', 0), Host) as host:
     host.shutdown()
 pathlib.Path(sys.argv[2]).write_text(result.stdout)
 print(result.stdout)
-assert result.returncode == 0 and re.search(r'^OK \(3 tests\)', result.stdout, re.M), "Android tests did not all pass"
+assert result.returncode == 0 and re.search(r'^OK \(5 tests\)', result.stdout, re.M), "Android tests did not all pass"
 PYTHON
 adb -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png"
 [[ $test_status == 0 ]] || exit "$test_status"
 adb -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-granted.png "$log.granted.png"
-echo "Android API 37: 3 tests passed; $log.tests.log"
+echo "Android API 37: 5 tests passed; $log.tests.log"
