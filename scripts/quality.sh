@@ -2,8 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 case "${1:-all}" in all|rust|kotlin|swift) language=${1:-all} ;; *) echo 'quality expects rust, kotlin, or swift' >&2; exit 2 ;; esac
+export CARGO_INCREMENTAL=0
 failed=0
 if [[ $language == all || $language == rust ]]; then
+    python3 -B -m unittest discover -s scripts/tests || failed=1
     cargo fmt --all --check || failed=1
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
     cargo test --locked -p agent-core -p bex-desktop --lib --bins || failed=1
@@ -16,4 +18,5 @@ if [[ $language == all || $language == swift ]]; then
     swiftlint lint --strict || failed=1
     just conversation-ui || failed=1
 fi
+python3 scripts/clean-builds.py || failed=1
 exit "$failed"

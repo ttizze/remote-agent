@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reduce development/test debug information to filename and line-number backtraces, disable incremental compilation in quality checks, and replace unbounded inactive Cargo output retention with a 3-day/32-GiB cleanup after checks. Preserve live builds, running executables, application backups, and verification records; verify cleanup and subsequent rebuilds with real isolated Cargo projects.
+
 - Use compact white send buttons with black arrows for both typed and recorded iOS messages, and a neutral gray recording stop button. Keep 44-point tap targets and visible disabled states.
 
 - Replace the iOS composer text field with a live microphone waveform while recording, and show permission/transcription progress inside the input. Add recording cancellation that retains the draft and clear stale error notices when retrying recording. Extend isolated Simulator coverage for cancellation/restart, recording beyond 30 seconds, permission denial, and draft recovery after transcription failure.
