@@ -4,6 +4,8 @@
 
 - Reduce development/test debug information to filename and line-number backtraces, disable incremental compilation in quality checks, and replace unbounded inactive Cargo output retention with a 3-day/32-GiB cleanup after checks. Preserve live builds, running executables, application backups, and verification records; verify cleanup and subsequent rebuilds with real isolated Cargo projects.
 
+- Use Espresso 3.7.0 for Android instrumentation, replacing Compose's transitive 3.5.0 dependency and its removed reflective `InputManager.getInstance` call. Preserve the API 37 Markdown, permission, persistence and Host-recovery acceptance tests.
+
 - Redisplay repeated iOS operation errors after a retry clears the notice. Keep the existing dictation regression through cancellation, 32-second recording, repeated transcription failure, draft recovery, and completed text submission.
 
 - Move iPhone navigation to `NavigationStack` and explicit destinations, removing hidden navigation links and stack-style overrides. Use SwiftUI `PhotosPicker` with file transfers and sequential async uploads instead of the UIKit photo-picker delegate and recursive callbacks. Preserve ordered photo/video selection, repeated selection, cancellation, conversation ownership, and temporary-file cleanup. Clear stale upload errors in core when retrying and reflect core error changes in iOS notices. Acceptance: native back gestures, repeated task/directory navigation, settings restoration, media upload failure/recovery, completed sends and reopened attachments.
