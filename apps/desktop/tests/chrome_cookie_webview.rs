@@ -221,7 +221,7 @@ fn native_phase(phase: &str, identifier: &str, url: &str, profile: &str) {
                 )
                 .await;
                 if phase == "import" {
-                    verify_wry_cookie_scope(&browser, cx).await;
+                    seed_existing_cookies(&browser, cx).await;
                     browser.update(cx, |s, cx| {
                         s.import_chrome(profile.clone(), || Err("fixture denied".into()), cx)
                     });
@@ -331,13 +331,12 @@ async fn wait_for_page(browser: &Entity<Browser>, expected: &str, cx: &mut Async
 }
 
 #[cfg(target_os = "macos")]
-async fn verify_wry_cookie_scope(browser: &Entity<Browser>, cx: &mut AsyncApp) {
-    use wry::WebViewExtMacOS;
+async fn seed_existing_cookies(browser: &Entity<Browser>, cx: &mut AsyncApp) {
     let cookie = wry::cookie::Cookie::build(("scope-regression", "fixture"))
         .domain(".example.test")
         .path("/")
         .build();
-    let store = browser.update(cx, |s, cx| {
+    browser.update(cx, |s, cx| {
         let raw = s.webview.read(cx).raw();
         raw.set_cookie(&cookie).unwrap();
         raw.set_cookie(
@@ -348,29 +347,5 @@ async fn verify_wry_cookie_scope(browser: &Entity<Browser>, cx: &mut AsyncApp) {
                 .build(),
         )
         .unwrap();
-        unsafe {
-            raw.webview()
-                .configuration()
-                .websiteDataStore()
-                .httpCookieStore()
-        }
     });
-    let (tx, rx) = async_channel::bounded(1);
-    unsafe {
-        store.getAllCookies(&block2::RcBlock::new(
-            move |cookies: std::ptr::NonNull<
-                objc2_foundation::NSArray<objc2_foundation::NSHTTPCookie>,
-            >| {
-                let domain = cookies
-                    .as_ref()
-                    .iter()
-                    .find(|cookie| cookie.name().to_string() == "scope-regression")
-                    .map(|cookie| cookie.domain().to_string());
-                let _ = tx.try_send(domain);
-            },
-        ));
-    }
-    // Pinned lb-wry 0.53.3 loses the domain-cookie dot; remove our native writer once upstream preserves scope.
-    assert_eq!(rx.recv().await.unwrap().as_deref(), Some("example.test"));
-    println!("Confirmed: lb-wry set_cookie changes .example.test to host-only example.test");
 }

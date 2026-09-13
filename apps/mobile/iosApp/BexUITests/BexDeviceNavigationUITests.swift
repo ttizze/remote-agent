@@ -46,50 +46,14 @@ extension BexLaunchUITests {
         app.terminate()
         app.launch()
 
-        let reconnectTaskDetail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Relaunch did not open the task list")
-        XCTAssertFalse(reconnectTaskDetail.exists)
+        XCTAssertFalse(taskDetail.exists)
         if project.exists, project.value as? String == "閉じています" {
             project.tap()
         }
         XCTAssertTrue(firstTask.waitForExistence(timeout: 30)); firstTask.tap()
         XCTAssertTrue(firstItem.waitForExistence(timeout: 30))
-    }
-
-    func testOpeningTaskAndReturningShowsTaskList() {
-        let app = XCUIApplication()
-        app.terminate()
-        app.launch()
-
-        let taskList = app.descendants(matching: .any)["tasks.list"]
-        let taskDetail = app.descendants(matching: .any)["task.detail"]
-        let connectionNotice = app.staticTexts["notice"]
-        let ready = expectation(for: NSPredicate { _, _ in taskList.exists || taskDetail.exists }, evaluatedWith: app)
-        wait(for: [ready], timeout: 30)
-        if taskDetail.exists {
-            app.navigationBars.buttons.element(boundBy: 0).tap()
-        }
-        XCTAssertTrue(taskList.waitForExistence(timeout: 30))
-
-        let project = prefixedButton(app, prefix: "tasks.project.")
-        if project.exists, project.value as? String == "閉じています" {
-            project.tap()
-        }
-        let firstTask = app
-            .descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "tasks.row."))
-            .firstMatch
-        XCTAssertTrue(firstTask.waitForExistence(timeout: 30), "No task row appeared in the task list")
-        firstTask.tap()
-
-        XCTAssertTrue(
-            taskDetail.waitForExistence(timeout: 30),
-            "Task detail content did not appear; notice: \(connectionNotice.exists ? connectionNotice.label : "(none)")"
-        )
-
-        let firstItem = assertLoadedTaskDetails(app)
-        let backButton = app.navigationBars.buttons.element(boundBy: 0)
-        backButton.tap()
+        app.navigationBars.buttons.element(boundBy: 0).tap()
 
         XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Task list did not reappear after returning")
         XCTAssertTrue(firstTask.waitForExistence(timeout: 30)); firstTask.tap()

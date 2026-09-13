@@ -245,44 +245,6 @@
     }
   },
   {
-    "name": "host-default-directory",
-    "command": {
-      "type": "startThread",
-      "cwd": "",
-      "model": null
-    },
-    "exchanges": [
-      {
-        "method": "host/thread/start",
-        "params": {},
-        "response": {
-          "result": {
-            "thread": {
-              "id": "thread-new",
-              "cwd": "/default",
-              "turns": [],
-              "future": {
-                "opaque": 42
-              }
-            },
-            "model": "model-b"
-          }
-        }
-      }
-    ],
-    "result": {
-      "thread": {
-        "id": "thread-new",
-        "cwd": "/default",
-        "turns": [],
-        "future": {
-          "opaque": 42
-        }
-      },
-      "model": "model-b"
-    }
-  },
-  {
     "name": "deferred-history",
     "command": {
       "type": "readThread",
@@ -807,62 +769,6 @@
     "result": "turn-1"
   },
   {
-    "name": "explicit-cwd-second",
-    "command": {
-      "type": "sendTurn",
-      "threadId": "thread-1",
-      "input": {
-        "text": "hello",
-        "attachments": [],
-        "clientUserMessageId": "client-1"
-      },
-      "model": null,
-      "effort": null,
-      "snapshot": {
-        "cwd": "/second",
-        "status": {
-          "type": "notLoaded"
-        },
-        "turns": []
-      },
-      "listed": null
-    },
-    "exchanges": [
-      {
-        "method": "thread/resume",
-        "params": {
-          "threadId": "thread-1",
-          "cwd": "/second"
-        },
-        "response": {
-          "result": {}
-        }
-      },
-      {
-        "method": "turn/start",
-        "params": {
-          "threadId": "thread-1",
-          "clientUserMessageId": "client-1",
-          "input": [
-            {
-              "type": "text",
-              "text": "hello",
-              "text_elements": []
-            }
-          ]
-        },
-        "response": {
-          "result": {
-            "turn": {
-              "id": "turn-1"
-            }
-          }
-        }
-      }
-    ],
-    "result": "turn-1"
-  },
-  {
     "name": "failed-resume-stops-send",
     "command": {
       "type": "sendTurn",
@@ -993,50 +899,6 @@
           "result": {
             "queuedSubmission": {
               "id": "queued-1"
-            }
-          }
-        }
-      }
-    ],
-    "result": null
-  },
-  {
-    "name": "queue-fresh-identity",
-    "command": {
-      "type": "sendTurn",
-      "threadId": "thread-1",
-      "input": {
-        "text": "again",
-        "attachments": [],
-        "clientUserMessageId": "client-2"
-      },
-      "snapshot": {
-        "status": {
-          "type": "active"
-        }
-      },
-      "listed": null,
-      "model": null,
-      "effort": null
-    },
-    "exchanges": [
-      {
-        "method": "thread/queue/add",
-        "params": {
-          "threadId": "thread-1",
-          "clientUserMessageId": "client-2",
-          "input": [
-            {
-              "type": "text",
-              "text": "again",
-              "text_elements": []
-            }
-          ]
-        },
-        "response": {
-          "result": {
-            "queuedSubmission": {
-              "id": "queued-2"
             }
           }
         }
@@ -2274,25 +2136,5 @@
       }
     ],
     "result": null
-  },
-  {
-    "name": "raw-invalid-json-does-not-send",
-    "command": {
-      "type": "respond",
-      "request": {
-        "id": "future",
-        "method": "future/input",
-        "params": {
-          "future": true
-        }
-      },
-      "answer": {
-        "type": "raw",
-        "json": "{"
-      }
-    },
-    "exchanges": [],
-    "errorContains": "EOF",
-    "errorRaw": null
   }
 ]

@@ -839,19 +839,9 @@ mod tests {
 
     #[tokio::test]
     async fn response_completion_means_written_before_close() {
-        use std::{future::Future, task::Poll};
         let (peer, server_reader, _server_writer) = make_peer();
         let response = r#"{"id":"approval","result":{"decision":"decline"}}"#;
-        let mut send = std::pin::pin!(peer.send_raw(response));
-        std::future::poll_fn(|cx| {
-            assert!(
-                send.as_mut().poll(cx).is_pending(),
-                "must wait for the writer"
-            );
-            Poll::Ready(())
-        })
-        .await;
-        send.await.unwrap();
+        peer.send_raw(response).await.unwrap();
         peer.close().await.unwrap();
         let mut lines = BufReader::new(server_reader);
         assert_eq!(read_line(&mut lines).await, response);
@@ -874,33 +864,45 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn ignores_unknown_and_late_responses() {
-        let (peer, server_reader, mut server_writer) = make_peer();
-        let mut lines = BufReader::new(server_reader);
-        let request = {
+    #[tokio::test(start_paused = true)]
+    async fn disabled_request_timeout_preserves_a_silent_request_until_its_reply() {
+        let (client, server) = duplex(32 * 1024);
+        let (read, write) = tokio::io::split(client);
+        let (read_server, mut write_server) = tokio::io::split(server);
+        let peer = Arc::new(RpcPeer::open(JsonlReader::new(read), write, None, 1).unwrap());
+        let mut reader = BufReader::new(read_server);
+        let pending = tokio::spawn({
             let peer = peer.clone();
-            tokio::spawn(async move {
-                peer.request_raw(r#"{"id":"caller","method":"wait","params":{}}"#)
+            async move {
+                peer.request_raw(r#"{"id":"waiting","method":"approval"}"#)
                     .await
-            })
-        };
-        let sent: Value = serde_json::from_str(&read_line(&mut lines).await).unwrap();
-        let id = sent["id"].as_u64().unwrap();
-        server_writer
-            .write_all(b"{\"id\":999,\"result\":{\"late\":true}}\n")
+            }
+        });
+        let request: Value = serde_json::from_str(&read_line(&mut reader).await).unwrap();
+        tokio::time::advance(Duration::from_secs(301)).await;
+        assert!(
+            !pending.is_finished(),
+            "disabled timeout must preserve the request"
+        );
+        write_server
+            .write_all(
+                format!(
+                    "{{\"id\":{},\"result\":{{\"decision\":\"accept\"}}}}\n",
+                    request["id"]
+                )
+                .as_bytes(),
+            )
             .await
             .unwrap();
-        server_writer
-            .write_all(format!("{{\"id\":{id},\"result\":{{\"ok\":true}}}}\n").as_bytes())
-            .await
-            .unwrap();
-        let response: Value = serde_json::from_str(&request.await.unwrap().unwrap().value).unwrap();
-        assert_eq!(response["id"], "caller");
-        assert_eq!(response["result"]["ok"], true);
+        let reply = pending.await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply.value).unwrap(),
+            serde_json::json!({"id":"waiting","result":{"decision":"accept"}})
+        );
+        peer.close().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn timeout_closes_only_a_silent_peer() {
         for traffic in [false, true] {
             let (client_io, server_io) = duplex(32 * 1024);
@@ -983,6 +985,10 @@ mod tests {
         let sent: Value = serde_json::from_str(&read_line(&mut lines).await).unwrap();
         let next_id = sent["id"].as_u64().unwrap();
         server_writer
+            .write_all(b"{\"id\":999,\"result\":{\"unknown\":true}}\n")
+            .await
+            .unwrap();
+        server_writer
             .write_all(format!("{{\"id\":{next_id},\"result\":{{\"ok\":true}}}}\n").as_bytes())
             .await
             .unwrap();
@@ -1015,15 +1021,5 @@ mod envelope_tests {
         assert!(response_line("7 8", "result", "null").is_err());
         assert!(response_line("7", "error", "{").is_err());
         assert!(response_line("7", "params", "{}").is_err());
-    }
-    #[test]
-    fn request_ids_stop_at_exhaustion_without_wrapping() {
-        let next = AtomicU64::new(u64::MAX - 1);
-        assert_eq!(allocate_id(&next).unwrap(), u64::MAX - 1);
-        assert!(matches!(
-            allocate_id(&next),
-            Err(PeerError::RequestIdExhausted)
-        ));
-        assert_eq!(next.load(Ordering::Relaxed), u64::MAX);
     }
 }

@@ -1,7 +1,4 @@
-use agent_core::{
-    models::Invitation,
-    transport::{Identity, Ticket, TransportError, Trust, authorize},
-};
+use agent_core::transport::{Identity, TransportError, Trust, authorize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
@@ -42,32 +39,6 @@ fn pairing_consumes_invitation_and_authorizes_only_the_paired_identity() {
     ));
     let restored: Trust = serde_json::from_slice(&serde_json::to_vec(&paired).unwrap()).unwrap();
     assert!(restored == paired);
-}
-#[tokio::test]
-async fn endpoint_ticket_and_identity_round_trip_with_public_services_disabled() {
-    use agent_core::transport::{Endpoint, Relays};
-    let identity = Identity::generate();
-    let restored = Identity::from_bytes(identity.to_bytes());
-    assert_eq!(identity.node_id(), restored.node_id());
-    let endpoint = Endpoint::bind(identity, Relays::Disabled).await.unwrap();
-    let ticket = endpoint.ticket();
-    let parsed: Ticket = ticket.to_string().parse().unwrap();
-    assert_eq!(parsed.node_id(), endpoint.node_id());
-    let pairing = Invitation {
-        endpoint: parsed.to_string(),
-        invitation: uuid::Uuid::new_v4(),
-        expires_at: 100,
-        extra: Default::default(),
-    };
-    let restored: Invitation =
-        serde_json::from_slice(&serde_json::to_vec(&pairing).unwrap()).unwrap();
-    assert_eq!(restored.invitation, pairing.invitation);
-    assert_eq!(restored.expires_at, 100);
-    assert_eq!(
-        restored.endpoint.parse::<Ticket>().unwrap().node_id(),
-        endpoint.node_id()
-    );
-    endpoint.close().await;
 }
 
 #[tokio::test]

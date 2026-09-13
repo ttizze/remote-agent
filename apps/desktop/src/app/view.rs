@@ -44,6 +44,7 @@ fn fitted_image(source: ImageSource, height: f32) -> Img {
         .min_h(px(height))
         .max_h(px(height))
         .object_fit(ObjectFit::Contain)
+        .debug_selector(|| "chat-image".into())
 }
 
 fn user_message_bubble() -> Div {
@@ -422,68 +423,6 @@ impl Render for Desktop {
                 body.child(self.sidebar(window, cx))
             })
             .child(main)
-    }
-}
-
-#[cfg(test)]
-mod image_tests {
-    use super::{fitted_image, h_flex, user_message_bubble};
-    use gpui_kit as gpui;
-    use gpui_kit::{
-        Context, InteractiveElement, IntoElement, ParentElement, Render, RenderImage, Styled,
-        TestAppContext, Window, div, px, size,
-    };
-    use std::sync::Arc;
-
-    struct ImageBubble(Arc<RenderImage>);
-    impl Render for ImageBubble {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            h_flex().w_full().justify_end().child(
-                user_message_bubble().child(
-                    div()
-                        .w_full()
-                        .h(px(320.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            fitted_image(self.0.clone().into(), 320.)
-                                .debug_selector(|| "chat-image".into()),
-                        ),
-                ),
-            )
-        }
-    }
-
-    #[gpui::test]
-    fn chat_images_stay_inside_the_bubble_at_different_window_sizes(cx: &mut TestAppContext) {
-        for (width, height) in [(1156, 78), (78, 1156), (400, 400)] {
-            let frame = image::Frame::new(image::RgbaImage::new(width, height));
-            let image = Arc::new(RenderImage::new(vec![frame]));
-            let (view, window) = cx.add_window_view(|_, _| ImageBubble(image));
-            for viewport_width in [780_f32, 360.] {
-                window.simulate_resize(size(px(viewport_width), px(600.)));
-                window.run_until_parked();
-                view.update(window, |_, cx| cx.notify());
-                window.run_until_parked();
-                let bounds = window
-                    .debug_bounds("chat-image")
-                    .expect("image must render");
-                assert!(
-                    bounds.size.width > px(0.),
-                    "image must remain visible: {bounds:?}"
-                );
-                assert!(
-                    bounds.size.width <= px(528_f32.min(viewport_width - 32.)),
-                    "image exceeds bubble: {bounds:?}"
-                );
-                assert!(
-                    bounds.left() >= px(0.) && bounds.right() <= px(viewport_width),
-                    "image overflows conversation: {bounds:?}"
-                );
-            }
-        }
     }
 }
 

@@ -420,12 +420,7 @@ impl Desktop {
         draft: &Draft,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut body = v_flex()
-            .gap_3()
-            .max_w(px(560.))
-            .p_4()
-            .rounded(px(18.))
-            .bg(rgb(0x303030));
+        let mut body = user_message_bubble();
         if !draft.text.is_empty() {
             body = body.child(
                 TextView::markdown(
@@ -659,10 +654,12 @@ fn user_message_row(
     let group = SharedString::from(format!("user-message-{id}"));
     h_flex().w_full().justify_end().my_4().child(
         v_flex()
+            .min_w_0()
+            .max_w_full()
             .group(group.clone())
             .items_end()
             .gap_1()
-            .child(body)
+            .child(body.w_full())
             .child(
                 h_flex()
                     .debug_selector(|| "user-message-actions".into())
@@ -742,18 +739,22 @@ mod tests {
 }
 
 #[cfg(test)]
-mod file_change_tests {
+mod rendering_tests {
     use super::{Desktop, Mode, Snapshot};
+    use crate::app::ImageState;
     use agent_core::presentation::conversation::{RenderedConversation, project_conversation};
     use gpui_kit as gpui;
-    use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, TestAppContext, Window, px};
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, Render, RenderImage, TestAppContext, Window, px,
+        size,
+    };
     use std::sync::Arc;
 
-    struct FileActivity {
+    struct ConversationView {
         desktop: Entity<Desktop>,
         conversation: Arc<RenderedConversation>,
     }
-    impl Render for FileActivity {
+    impl Render for ConversationView {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.desktop.update(cx, |desktop, cx| {
                 desktop.turn(&self.conversation.turns[0], cx)
@@ -761,8 +762,7 @@ mod file_change_tests {
         }
     }
 
-    #[gpui::test]
-    fn file_changes_render_and_expand_in_the_desktop_view(cx: &mut TestAppContext) {
+    fn init(cx: &mut TestAppContext) -> tokio::runtime::Runtime {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -776,33 +776,52 @@ mod file_change_tests {
                 logging_error: None,
             });
         });
-        let source = Arc::new(serde_json::from_value(serde_json::json!({
+        runtime
+    }
+
+    impl ConversationView {
+        fn new(
+            snapshot: Snapshot,
+            source: agent_core::models::Thread,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> Self {
+            Self {
+                desktop: cx.new(|cx| {
+                    Desktop::new(
+                        Mode::SideChat {
+                            // Reject before reading preferences or connecting to a real Host.
+                            remote: Some(agent_core::models::RemoteHost {
+                                id: "fixture".into(),
+                                name: "fixture".into(),
+                                ticket: "invalid-fixture-ticket".into(),
+                                extra: Default::default(),
+                            }),
+                            cwd: "/fixture".into(),
+                        },
+                        window,
+                        cx,
+                    )
+                }),
+                conversation: project_conversation(&snapshot, Arc::new(source), &None),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn file_changes_render_and_expand_in_the_desktop_view(cx: &mut TestAppContext) {
+        let _runtime = init(cx);
+        let source = serde_json::from_value(serde_json::json!({
             "id":"fixture", "turns":[{"id":"turn", "status":"completed", "items":[{
                 "id":"files", "type":"fileChange", "status":"completed", "changes":[
                     {"path":"/fixture/a.txt", "kind":"update", "diff":"@@ -1 +1 @@\n-old\n+new"},
                     {"path":"/fixture/b.txt", "kind":"add", "diff":"@@ -0,0 +1 @@\n+second"}
                 ]
             }]}]
-        })).unwrap());
-        let conversation = project_conversation(&Snapshot::default(), source, &None);
-        let (view, window) = cx.add_window_view(|window, cx| FileActivity {
-            desktop: cx.new(|cx| {
-                Desktop::new(
-                    Mode::SideChat {
-                        // Reject before reading preferences or connecting to a real Host.
-                        remote: Some(agent_core::models::RemoteHost {
-                            id: "fixture".into(),
-                            name: "fixture".into(),
-                            ticket: "invalid-fixture-ticket".into(),
-                            extra: Default::default(),
-                        }),
-                        cwd: "/fixture".into(),
-                    },
-                    window,
-                    cx,
-                )
-            }),
-            conversation,
+        }))
+        .unwrap();
+        let (view, window) = cx.add_window_view(|window, cx| {
+            ConversationView::new(Snapshot::default(), source, window, cx)
         });
         window.run_until_parked();
         assert!(
@@ -828,8 +847,7 @@ mod file_change_tests {
             gpui_kit::point(bounds.left() + px(20.), bounds.center().y),
             gpui_kit::Modifiers::default(),
         );
-        view.update(window, |view, cx| {
-            assert!(view.desktop.read(cx).expanded_items.contains("files"));
+        view.update(window, |_, cx| {
             cx.notify();
         });
         window.run_until_parked();
@@ -837,12 +855,91 @@ mod file_change_tests {
             window.debug_bounds("change-files-1").unwrap().top() > before,
             "expanded diff must occupy space in the rendered conversation"
         );
-        view.update(window, |view, cx| {
-            view.desktop.update(cx, |desktop, _| {
-                assert_eq!(desktop.diffs.len(), 2);
-                assert!(desktop.diffs.contains_key("diff-files-0"));
-                assert!(desktop.diffs.contains_key("diff-files-1"));
-            });
-        });
+    }
+    #[gpui::test]
+    fn chat_images_stay_inside_the_bubble_at_different_window_sizes(cx: &mut TestAppContext) {
+        let _runtime = init(cx);
+        for pending in [false, true] {
+            for (width, height) in [(1156, 78), (78, 1156), (400, 400)] {
+                let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+                    image::RgbaImage::new(width, height),
+                )]));
+                let items = if pending {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([{
+                        "id":"user", "type":"userMessage", "content":[{"type":"localImage","path":"/fixture/image.png"}]
+                    }])
+                };
+                let mut snapshot = Snapshot::default();
+                if pending {
+                    Arc::make_mut(&mut snapshot.pending_submissions).insert(
+                        "pending".into(),
+                        Arc::new(agent_core::state::PendingSubmission {
+                            draft_key: "fixture".into(),
+                            draft: Arc::new(agent_core::state::Draft {
+                                attachments: vec![agent_core::state::Attachment {
+                                    path: "/fixture/image.png".into(),
+                                    name: "image.png".into(),
+                                    is_image: true,
+                                }],
+                                ..Default::default()
+                            }),
+                            turn_id: Some("turn".into()),
+                            after_item_id: None,
+                            accepted: true,
+                            recovery_text: None,
+                            clear_draft: None,
+                        }),
+                    );
+                }
+                let source = serde_json::from_value(serde_json::json!({
+                    "id":"fixture", "turns":[{"id":"turn", "status":"completed", "items":items}]
+                }))
+                .unwrap();
+                let (view, window) = cx.add_window_view(|window, cx| {
+                    let view = ConversationView::new(snapshot, source, window, cx);
+                    view.desktop.update(cx, |desktop, _| {
+                        let source = "/fixture/image.png".to_owned();
+                        let key = format!(
+                            "{}:{}:false:{}",
+                            desktop.remote_key(),
+                            desktop.snapshot.navigation.cwd,
+                            source
+                        );
+                        desktop.images.insert(
+                            key,
+                            ImageState {
+                                source: Arc::new(source),
+                                path: Some(image.into()),
+                                error: None,
+                            },
+                        );
+                    });
+                    view
+                });
+                for viewport_width in [780_f32, 360.] {
+                    window.simulate_resize(size(px(viewport_width), px(600.)));
+                    window.run_until_parked();
+                    view.update(window, |_, cx| cx.notify());
+                    window.run_until_parked();
+                    let bounds = window
+                        .debug_bounds("chat-image")
+                        .expect("image must render");
+                    assert!(
+                        bounds.size.width > px(0.),
+                        "image must remain visible: {bounds:?}"
+                    );
+                    assert!(
+                        bounds.size.width <= px(528_f32.min(viewport_width - 32.)),
+                        "image exceeds bubble: {bounds:?}"
+                    );
+                    assert!(
+                        bounds.left() >= px(0.) && bounds.right() <= px(viewport_width),
+                        "image overflows conversation: {bounds:?}"
+                    );
+                }
+            }
+        }
     }
 }

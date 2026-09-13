@@ -42,6 +42,9 @@ jobs:
         run: nix develop .#native --command cargo build --locked -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
         run: nix develop .#native --command cargo test --locked -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+      - name: Real-time passive approval soak
+        if: github.event_name == 'workflow_dispatch'
+        run: nix develop .#native --command cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
   windows:
     needs: toolchain
     # Latest stable Windows Server major; Windows 11 UI acceptance is separate.
@@ -60,3 +63,6 @@ jobs:
         run: cargo build --locked -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
         run: cargo test --locked -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+      - name: Real-time passive approval soak
+        if: github.event_name == 'workflow_dispatch'
+        run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored

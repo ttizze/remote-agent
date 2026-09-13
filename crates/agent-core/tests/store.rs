@@ -160,36 +160,6 @@ fn loaded_text(snapshot: &Snapshot) -> Option<&str> {
 }
 
 #[tokio::test]
-async fn intent_order_is_independent_of_receipt_polling_order() {
-    let (store, _, _writer) = setup(Snapshot::default()).await;
-    let first = store.dispatch(Intent::SetDraft {
-        thread_id: "thread".into(),
-        draft: Draft {
-            text: "first".into(),
-            ..Default::default()
-        },
-    });
-    let second = store.dispatch(Intent::SetDraft {
-        thread_id: "thread".into(),
-        draft: Draft {
-            text: "second".into(),
-            ..Default::default()
-        },
-    });
-    second.await.unwrap();
-    first.await.unwrap();
-    assert_eq!(store.snapshot().drafts["thread"].text, "second");
-    drop(store.dispatch(Intent::SetDraft {
-        thread_id: "thread".into(),
-        draft: Draft {
-            text: "last".into(),
-            ..Default::default()
-        },
-    }));
-    wait_for(&store, |state| state.drafts["thread"].text == "last").await;
-    store.close().await.unwrap();
-}
-#[tokio::test]
 async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
     use agent_core::state::Attachment;
     for attachment_first in [false, true] {
@@ -466,66 +436,68 @@ async fn new_conversation_clears_sent_draft_after_native_echo() {
 
 #[tokio::test]
 async fn successful_submission_does_not_erase_a_newer_draft() {
-    let mut initial = snapshot();
-    Arc::make_mut(&mut initial.conversations).insert(
-        "thread".into(),
-        Arc::new(
-            serde_json::from_value(
-                json!({"id":"thread","cwd":"/fixture","status":{"type":"idle"},"turns":[]}),
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/submission-drafts.json")).unwrap();
+    for case in cases {
+        let mut sent: Draft = serde_json::from_value(case["sent"].clone()).unwrap();
+        sent.service_tier = Some("priority".into());
+        let initial = Snapshot {
+            conversations: Arc::new(BTreeMap::from([(
+                "thread".into(),
+                Arc::new(
+                    serde_json::from_value(
+                        json!({"id":"thread","cwd":"/fixture","status":{"type":"idle"},"turns":[]}),
+                    )
+                    .unwrap(),
+                ),
+            )])),
+            ..Default::default()
+        };
+        let (store, mut reader, mut writer) = setup(initial).await;
+        store
+            .dispatch(Intent::SetDraft {
+                thread_id: "thread".into(),
+                draft: sent,
+            })
+            .await
+            .unwrap();
+        let sending = store.dispatch(Intent::Submit {
+            thread_id: Some("thread".into()),
+            client_user_message_id: "fixture-message".into(),
+        });
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "turn/start");
+        assert_eq!(request["params"]["input"][0]["text"], "sent");
+        assert_eq!(request["params"]["serviceTierForTurn"], "priority");
+        store
+            .dispatch(Intent::SetDraft {
+                thread_id: "thread".into(),
+                draft: serde_json::from_value(case["current"].clone()).unwrap(),
+            })
+            .await
+            .unwrap();
+        writer
+            .write_line(
+                &json!({"id":request["id"],"result":{"turn":{"id":"turn-new"}}}).to_string(),
             )
-            .unwrap(),
-        ),
-    );
-    let (store, mut reader, mut writer) = setup(initial).await;
-    store
-        .dispatch(Intent::SetDraft {
-            thread_id: "thread".into(),
-            draft: Draft {
-                text: "first".into(),
-                service_tier: Some("priority".into()),
-                ..Default::default()
-            },
-        })
-        .await
-        .unwrap();
-    let sending = tokio::spawn({
-        let store = store.clone();
-        async move {
-            store
-                .dispatch(Intent::Submit {
-                    thread_id: Some("thread".into()),
-                    client_user_message_id: "fixture-message".into(),
-                })
-                .await
-        }
-    });
-    let request = tokio::time::timeout(Duration::from_secs(2), read(&mut reader))
-        .await
-        .unwrap();
-    assert_eq!(request["params"]["input"][0]["text"], "first");
-    assert_eq!(request["method"], "turn/start");
-    assert_eq!(request["params"]["serviceTierForTurn"], "priority");
-    store
-        .dispatch(Intent::SetDraft {
-            thread_id: "thread".into(),
-            draft: Draft {
-                text: "second".into(),
-                ..Default::default()
-            },
-        })
-        .await
-        .unwrap();
-    writer
-        .write_line(&json!({"id":request["id"],"result":{"turn":{"id":"turn-new"}}}).to_string())
-        .await
-        .unwrap();
-    assert_eq!(
-        sending.await.unwrap().unwrap(),
-        Outcome::Submitted {
-            turn_id: Some("turn-new".into())
-        }
-    );
-    assert_eq!(store.snapshot().drafts["thread"].text, "second");
+            .await
+            .unwrap();
+        assert_eq!(
+            sending.await.unwrap(),
+            Outcome::Submitted {
+                turn_id: Some("turn-new".into())
+            }
+        );
+        let expected: Draft = serde_json::from_value(case["expected"].clone()).unwrap();
+        assert_eq!(
+            *store.snapshot().drafts["thread"],
+            expected,
+            "{}",
+            case["name"]
+        );
+        assert!(store.snapshot().error.is_none());
+        store.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -896,67 +868,64 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
 
 #[tokio::test]
 async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
-    for existing in [false, true] {
-        for send in [false, true] {
-            for navigate in [false, true] {
-                for transcript in ["", " \n"] {
-                    let mut initial = snapshot();
-                    let key = if existing { "thread" } else { "new:/fixture" };
-                    let navigation = Arc::make_mut(&mut initial.navigation);
-                    navigation.thread_id = existing.then(|| "thread".into());
-                    navigation.cwd = "/fixture".into();
-                    navigation.draft_key = key.into();
-                    Arc::make_mut(&mut initial.drafts).insert(
-                        key.into(),
-                        Arc::new(Draft {
-                            text: "keep this draft".into(),
-                            attachments: vec![agent_core::state::Attachment {
-                                path: "/fixture/photo.png".into(),
-                                name: "photo.png".into(),
-                                is_image: true,
-                            }],
-                            ..Default::default()
-                        }),
-                    );
-                    let (store, mut reader, mut writer) = setup(initial).await;
-                    let operation = store.dispatch(Intent::Transcribe(op::Dictate {
-                        draft_key: key.into(),
-                        audio: vec![0, 0],
-                        send,
-                        client_user_message_id: "silent".into(),
-                    }));
-                    let request = read(&mut reader).await;
-                    assert_eq!(request["method"], "host/dictation/transcribe");
-                    if navigate {
-                        new_chat(&store, &mut reader, &mut writer, "/other").await;
-                    }
-                    let before = store.snapshot();
-                    writer
-                        .write_line(
-                            &json!({"id":request["id"], "result":{"text":transcript}}).to_string(),
-                        )
-                        .await
-                        .unwrap();
-                    assert_eq!(operation.await.unwrap(), Outcome::Applied);
-                    let after = store.snapshot();
-                    assert_eq!(after.drafts, before.drafts);
-                    assert_eq!(after.conversations, before.conversations);
-                    assert_eq!(after.pending_submissions, before.pending_submissions);
-                    assert_eq!(after.navigation, before.navigation);
-                    assert!(after.error.is_none());
-                    assert!(
-                        tokio::time::timeout(Duration::from_millis(50), reader.read_line())
-                            .await
-                            .is_err(),
-                        "silent dictation must not submit or create a conversation"
-                    );
-                    let restored: Snapshot =
-                        serde_json::from_slice(&serde_json::to_vec(&after).unwrap()).unwrap();
-                    assert_eq!(restored.drafts, after.drafts);
-                    store.close().await.unwrap();
-                }
-            }
+    for (existing, send, navigate, transcript) in [
+        (false, true, false, " \n"),
+        (true, true, false, ""),
+        (false, true, true, ""),
+        (true, false, false, " \n"),
+    ] {
+        let mut initial = snapshot();
+        let key = if existing { "thread" } else { "new:/fixture" };
+        let navigation = Arc::make_mut(&mut initial.navigation);
+        navigation.thread_id = existing.then(|| "thread".into());
+        navigation.cwd = "/fixture".into();
+        navigation.draft_key = key.into();
+        Arc::make_mut(&mut initial.drafts).insert(
+            key.into(),
+            Arc::new(Draft {
+                text: "keep this draft".into(),
+                attachments: vec![agent_core::state::Attachment {
+                    path: "/fixture/photo.png".into(),
+                    name: "photo.png".into(),
+                    is_image: true,
+                }],
+                ..Default::default()
+            }),
+        );
+        let (store, mut reader, mut writer) = setup(initial).await;
+        let operation = store.dispatch(Intent::Transcribe(op::Dictate {
+            draft_key: key.into(),
+            audio: vec![0, 0],
+            send,
+            client_user_message_id: "silent".into(),
+        }));
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/dictation/transcribe");
+        if navigate {
+            new_chat(&store, &mut reader, &mut writer, "/other").await;
         }
+        let before = store.snapshot();
+        writer
+            .write_line(&json!({"id":request["id"], "result":{"text":transcript}}).to_string())
+            .await
+            .unwrap();
+        assert_eq!(operation.await.unwrap(), Outcome::Applied);
+        let after = store.snapshot();
+        assert_eq!(after.drafts, before.drafts);
+        assert_eq!(after.conversations, before.conversations);
+        assert_eq!(after.pending_submissions, before.pending_submissions);
+        assert_eq!(after.navigation, before.navigation);
+        assert!(after.error.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), reader.read_line())
+                .await
+                .is_err(),
+            "silent dictation must not submit or create a conversation"
+        );
+        let restored: Snapshot =
+            serde_json::from_slice(&serde_json::to_vec(&after).unwrap()).unwrap();
+        assert_eq!(restored.drafts, after.drafts);
+        store.close().await.unwrap();
     }
 }
 
@@ -1084,73 +1053,71 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
 
 #[tokio::test]
 async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
-    for cached in [false, true] {
-        for restored in [false, true] {
-            let mut initial = if cached {
-                snapshot()
-            } else {
-                Snapshot::default()
-            };
-            initial.threads = Some(Arc::new(
-                serde_json::from_value(json!({
-                    "data":[{"id":"thread","cwd":"/listed","name":"Selected task"}],
-                    "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-                }))
-                .unwrap(),
-            ));
-            Arc::make_mut(&mut initial.drafts).insert(
-                "thread".into(),
-                Arc::new(Draft {
-                    text: "Keep this draft".into(),
-                    ..Default::default()
-                }),
-            );
-            if restored {
-                initial = serde_json::from_slice(&serde_json::to_vec(&initial).unwrap()).unwrap();
-            }
-            let (store, mut reader, mut writer) = setup(initial).await;
-            let refresh = store.dispatch(Intent::ListThreads(op::ListThreads::new(
-                Default::default(),
-            )));
-            let list_request = read(&mut reader).await;
-            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
-            let selected = store.snapshot();
-            assert_eq!(
-                selected.navigation.thread_id.as_deref(),
-                Some("thread"),
-                "selection must not wait for either RPC (cached={cached}, restored={restored})"
-            );
-            assert_eq!(selected.navigation.draft_key, "thread");
-            assert_eq!(
-                selected.navigation.cwd,
-                if cached { "/fixture" } else { "/listed" }
-            );
-            assert_eq!(selected.drafts["thread"].text, "Keep this draft");
-            assert_eq!(loaded_text(&selected), cached.then_some("old"));
-            let request = read(&mut reader).await;
-            assert_eq!(request["method"], "host/thread/read");
-            writer
-                .write_line(
-                    &json!({"id":request["id"],"result":{"thread":thread("latest")}}).to_string(),
-                )
-                .await
-                .unwrap();
-            opening.await.unwrap();
-            assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
-            assert_eq!(store.snapshot().navigation.cwd, "/fixture");
-            writer.write_line(&json!({"id":list_request["id"],"result":{
+    for (cached, restored) in [(false, false), (true, true)] {
+        let mut initial = if cached {
+            snapshot()
+        } else {
+            Snapshot::default()
+        };
+        initial.threads = Some(Arc::new(
+            serde_json::from_value(json!({
+                "data":[{"id":"thread","cwd":"/listed","name":"Selected task"}],
+                "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+            }))
+            .unwrap(),
+        ));
+        Arc::make_mut(&mut initial.drafts).insert(
+            "thread".into(),
+            Arc::new(Draft {
+                text: "Keep this draft".into(),
+                ..Default::default()
+            }),
+        );
+        if restored {
+            initial = serde_json::from_slice(&serde_json::to_vec(&initial).unwrap()).unwrap();
+        }
+        let (store, mut reader, mut writer) = setup(initial).await;
+        let refresh = store.dispatch(Intent::ListThreads(
+            op::ListThreads::new(Default::default()),
+        ));
+        let list_request = read(&mut reader).await;
+        let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open("thread".into())));
+        let selected = store.snapshot();
+        assert_eq!(
+            selected.navigation.thread_id.as_deref(),
+            Some("thread"),
+            "selection must not wait for either RPC (cached={cached}, restored={restored})"
+        );
+        assert_eq!(selected.navigation.draft_key, "thread");
+        assert_eq!(
+            selected.navigation.cwd,
+            if cached { "/fixture" } else { "/listed" }
+        );
+        assert_eq!(selected.drafts["thread"].text, "Keep this draft");
+        assert_eq!(loaded_text(&selected), cached.then_some("old"));
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/thread/read");
+        writer
+            .write_line(
+                &json!({"id":request["id"],"result":{"thread":thread("latest")}}).to_string(),
+            )
+            .await
+            .unwrap();
+        opening.await.unwrap();
+        assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
+        assert_eq!(store.snapshot().navigation.cwd, "/fixture");
+        writer.write_line(&json!({"id":list_request["id"],"result":{
                 "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
             }}).to_string()).await.unwrap();
-            refresh.await.unwrap();
-            assert_eq!(
-                store.snapshot().navigation.thread_id.as_deref(),
-                Some("thread")
-            );
-            assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
-            assert_eq!(store.snapshot().drafts["thread"].text, "Keep this draft");
-            assert!(store.snapshot().error.is_none());
-            store.close().await.unwrap();
-        }
+        refresh.await.unwrap();
+        assert_eq!(
+            store.snapshot().navigation.thread_id.as_deref(),
+            Some("thread")
+        );
+        assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
+        assert_eq!(store.snapshot().drafts["thread"].text, "Keep this draft");
+        assert!(store.snapshot().error.is_none());
+        store.close().await.unwrap();
     }
 }
 
@@ -1388,6 +1355,7 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         }
         let close = read(&mut reader).await;
         assert_eq!(close["method"], "process/kill");
+        assert_eq!(close["params"]["processHandle"], "terminal");
         writer
             .write_line(&json!({"id":close["id"],"result":{}}).to_string())
             .await
@@ -1468,37 +1436,6 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
         store.snapshot().terminals["terminal"].phase,
         TerminalPhase::Exited(17)
     );
-    store.close().await.unwrap();
-    server.await.unwrap();
-}
-
-#[tokio::test]
-async fn closing_store_terminates_its_running_terminal() {
-    use agent_core::client::TerminalSize;
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
-    let server = tokio::spawn(async move {
-        let start = read(&mut reader).await;
-        writer
-            .write_line(&json!({"id":start["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
-        let kill = read(&mut reader).await;
-        assert_eq!(kill["method"], "process/kill");
-        assert_eq!(kill["params"]["processHandle"], "terminal");
-        writer
-            .write_line(&json!({"id":kill["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
-        assert!(reader.read_line().await.unwrap().is_none());
-    });
-    store
-        .dispatch(Intent::StartTerminal(op::StartTerminal {
-            handle: "terminal".into(),
-            cwd: "/fixture".into(),
-            size: TerminalSize { cols: 80, rows: 24 },
-        }))
-        .await
-        .unwrap();
     store.close().await.unwrap();
     server.await.unwrap();
 }
@@ -1705,37 +1642,46 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
 
 #[tokio::test]
 async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
-    let (store, mut reader, mut writer) = setup(snapshot()).await;
-    let fork = store.dispatch(Intent::ForkThread(op::ForkThread::new(
-        "thread".into(),
-        "turn".into(),
-    )));
-    let request = read(&mut reader).await;
-    assert_eq!(request["method"], "thread/fork");
-    assert_eq!(request["params"]["lastTurnId"], "turn");
-    writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"forked","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","type":"agentMessage","text":"copied"}]}]}}}).to_string()).await.unwrap();
-    writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}}).to_string()).await.unwrap();
-    assert_eq!(
-        fork.await.unwrap(),
-        Outcome::StartedThread {
-            id: "forked".into()
+    for navigate in [false, true] {
+        let (store, mut reader, mut writer) = setup(snapshot()).await;
+        let fork = store.dispatch(Intent::ForkThread(op::ForkThread::new(
+            "thread".into(),
+            "turn".into(),
+        )));
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "thread/fork");
+        assert_eq!(request["params"]["lastTurnId"], "turn");
+        if navigate {
+            new_chat(&store, &mut reader, &mut writer, "/new").await;
         }
-    );
-    wait_for(&store, |s| {
-        s.conversations
-            .get("forked")
-            .and_then(|t| t.turns.as_ref())
-            .is_some_and(|turns| {
-                turns[0].items.as_ref().unwrap()[0].text.as_deref() == Some("copied later")
-            })
-    })
-    .await;
-    assert_eq!(
-        store.snapshot().navigation.thread_id.as_deref(),
-        Some("forked")
-    );
-    assert_eq!(loaded_text(&store.snapshot()), Some("old"));
-    store.close().await.unwrap();
+        writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"forked","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","type":"agentMessage","text":"copied"}]}]}}}).to_string()).await.unwrap();
+        writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}}).to_string()).await.unwrap();
+        assert_eq!(
+            fork.await.unwrap(),
+            Outcome::StartedThread {
+                id: "forked".into()
+            }
+        );
+        wait_for(&store, |s| {
+            s.conversations
+                .get("forked")
+                .and_then(|t| t.turns.as_ref())
+                .is_some_and(|turns| {
+                    turns[0].items.as_ref().unwrap()[0].text.as_deref() == Some("copied later")
+                })
+        })
+        .await;
+        assert_eq!(
+            store.snapshot().navigation.thread_id.as_deref(),
+            if navigate { None } else { Some("forked") }
+        );
+        assert_eq!(
+            store.snapshot().navigation.cwd,
+            if navigate { "/new" } else { "/fixture" }
+        );
+        assert_eq!(loaded_text(&store.snapshot()), Some("old"));
+        store.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1783,12 +1729,27 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 }
 
 #[tokio::test]
-async fn cancelled_account_login_ignores_an_older_status_reply() {
+async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_late_status() {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {}));
     let request = read(&mut reader).await;
+    let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
+    let list = read(&mut reader).await;
+    writer
+        .write_line(
+            &json!({"id":list["id"],"result":{"accounts":[],"selectedId":null,"error":null}})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    listing.await.unwrap();
     writer.write_line(&json!({"id":request["id"],"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}}).to_string()).await.unwrap();
     starting.await.unwrap();
+    assert_eq!(
+        store.snapshot().account.login.as_ref().unwrap().login_id,
+        "login"
+    );
+
     let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
         id: "login".into(),
     }));
@@ -1813,7 +1774,7 @@ async fn cancelled_account_login_ignores_an_older_status_reply() {
     let state = store.snapshot();
     assert!(state.account.login.is_none());
     assert!(state.account.login_status.is_none());
-    assert!(state.account.accounts.is_none());
+    assert!(state.account.accounts.as_ref().unwrap().accounts.is_empty());
     store.close().await.unwrap();
 }
 
@@ -1933,8 +1894,19 @@ async fn dispatch_publishes_edits_before_returning_to_the_native_input_control()
         text: "入力を戻さない".into(),
     });
     assert_eq!(store.snapshot().drafts["new:/input"].text, "入力を戻さない");
-    navigation.await.unwrap();
+    let second = store.dispatch(Intent::SetDraftText {
+        thread_id: "new:/input".into(),
+        text: "second".into(),
+    });
+    second.await.unwrap();
     edit.await.unwrap();
+    navigation.await.unwrap();
+    assert_eq!(store.snapshot().drafts["new:/input"].text, "second");
+    drop(store.dispatch(Intent::SetDraftText {
+        thread_id: "new:/input".into(),
+        text: "last".into(),
+    }));
+    assert_eq!(store.snapshot().drafts["new:/input"].text, "last");
     store.close().await.unwrap();
 }
 

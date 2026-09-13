@@ -194,27 +194,7 @@ struct ProjectAssignment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
-    impl Snapshot {
-        fn enrich_threads(&self, mut result: Value) -> Value {
-            let enrich = |value: &mut Value| {
-                let mut thread: Thread = serde_json::from_value(value.take()).unwrap();
-                self.enrich_thread(&mut thread);
-                *value = serde_json::to_value(thread).unwrap();
-            };
-            if let Some(data) = result.get_mut("data").and_then(Value::as_array_mut) {
-                for thread in data {
-                    enrich(thread);
-                }
-            } else if let Some(thread) = result.get_mut("thread") {
-                enrich(thread);
-            } else {
-                enrich(&mut result);
-            }
-            result
-        }
-    }
-
+    use serde_json::json;
     fn snapshot() -> Snapshot {
         Snapshot::parse(
             br#"{
@@ -263,49 +243,65 @@ mod tests {
 
     #[test]
     fn explicit_membership_wins_and_unassigned_threads_use_workspace_roots() {
-        let result = snapshot().enrich_threads(json!({
-            "data": [
-                {"id": "assigned", "cwd": "/elsewhere", "projectId": null},
-                {"id": "projectless", "cwd": "/work/a", "projectId": "upstream"},
-                {"id": "overlap", "cwd": "/work/a"},
-                {"id": "upstream-only", "cwd": "/work/a", "projectId": "upstream"},
-                {"id": "workspace-thread", "cwd": "/work/a"}
-            ]
-        }));
-        assert_eq!(result["data"][0]["projectId"], "project-a");
-        assert!(result["data"][1]["projectId"].is_null());
-        assert_eq!(result["data"][2]["projectId"], "project-b");
-        assert_eq!(result["data"][3]["projectId"], "upstream");
-        assert_eq!(result["data"][4]["projectId"], "project-a");
-    }
-
-    #[test]
-    fn overlays_thread_read_and_start_response_shapes() {
-        let read = snapshot().enrich_threads(json!({"thread": {"id": "assigned"}}));
-        assert_eq!(read["thread"]["projectId"], "project-a");
-        let start = snapshot().enrich_threads(json!({"id": "assigned"}));
-        assert_eq!(start["projectId"], "project-a");
-        let unassigned =
-            snapshot().enrich_threads(json!({"thread": {"id": "new-thread", "cwd": "/work/a"}}));
-        assert_eq!(unassigned["thread"]["projectId"], "project-a");
-        let started = snapshot().enrich_threads(json!({"id": "new-thread", "cwd": "/work/a"}));
-        assert_eq!(started["projectId"], "project-a");
+        let mut result: Vec<Thread> = serde_json::from_value(json!([
+            {"id": "assigned", "cwd": "/elsewhere", "projectId": null},
+            {"id": "projectless", "cwd": "/work/a", "projectId": "upstream"},
+            {"id": "overlap", "cwd": "/work/a"},
+            {"id": "upstream-only", "cwd": "/work/a", "projectId": "upstream"},
+            {"id": "workspace-thread", "cwd": "/work/a"}
+        ]))
+        .unwrap();
+        let snapshot = snapshot();
+        for thread in &mut result {
+            snapshot.enrich_thread(thread);
+        }
+        assert_eq!(
+            result[0].project_id.as_ref().and_then(Option::as_deref),
+            Some("project-a")
+        );
+        assert_eq!(result[1].project_id, Some(None));
+        assert_eq!(
+            result[2].project_id.as_ref().and_then(Option::as_deref),
+            Some("project-b")
+        );
+        assert_eq!(
+            result[3].project_id.as_ref().and_then(Option::as_deref),
+            Some("upstream")
+        );
+        assert_eq!(
+            result[4].project_id.as_ref().and_then(Option::as_deref),
+            Some("project-a")
+        );
     }
 
     #[test]
     fn workspace_membership_respects_boundaries_secondary_roots_and_worktree_hints() {
-        let result = snapshot().enrich_threads(json!({"data": [
+        let mut result: Vec<Thread> = serde_json::from_value(json!([
             {"id": "child", "cwd": "/work/a/src"},
             {"id": "secondary", "cwd": "/work/a-two/"},
             {"id": "neighbor", "cwd": "/work/another"},
             {"id": "relative", "cwd": "work/a"},
             {"id": "worktree-thread", "cwd": "/work/a"}
-        ]}));
-        assert_eq!(result["data"][0]["projectId"], "project-a");
-        assert_eq!(result["data"][1]["projectId"], "project-a");
-        assert!(result["data"][2].get("projectId").is_none());
-        assert!(result["data"][3].get("projectId").is_none());
-        assert_eq!(result["data"][4]["projectId"], "project-b");
+        ]))
+        .unwrap();
+        let snapshot = snapshot();
+        for thread in &mut result {
+            snapshot.enrich_thread(thread);
+        }
+        assert_eq!(
+            result[0].project_id.as_ref().and_then(Option::as_deref),
+            Some("project-a")
+        );
+        assert_eq!(
+            result[1].project_id.as_ref().and_then(Option::as_deref),
+            Some("project-a")
+        );
+        assert!(result[2].project_id.is_none());
+        assert!(result[3].project_id.is_none());
+        assert_eq!(
+            result[4].project_id.as_ref().and_then(Option::as_deref),
+            Some("project-b")
+        );
     }
 
     #[test]
@@ -317,14 +313,24 @@ mod tests {
         }}"#,
         )
         .unwrap();
-        let result = state.enrich_threads(json!({"data": [
+        let mut result: Vec<Thread> = serde_json::from_value(json!([
             {"id":"unique", "cwd":"/work/other"},
             {"id":"ambiguous", "cwd":"/work/shared"},
             {"id":"specific", "cwd":"/work/shared/nested/src"}
-        ]}));
-        assert_eq!(result["data"][0]["projectId"], "a");
-        assert!(result["data"][1].get("projectId").is_none());
-        assert_eq!(result["data"][2]["projectId"], "b");
+        ]))
+        .unwrap();
+        for thread in &mut result {
+            state.enrich_thread(thread);
+        }
+        assert_eq!(
+            result[0].project_id.as_ref().and_then(Option::as_deref),
+            Some("a")
+        );
+        assert!(result[1].project_id.is_none());
+        assert_eq!(
+            result[2].project_id.as_ref().and_then(Option::as_deref),
+            Some("b")
+        );
     }
 
     #[test]
@@ -341,12 +347,22 @@ mod tests {
         snapshot
             .worktree_roots
             .insert("/repo/.git/bex-worktrees/session-a".into(), "/repo".into());
-        let result = snapshot.enrich_threads(json!({"data":[
+        let mut result: Vec<Thread> = serde_json::from_value(json!([
             {"id":"nested","cwd":"/repo/.git/bex-worktrees/session-a/packages/app"},
             {"id":"root","cwd":"/repo/.git/bex-worktrees/session-a"}
-        ]}));
-        assert_eq!(result["data"][0]["projectId"], "app");
-        assert_eq!(result["data"][1]["projectId"], "repo");
+        ]))
+        .unwrap();
+        for thread in &mut result {
+            snapshot.enrich_thread(thread);
+        }
+        assert_eq!(
+            result[0].project_id.as_ref().and_then(Option::as_deref),
+            Some("app")
+        );
+        assert_eq!(
+            result[1].project_id.as_ref().and_then(Option::as_deref),
+            Some("repo")
+        );
     }
 
     #[test]
@@ -357,7 +373,11 @@ mod tests {
         snapshot
             .resolved_roots
             .insert(".".into(), "/host/cwd".into());
-        let result = snapshot.enrich_threads(json!({"data":[{"id":"task","cwd":"/host/cwd"}]}));
-        assert!(result["data"][0].get("projectId").is_none());
+        let mut result: Vec<Thread> =
+            serde_json::from_value(json!([{"id":"task","cwd":"/host/cwd"}])).unwrap();
+        for thread in &mut result {
+            snapshot.enrich_thread(thread);
+        }
+        assert!(result[0].project_id.is_none());
     }
 }

@@ -3,22 +3,6 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
-    func testLaunchKeepsPairingScreenAlive() {
-        let app = XCUIApplication()
-        app.launch()
-
-        let pairingTitle = app.staticTexts["PCとペアリング"]
-        XCTAssertTrue(pairingTitle.waitForExistence(timeout: 10))
-
-        let stayedAlive = XCTWaiter.wait(
-            for: [XCTestExpectation(description: "observe process stability")],
-            timeout: 2
-        )
-        XCTAssertEqual(stayedAlive, .timedOut)
-        XCTAssertEqual(app.state, .runningForeground)
-        XCTAssertTrue(pairingTitle.exists)
-    }
-
     func testSimulatorDictationContinuesPastThirtySecondsAndReachesHost() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("This test uses the isolated Simulator fixture")

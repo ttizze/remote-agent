@@ -400,36 +400,6 @@ mod tests {
     use agent_core::peer::raw_object;
 
     #[tokio::test]
-    async fn server_requests_get_unique_ids_and_first_response_wins() {
-        let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        let mut second = router.open_session(4);
-        let line = r#"{"id":"codex-1","method":"item/request","params":{"future":{"id":7}},"unknown":{"keep":true}}"#;
-        router.handle_server_message(&RpcMessage::parse(line).unwrap());
-
-        let first_line = first.recv().await.unwrap();
-        let second_line = second.recv().await.unwrap();
-        let first_message = RpcMessage::parse(&first_line).unwrap();
-        let second_message = RpcMessage::parse(&second_line).unwrap();
-        assert_ne!(first_message.raw_id(), second_message.raw_id());
-        assert_eq!(first_message.method(), Some("item/request"));
-        let first_object = raw_object(&first_line).unwrap();
-        assert_eq!(first_object["params"].get(), r#"{"future":{"id":7}}"#);
-        assert_eq!(first_object["unknown"].get(), r#"{"keep":true}"#);
-
-        let first_id = first_message.raw_id().unwrap().to_owned();
-        let second_id = second_message.raw_id().unwrap().to_owned();
-        assert_eq!(
-            router.resolve_response(1, &first_id),
-            ResponseRoute::Forward(r#""codex-1""#.to_owned())
-        );
-        assert_eq!(
-            router.resolve_response(2, &second_id),
-            ResponseRoute::Unknown
-        );
-    }
-
-    #[tokio::test]
     async fn notifications_are_forwarded_byte_for_byte() {
         let router = SessionRouter::new();
         let mut first = router.open_session(4);
@@ -445,7 +415,7 @@ mod tests {
         let router = SessionRouter::new();
         let mut first = router.open_session(4);
         let mut second = router.open_session(4);
-        router.handle_server_message(&RpcMessage::parse(r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1"}}"#).unwrap());
+        router.handle_server_message(&RpcMessage::parse(r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1","future":{"id":7}},"unknown":{"keep":true}}"#).unwrap());
         let first_request = first.recv().await.unwrap();
         let second_request = second.recv().await.unwrap();
         let first_id = RpcMessage::parse(&first_request)
@@ -459,6 +429,13 @@ mod tests {
             .unwrap()
             .to_owned();
 
+        assert_ne!(first_id, second_id);
+        let object = raw_object(&first_request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(object["params"].get()).unwrap(),
+            serde_json::json!({"threadId":"thread-1","future":{"id":7}})
+        );
+        assert_eq!(object["unknown"].get(), r#"{"keep":true}"#);
         assert_eq!(
             router.resolve_response(first.id(), &first_id),
             ResponseRoute::Forward(r#""codex-1""#.to_owned())

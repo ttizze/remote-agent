@@ -225,9 +225,7 @@ pub(super) fn append_quote(draft: &str, text: &str) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ConversationSelection, SelectionAction, append_quote, append_to_composer, search_url,
-    };
+    use super::{ConversationSelection, SelectionAction, append_to_composer, search_url};
     use gpui_kit as gpui;
     use gpui_kit::{
         AppContext, Context, Entity, InputEvent as _, IntoElement, Modifiers, MouseButton,
@@ -360,9 +358,12 @@ mod tests {
         cx.simulate_mouse_up(at, MouseButton::Right, Modifiers::default());
         cx.run_until_parked();
         cx.simulate_keystrokes("down down enter");
+        let url = url::Url::parse(&cx.opened_url().unwrap()).unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("www.google.com"));
         assert_eq!(
-            cx.opened_url().as_deref(),
-            Some(search_url("Alpha Bravo\n").as_str())
+            url.query_pairs().collect::<Vec<_>>(),
+            [("q".into(), "Alpha Bravo\n".into())]
         );
     }
 
@@ -429,10 +430,17 @@ mod tests {
             assert_eq!(input.value().as_ref(), expected);
             assert_eq!(input.selected_range(), expected.len()..expected.len());
         });
+        cx.update(|window, cx| composer.update(cx, |input, cx| input.set_value("", window, cx)));
+        cx.update(|window, cx| append_to_composer(&composer, "first", window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            changed.borrow().last().map(String::as_str),
+            Some("> first\n\n")
+        );
     }
 
     #[test]
-    fn search_encodes_selected_text_and_quotes_preserve_existing_drafts() {
+    fn search_encodes_unicode_and_reserved_characters() {
         let text = "日本語 & x=1\n次の行";
         let url = search_url(text);
         assert_eq!(url.scheme(), "https");
@@ -441,10 +449,5 @@ mod tests {
             url.query_pairs().collect::<Vec<_>>(),
             [("q".into(), text.into())]
         );
-        assert_eq!(
-            append_quote("unsent", "first\nsecond").as_ref(),
-            "unsent\n\n> first\n> second\n\n"
-        );
-        assert_eq!(append_quote("", "first").as_ref(), "> first\n\n");
     }
 }

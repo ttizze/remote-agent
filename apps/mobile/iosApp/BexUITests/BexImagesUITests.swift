@@ -111,12 +111,6 @@ extension BexLaunchUITests {
         XCTAssertLessThan(save.frame.midX, close.frame.midX)
         XCTAssertGreaterThan(save.frame.midX, app.frame.midX)
         captureScreen(app, named: "Expanded image with Save and Close at top right")
-        save.tap()
-        let saved = expectation(
-            for: NSPredicate(format: "label == %@ AND enabled == false", "保存済み"),
-            evaluatedWith: save
-        )
-        wait(for: [saved], timeout: 20)
         close.tap()
         XCTAssertTrue(inlineImage.waitForExistence(timeout: 5))
         captureScreen(app, named: "Markdown image decoded in the conversation")

@@ -228,7 +228,9 @@ mod tests {
     async fn chat_scope_survives_missing_desktop_state_and_workspace_matching() {
         let directory = tempfile::tempdir().unwrap();
         let store = DesktopProjectStore::new(directory.path().join("projects.json"));
-        assert!(store.load().await.unwrap().chat_directory.is_none());
+        let missing = store.load().await.unwrap();
+        assert!(missing.chat_directory.is_none());
+        assert!(missing.projects.is_empty());
         tokio::fs::create_dir(store.chat_directory()).await.unwrap();
         let cwd = tokio::fs::canonicalize(store.chat_directory())
             .await
@@ -259,14 +261,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(assigned.project_id, Some(Some("parent".into())));
-    }
-
-    #[tokio::test]
-    async fn missing_state_file_returns_an_empty_snapshot() {
-        let path = temporary_path("missing");
-        let snapshot = DesktopProjectStore::new(path).load().await.unwrap();
-
-        assert!(snapshot.projects.is_empty());
     }
 
     #[tokio::test]

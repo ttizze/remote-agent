@@ -74,41 +74,6 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Restored task and selected model")
     }
 
-    func testSimulatorReturnsToListWithNativeEdgeSwipeAndRetainsDrafts() throws {
-        #if !targetEnvironment(simulator)
-            throw XCTSkip("This test uses the isolated Simulator fixture")
-        #endif
-        let app = try connectedSimulatorApp()
-        let compose = app.buttons["tasks.new.project.simulator-project"]
-        XCTAssertTrue(compose.waitForExistence(timeout: 10)); compose.tap()
-        let message = app.textFields["task.message"]
-        XCTAssertTrue(message.waitForExistence(timeout: 10))
-        message.tap(); message.typeText("[success] Retain this project draft")
-        func swipeBack() {
-            app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.4))
-                .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
-            XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
-            XCTAssertFalse(message.exists)
-        }
-        swipeBack()
-        compose.tap()
-        XCTAssertTrue(message.waitForExistence(timeout: 10))
-        XCTAssertEqual(message.value as? String, "[success] Retain this project draft")
-        app.buttons["task.send"].tap()
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
-        XCTAssertTrue(answer.waitForExistence(timeout: 25))
-        let answerID = answer.identifier
-        let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
-        message.tap(); message.typeText("Keep this conversation draft")
-        swipeBack()
-        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
-        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
-        XCTAssertTrue(app.descendants(matching: .any)[answerID].waitForExistence(timeout: 15))
-        XCTAssertEqual(message.value as? String, "Keep this conversation draft")
-        captureScreen(app, named: "Native navigation after edge swipe with retained draft")
-        swipeBack()
-    }
-
     func testSimulatorUsesNativeHostNavigationAndPairingDismissal() throws {
         let app = try connectedSimulatorApp()
         app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -173,15 +138,6 @@ extension BexLaunchUITests {
         try startSimulatorConversation(app, promptText: "[success] Native project disclosure")
         let answer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(answer.waitForExistence(timeout: 25))
-        let number = try XCTUnwrap(answer.identifier.split(separator: "-").dropLast().last)
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
-        XCTAssertTrue(row.waitForExistence(timeout: 15))
-        let project = app.buttons["tasks.project.simulator-project"]
-        XCTAssertTrue(project.waitForExistence(timeout: 10)); project.tap()
-        XCTAssertFalse(row.exists)
-        project.tap()
-        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         openFiles(app)
         let nested = app.buttons["file.nested"]
         XCTAssertTrue(nested.waitForExistence(timeout: 10)); nested.tap()
@@ -347,53 +303,65 @@ extension BexLaunchUITests {
             throw XCTSkip("This test uses the isolated Simulator fixture")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Repeated navigation fixture")
+        let projectCompose = app.buttons["tasks.new.project.simulator-project"]
+        XCTAssertTrue(projectCompose.waitForExistence(timeout: 10)); projectCompose.tap()
+        let draft = app.textFields["task.message"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        draft.tap(); draft.typeText("[success] Retain this project draft")
+        backToTaskList(app, swipe: true)
+        projectCompose.tap()
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        XCTAssertEqual(draft.value as? String, "[success] Retain this project draft")
+        app.buttons["task.send"].tap()
         let answer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(answer.waitForExistence(timeout: 25))
         let answerID = answer.identifier
         let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
         let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
         let message = app.textFields["task.message"]
-        let list = app.descendants(matching: .any)["tasks.list"]
 
-        func back(swipe: Bool) {
-            if swipe {
-                app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.4))
-                    .press(
-                        forDuration: 0.1,
-                        thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4))
-                    )
-            } else {
-                app.navigationBars.buttons.element(boundBy: 0).tap()
-            }
-            XCTAssertTrue(list.waitForExistence(timeout: 15))
-            XCTAssertFalse(message.exists)
-        }
-
-        for cycle in 0 ..< 6 {
+        message.tap(); message.typeText("Keep this conversation draft")
+        for cycle in 0 ..< 2 {
             // End an interactive pop near the edge so the navigation is cancelled.
             let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.4))
             edge.press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.4)),
                        withVelocity: .slow, thenHoldForDuration: 0.5)
             XCTAssertTrue(message.waitForExistence(timeout: 10))
             XCTAssertTrue(app.descendants(matching: .any)[answerID].exists)
-            back(swipe: cycle.isMultiple(of: 2))
+            backToTaskList(app, swipe: cycle.isMultiple(of: 2))
 
             XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
             XCTAssertTrue(app.descendants(matching: .any)[answerID].waitForExistence(timeout: 15))
-            back(swipe: !cycle.isMultiple(of: 2))
+            XCTAssertEqual(message.value as? String, "Keep this conversation draft")
+            backToTaskList(app, swipe: !cycle.isMultiple(of: 2))
 
             let compose = app
                 .buttons[cycle.isMultiple(of: 2) ? "tasks.new.project.simulator-project" : "tasks.new.chat"]
             XCTAssertTrue(compose.waitForExistence(timeout: 10)); compose.tap()
             XCTAssertTrue(message.waitForExistence(timeout: 10))
             XCTAssertTrue(message.isHittable)
-            back(swipe: cycle.isMultiple(of: 2))
+            message.tap(); message.typeText("New draft \(cycle)")
+            backToTaskList(app, swipe: cycle.isMultiple(of: 2))
+            compose.tap()
+            XCTAssertTrue(message.waitForExistence(timeout: 10))
+            XCTAssertEqual(message.value as? String, "New draft \(cycle)")
+            backToTaskList(app, swipe: !cycle.isMultiple(of: 2))
             row.tap()
             XCTAssertTrue(app.descendants(matching: .any)[answerID].waitForExistence(timeout: 15))
         }
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Task reopened after repeated back and cancelled edge swipes"
         screenshot.lifetime = .keepAlways; add(screenshot)
+    }
+
+    private func backToTaskList(_ app: XCUIApplication, swipe: Bool) {
+        if swipe {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.4))
+                .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
+        } else {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+        }
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.textFields["task.message"].exists)
     }
 }

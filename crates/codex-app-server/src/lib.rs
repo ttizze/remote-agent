@@ -212,38 +212,3 @@ fn ensure_public_send_method(line: &str) -> Result<(), Error> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn initialize_params_advertise_the_experimental_api_capability() {
-        let client = ClientInfo {
-            name: "test-client".to_owned(),
-            title: "Test Client".to_owned(),
-            version: "1.0.0".to_owned(),
-        };
-
-        assert_eq!(
-            serde_json::to_value(InitializeParams {
-                client_info: &client,
-                capabilities: Capabilities {
-                    experimental_api: true
-                }
-            })
-            .unwrap(),
-            json!({
-                "clientInfo": {
-                    "name": "test-client",
-                    "title": "Test Client",
-                    "version": "1.0.0",
-                },
-                "capabilities": {
-                    "experimentalApi": true,
-                },
-            })
-        );
-    }
-}

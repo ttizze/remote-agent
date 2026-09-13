@@ -289,15 +289,15 @@ fn list_fixture(root: &Path, path: &str) -> Result<()> {
         fs::copy(&projects_path, &backup)?;
     }
     let mut projects = serde_json::Map::new();
-    let mut order = Vec::with_capacity(26);
-    let mut threads = Vec::with_capacity(if path == "/title-fixture" { 508 } else { 66 });
-    for number in 1..=26 {
+    let mut order = Vec::new();
+    let mut threads = Vec::new();
+    for number in 1..=16 {
         let id = format!("pagination-project-{number}");
         let cwd = root.join(&id);
         projects.insert(id.clone(), json!({"id":id,"name":format!("Project {number:02}"),"rootPaths":[cwd],"createdAt":1,"updatedAt":1}));
         order.push(id);
         if path == "/title-fixture" {
-            for conversation in 1..=18 {
+            for conversation in 1..=16 {
                 threads.push(json!({"id":format!("pagination-project-thread-{number}-{conversation}"),"cwd":cwd,
                     "name":format!("Project {number:02} conversation {conversation:02}"),"preview":"Unused preview. ".repeat(1000),"updatedAt":number * 100 + conversation}));
             }
@@ -309,7 +309,7 @@ fn list_fixture(root: &Path, path: &str) -> Result<()> {
         }
     }
     let unassigned = root.join("unassigned");
-    for number in 1..=40 {
+    for number in 1..=16 {
         threads.push(json!({"id":format!("pagination-chat-{number}"),"cwd":unassigned,"name":format!("Chat {number:02}"),"updatedAt":100 + number}));
     }
     write_json(

@@ -17,10 +17,10 @@
         "defaultServiceTier": "priority",
         "supportedReasoningEfforts": [
           {
-            "reasoningEffort": "medium"
+            "reasoningEffort": "max"
           },
           {
-            "reasoningEffort": "max"
+            "reasoningEffort": "medium"
           }
         ],
         "serviceTiers": [
@@ -36,45 +36,6 @@
       "model": "model-a",
       "effort": "max",
       "service_tier": "default"
-    }
-  },
-  {
-    "name": "reordered efforts keep the selected value",
-    "draft": {
-      "text": "keep text",
-      "attachments": [],
-      "model": "model-a",
-      "effort": "max",
-      "service_tier": "priority"
-    },
-    "models": [
-      {
-        "id": "model-a",
-        "model": "model-a",
-        "displayName": "Model A",
-        "defaultReasoningEffort": "medium",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "max"
-          },
-          {
-            "reasoningEffort": "medium"
-          }
-        ],
-        "serviceTiers": [
-          {
-            "id": "priority"
-          }
-        ]
-      }
-    ],
-    "expected": {
-      "text": "keep text",
-      "attachments": [],
-      "model": "model-a",
-      "effort": "max",
-      "service_tier": "priority"
     }
   },
   {

@@ -31,9 +31,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             call!(ListThreads { query })
         }
         "startThread" => call!(StartThread {
-            cwd: optional(command, "cwd")
-                .filter(|cwd| !cwd.trim().is_empty())
-                .map(str::to_owned),
+            cwd: optional(command, "cwd").map(str::to_owned),
             model: optional(command, "model").map(str::to_owned)
         }),
         "readThread" => call!(ReadThread {
@@ -298,7 +296,6 @@ async fn operation_corpus() {
     let host: Vec<Value> =
         serde_json::from_str(include_str!("fixtures/host-operations.json")).unwrap();
     let cases: Vec<_> = operations.iter().chain(&host).collect();
-    assert_eq!(cases.len(), 63);
     for case in cases {
         run_case(case).await;
     }

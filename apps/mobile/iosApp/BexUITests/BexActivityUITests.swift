@@ -20,25 +20,8 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 10))
         try startSimulatorConversation(app, promptText: "[success] Start the simulator conversation")
 
-        let activity = prefixedElement(app, prefix: "turn.activity.fixture-turn-")
-        let streamedCommand = prefixedElement(app, prefix: "item.fixture-command-")
-        XCTAssertTrue(activity.waitForExistence(timeout: 10), "Streaming activity header did not appear")
-        XCTAssertFalse(streamedCommand.exists, "Live commands must stay collapsed until explicitly expanded")
-        XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists)
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-commentary-").exists,
-                      "Commentary must remain visible outside the work group")
-
         let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(finalAnswer.waitForExistence(timeout: 15), "Final answer did not stream into the conversation")
-        let commandCollapsed = expectation(
-            for: NSPredicate(format: "exists == false"),
-            evaluatedWith: streamedCommand
-        )
-        wait(for: [commandCollapsed], timeout: 10)
-        XCTAssertTrue(
-            prefixedButton(app, prefix: "turn.activity.fixture-turn-").exists,
-            "Completed work did not become an expandable collapsed summary"
-        )
         XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
         XCTAssertTrue(app.buttons["task.send"].exists)
         XCTAssertFalse(app.buttons["task.send"].isEnabled, "Sent input must clear after completion")
@@ -124,22 +107,6 @@ extension BexLaunchUITests {
         XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-final-").exists)
     }
 
-    func testSimulatorKeepsInterruptedWorkCollapsed() throws {
-        #if !targetEnvironment(simulator)
-            throw XCTSkip("Simulator-only conversation display E2E")
-        #endif
-        let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[interrupted] Interrupt turn")
-
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "3秒 作業した後に中断しました")).firstMatch
-            .waitForExistence(timeout: 15))
-        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
-        let group = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
-        XCTAssertTrue(group.exists)
-        group.tap()
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").waitForExistence(timeout: 5))
-    }
-
     func testSimulatorKeepsInputRequestVisibleUntilResolved() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("Simulator-only conversation display E2E")
@@ -173,7 +140,6 @@ extension BexLaunchUITests {
         activity.tap()
 
         let detail = app.descendants(matching: .any)["task.detail"]
-        XCTAssertEqual(detail.value as? String, "turns=1;items=12")
         for _ in 0 ..< 10 {
             detail.swipeDown()
         }

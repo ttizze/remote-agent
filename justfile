@@ -36,17 +36,17 @@ conversation-ui:
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
-        testSimulatorCopiesOwnMessageIntoComposer \
+        testSimulatorBrowsesAllSessionImagesAndSavesTheSelection \
         testSimulatorCopiesOnlySelectedMessageText \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
-        testSimulatorAsksAboutAssistantSelectionInSideChatAndRestoresOriginalDraft \
+        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
         testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorCanStartAConversationInAProject \
         testSimulatorOpensTasksBeforeHistoryReadFinishes \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
+        testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
-        testSimulatorKeepsInterruptedWorkCollapsed \
         testSimulatorReopensCompletedHistoryCollapsed
 
 # Exercise the real iroh Host through the headless client.

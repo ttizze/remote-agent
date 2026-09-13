@@ -303,6 +303,10 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     } else { context.error(id, -32602, "process not found")?; }
                 }
                 "initialize" => {
+                    if params["capabilities"]["experimentalApi"] != true {
+                        context.error(id, -32602, "experimentalApi capability required")?;
+                        continue;
+                    }
                     if let Some(gate) = &context.config.initialize_gate {
                         fs::write(gate.with_extension("entered"), [])?;
                         tokio::time::timeout(std::time::Duration::from_secs(10), async {

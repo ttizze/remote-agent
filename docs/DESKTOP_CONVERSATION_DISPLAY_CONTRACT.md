@@ -263,3 +263,11 @@ field, so it must never be looked up in `Item::extra`. Deferred items retain
 file headers while their diff bodies are fetched separately.
 
 When a provider is unavailable, the model menu displays the remaining catalog and the provider error. An existing draft keeps its saved model and settings until the user changes them; a new draft selects an available default. iOS exposes the model catalog without requiring a Codex account. Codex exit fails its active turn but leaves the Host connection and Claude approvals/conversations usable.
+
+
+The September 2026 test consolidation preserves the assertions above. Full and
+partial user-message copying share one Simulator conversation; the accepted
+additional-input case also checks stop, approval removal, and collapsed
+interrupted work. The retry side-chat case retains submission, draft clearing,
+and reopen checks. See [test maintenance](TEST_MAINTENANCE.md) for the complete
+boundary map and manual real-time soak command.

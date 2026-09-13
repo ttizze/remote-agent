@@ -40,7 +40,7 @@ extension BexLaunchUITests {
         XCTAssertEqual(restored.value as? String, expected)
     }
 
-    func testSimulatorAsksAboutAssistantSelectionInSideChatAndRestoresOriginalDraft() throws {
+    func testSimulatorOpensSideChatWithoutLosingOriginalDraft() throws {
         try verifyAssistantSideChat(retryRead: false)
     }
 
@@ -73,6 +73,33 @@ extension BexLaunchUITests {
         let sideMessage = sheet.textFields["task.message"]
         XCTAssertTrue(sideMessage.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertEqual(sideMessage.value as? String, "> Needle\n\n")
+        if !retryRead {
+            app.buttons["side-chat.close"].tap()
+            XCTAssertTrue(app.descendants(matching: .any)[originalID].waitForExistence(timeout: 15))
+            XCTAssertEqual(message.value as? String, "Keep my original draft")
+            XCTAssertFalse(app.staticTexts["notice"].exists)
+            return
+        }
+        try verifySideChatSubmissionAndRestore(app, sheet: sheet, originalID: originalID)
+    }
+
+    private func openAssistantSelectionSideChat(_ app: XCUIApplication) {
+        let side = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "サイドチャットで質問")).firstMatch
+        if !side.exists {
+            let forward = app.buttons["Forward"]
+            XCTAssertTrue(forward.waitForExistence(timeout: 5)); forward.tap()
+        }
+        XCTAssertTrue(side.waitForExistence(timeout: 5)); side.tap()
+        XCTAssertTrue(app.buttons["side-chat.close"].waitForExistence(timeout: 15))
+    }
+
+    private func verifySideChatSubmissionAndRestore(
+        _ app: XCUIApplication,
+        sheet: XCUIElement,
+        originalID: String
+    ) throws {
+        let sideMessage = sheet.textFields["task.message"]
         sideMessage.tap()
         sideMessage.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
         sideMessage.typeText("[success] Explain this selection")
@@ -93,21 +120,6 @@ extension BexLaunchUITests {
         XCTAssertEqual(sideMessage.value as? String, sideMessage.placeholderValue)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Selected quote submitted in side chat")
-        try verifySideChatRestored(app, originalID: originalID, sideID: sideID)
-    }
-
-    private func openAssistantSelectionSideChat(_ app: XCUIApplication) {
-        let side = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label == %@", "サイドチャットで質問")).firstMatch
-        if !side.exists {
-            let forward = app.buttons["Forward"]
-            XCTAssertTrue(forward.waitForExistence(timeout: 5)); forward.tap()
-        }
-        XCTAssertTrue(side.waitForExistence(timeout: 5)); side.tap()
-        XCTAssertTrue(app.buttons["side-chat.close"].waitForExistence(timeout: 15))
-    }
-
-    private func verifySideChatRestored(_ app: XCUIApplication, originalID: String, sideID: String) throws {
         let message = app.textFields["task.message"]
         app.buttons["side-chat.close"].tap()
         XCTAssertTrue(app.descendants(matching: .any)[originalID].waitForExistence(timeout: 15))
@@ -131,6 +143,17 @@ extension BexLaunchUITests {
         try startSimulatorConversation(app, promptText: text)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
         app.staticTexts[text].press(forDuration: 1.2)
+        let fullCopy = app.buttons["コピー"]
+        XCTAssertTrue(fullCopy.waitForExistence(timeout: 10)); fullCopy.tap()
+        let composer = app.textFields["task.message"]
+        composer.press(forDuration: 1.2)
+        let fullPaste = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Paste", "ペースト"])).firstMatch
+        XCTAssertTrue(fullPaste.waitForExistence(timeout: 5)); fullPaste.tap()
+        let fullText = expectation(for: NSPredicate(format: "value == %@", text), evaluatedWith: composer)
+        wait(for: [fullText], timeout: 5)
+        composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: text.count))
+        XCTAssertEqual(composer.value as? String, composer.placeholderValue)
+        app.staticTexts[text].press(forDuration: 1.2)
         let select = app.buttons["テキストを選択"]
         XCTAssertTrue(select.waitForExistence(timeout: 5)); select.tap()
         let selection = app.textViews["message.text-selection"]
@@ -141,32 +164,13 @@ extension BexLaunchUITests {
         let copy = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Copy", "コピー"])).firstMatch
         XCTAssertTrue(copy.waitForExistence(timeout: 5)); copy.tap()
         app.buttons["完了"].tap()
-        let message = app.textFields["task.message"]
-        message.press(forDuration: 1.2)
+        composer.press(forDuration: 1.2)
         let paste = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Paste", "ペースト"])).firstMatch
         XCTAssertTrue(paste.waitForExistence(timeout: 5)); paste.tap()
-        XCTAssertEqual(message.value as? String, "Needle")
+        let selectedText = expectation(for: NSPredicate(format: "value == %@", "Needle"), evaluatedWith: composer)
+        wait(for: [selectedText], timeout: 5)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Only the selected word was copied")
-    }
-
-    func testSimulatorCopiesOwnMessageIntoComposer() throws {
-        let app = try connectedSimulatorApp()
-        let text = "[success] Copy this complete message"
-        try startSimulatorConversation(app, promptText: text)
-        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
-        app.staticTexts[text].press(forDuration: 1.2)
-        let copy = app.buttons["コピー"]
-        XCTAssertTrue(copy.waitForExistence(timeout: 10))
-        copy.tap()
-        let message = app.textFields["task.message"]
-        message.press(forDuration: 1.2)
-        let paste = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Paste", "ペースト"])).firstMatch
-        XCTAssertTrue(paste.waitForExistence(timeout: 5))
-        paste.tap()
-        XCTAssertEqual(message.value as? String, text)
-        XCTAssertFalse(app.staticTexts["notice"].exists)
-        captureScreen(app, named: "Own message copied into composer")
     }
 
     func testSimulatorKeepsChatUnassignedAfterSendingAndReopening() throws {
@@ -273,22 +277,12 @@ extension BexLaunchUITests {
                 .count,
             1
         )
-    }
-
-    func testSimulatorCanSteerAndStopAnActiveTurn() throws {
-        let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[approval] Hold this turn")
-        XCTAssertTrue(app.buttons["request.accept"].waitForExistence(timeout: 15))
-        captureScreen(app, named: "Active conversation text and tool labels")
-        let message = app.descendants(matching: .any)["task.message"]
-        message.tap(); message.typeText("Change the requested approach")
-        app.buttons["task.send"].tap()
-        XCTAssertTrue(app.staticTexts["Change the requested approach"].waitForExistence(timeout: 2))
-        let stop = prefixedButton(app, prefix: "turn.interrupt.")
-        XCTAssertTrue(stop.waitForExistence(timeout: 5)); stop.tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "3秒 作業した後に中断しました")).firstMatch
-            .waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["request.accept"].exists)
-        XCTAssertFalse(stop.exists)
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertFalse(prefixedElement(app, prefix: "item.fixture-command-").exists)
+        command.tap()
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-command-").waitForExistence(timeout: 5))
+        XCTAssertEqual(message.value as? String, message.placeholderValue)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
     }
 }

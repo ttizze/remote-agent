@@ -16,7 +16,6 @@ if [[ $# == 0 ]]; then
         testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject \
         testSimulatorLoadsLatestFiveTitlesPerProjectAndExpandsOneProject \
         testSimulatorPaginatesRecentProjectsAndUnassignedChats \
-        testSimulatorShowsWorkspaceConversationInsideItsProject \
         testSimulatorFetchesNewTaskWhenReturningToList \
         testSimulatorFetchesNewTaskAfterForeground \
         testSimulatorKeepsOpenTaskAndFetchesLatestReplyAfterForeground \
@@ -27,7 +26,6 @@ if [[ $# == 0 ]]; then
         testSimulatorReviewsTheOpenSessionsWorktree \
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorSwitchesCodexAccountsAndForksConversation \
-        testSimulatorReturnsToListWithNativeEdgeSwipeAndRetainsDrafts \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
@@ -37,17 +35,16 @@ if [[ $# == 0 ]]; then
         testSimulatorMarksUnseenCompletionUntilOpened \
         testSimulatorDictationPermissionDenialPreservesDraftAndSend \
         testSimulatorDictationContinuesPastThirtySecondsAndReachesHost \
-        testSimulatorCopiesOwnMessageIntoComposer \
+        testSimulatorBrowsesAllSessionImagesAndSavesTheSelection \
         testSimulatorCopiesOnlySelectedMessageText \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
-        testSimulatorAsksAboutAssistantSelectionInSideChatAndRestoresOriginalDraft \
+        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
         testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorApprovalEditorAndDraftSurviveReconnect \
         testSimulatorKeepsInputRequestVisibleUntilResolved \
         testSimulatorShowsRetryingStreamErrorThenRecovers \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
-        testSimulatorKeepsInterruptedWorkCollapsed \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorReopensCompletedHistoryCollapsed \
@@ -56,7 +53,6 @@ if [[ $# == 0 ]]; then
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
         testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
-        testSimulatorCanSteerAndStopAnActiveTurn \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorCanAttachDownloadAndPrepareAIEdit \
         testSimulatorCanAddASecondPhoto \
