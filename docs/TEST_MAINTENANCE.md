@@ -72,3 +72,8 @@ Integration with the independent-provider Host changes also updates the fatal
 startup logging fixture: a missing Codex executable is recoverable, so corrupt
 isolated trust state now supplies the fatal error. Both process exits, distinct
 process IDs, startup records, and persisted error messages remain asserted.
+
+The Android 17 integration exposed Compose's transitive Espresso 3.5.0 dependency
+calling the removed `InputManager.getInstance` API before Markdown assertions
+could run. An explicit Espresso 3.7.0 test dependency uses the upstream fix;
+the native Markdown cases and their assertions remain unchanged.

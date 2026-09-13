@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use Espresso 3.7.0 for Android Compose tests so input injection works on Android 17. Preserve the Markdown rendering, scrolling, streaming, and reopening assertions.
+
 - Redisplay repeated iOS operation errors after a retry clears the notice. Keep the existing dictation regression through cancellation, 32-second recording, repeated transcription failure, draft recovery, and completed text submission.
 
 - Move iPhone navigation to `NavigationStack` and explicit destinations, removing hidden navigation links and stack-style overrides. Use SwiftUI `PhotosPicker` with file transfers and sequential async uploads instead of the UIKit photo-picker delegate and recursive callbacks. Preserve ordered photo/video selection, repeated selection, cancellation, conversation ownership, and temporary-file cleanup. Clear stale upload errors in core when retrying and reflect core error changes in iOS notices. Acceptance: native back gestures, repeated task/directory navigation, settings restoration, media upload failure/recovery, completed sends and reopened attachments.
