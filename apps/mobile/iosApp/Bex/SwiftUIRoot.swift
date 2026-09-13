@@ -21,24 +21,22 @@ private struct BexScreen: View {
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Group {
                 if model.profiles.isEmpty {
                     PairingScreen(model: model)
                 } else {
                     ProfilesScreen(model: model)
-                        .background(
-                            NavigationLink(isActive: Binding(
-                                get: { model.screen == .threads || model.screen == .thread },
-                                set: {
-                                    if !$0, model.selectedProfileId != nil {
-                                        model.showProfiles()
-                                    }
+                        .navigationDestination(isPresented: Binding(
+                            get: { model.screen == .threads || model.screen == .thread },
+                            set: {
+                                if !$0, model.selectedProfileId != nil {
+                                    model.showProfiles()
                                 }
-                            )) {
-                                threadList
-                            } label: { EmptyView() }
-                        )
+                            }
+                        )) {
+                            threadList
+                        }
                         .sheet(isPresented: Binding(
                             get: { model.screen == .pairing },
                             set: {
@@ -47,34 +45,30 @@ private struct BexScreen: View {
                                 }
                             }
                         )) {
-                            NavigationView { PairingScreen(model: model) }
-                                .navigationViewStyle(StackNavigationViewStyle())
+                            NavigationStack { PairingScreen(model: model) }
                         }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         .preferredColorScheme(.dark)
     }
 
     private var threadList: some View {
         ThreadsScreen(model: model)
-            .background(
-                NavigationLink(isActive: Binding(
-                    get: { model.screen == .thread },
-                    set: {
-                        if !$0, model.screen == .thread {
-                            model.showThreadList()
-                        }
+            .navigationDestination(isPresented: Binding(
+                get: { model.screen == .thread },
+                set: {
+                    if !$0, model.screen == .thread {
+                        model.showThreadList()
                     }
-                )) {
-                    ThreadScreen(
-                        model: model,
-                        conversation: model.sideChatRequest?.originalConversation ?? model.conversation
-                    )
-                } label: { EmptyView() }
-            )
+                }
+            )) {
+                ThreadScreen(
+                    model: model,
+                    conversation: model.sideChatRequest?.originalConversation ?? model.conversation
+                )
+            }
     }
 }
 
@@ -215,7 +209,7 @@ private struct BexQrScannerSheet: View {
     let completion: (String?) -> Void
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             BexQrScannerController { result in
                 switch result {
                 case let .success(contents): completion(contents)
@@ -231,7 +225,6 @@ private struct BexQrScannerSheet: View {
                 }
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         .accessibilityIdentifier("scanner.sheet")
     }
 }

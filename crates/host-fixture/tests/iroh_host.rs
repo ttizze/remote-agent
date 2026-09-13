@@ -406,27 +406,42 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         assert!(snapshot.workspace.review.as_ref().unwrap().files.is_empty());
         assert!(snapshot.error.is_none());
         let retained = store.snapshot().drafts["transfer-draft"].clone();
+        let retry = op::UploadAttachment {
+            draft_key: "transfer-draft".into(),
+            attachment: Attachment {
+                path: directory
+                    .path()
+                    .join("missing.bin")
+                    .to_str()
+                    .unwrap()
+                    .into(),
+                name: "missing.bin".into(),
+                is_image: false,
+            },
+            directory: directory.path().to_str().unwrap().into(),
+        };
         assert!(
             store
-                .dispatch(Intent::UploadAttachment(op::UploadAttachment {
-                    draft_key: "transfer-draft".into(),
-                    attachment: Attachment {
-                        path: directory
-                            .path()
-                            .join("missing.bin")
-                            .to_str()
-                            .unwrap()
-                            .into(),
-                        name: "missing.bin".into(),
-                        is_image: false,
-                    },
-                    directory: directory.path().to_str().unwrap().into(),
-                }))
+                .dispatch(Intent::UploadAttachment(retry.clone()))
                 .await
                 .is_err()
         );
         assert_eq!(store.snapshot().drafts["transfer-draft"], retained);
         assert!(store.snapshot().error.is_some());
+        std::fs::write(&retry.attachment.path, &content).unwrap();
+        store
+            .dispatch(Intent::UploadAttachment(retry))
+            .await
+            .unwrap();
+        let recovered = store.snapshot();
+        let attachments = &recovered.drafts["transfer-draft"].attachments;
+        assert_eq!(attachments.len(), retained.attachments.len() + 1);
+        assert_eq!(attachments[0], retained.attachments[0]);
+        assert_eq!(std::fs::read(&attachments[1].path).unwrap(), content);
+        assert!(
+            recovered.error.is_none(),
+            "successful retry retained the upload error"
+        );
 
         store.close().await.unwrap();
         assert!(!store.snapshot().connected);

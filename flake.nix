@@ -32,14 +32,14 @@
             ];
           };
           androidSdk = (pkgs.androidenv.composeAndroidPackages {
-            platformVersions = [ "36" ];
-            buildToolsVersions = [ "35.0.0" "36.0.0" ];
+            platformVersions = [ "37.0" ];
+            buildToolsVersions = [ "36.0.0" ];
             includeNDK = true;
             includeEmulator = false;
             includeSystemImages = false;
           }).androidsdk;
           androidTestSdk = (pkgs.androidenv.composeAndroidPackages {
-            platformVersions = [ "36" ];
+            platformVersions = [ "37.0" ];
             buildToolsVersions = [ "36.0.0" ];
             includeEmulator = true;
             includeSystemImages = true;
@@ -60,7 +60,7 @@
               (pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libGL pkgs.libxkbcommon pkgs.wayland ]);
           };
           android-test = pkgs.mkShell {
-            packages = [ androidTestSdk pkgs.jdk21 ];
+            packages = [ androidTestSdk pkgs.jdk21 pkgs.python3 ];
             JAVA_HOME = pkgs.jdk21.home;
             ANDROID_HOME = "${androidTestSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidTestSdk}/libexec/android-sdk";

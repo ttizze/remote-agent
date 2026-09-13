@@ -21,6 +21,11 @@ ios-e2e *tests:
 ios-markdown:
     scripts/test-ios-markdown.sh
 
+# Build and test only on a fresh, owned Android 17 emulator.
+android-e2e:
+    ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
+    nix develop .#android-test --command bash scripts/android-e2e.sh
+
 # Native conversation contracts used by the post-commit Swift check.
 conversation-ui:
     scripts/ios-e2e.sh \

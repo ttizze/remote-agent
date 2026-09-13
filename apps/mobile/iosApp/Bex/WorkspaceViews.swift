@@ -39,9 +39,9 @@ struct WorkspaceSheet: View {
             if showingDiff {
                 WorkspaceDiffScreen(model: model, root: root)
             } else {
-                NavigationView {
+                NavigationStack {
                     WorkspaceDirectoryScreen(model: model, root: root, directory: root) { dismiss() }
-                }.navigationViewStyle(StackNavigationViewStyle())
+                }
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
@@ -106,20 +106,9 @@ private struct WorkspaceDirectoryScreen: View {
                 }
             }
         }
-        .background(
-            NavigationLink(isActive: Binding(
-                get: { destinationPath != nil },
-                set: {
-                    if !$0 {
-                        destinationPath = nil
-                    }
-                }
-            )) {
-                if let destinationPath {
-                    WorkspaceDirectoryScreen(model: model, root: root, directory: destinationPath, close: close)
-                }
-            } label: { EmptyView() }
-        )
+        .navigationDestination(item: $destinationPath) { destination in
+            WorkspaceDirectoryScreen(model: model, root: root, directory: destination, close: close)
+        }
         .navigationTitle(directory == root ? "ファイル" : URL(fileURLWithPath: directory).lastPathComponent)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
@@ -305,7 +294,7 @@ private struct FileEditorSheet: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(alignment: .leading) {
                 Text(entry.path).font(.caption).foregroundColor(.secondary).textSelection(.enabled).padding(.horizontal)
                 if let error {

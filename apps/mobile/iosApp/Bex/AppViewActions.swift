@@ -152,26 +152,30 @@ extension BexAppViewModel {
 }
 
 extension BexAppViewModel {
-    func attach(_ url: URL, temporaryDirectory: URL? = nil, completion: @escaping () -> Void = {}) {
+    func attach(_ url: URL, temporaryDirectory: URL? = nil) async throws {
         let access = url.startAccessingSecurityScopedResource()
         transferring = true
         transferError = nil
-        let attachment = Attachment(path: url.path, name: url.lastPathComponent,
-                                    isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true)
-        perform(.uploadAttachment(UploadAttachment(
-            draftKey: coreDraftKey,
-            attachment: attachment,
-            directory: cwd
-        ))) { [weak self] _ in
-            self?.persist()
+        defer {
+            persist()
             if access {
                 url.stopAccessingSecurityScopedResource()
             }
             if let temporaryDirectory {
                 try? FileManager.default.removeItem(at: temporaryDirectory)
             }
-            self?.transferring = false
-            completion()
+            transferring = false
+        }
+        let attachment = Attachment(path: url.path, name: url.lastPathComponent,
+                                    isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            perform(.uploadAttachment(UploadAttachment(
+                draftKey: coreDraftKey,
+                attachment: attachment,
+                directory: cwd
+            ))) { result in
+                continuation.resume(with: result.map { _ in () })
+            }
         }
     }
 
