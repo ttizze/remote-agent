@@ -17,7 +17,11 @@ build-desktop-macos:
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
-# Build and test Store recovery and network permission on a fresh Android 17 emulator.
+# Headless tests of the production iOS Markdown parser.
+ios-markdown:
+    scripts/test-ios-markdown.sh
+
+# Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
 android-e2e:
     cargo build --locked -p host-fixture --bins
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
@@ -30,6 +34,8 @@ conversation-ui:
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorRendersMarkdownTableAndReopensIt \
+        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorCopiesOwnMessageIntoComposer \
         testSimulatorCopiesOnlySelectedMessageText \
