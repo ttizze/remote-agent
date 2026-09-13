@@ -17,13 +17,6 @@ fn main() {
         return;
     }
     use std::io::{Read, Write};
-    assert!(
-        objc2_foundation::NSProcessInfo::processInfo()
-            .operatingSystemVersion()
-            .majorVersion
-            >= 14,
-        "isolated WebKit store tests require macOS 14 or newer"
-    );
     let (directory, db) = chrome_tests::fixture();
     db.execute_batch("UPDATE cookies SET host_key='localhost', path='/', is_secure=0,
         encrypted_value=X'76313061f8d83827d2fabc8b7c4cbc230263a34b04859bc17fad7d973df6aabdd1f843fde0c9f8d84450325e95ca4078ad1562';").unwrap();
@@ -110,7 +103,7 @@ fn main() {
         <key>CFBundleIdentifier</key><string>app.bex.cookie-test.{store}</string>
         <key>CFBundleName</key><string>Bex Cookie Import Test</string>
         <key>CFBundlePackageType</key><string>APPL</string>
-        <key>LSMinimumSystemVersion</key><string>14.0</string>
+        <key>LSMinimumSystemVersion</key><string>26.0</string>
         <key>NSHighResolutionCapable</key><true/>
         </dict></plist>"#
         ),

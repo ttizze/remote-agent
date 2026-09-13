@@ -23,7 +23,7 @@ struct WorktreeSettingsSheet: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
                 Section {
                     Text(host.name).font(.headline)
@@ -79,7 +79,6 @@ struct WorktreeSettingsSheet: View {
                 }
             }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         .interactiveDismissDisabled(busy)
         .task { await load() }
     }

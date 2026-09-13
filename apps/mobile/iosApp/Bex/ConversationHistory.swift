@@ -131,3 +131,10 @@ extension ThreadScreen {
         return "turns=\(thread.source.turnCount());items=\(itemCount)"
     }
 }
+
+struct HistoryBoundaryPreferenceKey: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}

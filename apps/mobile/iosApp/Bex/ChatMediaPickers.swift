@@ -1,4 +1,4 @@
-import PhotosUI
+import CoreTransferable
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -18,34 +18,15 @@ func retainChatMedia(_ source: URL) throws -> URL {
     }
 }
 
-struct ChatPhotoPicker: UIViewControllerRepresentable {
-    let selected: ([NSItemProvider]) -> Void
+struct ChatMedia: Transferable {
+    let url: URL
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(selected: selected)
-    }
-
-    func makeUIViewController(context: Context) -> PHPickerViewController {
-        var configuration = PHPickerConfiguration()
-        configuration.filter = .any(of: [.images, .videos])
-        configuration.selectionLimit = 0
-        configuration.selection = .ordered
-        configuration.preferredAssetRepresentationMode = .compatible
-        let picker = PHPickerViewController(configuration: configuration)
-        picker.delegate = context.coordinator
-        return picker
-    }
-
-    func updateUIViewController(_: PHPickerViewController, context _: Context) {}
-
-    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
-        let selected: ([NSItemProvider]) -> Void
-        init(selected: @escaping ([NSItemProvider]) -> Void) {
-            self.selected = selected
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) {
+            try Self(url: retainChatMedia($0.file))
         }
-
-        func picker(_: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-            selected(results.map(\.itemProvider))
+        FileRepresentation(importedContentType: .image) {
+            try Self(url: retainChatMedia($0.file))
         }
     }
 }
