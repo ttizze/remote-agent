@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use agent_core::peer::{RpcMessage, RpcMessageKind, rewrite_top_level_id};
+use agent_core::peer::{RpcMessage, RpcMessageKind};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -58,8 +58,13 @@ pub(crate) struct SessionRouter {
 
 struct State {
     next_session_id: SessionId,
-    next_proxy_id: u64,
     sessions: HashMap<SessionId, mpsc::Sender<String>>,
+    routing: Routing,
+}
+
+/// Owned protocol data. Transitions neither lock nor send to client queues.
+struct Routing {
+    next_proxy_id: u64,
     pending: HashMap<String, PendingServerRequest>,
     proxy_to_upstream: HashMap<ProxyKey, String>,
 }
@@ -80,12 +85,26 @@ impl Default for State {
     fn default() -> Self {
         Self {
             next_session_id: 1,
-            next_proxy_id: 1,
             sessions: HashMap::new(),
+            routing: Routing::default(),
+        }
+    }
+}
+
+impl Default for Routing {
+    fn default() -> Self {
+        Self {
+            next_proxy_id: 1,
             pending: HashMap::new(),
             proxy_to_upstream: HashMap::new(),
         }
     }
+}
+
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Delivery {
+    Send(SessionId, String),
+    Close(SessionId),
 }
 
 impl SessionRouter {
@@ -105,30 +124,21 @@ impl SessionRouter {
         // A request that was sent while no phone was connected remains
         // pending. Replay it to this new session with a fresh proxy id.
         let pending = state
+            .routing
             .pending
             .iter()
             .filter(|(_, request)| !request.response_claimed)
             .map(|(upstream_id, request)| (upstream_id.clone(), request.line.clone()))
             .collect::<Vec<_>>();
         for (upstream_id, line) in pending {
-            let proxy_id = allocate_proxy_id(&mut state);
-            let Ok(proxy_line) = rewrite_top_level_id(&line, &proxy_id) else {
-                continue;
-            };
-            if sender.try_send(proxy_line).is_err() {
+            let (routing, line) = std::mem::take(&mut state.routing).replay(id, upstream_id, &line);
+            state.routing = routing;
+            if let Some(line) = line
+                && sender.try_send(line).is_err()
+            {
                 remove_session_locked(&mut state, id);
                 break;
             }
-            if let Some(request) = state.pending.get_mut(&upstream_id) {
-                request.proxies.insert(id, proxy_id.clone());
-            }
-            state.proxy_to_upstream.insert(
-                ProxyKey {
-                    session: id,
-                    id: proxy_id,
-                },
-                upstream_id,
-            );
         }
 
         HostSession {
@@ -146,17 +156,9 @@ impl SessionRouter {
     /// approvals and authenticated client connections remain live.
     pub(crate) fn resolve_codex_requests(&self) {
         let mut state = lock_state(&self.state);
-        let ids: Vec<_> = state
-            .pending
-            .keys()
-            .filter(|id| !crate::claude::is_permission_id(id))
-            .cloned()
-            .collect();
-        for id in ids {
-            let notification =
-                format!(r#"{{"method":"serverRequest/resolved","params":{{"requestId":{id}}}}}"#);
-            fanout_resolved_request_locked(&mut state, &id, &notification);
-        }
+        let (routing, deliveries) = std::mem::take(&mut state.routing).resolve_codex_requests();
+        state.routing = routing;
+        deliver_locked(&mut state, deliveries);
     }
 
     pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), String> {
@@ -190,105 +192,165 @@ impl SessionRouter {
     /// Fan out a backend notification or server request. Notifications are
     /// sent unchanged; server requests get one unique id per phone.
     pub(crate) fn handle_server_message(&self, message: &RpcMessage<'_>) {
-        let line = message.line();
         let mut state = lock_state(&self.state);
-        match message.kind() {
-            RpcMessageKind::Notification => {
-                let resolved = resolved_server_request_id(message).is_some_and(|upstream_id| {
-                    fanout_resolved_request_locked(&mut state, &upstream_id, line)
-                });
-                if !resolved {
-                    broadcast_line_locked(&mut state, line);
-                }
-            }
-            RpcMessageKind::Request => fanout_request_locked(&mut state, message),
-            RpcMessageKind::Response => {
-                // Responses are consumed by the backend adapter before dispatch.
-            }
-        }
+        let (routing, deliveries) =
+            std::mem::take(&mut state.routing).message(message, state.sessions.keys().copied());
+        state.routing = routing;
+        deliver_locked(&mut state, deliveries);
     }
 
     /// First valid response wins. Retain aliases until the backend resolves the request
     /// so every device receives its own proxy id, but stop accepting/replaying it.
     pub(crate) fn resolve_response(&self, session: SessionId, id: &str) -> ResponseRoute {
         let mut state = lock_state(&self.state);
-        let Some(upstream_id) = state.proxy_to_upstream.remove(&ProxyKey {
+        let (routing, route) = std::mem::take(&mut state.routing).respond(session, id);
+        state.routing = routing;
+        route
+    }
+}
+
+impl Routing {
+    fn resolve_codex_requests(mut self) -> (Self, Vec<Delivery>) {
+        let ids: Vec<_> = self
+            .pending
+            .keys()
+            .filter(|id| !crate::claude::is_permission_id(id))
+            .cloned()
+            .collect();
+        let mut deliveries = Vec::new();
+        for id in ids {
+            let notification =
+                format!(r#"{{"method":"serverRequest/resolved","params":{{"requestId":{id}}}}}"#);
+            resolve_request(&mut self, &id, &notification, &mut deliveries);
+        }
+        (self, deliveries)
+    }
+
+    fn replay(
+        mut self,
+        session: SessionId,
+        upstream: String,
+        line: &str,
+    ) -> (Self, Option<String>) {
+        let line = RpcMessage::parse(line)
+            .ok()
+            .and_then(|message| self.alias(session, upstream, &message));
+        (self, line)
+    }
+
+    fn alias(
+        &mut self,
+        session: SessionId,
+        upstream: String,
+        message: &RpcMessage<'_>,
+    ) -> Option<String> {
+        let proxy = allocate_proxy_id(self);
+        let line = message.rewrite_id(&proxy).ok()?;
+        self.pending
+            .get_mut(&upstream)?
+            .proxies
+            .insert(session, proxy.clone());
+        self.proxy_to_upstream
+            .insert(ProxyKey { session, id: proxy }, upstream);
+        Some(line)
+    }
+
+    fn message(
+        mut self,
+        message: &RpcMessage<'_>,
+        sessions: impl Iterator<Item = SessionId>,
+    ) -> (Self, Vec<Delivery>) {
+        let mut deliveries = Vec::new();
+        match message.kind() {
+            RpcMessageKind::Notification => {
+                let resolved = resolved_server_request_id(message).is_some_and(|id| {
+                    resolve_request(&mut self, &id, message.line(), &mut deliveries)
+                });
+                if !resolved {
+                    deliveries.extend(
+                        sessions.map(|session| Delivery::Send(session, message.line().to_owned())),
+                    );
+                }
+            }
+            RpcMessageKind::Request => route_request(&mut self, message, sessions, &mut deliveries),
+            RpcMessageKind::Response => {}
+        }
+        (self, deliveries)
+    }
+
+    fn respond(mut self, session: SessionId, id: &str) -> (Self, ResponseRoute) {
+        let Some(upstream) = self.proxy_to_upstream.remove(&ProxyKey {
             session,
             id: id.to_owned(),
         }) else {
-            return ResponseRoute::Unknown;
+            return (self, ResponseRoute::Unknown);
         };
-        let State {
-            pending,
-            proxy_to_upstream,
-            ..
-        } = &mut *state;
-        let Some(request) = pending.get_mut(&upstream_id) else {
-            return ResponseRoute::Unknown;
+        let Some(request) = self.pending.get_mut(&upstream) else {
+            return (self, ResponseRoute::Unknown);
         };
         request.response_claimed = true;
-        for (alias_session, proxy_id) in &request.proxies {
-            proxy_to_upstream.remove(&ProxyKey {
-                session: *alias_session,
-                id: proxy_id.clone(),
+        for (session, id) in &request.proxies {
+            self.proxy_to_upstream.remove(&ProxyKey {
+                session: *session,
+                id: id.clone(),
             });
         }
-        ResponseRoute::Forward(upstream_id)
+        (self, ResponseRoute::Forward(upstream))
+    }
+
+    fn close(mut self, session: SessionId) -> Self {
+        for pending in self.pending.values_mut() {
+            pending.proxies.remove(&session);
+        }
+        self.proxy_to_upstream
+            .retain(|key, _| key.session != session);
+        self
     }
 }
 
-fn fanout_request_locked(state: &mut State, message: &RpcMessage<'_>) {
+fn deliver_locked(state: &mut State, deliveries: Vec<Delivery>) {
+    // Keep transitions, delivery, and failure cleanup under the same lock.
+    // A concurrent response cannot observe aliases for a failed delivery.
+    for delivery in deliveries {
+        let failed = match delivery {
+            Delivery::Send(session, line) => state
+                .sessions
+                .get(&session)
+                .map(|sender| sender.try_send(line).is_err())
+                .unwrap_or(true)
+                .then_some(session),
+            Delivery::Close(session) => Some(session),
+        };
+        if let Some(session) = failed {
+            remove_session_locked(state, session);
+        }
+    }
+}
+
+fn route_request(
+    state: &mut Routing,
+    message: &RpcMessage<'_>,
+    sessions: impl Iterator<Item = SessionId>,
+    deliveries: &mut Vec<Delivery>,
+) {
     let upstream_id = message.raw_id().expect("classified request has an ID");
-    let line = message.line();
     if state.pending.contains_key(upstream_id) {
         return;
     }
-    let mut pending = PendingServerRequest {
-        response_claimed: false,
-        line: line.to_owned(),
-        proxies: HashMap::new(),
-    };
-    let sessions = state.sessions.keys().copied().collect::<Vec<_>>();
-    let mut failed = Vec::new();
-    for session in sessions {
-        let proxy_id = allocate_proxy_id(state);
-        let Ok(proxy_line) = message.rewrite_id(&proxy_id) else {
-            failed.push(session);
-            continue;
-        };
-        let Some(sender) = state.sessions.get(&session).cloned() else {
-            failed.push(session);
-            continue;
-        };
-        if sender.try_send(proxy_line).is_err() {
-            failed.push(session);
-            continue;
+    state.pending.insert(
+        upstream_id.to_owned(),
+        PendingServerRequest {
+            response_claimed: false,
+            line: message.line().to_owned(),
+            proxies: HashMap::new(),
+        },
+    );
+    deliveries.extend(sessions.map(|session| {
+        match state.alias(session, upstream_id.to_owned(), message) {
+            Some(line) => Delivery::Send(session, line),
+            None => Delivery::Close(session),
         }
-        pending.proxies.insert(session, proxy_id.clone());
-        state.proxy_to_upstream.insert(
-            ProxyKey {
-                session,
-                id: proxy_id,
-            },
-            upstream_id.to_owned(),
-        );
-    }
-    for session in failed {
-        remove_session_locked(state, session);
-    }
-    state.pending.insert(upstream_id.to_owned(), pending);
-}
-
-fn broadcast_line_locked(state: &mut State, line: &str) {
-    let mut failed = Vec::new();
-    for (&session, sender) in &state.sessions {
-        if sender.try_send(line.to_owned()).is_err() {
-            failed.push(session);
-        }
-    }
-    for session in failed {
-        remove_session_locked(state, session);
-    }
+    }));
 }
 
 fn resolved_server_request_id(message: &RpcMessage<'_>) -> Option<String> {
@@ -301,7 +363,12 @@ fn resolved_server_request_id(message: &RpcMessage<'_>) -> Option<String> {
 /// A backend identifies a resolved request with its upstream id. Each phone only
 /// knows its session-local proxy id, so fan out one correlated notification
 /// per session and retire the replayable pending request atomically.
-fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &str) -> bool {
+fn resolve_request(
+    state: &mut Routing,
+    upstream_id: &str,
+    line: &str,
+    deliveries: &mut Vec<Delivery>,
+) -> bool {
     let Some(pending) = state.pending.remove(upstream_id) else {
         return false;
     };
@@ -309,17 +376,13 @@ fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &s
         state.pending.insert(upstream_id.to_owned(), pending);
         return false;
     };
-    let mut failed = Vec::new();
     for (session, proxy_id) in pending.proxies {
         state.proxy_to_upstream.remove(&ProxyKey {
             session,
             id: proxy_id.clone(),
         });
-        let Some(sender) = state.sessions.get(&session) else {
-            continue;
-        };
         let Ok(proxy_value) = serde_json::from_str::<Value>(&proxy_id) else {
-            failed.push(session);
+            deliveries.push(Delivery::Close(session));
             continue;
         };
         let Some(request_id) = notification
@@ -327,20 +390,15 @@ fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &s
             .and_then(Value::as_object_mut)
             .and_then(|params| params.get_mut("requestId"))
         else {
-            failed.push(session);
+            deliveries.push(Delivery::Close(session));
             continue;
         };
         *request_id = proxy_value;
         let Ok(proxy_line) = serde_json::to_string(&notification) else {
-            failed.push(session);
+            deliveries.push(Delivery::Close(session));
             continue;
         };
-        if sender.try_send(proxy_line).is_err() {
-            failed.push(session);
-        }
-    }
-    for session in failed {
-        remove_session_locked(state, session);
+        deliveries.push(Delivery::Send(session, proxy_line));
     }
     true
 }
@@ -357,7 +415,7 @@ fn allocate_session_id(state: &mut State) -> SessionId {
 
 /// Return a JSON value, not a bare string, because it is inserted into the
 /// top-level JSON-RPC id field.
-fn allocate_proxy_id(state: &mut State) -> String {
+fn allocate_proxy_id(state: &mut Routing) -> String {
     loop {
         let id = state.next_proxy_id;
         state.next_proxy_id = state.next_proxy_id.checked_add(1).unwrap_or(1);
@@ -386,18 +444,111 @@ fn close_session_state(state: &Weak<Mutex<State>>, session: SessionId) {
 
 fn remove_session_locked(state: &mut State, session: SessionId) {
     state.sessions.remove(&session);
-    for pending in state.pending.values_mut() {
-        pending.proxies.remove(&session);
-    }
-    state
-        .proxy_to_upstream
-        .retain(|key, _| key.session != session);
+    state.routing = std::mem::take(&mut state.routing).close(session);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use agent_core::peer::raw_object;
+
+    #[test]
+    fn routing_decisions_are_reproducible_without_queues_or_a_runtime() {
+        let request =
+            RpcMessage::parse(r#"{"id":17,"method":"request","params":{"future":true}}"#).unwrap();
+        let (routing, deliveries) = Routing::default().message(&request, [3, 9].into_iter());
+        let (_, repeated) = Routing::default().message(&request, [3, 9].into_iter());
+        assert_eq!(deliveries, repeated);
+        assert_eq!(deliveries.len(), 2);
+        let ids: Vec<_> = deliveries
+            .iter()
+            .map(|delivery| {
+                let Delivery::Send(session, line) = delivery else {
+                    panic!("valid request closes no session")
+                };
+                (
+                    *session,
+                    RpcMessage::parse(line)
+                        .unwrap()
+                        .raw_id()
+                        .unwrap()
+                        .to_owned(),
+                )
+            })
+            .collect();
+        let (routing, first) = routing.respond(ids[0].0, &ids[0].1);
+        assert_eq!(first, ResponseRoute::Forward("17".into()));
+        let (routing, second) = routing.respond(ids[1].0, &ids[1].1);
+        assert_eq!(second, ResponseRoute::Unknown);
+        assert!(routing.pending["17"].response_claimed);
+        assert_eq!(routing.pending["17"].proxies.len(), 2);
+        let resolved =
+            RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"requestId":17}}"#)
+                .unwrap();
+        let (routing, deliveries) = routing.message(&resolved, [3, 9].into_iter());
+        assert!(routing.pending.is_empty());
+        assert!(routing.proxy_to_upstream.is_empty());
+        assert_eq!(deliveries.len(), 2);
+        for delivery in deliveries {
+            let Delivery::Send(session, line) = delivery else {
+                panic!("resolution must be delivered")
+            };
+            let notification: Value = serde_json::from_str(&line).unwrap();
+            let id = &ids.iter().find(|(id, _)| *id == session).unwrap().1;
+            assert_eq!(
+                notification["params"]["requestId"],
+                serde_json::from_str::<Value>(id).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_delivery_removes_aliases_and_retains_requests_for_reconnect() {
+        let router = SessionRouter::new();
+        let mut slow = router.open_session(1);
+        let mut healthy = router.open_session(4);
+        let notification = r#"{"method":"event","params":{}}"#;
+        router.handle_server_message(&RpcMessage::parse(notification).unwrap());
+        router.handle_server_message(
+            &RpcMessage::parse(r#"{"id":8,"method":"request","params":{}}"#).unwrap(),
+        );
+        assert!(router.ensure_session(slow.id()).is_err());
+        assert!(router.ensure_session(healthy.id()).is_ok());
+        assert_eq!(slow.receiver.try_recv().unwrap(), notification);
+        assert!(matches!(
+            slow.receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert_eq!(healthy.receiver.try_recv().unwrap(), notification);
+        let delivered = healthy.receiver.try_recv().unwrap();
+        let old_id = RpcMessage::parse(&delivered)
+            .unwrap()
+            .raw_id()
+            .unwrap()
+            .to_owned();
+        let mut reconnected = router.open_session(4);
+        let replay = reconnected.receiver.try_recv().unwrap();
+        let replay_id = RpcMessage::parse(&replay)
+            .unwrap()
+            .raw_id()
+            .unwrap()
+            .to_owned();
+        assert_ne!(old_id, replay_id);
+        assert!(
+            !lock_state(&router.state).routing.pending["8"]
+                .proxies
+                .contains_key(&slow.id())
+        );
+        assert_eq!(
+            router.resolve_response(reconnected.id(), &replay_id),
+            ResponseRoute::Forward("8".into())
+        );
+        assert_eq!(
+            router.resolve_response(healthy.id(), &old_id),
+            ResponseRoute::Unknown
+        );
+        assert!(router.open_session(4).receiver.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn server_requests_get_unique_ids_and_first_response_wins() {

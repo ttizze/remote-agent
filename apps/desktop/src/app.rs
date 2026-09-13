@@ -35,22 +35,36 @@ use std::{
     sync::Arc,
 };
 
-type UiEffect = Box<dyn FnOnce(&mut Desktop, &mut Window, &mut Context<Desktop>) + Send>;
-enum Update {
-    Connected {
-        epoch: u64,
-        result: Result<(StoreSession, PathBuf), String>,
+enum OperationCompletion {
+    Refresh,
+    Busy,
+    Download,
+    Composer(u64),
+    Editor(u64),
+    History {
+        generation: u64,
     },
-    Snapshot(u64),
-    Ui {
-        epoch: u64,
-        effect: UiEffect,
+    Item {
+        generation: u64,
+        key: (String, String),
+    },
+    WorktreeSettings,
+    Request(String),
+    Dictation(uuid::Uuid),
+    RemoveWorktree,
+    Gallery(uuid::Uuid),
+}
+enum Update {
+    Connected(Result<(StoreSession, PathBuf), String>),
+    Snapshot,
+    Completed(OperationCompletion, Result<Outcome, String>),
+    Folder(Result<Option<PathBuf>, String>),
+    Image {
+        key: String,
+        result: Result<String, String>,
     },
     Recording(uuid::Uuid, platform::RecordingEvent),
-    PersistenceError {
-        epoch: u64,
-        error: String,
-    },
+    PersistenceError(String),
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -149,7 +163,7 @@ pub(crate) struct Desktop {
     session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     runtime: Runtime,
-    updates: async_channel::Sender<Update>,
+    updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
     connecting: bool,
     remote: Option<RemoteHost>,
@@ -310,15 +324,7 @@ impl Desktop {
                                 thread_id: view.draft_key().into(),
                                 text: value.to_string(),
                             },
-                            move |view, result, window, cx| {
-                                if view.composer_pending == Some(revision) {
-                                    view.composer_pending = None;
-                                }
-                                if let Err(error) = result {
-                                    view.set_error(error);
-                                }
-                                view.accept_snapshot(window, cx);
-                            },
+                            OperationCompletion::Composer(revision),
                         );
                     }
                     cx.notify();
@@ -339,15 +345,7 @@ impl Desktop {
                                 path,
                                 text: value.to_string(),
                             },
-                            move |view, result, window, cx| {
-                                if view.editor_pending == Some(revision) {
-                                    view.editor_pending = None;
-                                }
-                                if let Err(error) = result {
-                                    view.set_error(error);
-                                }
-                                view.accept_snapshot(window, cx);
-                            },
+                            OperationCompletion::Editor(revision),
                         );
                     }
                 }
@@ -565,21 +563,18 @@ impl Desktop {
                         Ok(store),
                         runtime,
                         updates,
-                        move |session| Update::Connected {
-                            epoch,
-                            result: session.map(|session| (session, path)),
+                        move |session| {
+                            (
+                                epoch,
+                                Update::Connected(session.map(|session| (session, path))),
+                            )
                         },
-                        move |_| Update::Snapshot(epoch),
+                        move |_| (epoch, Update::Snapshot),
                     )
                     .await;
                 }
                 Err(error) => {
-                    let _ = updates
-                        .send(Update::Connected {
-                            epoch,
-                            result: Err(error),
-                        })
-                        .await;
+                    let _ = updates.send((epoch, Update::Connected(Err(error)))).await;
                 }
             }
         });
@@ -587,54 +582,44 @@ impl Desktop {
     fn effect<T: Send + 'static>(
         &self,
         future: impl Future<Output = Result<T, String>> + Send + 'static,
-        apply: impl FnOnce(&mut Self, Result<T, String>, &mut Window, &mut Context<Self>)
-        + Send
-        + 'static,
+        complete: impl FnOnce(Result<T, String>) -> Update + Send + 'static,
     ) {
         let epoch = self.epoch;
         let updates = self.updates.clone();
         self.runtime.handle.spawn(async move {
-            let result = future.await;
-            let effect = Box::new(
-                move |view: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
-                    apply(view, result, window, cx)
-                },
-            );
-            let _ = updates.send(Update::Ui { epoch, effect }).await;
+            let completion = complete(future.await);
+            let _ = updates.send((epoch, completion)).await;
         });
     }
-    fn perform(
-        &self,
-        intent: Intent,
-        apply: impl FnOnce(&mut Self, Result<Outcome, String>, &mut Window, &mut Context<Self>)
-        + Send
-        + 'static,
-    ) {
+    fn perform(&self, intent: Intent, completion: OperationCompletion) {
         let Some(store) = self.session.as_ref().map(|session| &session.store) else {
             return;
         };
         let receipt = store.dispatch(intent);
         self.effect(
             async move { receipt.await.map_err(|error| error.to_string()) },
-            apply,
+            move |result| Update::Completed(completion, result),
         );
     }
     fn dispatch(&self, intent: Intent) {
-        self.perform(intent, |view, result, window, cx| {
-            if let Err(error) = result {
-                view.set_error(error);
-            }
-            view.accept_snapshot(window, cx);
-        });
+        self.perform(intent, OperationCompletion::Refresh);
     }
-    fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
+    fn receive(
+        &mut self,
+        (epoch, update): (u64, Update),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if epoch != self.epoch {
+            return;
+        }
         match update {
-            Update::Connected { epoch, result } if epoch == self.epoch => {
+            Update::Connected(result) => {
                 self.connecting = false;
                 match result {
                     Ok((mut session, path)) => {
                         session.persist(path, self.updates.clone(), move |error| {
-                            Update::PersistenceError { epoch, error }
+                            (epoch, Update::PersistenceError(error))
                         });
                         self.session = Some(session);
                         self.accept_snapshot(window, cx);
@@ -652,15 +637,178 @@ impl Desktop {
                     Err(error) => self.set_error(error),
                 }
             }
-            Update::Snapshot(epoch) if epoch == self.epoch => self.accept_snapshot(window, cx),
-            Update::Ui { epoch, effect } if epoch == self.epoch => effect(self, window, cx),
+            Update::Snapshot => self.accept_snapshot(window, cx),
+            Update::Completed(kind, result) => self.operation_completed(kind, result, window, cx),
             Update::Recording(id, event) => self.recording_update(id, event, window, cx),
-            Update::PersistenceError { epoch, error } if epoch == self.epoch => {
-                self.set_error(error)
+            Update::PersistenceError(error) => self.set_error(error),
+            Update::Folder(result) => {
+                self.busy = self.busy.saturating_sub(1);
+                match result {
+                    Ok(Some(path)) => self.new_chat(path.to_string_lossy().into_owned()),
+                    Ok(None) => {}
+                    Err(error) => self.set_error(error),
+                }
             }
-            _ => {}
+            Update::Image { key, result } => {
+                if let Some(image) = self.images.get_mut(&key) {
+                    match result {
+                        Ok(path) => {
+                            image.path = Some(if Path::new(&path).is_absolute() {
+                                PathBuf::from(path).into()
+                            } else {
+                                ImageSource::from(path)
+                            })
+                        }
+                        Err(error) => {
+                            agent_core::diagnostics::error("image.load", &error);
+                            image.error = Some(error);
+                        }
+                    }
+                }
+                self.list.remeasure();
+            }
         }
         cx.notify();
+    }
+    fn operation_completed(
+        &mut self,
+        kind: OperationCompletion,
+        result: Result<Outcome, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            OperationCompletion::Composer(revision) => {
+                if self.composer_pending == Some(revision) {
+                    self.composer_pending = None;
+                }
+            }
+            OperationCompletion::Editor(revision) => {
+                if self.editor_pending == Some(revision) {
+                    self.editor_pending = None;
+                }
+            }
+            OperationCompletion::Busy => {
+                self.busy = self.busy.saturating_sub(1);
+            }
+            OperationCompletion::History { generation } => {
+                if self.snapshot.epoch != generation {
+                    return;
+                }
+                self.accept_snapshot(window, cx);
+                self.history_loading = false;
+                if let Err(error) = result {
+                    self.history_error = error;
+                }
+                self.list.remeasure_items(0..1);
+                return;
+            }
+            OperationCompletion::Item { generation, key } => {
+                if self.snapshot.epoch != generation {
+                    return;
+                }
+                self.item_details.insert(
+                    key.clone(),
+                    DetailLoad {
+                        loading: false,
+                        error: result.err(),
+                    },
+                );
+                self.accept_snapshot(window, cx);
+                self.remeasure_item(&key.0);
+                return;
+            }
+            OperationCompletion::WorktreeSettings => {
+                self.worktree_saving = false;
+                if let Err(error) = result {
+                    self.set_error(error);
+                }
+                self.accept_snapshot(window, cx);
+                self.worktree_dirty = !self.settings_match_inputs(cx);
+                self.worktree_saved = !self.worktree_dirty;
+                if std::mem::take(&mut self.worktree_save_pending) {
+                    self.save_worktree_settings(None, cx);
+                }
+                return;
+            }
+            OperationCompletion::Request(key) => {
+                if let Err(error) = result {
+                    self.set_error(error);
+                    if let Some(inputs) = self.requests.get_mut(&key) {
+                        inputs.sent = false;
+                    }
+                }
+                self.accept_snapshot(window, cx);
+                self.list.remeasure();
+                return;
+            }
+            OperationCompletion::Download => {
+                self.busy = self.busy.saturating_sub(1);
+                if let Err(error) = result {
+                    self.set_error(error);
+                }
+                return;
+            }
+            OperationCompletion::Refresh => {}
+            OperationCompletion::RemoveWorktree => {
+                self.worktree_busy = false;
+                match result {
+                    Ok(_) => self.worktree_removal = None,
+                    Err(error) => {
+                        self.set_error(error);
+                        self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
+                    }
+                }
+                self.accept_snapshot(window, cx);
+                return;
+            }
+            OperationCompletion::Dictation(id) => {
+                if self.dictation.as_ref().is_some_and(|state| state.id == id) {
+                    self.dictation = None;
+                }
+            }
+            OperationCompletion::Gallery(id) => {
+                let Some(gallery) = self
+                    .image_gallery
+                    .as_mut()
+                    .filter(|gallery| gallery.id == id)
+                else {
+                    return;
+                };
+                gallery.loading = false;
+                match result {
+                    Ok(Outcome::SessionImages { images }) => {
+                        let initial = gallery.current_image().clone();
+                        let mut seen = HashSet::new();
+                        let entries: Vec<_> = images
+                            .into_iter()
+                            .filter_map(|image| {
+                                let entry = (Arc::new(image.source), image.encoded);
+                                seen.insert(entry.clone()).then_some(entry)
+                            })
+                            .collect();
+                        gallery.selected = entries.iter().position(|entry| entry == &initial);
+                        gallery
+                            .list
+                            .splice(0..gallery.list.item_count(), entries.len());
+                        gallery.entries = entries;
+                        if let Some(index) = gallery.selected {
+                            gallery.list.scroll_to_reveal_item(index);
+                        }
+                    }
+                    Err(error) => {
+                        agent_core::diagnostics::error("gallery.load", &error);
+                        gallery.error = error;
+                    }
+                    _ => unreachable!("session image outcome"),
+                }
+                return;
+            }
+        }
+        if let Err(error) = result {
+            self.set_error(error);
+        }
+        self.accept_snapshot(window, cx);
     }
     fn accept_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(store) = self.session.as_ref().map(|session| &session.store) else {
@@ -917,23 +1065,7 @@ impl Desktop {
             .flat_map(|turn| turn.items.as_deref().unwrap_or_default())
             .filter(|item| item.kind.as_deref() == Some("userMessage"))
     }
-    fn pending_rows(&self) -> impl Iterator<Item = (&String, &Arc<PendingSubmission>)> {
-        self.snapshot
-            .pending_submissions
-            .iter()
-            .filter(move |(_, pending)| pending.draft_key == self.draft_key())
-    }
-    fn visible_requests(&self) -> impl Iterator<Item = (&String, &Arc<ServerRequest>)> {
-        self.snapshot.requests.iter().filter(|(_, request)| {
-            request
-                .params
-                .get("threadId")
-                .and_then(Value::as_str)
-                .is_none_or(|id| id == self.selected())
-        })
-    }
     fn sync_rows(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let mut rows = Vec::new();
         self.rendered = self.thread().map(|thread| {
             agent_core::presentation::conversation::project_conversation(
                 &self.snapshot,
@@ -941,41 +1073,7 @@ impl Desktop {
                 &self.rendered,
             )
         });
-        if let Some(rendered) = &self.rendered {
-            rows.push(ConversationRow::History);
-            rows.extend(rendered.turns.iter().cloned().map(ConversationRow::Turn));
-        }
-        if let Some(rendered) = &self.rendered {
-            rows.extend(rendered.queued.iter().filter_map(|item| {
-                if let agent_core::presentation::conversation::ItemSource::Pending(id, pending) =
-                    &item.source
-                {
-                    Some(ConversationRow::Pending(id.clone(), pending.clone()))
-                } else {
-                    None
-                }
-            }));
-        } else {
-            rows.extend(
-                self.pending_rows()
-                    .map(|(id, pending)| ConversationRow::Pending(id.clone(), pending.clone())),
-            );
-        }
-        let projected_requests: HashSet<_> = self
-            .rendered
-            .iter()
-            .flat_map(|conversation| &conversation.turns)
-            .flat_map(|turn| &turn.rows)
-            .filter_map(|row| match &row.content {
-                ConversationRowContent::PendingRequest { request } => Some(request.key.as_str()),
-                _ => None,
-            })
-            .collect();
-        rows.extend(
-            self.visible_requests()
-                .filter(|(id, _)| !projected_requests.contains(id.as_str()))
-                .map(|(id, request)| ConversationRow::Request(id.clone(), request.clone())),
-        );
+        let rows = conversation_rows(&self.snapshot, &self.rendered);
         if reset {
             self.list.reset(rows.len());
             self.list.scroll_to_end();
@@ -1081,13 +1179,7 @@ impl Desktop {
         self.busy += 1;
         self.perform(
             Intent::ReadThread(op::ReadThread::open(id)),
-            |view, result, window, cx| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.set_error(error);
-                }
-                view.accept_snapshot(window, cx);
-            },
+            OperationCompletion::Busy,
         );
     }
     fn older(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -1103,17 +1195,7 @@ impl Desktop {
         self.list.remeasure_items(0..1);
         self.perform(
             Intent::ReadOlder(op::ReadOlder::new(self.selected().into(), turn_id, cursor)),
-            move |view, result, window, cx| {
-                if view.snapshot.epoch != generation {
-                    return;
-                }
-                view.accept_snapshot(window, cx);
-                view.history_loading = false;
-                if let Err(error) = result {
-                    view.history_error = error;
-                }
-                view.list.remeasure_items(0..1);
-            },
+            OperationCompletion::History { generation },
         );
         cx.notify();
     }
@@ -1149,20 +1231,7 @@ impl Desktop {
                 turn_id,
                 item_id,
             }),
-            move |view, result, window, cx| {
-                if view.snapshot.epoch != generation {
-                    return;
-                }
-                view.item_details.insert(
-                    key.clone(),
-                    DetailLoad {
-                        loading: false,
-                        error: result.err(),
-                    },
-                );
-                view.accept_snapshot(window, cx);
-                view.remeasure_item(&key.0);
-            },
+            OperationCompletion::Item { generation, key },
         );
     }
     fn switch_host(
@@ -1229,13 +1298,7 @@ impl Desktop {
                 thread_id: None,
                 client_user_message_id: uuid::Uuid::new_v4().to_string(),
             },
-            |view, result, window, cx| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.set_error(error);
-                }
-                view.accept_snapshot(window, cx);
-            },
+            OperationCompletion::Busy,
         );
     }
     fn quote_selection(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1294,13 +1357,7 @@ impl Desktop {
                     .await
                     .map_err(|error| error.to_string())
             },
-            |view, result, window, cx| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.set_error(error);
-                }
-                view.accept_snapshot(window, cx);
-            },
+            |result| Update::Completed(OperationCompletion::Busy, result),
         );
         cx.notify();
     }
@@ -1366,14 +1423,7 @@ impl Desktop {
                     .await
                     .map_err(|error| error.to_string())
             },
-            |view, result, _, _| {
-                view.busy = view.busy.saturating_sub(1);
-                match result {
-                    Ok(Some(path)) => view.new_chat(path.to_string_lossy().into_owned()),
-                    Ok(None) => {}
-                    Err(error) => view.set_error(error),
-                }
-            },
+            Update::Folder,
         );
     }
     fn composer_enter(
@@ -1475,15 +1525,9 @@ impl Desktop {
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                Ok(())
+                Ok(Outcome::Applied)
             },
-            |view, result, window, cx| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.set_error(error);
-                }
-                view.accept_snapshot(window, cx);
-            },
+            |result| Update::Completed(OperationCompletion::Busy, result),
         );
     }
     fn download(&mut self, source: String) {
@@ -1514,14 +1558,9 @@ impl Desktop {
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                Ok(())
+                Ok(Outcome::Applied)
             },
-            |view, result, _, _| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.set_error(error);
-                }
-            },
+            |result| Update::Completed(OperationCompletion::Download, result),
         );
     }
     fn browse(&mut self, path: String) {
@@ -1543,13 +1582,7 @@ impl Desktop {
         self.busy += 1;
         self.perform(
             Intent::SaveFile(op::SaveFile { path }),
-            |view, result, window, cx| {
-                view.busy = view.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    view.set_error(error);
-                }
-                view.accept_snapshot(window, cx);
-            },
+            OperationCompletion::Busy,
         );
     }
     fn settings_match_inputs(&self, cx: &App) -> bool {
@@ -1602,18 +1635,7 @@ impl Desktop {
         self.worktree_saved = false;
         self.perform(
             Intent::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings }),
-            |view, result, window, cx| {
-                view.worktree_saving = false;
-                if let Err(error) = result {
-                    view.set_error(error);
-                }
-                view.accept_snapshot(window, cx);
-                view.worktree_dirty = !view.settings_match_inputs(cx);
-                view.worktree_saved = !view.worktree_dirty;
-                if std::mem::take(&mut view.worktree_save_pending) {
-                    view.save_worktree_settings(None, cx);
-                }
-            },
+            OperationCompletion::WorktreeSettings,
         );
     }
     fn respond(&mut self, key: String, id: Value, answer: Answer) {
@@ -1625,19 +1647,68 @@ impl Desktop {
                 request_id: id,
                 answer,
             }),
-            move |view, result, window, cx| {
-                if let Err(error) = result {
-                    view.set_error(error);
-                    if let Some(inputs) = view.requests.get_mut(&key) {
-                        inputs.sent = false;
-                    }
-                }
-                view.accept_snapshot(window, cx);
-                view.list.remeasure();
-            },
+            OperationCompletion::Request(key),
         );
     }
 }
+fn pending_rows(snapshot: &Snapshot) -> impl Iterator<Item = (&String, &Arc<PendingSubmission>)> {
+    snapshot
+        .pending_submissions
+        .iter()
+        .filter(|(_, pending)| pending.draft_key == snapshot.navigation.draft_key)
+}
+
+fn conversation_rows(
+    snapshot: &Snapshot,
+    rendered: &Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
+) -> Vec<ConversationRow> {
+    let mut rows = Vec::new();
+    if let Some(rendered) = rendered {
+        rows.push(ConversationRow::History);
+        rows.extend(rendered.turns.iter().cloned().map(ConversationRow::Turn));
+        rows.extend(rendered.queued.iter().filter_map(|item| {
+            if let agent_core::presentation::conversation::ItemSource::Pending(id, pending) =
+                &item.source
+            {
+                Some(ConversationRow::Pending(id.clone(), pending.clone()))
+            } else {
+                None
+            }
+        }));
+    } else {
+        rows.extend(
+            pending_rows(snapshot)
+                .map(|(id, pending)| ConversationRow::Pending(id.clone(), pending.clone())),
+        );
+    }
+    let projected_requests: HashSet<_> = rendered
+        .iter()
+        .flat_map(|conversation| &conversation.turns)
+        .flat_map(|turn| &turn.rows)
+        .filter_map(|row| match &row.content {
+            ConversationRowContent::PendingRequest { request } => Some(request.key.as_str()),
+            _ => None,
+        })
+        .collect();
+    rows.extend(
+        snapshot
+            .requests
+            .iter()
+            .filter(|(_, request)| {
+                request
+                    .params
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| {
+                        id == snapshot.navigation.thread_id.as_deref().unwrap_or_default()
+                    })
+            })
+            .filter(|(id, _)| !projected_requests.contains(id.as_str()))
+            .map(|(id, request)| ConversationRow::Request(id.clone(), request.clone())),
+    );
+    rows
+}
+
 fn toggle_set(set: &mut HashSet<String>, key: &str) {
     if !set.remove(key) {
         set.insert(key.into());
@@ -1763,5 +1834,183 @@ mod error_tests {
             Some("disconnected"),
         );
         assert_eq!(banner, "disconnected");
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::{
+        Arc, Context, ConversationRow, Desktop, Mode, OperationCompletion, Outcome, Snapshot,
+        Thread, Update, Window, conversation_rows,
+    };
+    use gpui_kit as gpui;
+    use gpui_kit::TestAppContext;
+
+    #[gpui::test]
+    fn completion_messages_preserve_newer_host_navigation_and_input(cx: &mut TestAppContext) {
+        // Do not drive this runtime: this test exercises UI result delivery, not provisioning.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::new(crate::platform::Connections::default()),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let view = cx.add_window(|window, cx| {
+            Desktop::new(
+                Mode::SideChat {
+                    remote: None,
+                    cwd: "/fixture".into(),
+                },
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |view, window, cx| {
+            view.epoch = 3;
+            Arc::make_mut(&mut view.snapshot).epoch = 5;
+            view.busy = 2;
+            view.composer_pending = Some(9);
+            view.editor_pending = Some(12);
+            view.history_loading = true;
+            let deliver = |view: &mut Desktop,
+                           host,
+                           kind,
+                           result,
+                           window: &mut Window,
+                           cx: &mut Context<Desktop>| {
+                view.receive((host, Update::Completed(kind, result)), window, cx);
+            };
+            deliver(
+                view,
+                2,
+                OperationCompletion::Busy,
+                Err("obsolete host".into()),
+                window,
+                cx,
+            );
+            assert_eq!(view.busy, 2);
+            assert!(view.error.is_empty());
+            deliver(
+                view,
+                3,
+                OperationCompletion::Composer(8),
+                Ok(Outcome::Applied),
+                window,
+                cx,
+            );
+            deliver(
+                view,
+                3,
+                OperationCompletion::Editor(11),
+                Ok(Outcome::Applied),
+                window,
+                cx,
+            );
+            assert_eq!(view.composer_pending, Some(9));
+            assert_eq!(view.editor_pending, Some(12));
+            deliver(
+                view,
+                3,
+                OperationCompletion::History { generation: 4 },
+                Err("obsolete history".into()),
+                window,
+                cx,
+            );
+            assert!(view.history_loading);
+            assert!(view.history_error.is_empty());
+            deliver(
+                view,
+                3,
+                OperationCompletion::History { generation: 5 },
+                Err("history failed".into()),
+                window,
+                cx,
+            );
+            assert!(!view.history_loading);
+            assert_eq!(view.history_error, "history failed");
+            deliver(
+                view,
+                3,
+                OperationCompletion::Composer(9),
+                Ok(Outcome::Applied),
+                window,
+                cx,
+            );
+            deliver(
+                view,
+                3,
+                OperationCompletion::Editor(12),
+                Ok(Outcome::Applied),
+                window,
+                cx,
+            );
+            assert_eq!(view.composer_pending, None);
+            assert_eq!(view.editor_pending, None);
+            deliver(
+                view,
+                3,
+                OperationCompletion::Busy,
+                Ok(Outcome::Applied),
+                window,
+                cx,
+            );
+            assert_eq!(view.busy, 1);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn row_projection_keeps_repeated_turns_and_scopes_requests_without_changing_input() {
+        let source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({
+            "id": "selected", "turns": [
+                {"id": "repeated", "items": [{"id":"first", "type":"agentMessage", "text":"first answer"}]},
+                {"id": "repeated", "items": [{"id":"second", "type":"agentMessage", "text":"second answer"}]}
+            ]
+        })).unwrap());
+        let mut snapshot = Snapshot::default();
+        Arc::make_mut(&mut snapshot.navigation).thread_id = Some("selected".into());
+        for (key, params) in [
+            ("global", serde_json::json!({})),
+            ("other", serde_json::json!({"threadId":"other"})),
+        ] {
+            Arc::make_mut(&mut snapshot.requests).insert(
+                key.into(),
+                Arc::new(
+                    serde_json::from_value(
+                        serde_json::json!({"id":key,"method":"request","params":params}),
+                    )
+                    .unwrap(),
+                ),
+            );
+        }
+        let before = snapshot.clone();
+        let rendered = Some(
+            agent_core::presentation::conversation::project_conversation(
+                &snapshot,
+                source.clone(),
+                &None,
+            ),
+        );
+        let rows = conversation_rows(&snapshot, &rendered);
+        let repeated = conversation_rows(&snapshot, &rendered);
+        assert_eq!(rows.len(), 4);
+        assert!(matches!(rows[0], ConversationRow::History));
+        for (index, turn) in source.turns.as_ref().unwrap().iter().enumerate() {
+            let ConversationRow::Turn(row) = &rows[index + 1] else {
+                panic!("missing turn")
+            };
+            assert!(Arc::ptr_eq(&row.source, turn));
+        }
+        assert!(matches!(&rows[3], ConversationRow::Request(key, _) if key == "global"));
+        assert!(rows.iter().zip(&repeated).all(|(a, b)| a.unchanged(b)
+            || matches!((a, b), (ConversationRow::History, ConversationRow::History))));
+        assert_eq!(snapshot, before);
     }
 }

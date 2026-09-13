@@ -189,13 +189,7 @@ impl Desktop {
                             return;
                         }
                         view.busy += 1;
-                        view.perform(intent, |view, result, window, cx| {
-                            view.busy = view.busy.saturating_sub(1);
-                            if let Err(error) = result {
-                                view.set_error(error);
-                            }
-                            view.accept_snapshot(window, cx);
-                        });
+                        view.perform(intent, OperationCompletion::Busy);
                         cx.notify();
                     });
                 },
@@ -394,7 +388,7 @@ impl Desktop {
         .flex_1()
         .min_h_0();
         let mut body = v_flex().flex_1().min_w_0().h_full();
-        if self.thread().is_none() && self.pending_rows().next().is_none() {
+        if self.thread().is_none() && pending_rows(&self.snapshot).next().is_none() {
             body = body.child(
                 v_flex()
                     .flex_1()

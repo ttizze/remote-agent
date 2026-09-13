@@ -52,6 +52,7 @@ if [[ $# == 0 ]]; then
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorReopensCompletedHistoryCollapsed \
         testSimulatorKeepsEarlierAnswersBetweenFollowupsWhenReopening \
+        testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
         testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \

@@ -8,7 +8,7 @@ pub(super) enum Phase {
     Transcribing,
 }
 pub(super) struct Dictation {
-    id: uuid::Uuid,
+    pub(super) id: uuid::Uuid,
     key: String,
     generation: u64,
     pub(super) phase: Phase,
@@ -104,9 +104,14 @@ impl Desktop {
             Ok(control) => {
                 let id = uuid::Uuid::new_v4();
                 let updates = self.updates.clone();
+                let epoch = self.epoch;
                 self.runtime.handle.spawn(async move {
                     while let Ok(event) = incoming.recv().await {
-                        if updates.send(Update::Recording(id, event)).await.is_err() {
+                        if updates
+                            .send((epoch, Update::Recording(id, event)))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -179,15 +184,7 @@ impl Desktop {
                     send: state.send && state.generation == self.snapshot.epoch,
                     client_user_message_id: uuid::Uuid::new_v4().to_string(),
                 });
-                self.perform(intent, move |view, result, window, cx| {
-                    if view.dictation.as_ref().is_some_and(|state| state.id == id) {
-                        view.dictation = None;
-                    }
-                    if let Err(error) = result {
-                        view.set_error(error);
-                    }
-                    view.accept_snapshot(window, cx);
-                });
+                self.perform(intent, OperationCompletion::Dictation(id));
             }
         }
     }

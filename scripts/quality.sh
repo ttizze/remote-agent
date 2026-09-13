@@ -17,6 +17,7 @@ fi
 if [[ $language == all || $language == swift ]]; then
     swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/desktop/macos || failed=1
     swiftlint lint --strict || failed=1
+    just ios-markdown || failed=1
     just conversation-ui || failed=1
 fi
 python3 scripts/clean-builds.py || failed=1

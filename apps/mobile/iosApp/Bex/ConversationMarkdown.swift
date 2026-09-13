@@ -1,51 +1,32 @@
+import AgentCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Foundation parses block structure and inline Markdown; no HTML/web view is involved.
+/// Shared Markdown semantics render as native selectable content.
 struct ConversationMarkdown: View {
-    let blocks: [Part]
-    let model: BexAppViewModel
+    let blocks: [ConversationMarkdownContent.Part]
+    let media: ConversationMediaAccess
+    let selection: ConversationSelectionActions
+    @ScaledMetric(relativeTo: .body) private var tableColumnWidth = 220.0
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
     @State private var previewDirectory: URL?
     @State private var previewSource: String?
     @State private var linkError: String?
-    struct Block: Identifiable, Sendable, Equatable {
-        let id: Int
-        let content: AttributedString
-        let style: ParagraphStyle
-        let imageURL: URL?
-    }
-
-    struct Part: Identifiable, Sendable {
-        let id: Int
-        let blocks: [Block]
-        var image: Block? {
-            blocks.first.flatMap { $0.imageURL == nil ? nil : $0 }
-        }
-
-        var isCode: Bool {
-            blocks.first?.style.code == true
-        }
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             ForEach(blocks) { part in
-                if let block = part.image, let imageURL = block.imageURL {
-                    ConversationImage(
-                        source: imageURL.scheme == nil ? imageURL.path : imageURL.absoluteString,
-                        label: String(block.content.characters),
-                        identifier: "markdown.image.\(block.id)",
-                        model: model
-                    )
+                if !part.tableRows.isEmpty {
+                    table(part)
+                } else if let block = part.image, let imageURL = block.imageURL {
+                    image(block, url: imageURL)
                 } else if part.isCode {
                     ScrollView(.horizontal) {
-                        AssistantSelectableText(blocks: part.blocks, model: model)
+                        AssistantSelectableText(blocks: part.blocks, actions: selection)
                             .fixedSize(horizontal: true, vertical: false).padding(12)
                     }.background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 } else {
-                    AssistantSelectableText(blocks: part.blocks, model: model)
+                    AssistantSelectableText(blocks: part.blocks, actions: selection)
                 }
             }
             if let linkError {
@@ -60,7 +41,7 @@ struct ConversationMarkdown: View {
             }
             do {
                 linkError = nil
-                linkTarget = try conversationFileURL(url.absoluteString, cwd: model.cwd)
+                linkTarget = try conversationFileURL(url.absoluteString, cwd: media.cwd)
             } catch { linkError = "リンクを開けません: \(error.localizedDescription)" }
             return .handled
         })
@@ -73,8 +54,8 @@ struct ConversationMarkdown: View {
                 ConversationPreview(
                     url: url,
                     isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true,
-                    model: model,
-                    source: previewSource
+                    media: media,
+                    source: previewSource.map(SessionImage.init(reference:))
                 ) {
                     previewURL = nil
                 }
@@ -88,105 +69,59 @@ struct ConversationMarkdown: View {
         }
         .task(id: linkTarget) {
             guard let target = linkTarget else { return }
-            let host = model.selectedProfileId
-            let (downloaded, error) = await withCheckedContinuation { continuation in
-                model.download(target.path) { url, error in continuation.resume(returning: (url, error)) }
-            }
-            guard !Task.isCancelled, host == model.selectedProfileId else {
-                if let downloaded {
+            do {
+                let downloaded = try await media.download(target.path)
+                guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: downloaded.deletingLastPathComponent())
+                    return
                 }
-                return
-            }
-            if let downloaded {
                 previewDirectory = downloaded.deletingLastPathComponent()
                 previewSource = target.path
                 previewURL = downloaded
-            } else {
-                linkError = error ?? "ファイルを取得できません"
+            } catch {
+                if !Task.isCancelled {
+                    linkError = error.localizedDescription
+                }
             }
             linkTarget = nil
         }
     }
 
-    nonisolated static func parse(_ text: String) -> [Part] {
-        guard let document = try? AttributedString(markdown: text) else {
-            return [Part(
-                id: 0,
-                blocks: [Block(id: 0, content: AttributedString(text), style: ParagraphStyle([]), imageURL: nil)]
-            )]
-        }
-        var result: [Block] = []
-        var start: AttributedString.Index?
-        var end: AttributedString.Index?
-        var paragraphID: Int?
-        var imageURL: URL?
-        var style = ParagraphStyle([])
-        for run in document.runs {
-            let components = run.presentationIntent?.components ?? []
-            let identity = components.first?.identity ?? 0
-            if paragraphID == identity, imageURL == run.imageURL {
-                end = run.range.upperBound
-                continue
-            }
-            if let start, let end {
-                result.append(Block(id: result.count,
-                                    content: AttributedString(document[start ..< end]), style: style,
-                                    imageURL: imageURL))
-            }
-            start = run.range.lowerBound
-            end = run.range.upperBound
-            paragraphID = identity
-            imageURL = run.imageURL
-            style = ParagraphStyle(components)
-        }
-        if let start, let end {
-            result.append(Block(id: result.count,
-                                content: AttributedString(document[start ..< end]), style: style, imageURL: imageURL))
-        }
-        return parts(result)
+    private func image(_ block: ConversationMarkdownContent.Block, url: URL) -> some View {
+        ConversationImage(
+            source: SessionImage(reference: url.scheme == nil ? url.path : url.absoluteString),
+            label: block.runs.map(\.text).joined(),
+            identifier: "markdown.image.\(block.id)",
+            media: media
+        )
     }
 
-    private nonisolated static func parts(_ blocks: [Block]) -> [Part] {
-        var parts: [Part] = []
-        var paragraphs: [Block] = []
-        for block in blocks {
-            if block.imageURL != nil || block.style.code {
-                if let first = paragraphs.first {
-                    parts.append(Part(id: first.id, blocks: paragraphs))
-                    paragraphs.removeAll(keepingCapacity: true)
-                }
-                parts.append(Part(id: block.id, blocks: [block]))
-            } else {
-                paragraphs.append(block)
-            }
-        }
-        if let first = paragraphs.first {
-            parts.append(Part(id: first.id, blocks: paragraphs))
-        }
-        return parts
-    }
-
-    struct ParagraphStyle: Sendable, Equatable {
-        var header: Int?
-        var marker: String?
-        var code = false
-        var quoted = false
-
-        init(_ components: [PresentationIntent.IntentType]) {
-            var ordinal: Int?
-            var ordered = false
-            for component in components {
-                switch component.kind {
-                case let .header(level: level): header = level
-                case let .listItem(ordinal: number): ordinal = number
-                case .orderedList: ordered = true
-                case .codeBlock: code = true
-                case .blockQuote: quoted = true
-                default: break
+    private func table(_ part: ConversationMarkdownContent.Part) -> some View {
+        let rows = part.tableRows
+        return ScrollView(.horizontal) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(rows.indices, id: \.self) { row in
+                    HStack(alignment: .top, spacing: 0) {
+                        ForEach(rows[row].indices, id: \.self) { column in
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(rows[row][column]) { block in
+                                    if let url = block.imageURL {
+                                        image(block, url: url)
+                                    } else {
+                                        AssistantSelectableText(blocks: [block], actions: selection)
+                                    }
+                                }
+                            }
+                            .frame(width: tableColumnWidth)
+                            .padding(10)
+                            .accessibilityIdentifier("markdown.cell.\(part.id).\(row).\(column)")
+                        }
+                    }
+                    .background(row == 0 ? Color(UIColor.secondarySystemBackground) : Color.clear)
+                    Divider()
                 }
             }
-            marker = ordinal.map { ordered ? "\($0)." : "•" }
+            .overlay(Rectangle().stroke(Color(UIColor.separator), lineWidth: 0.5))
         }
     }
 }
