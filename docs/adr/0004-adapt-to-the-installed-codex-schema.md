@@ -17,6 +17,14 @@ The iPhone opts into this projection and requests a deferred body when its activ
 
 The mobile adapter obtains available models and supported reasoning strengths through paginated `model/list`; no model names are embedded in the client. Per-Host selections are sent as `model` on `host/thread/start` and as `model` / `effort` on `turn/start`. Steering and queueing retain their existing installed-Codex contracts and do not override a running turn. Catalog errors remain visible and can be retried.
 
+## Claude Code routing
+
+The Host appends the installed Claude Code catalog to the first `model/list` page, using `claude:<CLI model value>` to avoid collisions. Selecting it on `host/thread/start` creates a Host-owned `claude:<UUID>` conversation after the same workspace/worktree preparation as Codex. Requests for that conversation are never sent to the Codex App Server. Switching inference providers requires a new conversation.
+
+Claude runs as an unmodified `claude -p --input-format stream-json --output-format stream-json` subprocess. The Host performs the CLI initialize handshake, requires subscription authentication before sending input, and adapts its events into the existing Thread/Turn/Item presentation. Text and thinking blocks share Claude message IDs, so streaming block indices distinguish them; a completed block replaces its streamed body. Tool calls and results stay inspectable. Permission requests use the existing session router's per-client aliases and first-response semantics, then return to Claude's `can_use_tool` control callback. Credentials stay in Claude Code.
+
+Claude retains its native session transcript; the Host atomically persists its display records under its own state directory. Subsequent turns use the same session ID and cwd with `--resume`, including after restart. Unfinished persisted turns recover as interrupted, not completed. Model catalogs are cached until Host restart; failed catalog initialization can be retried. Claude steering/queueing and fork/delegation requests return explicit unsupported errors. No AGMSG dependency is added.
+
 ## An open conversation owned by another process
 
 `thread/read` does not subscribe to another Codex process’s notifications, and resuming its active thread can conflict with its writer lock. The mobile controller uses native events for threads loaded by the Host’s Codex process. For a selected `notLoaded` thread, `host/thread/watch` watches its rollout parent through OS filesystem notifications; it only reports changes for that conversation to the requesting authenticated session. `host/thread/unwatch`, navigation and disconnect release the watch. Monotonic watch IDs prevent delayed registration/cancellation from replacing a newer watch.
@@ -31,3 +39,9 @@ The mobile controller coalesces change bursts into a quiet history refresh. The 
 Installed Codex can acknowledge `turn/steer` before emitting its user-message item. The mobile controller supplies `clientUserMessageId` for start, steer and queue requests and records the accepted body after a successful acknowledgement. These receipts are separate from native turn items, survive display-cache serialization and stale history reads, and disappear only when a native user message with the same `clientId` arrives. An echo that precedes the acknowledgement creates no receipt; equal text with different client IDs remains separate. Failed sends keep the composer draft and create no accepted receipt.
 
 The receipt retains the actual turn ID and the preceding native item ID for placement. Presentation splits a native turn at each user message so additional inputs follow the preceding work. Segment display IDs remain separate from the actual turn ID used for interruption and item-detail requests. Queued receipts without a turn ID render after the current history until their matching native item arrives.
+
+## Independent provider lifetime
+
+`HostRpcService` owns routing and client sessions. Codex startup is optional and its event pump stops only that provider. On Codex exit, active Codex turns fail, terminal sessions receive `host/terminal/failed` without inventing an exit code, and only its pending requests resolve; Claude approvals and authenticated connections remain intact. Model and conversation lists merge available providers and expose `providerErrors`; an incomplete model catalog preserves saved selections. Worktree deletion fails closed when Codex activity is unavailable. iOS model choices are independent of the Codex account list.
+
+Acceptance coverage includes `missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable`, `codex_exit_preserves_claude_approval_and_completes_after_reconnect`, `upstream_exit_keeps_host_management_connected`, the core incomplete-catalog restoration test, and `testSimulatorUsesClaudeWithoutCodexAndRestoresConversation` (`just ios-e2e --without-codex` with that selector).

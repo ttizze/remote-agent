@@ -19,13 +19,13 @@ pub(crate) enum ResponseRoute {
 }
 
 /// A live authenticated session's bounded outbound queue.
-pub struct CodexSession {
+pub struct HostSession {
     id: SessionId,
     receiver: mpsc::Receiver<String>,
     state: Weak<Mutex<State>>,
 }
 
-impl CodexSession {
+impl HostSession {
     pub fn id(&self) -> SessionId {
         self.id
     }
@@ -35,22 +35,22 @@ impl CodexSession {
     }
 }
 
-impl fmt::Debug for CodexSession {
+impl fmt::Debug for HostSession {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("CodexSession")
+            .debug_struct("HostSession")
             .field("id", &self.id)
             .finish_non_exhaustive()
     }
 }
 
-impl Drop for CodexSession {
+impl Drop for HostSession {
     fn drop(&mut self) {
         close_session_state(&self.state, self.id);
     }
 }
 
-/// Owns bounded session queues and aliases used for Codex server requests.
+/// Owns bounded session queues and aliases used for backend server requests.
 #[derive(Clone)]
 pub(crate) struct SessionRouter {
     state: Arc<Mutex<State>>,
@@ -95,8 +95,8 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn open_session(&self, capacity: usize) -> CodexSession {
-        assert!(capacity > 0, "a Codex session queue must have capacity");
+    pub(crate) fn open_session(&self, capacity: usize) -> HostSession {
+        assert!(capacity > 0, "a Host session queue must have capacity");
         let (sender, receiver) = mpsc::channel(capacity);
         let mut state = lock_state(&self.state);
         let id = allocate_session_id(&mut state);
@@ -131,7 +131,7 @@ impl SessionRouter {
             );
         }
 
-        CodexSession {
+        HostSession {
             id,
             receiver,
             state: Arc::downgrade(&self.state),
@@ -142,13 +142,20 @@ impl SessionRouter {
         remove_session_locked(&mut lock_state(&self.state), session);
     }
 
-    /// Close phones but retain unresolved Codex requests for later replay.
-    pub(crate) fn close_all(&self) {
+    /// Resolve only requests belonging to the stopped Codex backend. Claude
+    /// approvals and authenticated client connections remain live.
+    pub(crate) fn resolve_codex_requests(&self) {
         let mut state = lock_state(&self.state);
-        state.sessions.clear();
-        state.proxy_to_upstream.clear();
-        for pending in state.pending.values_mut() {
-            pending.proxies.clear();
+        let ids: Vec<_> = state
+            .pending
+            .keys()
+            .filter(|id| !crate::claude::is_permission_id(id))
+            .cloned()
+            .collect();
+        for id in ids {
+            let notification =
+                format!(r#"{{"method":"serverRequest/resolved","params":{{"requestId":{id}}}}}"#);
+            fanout_resolved_request_locked(&mut state, &id, &notification);
         }
     }
 
@@ -180,7 +187,7 @@ impl SessionRouter {
         }
     }
 
-    /// Fan out a raw Codex notification or server request. Notifications are
+    /// Fan out a backend notification or server request. Notifications are
     /// sent unchanged; server requests get one unique id per phone.
     pub(crate) fn handle_server_message(&self, message: &RpcMessage<'_>) {
         let line = message.line();
@@ -196,13 +203,12 @@ impl SessionRouter {
             }
             RpcMessageKind::Request => fanout_request_locked(&mut state, message),
             RpcMessageKind::Response => {
-                // Responses are consumed by CodexAppServer's own peer and are
-                // not expected on its event broadcast.
+                // Responses are consumed by the backend adapter before dispatch.
             }
         }
     }
 
-    /// First valid response wins. Retain aliases until Codex resolves the request
+    /// First valid response wins. Retain aliases until the backend resolves the request
     /// so every device receives its own proxy id, but stop accepting/replaying it.
     pub(crate) fn resolve_response(&self, session: SessionId, id: &str) -> ResponseRoute {
         let mut state = lock_state(&self.state);
@@ -292,7 +298,7 @@ fn resolved_server_request_id(message: &RpcMessage<'_>) -> Option<String> {
     serde_json::to_string(message.params::<Value>().ok()?.get("requestId")?).ok()
 }
 
-/// Codex identifies a resolved request with its upstream id. Each phone only
+/// A backend identifies a resolved request with its upstream id. Each phone only
 /// knows its session-local proxy id, so fan out one correlated notification
 /// per session and retire the replayable pending request atomically.
 fn fanout_resolved_request_locked(state: &mut State, upstream_id: &str, line: &str) -> bool {

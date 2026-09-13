@@ -6,6 +6,15 @@ that bundle on 2026-08-25. The turn lifecycle and selection contracts below
 record Bex's current product requirements, updated on 2026-09-11; the original
 reference app's behavior does not override them. It is not a second wire protocol.
 
+Claude Code conversations use the same lifecycle, activity, draft and error
+contracts through the Host adapter. Streamed and completed blocks replace by
+stable block ID, so thinking cannot overwrite text and final text is not
+duplicated. Approvals and questions remain actionable after reconnect. Failed
+submission retains the draft; retry clears the previous submission notice.
+Switching between Claude and Codex requires a new conversation. Claude does not
+yet support active-turn steering or fork-based side chats; those requests fail
+explicitly instead of creating a Codex conversation or dropping the draft.
+
 ## Turn lifecycle
 
 | Input state | Expanded work | Header / divider | Transition |
@@ -252,3 +261,5 @@ Desktop file-change headers and patches, and the mobile expanded text, read
 `presentation::body::file_changes`. The wire model stores `changes` as a named
 field, so it must never be looked up in `Item::extra`. Deferred items retain
 file headers while their diff bodies are fetched separately.
+
+When a provider is unavailable, the model menu displays the remaining catalog and the provider error. An existing draft keeps its saved model and settings until the user changes them; a new draft selects an available default. iOS exposes the model catalog without requiring a Codex account. Codex exit fails its active turn but leaves the Host connection and Claude approvals/conversations usable.

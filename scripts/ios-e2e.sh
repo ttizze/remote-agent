@@ -5,6 +5,11 @@ cd "$(dirname "$0")/.."
 [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]] || {
     echo 'iOS E2E requires an Apple Silicon Mac with Xcode' >&2; exit 2
 }
+without_codex=false
+if [[ ${1:-} == --without-codex ]]; then
+    without_codex=true
+    shift
+fi
 if [[ $# == 0 ]]; then
     set -- \
         testSimulatorEditsHostWorktreeSettingsFromTaskMenu \
@@ -94,8 +99,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 scripts/build-agent-ios.sh simulator
-cargo build --locked --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture
-"$target/debug/bex-ui-fixture" "$fixture/host" "$target/debug/bex-codex-fixture" "$fixture/pairing.port" 8000 >"$fixture/host.log" 2>&1 &
+cargo build --locked --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture --bin bex-claude-fixture
+codex_program="$target/debug/bex-codex-fixture"
+claude_args=()
+if [[ $without_codex == true ]]; then
+    codex_program=--without-codex
+    claude_args=("$target/debug/bex-claude-fixture")
+fi
+"$target/debug/bex-ui-fixture" "$fixture/host" "$codex_program" "$fixture/pairing.port" 8000 "${claude_args[@]}" >"$fixture/host.log" 2>&1 &
 host=$!
 for ((attempt=0; attempt<300; attempt++)); do
     [[ -s $fixture/pairing.port ]] && break

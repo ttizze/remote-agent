@@ -1,4 +1,4 @@
-use crate::{CodexSession, HostRuntime};
+use crate::{HostRuntime, HostSession};
 use agent_core::peer::{RpcMessage, RpcMessageKind};
 use agent_core::{
     peer::{PeerEvent, RpcPeer},
@@ -19,7 +19,7 @@ pub(crate) async fn serve_jsonl_session(
     runtime: Arc<HostRuntime>,
     node: NodeId,
     stop: CancellationToken,
-    mut session: CodexSession,
+    mut session: HostSession,
 ) -> Result<(), String> {
     let id = session.id();
     let mut tasks = JoinSet::<Result<(), String>>::new();

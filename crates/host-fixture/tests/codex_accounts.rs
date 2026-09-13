@@ -1,5 +1,5 @@
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{CodexRpcService, CodexSession, DesktopProjectStore};
+use host_daemon::{DesktopProjectStore, HostRpcService, HostSession};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -16,8 +16,8 @@ async fn rpc(server: &CodexAppServer, method: &str, params: Value) -> Value {
 }
 
 async fn call(
-    service: &CodexRpcService,
-    session: &mut CodexSession,
+    service: &HostRpcService,
+    session: &mut HostSession,
     method: &str,
     params: Value,
 ) -> Value {
@@ -49,8 +49,8 @@ async fn call(
 }
 
 async fn completed_turn(
-    service: &CodexRpcService,
-    session: &mut CodexSession,
+    service: &HostRpcService,
+    session: &mut HostSession,
     thread: &str,
     text: &str,
 ) -> String {
@@ -80,7 +80,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         std::fs::write(home.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
         let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(home.join("projects.json")));
+        let service = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(home.join("projects.json")));
         let accounts_dir = directory.path().join("accounts");
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session(256);
@@ -131,9 +131,9 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         assert!(!stored.contains("authToken") && !stored.contains("invalid-test-signature"));
         drop(session); drop(service);
-        Arc::try_unwrap(server).ok().unwrap().shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(home.join("projects.json")));
+        let service = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(home.join("projects.json")));
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session(256);
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
@@ -145,10 +145,10 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":"desktop"})).await["result"]["selectedId"], "desktop");
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "desktop");
         drop(session); drop(service);
-        Arc::try_unwrap(server).ok().unwrap().shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
         std::fs::remove_file(home.join("account-fixture.json")).unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = CodexRpcService::new(server.clone(), DesktopProjectStore::new(home.join("projects.json")));
+        let service = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(home.join("projects.json")));
         service.enable_accounts(accounts_dir, config).await.unwrap();
         let mut session = service.open_session(256);
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
@@ -160,7 +160,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
         completed_turn(&service, &mut session, started["result"]["thread"]["id"].as_str().unwrap(), "recovered account").await;
         drop(session); drop(service);
-        Arc::try_unwrap(server).ok().unwrap().shutdown().await.unwrap();
+        server.shutdown().await.unwrap();
     }).await.expect("account switching stalled");
 }
 
@@ -173,8 +173,8 @@ async fn fork_inherits_only_through_selected_completed_turn_and_preserves_origin
             ..codex_fixture::config(directory.path())
         };
         let server = Arc::new(CodexAppServer::spawn(config).await.unwrap());
-        let service = CodexRpcService::new(
-            server.clone(),
+        let service = HostRpcService::new(
+            Ok(server.clone()),
             DesktopProjectStore::new(directory.path().join("projects.json")),
         );
         let mut session = service.open_session(256);
@@ -232,12 +232,7 @@ async fn fork_inherits_only_through_selected_completed_turn_and_preserves_origin
         assert_eq!(unchanged["result"]["thread"], original["result"]["thread"]);
         drop(session);
         drop(service);
-        Arc::try_unwrap(server)
-            .ok()
-            .unwrap()
-            .shutdown()
-            .await
-            .unwrap();
+        server.shutdown().await.unwrap();
     })
     .await
     .expect("forking stalled");
@@ -251,8 +246,8 @@ async fn helper_initialization_does_not_block_completed_turns() {
         let home = directory.path();
         let config = codex_fixture::config(home);
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = CodexRpcService::new(
-            server.clone(),
+        let service = HostRpcService::new(
+            Ok(server.clone()),
             DesktopProjectStore::new(home.join("projects.json")),
         );
         service
@@ -310,12 +305,7 @@ async fn helper_initialization_does_not_block_completed_turns() {
         );
         drop(session);
         drop(service);
-        Arc::try_unwrap(server)
-            .ok()
-            .unwrap()
-            .shutdown()
-            .await
-            .unwrap();
+        server.shutdown().await.unwrap();
     })
     .await
     .expect("concurrent account/turn fixture stalled");

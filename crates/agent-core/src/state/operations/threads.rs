@@ -469,15 +469,22 @@ impl Operation for ReadOlder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadModels {}
 impl Operation for LoadModels {
-    type Output = Vec<Model>;
+    type Output = crate::client::ModelPage;
 
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         context.client.models().await
     }
-    fn apply(self, snapshot: &mut Snapshot, models: Self::Output) -> Vec<Effect> {
+    fn apply(self, snapshot: &mut Snapshot, catalog: Self::Output) -> Vec<Effect> {
+        let models = catalog.data;
+        let errors = catalog
+            .extra
+            .get("providerErrors")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         let drafts = snapshot.drafts.clone();
         for (id, previous_draft) in drafts.iter() {
-            let settings = supported_settings(previous_draft, &models);
+            let settings = supported_settings(previous_draft, &models, &errors);
             if settings
                 != (
                     previous_draft.model.as_deref(),
@@ -492,6 +499,7 @@ impl Operation for LoadModels {
             }
         }
         snapshot.models = Arc::new(models);
+        snapshot.model_errors = Arc::new(errors);
         Vec::new()
     }
 }

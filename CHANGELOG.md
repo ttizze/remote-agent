@@ -14,6 +14,12 @@
 
 - Use the Mac renderer's GFM parser for shared mobile Markdown paragraphs and tables, and for Mac image extraction. Remove iPhone's second Markdown parse, source-position reconciliation and intermediate attributed-string conversion, and the desktop-only image parser. Share table-header emphasis between native clients. Preserve table cells, alignment and inline formatting with native wrapping and horizontal scrolling; cover shared document styles, references, streaming, reopening and native selection. Clarify shared-first implementation rules in AGENTS.md.
 
+- Rename the shared router to `HostRpcService` and remove Codex from the Host lifetime dependency. Claude conversations, approval reconnects, project selection, files, and management remain available when Codex cannot start or exits. Fail active Codex turns and terminal sessions when that backend is lost. Merge available model catalogs with provider errors, preserve saved choices, and expose iOS models without a Codex account. Clear iOS copies of a Store error when the Store recovers. Cover missing-Codex settings/restoration and simultaneous Codex exit/Claude approval through Store and iroh.
+
+- Add Claude Code subscription sessions to the shared model selector. Route Claude conversations through the installed CLI, preserving streaming thought/text blocks, text and attachments, approval and question responses, interruption, project/worktree selection, and persisted history after Host restart. Keep credentials in Claude Code and reject non-subscription authentication before submission. Verify the Store/iroh/Host path with isolated subprocess fixtures and an opt-in real-subscription restart/interruption test. Claude-to-Codex delegation and active-turn steering are not included.
+
+- Clear a previous submission error when retrying, while retaining the draft until submission succeeds. Cover retries after both failed thread creation and failed turn submission, plus complete recovery through the Claude Host integration.
+
 - Explicitly release local Host and discovery locks on shutdown, so a child process retaining an inherited descriptor cannot keep a stopped Host registered as running. Verify restart and duplicate-start rejection with a real child holding the descriptor.
 
 - Remove four unreferenced root screenshots and the unused Desktop SVG icon (1.93 MB).

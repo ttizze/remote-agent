@@ -15,15 +15,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tokio::sync::broadcast;
 
-use super::routing::{CodexSession, ResponseRoute, SessionId, SessionRouter};
+use super::routing::{HostSession, ResponseRoute, SessionId, SessionRouter};
 use crate::{
     DesktopProjectStore, HOST_THREAD_LIST_METHOD, HOST_THREAD_READ_METHOD, HOST_THREAD_START_METHOD,
 };
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, thiserror::Error)]
 #[serde(untagged)]
 enum Failure {
+    #[error("{message}")]
     Host { code: &'static str, message: String },
+    #[error("{0}")]
     Upstream(Box<RawValue>),
 }
 impl From<RpcMessageError> for Failure {
@@ -85,18 +87,19 @@ struct TerminalEnvironment {
 const MOBILE_THREAD_PAGE_SIZE: usize = 5;
 
 #[derive(Clone)]
-pub struct CodexRpcService {
+pub struct HostRpcService {
     inner: Arc<ServiceInner>,
 }
 
 struct ServiceInner {
+    claude: OnceLock<crate::claude::Claude>,
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
-    app_server: Arc<CodexAppServer>,
+    codex: Result<Arc<CodexAppServer>, String>,
     desktop_projects: DesktopProjectStore,
     router: SessionRouter,
     event_pump_started: OnceLock<()>,
-    stopped: tokio_util::sync::CancellationToken,
+    codex_stopped: tokio_util::sync::CancellationToken,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
@@ -104,26 +107,27 @@ struct ServiceInner {
     thread_watches: super::thread_watch::ThreadWatches,
 }
 
-impl CodexRpcService {
-    pub fn new(app_server: Arc<CodexAppServer>, desktop_projects: DesktopProjectStore) -> Self {
+impl HostRpcService {
+    pub fn new(
+        codex: Result<Arc<CodexAppServer>, String>,
+        desktop_projects: DesktopProjectStore,
+    ) -> Self {
         let files = crate::workspace_files::WorkspaceFiles::new(
-            app_server
-                .initialize_response()
-                .codex_home
-                .join("bex-attachments"),
+            desktop_projects.path().with_file_name("bex-attachments"),
         );
         Self {
             inner: Arc::new(ServiceInner {
+                claude: OnceLock::new(),
                 accounts: tokio::sync::Mutex::new(None),
                 restoration_error: tokio::sync::watch::channel(None).0,
-                app_server,
+                codex,
                 worktrees: crate::worktrees::Worktrees::new(desktop_projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
                 process_directories: std::sync::Mutex::new(Default::default()),
                 desktop_projects,
                 router: SessionRouter::new(),
                 event_pump_started: OnceLock::new(),
-                stopped: tokio_util::sync::CancellationToken::new(),
+                codex_stopped: tokio_util::sync::CancellationToken::new(),
                 files,
                 thread_watches: super::thread_watch::ThreadWatches::default(),
             }),
@@ -138,7 +142,7 @@ impl CodexRpcService {
         let accounts = crate::codex_accounts::Accounts::load(
             directory,
             config,
-            &self.inner.app_server,
+            self.codex().map_err(|error| error.to_string())?,
             self.inner.restoration_error.clone(),
         )
         .await?;
@@ -146,8 +150,27 @@ impl CodexRpcService {
         Ok(())
     }
 
-    pub fn open_session(&self, capacity: usize) -> CodexSession {
-        self.start_event_pump();
+    pub async fn enable_claude(
+        &self,
+        program: std::path::PathBuf,
+        directory: std::path::PathBuf,
+    ) -> Result<(), String> {
+        let claude =
+            crate::claude::Claude::load(program, directory, self.inner.router.clone()).await?;
+        self.inner
+            .claude
+            .set(claude)
+            .map_err(|_| "Claude Code is already configured".into())
+    }
+
+    pub(crate) async fn shutdown_claude(&self) {
+        if let Some(claude) = self.inner.claude.get() {
+            claude.shutdown().await;
+        }
+    }
+
+    pub fn open_session(&self, capacity: usize) -> HostSession {
+        self.start_codex_event_pump();
         self.inner.router.open_session(capacity)
     }
 
@@ -157,14 +180,32 @@ impl CodexRpcService {
         self.inner.router.close_session(session);
     }
 
-    /// Begin consuming Codex-originated lines before the first phone connects.
-    /// This keeps server requests replayable across phone disconnects.
-    pub(crate) async fn stopped(&self) {
-        self.inner.stopped.cancelled().await;
+    fn codex(&self) -> Result<&CodexAppServer, Failure> {
+        if self.inner.codex_stopped.is_cancelled() {
+            return Err(Failure::new(
+                "codex_unavailable",
+                "Codexが終了しました。Hostを再起動すると再接続できます。Claudeの会話は継続できます。",
+            ));
+        }
+        self.inner
+            .codex
+            .as_deref()
+            .map_err(|error| Failure::new("codex_unavailable", error))
+    }
+
+    async fn codex_request(&self, line: &str) -> Result<String, Failure> {
+        self.codex()?.request_raw(line).await.map_err(Failure::from)
+    }
+
+    pub(crate) fn provider_errors(&self) -> serde_json::Value {
+        match self.codex() {
+            Ok(_) => serde_json::json!({}),
+            Err(error) => serde_json::json!({"codex":error}),
+        }
     }
 
     pub fn start(&self) {
-        self.start_event_pump();
+        self.start_codex_event_pump();
     }
 
     /// Dispatch a classified message from an authenticated session.
@@ -202,14 +243,26 @@ impl CodexRpcService {
                     return Ok(());
                 };
                 rewritten = message.rewrite_id(&upstream_id).map_err(invalid_message)?;
+                if crate::claude::is_permission_id(&upstream_id) {
+                    if let Some(claude) = self.inner.claude.get() {
+                        claude
+                            .respond(&RpcMessage::parse(&rewritten).map_err(invalid_message)?)
+                            .await?;
+                    }
+                    return Ok(());
+                }
                 &rewritten
             }
         };
-        self.inner
-            .app_server
-            .send_raw(line)
-            .await
-            .map_err(|error| format!("Codex App Server failed: {error}"))
+        let sent = match self.codex() {
+            Ok(codex) => codex.send_raw(line).await.map_err(Failure::from),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = sent {
+            agent_core::diagnostics::error("host.codex.delivery", &error.to_string());
+            self.inner.router.resolve_codex_requests();
+        }
+        Ok(())
     }
 
     async fn request(
@@ -261,12 +314,60 @@ impl CodexRpcService {
         } else {
             None
         };
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Target<'a> {
+            thread_id: Option<&'a str>,
+            model: Option<&'a str>,
+        }
+        let target = request.params::<Target>().unwrap_or_default();
+        let claude_thread = target.thread_id.is_some_and(|id| id.starts_with("claude:"));
         if method == "turn/start"
+            && !claude_thread
             && let Some(error) = self.inner.restoration_error.borrow().as_ref()
         {
             return request.error("account_unavailable", &error);
         }
         let response = async {
+            if claude_thread && !matches!(method, "host/thread/watch" | "host/thread/unwatch") {
+                let result = match self.inner.claude.get() {
+                    Some(claude) => claude
+                        .request(method, request.params()?)
+                        .await
+                        .map_err(|error| Failure::new("claude_failed", error)),
+                    None => Err(Failure::new(
+                        "claude_unavailable",
+                        "このHostではClaude Codeが有効になっていません。",
+                    )),
+                };
+                let result = match result {
+                    Ok(mut value) if value.get("thread").is_some() => {
+                        let mut thread: Thread = serde_json::from_value(value["thread"].take())?;
+                        self.inner
+                            .desktop_projects
+                            .enrich_threads(std::slice::from_mut(&mut thread))
+                            .await
+                            .map_err(Failure::from)
+                            .map(|()| {
+                                value["thread"] =
+                                    serde_json::to_value(thread).expect("Thread serializes");
+                                value
+                            })
+                    }
+                    result => result,
+                };
+                return request.response(result);
+            }
+            if method == "turn/start"
+                && target
+                    .model
+                    .is_some_and(|model| model.starts_with(crate::claude::MODEL_PREFIX))
+            {
+                return request.error(
+                    "provider_mismatch",
+                    &"Claudeへ切り替える場合は新しい会話を作成してください。",
+                );
+            }
             let response = match method {
                 "initialize" | "initialized" => request.error(
                     "daemon_owned_method",
@@ -277,6 +378,9 @@ impl CodexRpcService {
                 | "host/account/login/start"
                 | "host/account/login/status"
                 | "host/account/login/cancel" => {
+                    if let Err(error) = self.codex() {
+                        return request.response::<(), _>(Err(error));
+                    }
                     let mut accounts = self.inner.accounts.lock().await;
                     let result = match accounts.as_mut() {
                         Some(accounts) => {
@@ -284,7 +388,12 @@ impl CodexRpcService {
                                 serde_json::from_str(line),
                                 "account_operation_failed",
                                 |params| async move {
-                                    accounts.request(&self.inner.app_server, params).await
+                                    accounts
+                                        .request(
+                                            self.codex().map_err(|error| error.to_string())?,
+                                            params,
+                                        )
+                                        .await
                                 },
                             )
                             .await
@@ -295,6 +404,54 @@ impl CodexRpcService {
                         )),
                     };
                     request.response(result)?
+                }
+
+                "model/list" if self.inner.claude.get().is_some() => {
+                    let line = match self.codex_request(line).await {
+                        Ok(line) => line,
+                        Err(error) => {
+                            request.response::<agent_core::client::ModelPage, _>(Err(error))?
+                        }
+                    };
+                    let mut response = RpcResponse::<agent_core::client::ModelPage>::parse(&line)?;
+                    if let Err(error) = &response.outcome {
+                        let mut extra = serde_json::Map::new();
+                        extra.insert("providerErrors".into(), serde_json::json!({"codex":error}));
+                        response.outcome = Ok(agent_core::client::ModelPage {
+                            data: Vec::new(),
+                            next_cursor: None,
+                            extra,
+                        });
+                    }
+                    let first_page = request.params::<serde_json::Value>()?["cursor"].is_null();
+                    let page = response.outcome.as_mut().expect("model page initialized");
+                    if first_page {
+                        match self.inner.claude.get().unwrap().models().await {
+                            Ok(models) => page.data.extend_from_slice(models),
+                            Err(error) => {
+                                let errors = page
+                                    .extra
+                                    .entry("providerErrors")
+                                    .or_insert_with(|| serde_json::json!({}));
+                                let Some(errors) = errors.as_object_mut() else {
+                                    return request.error(
+                                        "invalid_model_catalog",
+                                        &"providerErrors must be an object",
+                                    );
+                                };
+                                errors
+                                    .insert("claude".into(), serde_json::json!({"message":error}));
+                            }
+                        }
+                    }
+                    if first_page
+                        && page.data.is_empty()
+                        && page.extra.contains_key("providerErrors")
+                    {
+                        request.error("models_unavailable", &page.extra["providerErrors"])?
+                    } else {
+                        serde_json::to_string(&response)?
+                    }
                 }
 
                 HOST_THREAD_LIST_METHOD => {
@@ -368,9 +525,7 @@ impl CodexRpcService {
                             output_bytes_cap: None,
                         };
                         match self
-                            .inner
-                            .app_server
-                            .request_raw(&request.request("process/spawn", &params)?)
+                            .codex_request(&request.request("process/spawn", &params)?)
                             .await
                         {
                             Ok(response) => response,
@@ -384,7 +539,11 @@ impl CodexRpcService {
                         request.params().map_err(|_| "録音データがありません。"),
                         "dictation_failed",
                         |params| async move {
-                            crate::dictation::transcribe(&self.inner.app_server, &params).await
+                            crate::dictation::transcribe(
+                                self.codex().map_err(|error| error.to_string())?,
+                                &params,
+                            )
+                            .await
                         },
                     )
                     .await,
@@ -408,7 +567,7 @@ impl CodexRpcService {
                     )
                     .await,
                 )?,
-                _ => match self.inner.app_server.request_raw(line).await {
+                _ => match self.codex_request(line).await {
                     Ok(response) => response,
                     Err(error) => request.error("codex_unavailable", &error)?,
                 },
@@ -443,6 +602,18 @@ impl CodexRpcService {
         &self.inner.files
     }
 
+    async fn codex_thread_page(
+        &self,
+        params: &ThreadListParams<'_>,
+    ) -> Result<ThreadPage, Failure> {
+        self.codex()?
+            .request("thread/list", params)
+            .await
+            .map_err(Failure::from)?
+            .outcome
+            .map_err(Failure::Upstream)
+    }
+
     async fn worktree_list(&self) -> Result<Vec<agent_core::models::Worktree>, Failure> {
         let mut worktrees = self
             .inner
@@ -462,61 +633,69 @@ impl CodexRpcService {
             cursor: None,
         };
         let mut cursors = std::collections::HashSet::new();
+        let mut threads = match self.inner.claude.get() {
+            Some(claude) => claude.list("").await,
+            None => Vec::new(),
+        };
         loop {
-            let page = self
-                .inner
-                .app_server
-                .request::<_, ThreadPage>("thread/list", &params)
-                .await
-                .map_err(Failure::from)?
-                .outcome
-                .map_err(Failure::Upstream)?;
-            for thread in page.data {
-                let Some(cwd) = thread.cwd.as_deref() else {
-                    continue;
-                };
-                let cwd = tokio::fs::canonicalize(cwd)
-                    .await
-                    .unwrap_or_else(|_| std::path::PathBuf::from(cwd));
-                for worktree in &mut worktrees {
-                    if !cwd.starts_with(&worktree.path) {
-                        continue;
+            let page = match self.codex_thread_page(&params).await {
+                Ok(page) => page,
+                Err(error) => {
+                    for worktree in &mut worktrees {
+                        worktree.blocked_reason = Some(format!(
+                            "Codexの稼働状況を確認できないため削除できません: {error}"
+                        ));
                     }
-                    let active = thread
-                        .status
-                        .as_ref()
-                        .is_some_and(|status| status.kind == "active");
-                    if active {
-                        worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
-                    }
-                    if let Some(id) = &thread.id {
-                        worktree.threads.push(agent_core::models::WorktreeThread {
-                            id: id.clone(),
-                            name: thread
-                                .name
-                                .clone()
-                                .filter(|name| !name.is_empty())
-                                .or_else(|| {
-                                    thread
-                                        .preview
-                                        .as_deref()
-                                        .map(|preview| preview.chars().take(120).collect())
-                                })
-                                .unwrap_or_else(|| "新しいチャット".into()),
-                            active,
-                        });
-                    }
+                    break;
                 }
-            }
+            };
+            threads.extend(page.data);
             params.cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
             let Some(cursor) = &params.cursor else {
                 break;
             };
             if !cursors.insert(cursor.clone()) {
                 return Err(Failure::new(
-                    "worktree_list_failed",
+                    "invalid_thread_list",
                     "thread list cursor repeated",
                 ));
+            }
+        }
+        for thread in threads {
+            let Some(cwd) = thread.cwd.as_deref() else {
+                continue;
+            };
+            let cwd = tokio::fs::canonicalize(cwd)
+                .await
+                .unwrap_or_else(|_| std::path::PathBuf::from(cwd));
+            for worktree in &mut worktrees {
+                if !cwd.starts_with(&worktree.path) {
+                    continue;
+                }
+                let active = thread
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.kind == "active");
+                if active {
+                    worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
+                }
+                if let Some(id) = &thread.id {
+                    worktree.threads.push(agent_core::models::WorktreeThread {
+                        id: id.clone(),
+                        name: thread
+                            .name
+                            .clone()
+                            .filter(|name| !name.is_empty())
+                            .or_else(|| {
+                                thread
+                                    .preview
+                                    .as_deref()
+                                    .map(|preview| preview.chars().take(120).collect())
+                            })
+                            .unwrap_or_else(|| "新しいチャット".into()),
+                        active,
+                    });
+                }
             }
         }
         let processes = self.inner.process_directories.lock().unwrap();
@@ -565,6 +744,13 @@ impl CodexRpcService {
             .map_err(Failure::from)?;
         let mut titles =
             crate::desktop_projects::titles::TitleList::new(&snapshot.projects, &query);
+        let mut claude_threads = match self.inner.claude.get() {
+            Some(claude) => claude.list(&query.search_term).await,
+            None => Vec::new(),
+        }
+        .into_iter()
+        .peekable();
+        let mut provider_errors = serde_json::Map::new();
         let mut cursors = std::collections::HashSet::new();
         let mut params = ThreadListParams {
             limit: 100,
@@ -578,14 +764,25 @@ impl CodexRpcService {
         loop {
             // DB metadata avoids scanning or repairing the rollout. Every page
             // uses one Desktop snapshot and the same membership decisions.
-            let response = self
-                .inner
-                .app_server
-                .request::<_, ThreadPage>("thread/list", &params)
-                .await
-                .map_err(Failure::from)?;
-            let page = response.outcome.map_err(Failure::Upstream)?;
+            let page = match self.codex_thread_page(&params).await {
+                Ok(page) => page,
+                Err(error) if self.inner.claude.get().is_some() => {
+                    provider_errors.insert(
+                        "codex".into(),
+                        serde_json::to_value(error).expect("Failure serializes"),
+                    );
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
             for mut thread in page.data {
+                while claude_threads.peek().is_some_and(|claude| {
+                    crate::claude::updated_at(claude) >= crate::claude::updated_at(&thread)
+                }) {
+                    let mut claude = claude_threads.next().unwrap();
+                    snapshot.enrich_thread(&mut claude);
+                    titles.push(claude);
+                }
                 snapshot.enrich_thread(&mut thread);
                 titles.push(thread);
             }
@@ -600,7 +797,16 @@ impl CodexRpcService {
                 ));
             }
         }
-        Ok(titles.finish())
+        for mut thread in claude_threads {
+            snapshot.enrich_thread(&mut thread);
+            titles.push(thread);
+        }
+        let mut page = titles.finish();
+        if !provider_errors.is_empty() {
+            page.extra
+                .insert("providerErrors".into(), provider_errors.into());
+        }
+        Ok(page)
     }
 
     async fn host_thread_request(
@@ -610,6 +816,15 @@ impl CodexRpcService {
         retain_recent_turns: bool,
     ) -> Result<RpcResponse<ThreadResponse>, Failure> {
         let mut params: ThreadParams = request.params()?;
+        if method == "thread/start"
+            && !params
+                .extra
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|model| model.starts_with(crate::claude::MODEL_PREFIX))
+        {
+            self.codex()?;
+        }
         if method == "thread/start" {
             // A missing selection must not inherit the App Server's checkout.
             // Keep the real cwd on the thread; project enrichment identifies
@@ -641,19 +856,37 @@ impl CodexRpcService {
                 }
             }
         }
+        if method == "thread/start"
+            && let Some(model) = params
+                .extra
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+            && model.starts_with(crate::claude::MODEL_PREFIX)
+        {
+            let claude = self.inner.claude.get().ok_or_else(|| {
+                Failure::new(
+                    "claude_unavailable",
+                    "このHostではClaude Codeが有効になっていません。",
+                )
+            })?;
+            let mut response = claude
+                .create(params.cwd.as_deref().unwrap_or_default(), model)
+                .await
+                .map_err(|error| Failure::new("claude_unavailable", error))?;
+            self.inner
+                .desktop_projects
+                .enrich_threads(std::slice::from_mut(&mut response.thread))
+                .await?;
+            return RpcResponse::parse(&request.response::<_, Failure>(Ok(response))?)
+                .map_err(Failure::from);
+        }
         let hydrate = method == "thread/read" && params.include_turns == Some(true);
         if hydrate {
             params.include_turns = Some(false);
         }
-        let response = match self
-            .inner
-            .app_server
-            .request_raw(&request.request(method, &params)?)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => return Err(error.into()),
-        };
+        let response = self
+            .codex_request(&request.request(method, &params)?)
+            .await?;
         let mut response: RpcResponse<ThreadResponse> = RpcResponse::parse(&response)?;
         if let Ok(result) = &mut response.outcome {
             if hydrate {
@@ -674,15 +907,9 @@ impl CodexRpcService {
                             "full"
                         }),
                     };
-                    let line = match self
-                        .inner
-                        .app_server
-                        .request_raw(&request.request("thread/turns/list", &history)?)
-                        .await
-                    {
-                        Ok(line) => line,
-                        Err(error) => return Err(error.into()),
-                    };
+                    let line = self
+                        .codex_request(&request.request("thread/turns/list", &history)?)
+                        .await?;
                     let response: RpcResponse<HistoryPage<Arc<Turn>>> = RpcResponse::parse(&line)?;
                     let mut page = match response.into_result() {
                         Ok(page) => page,
@@ -696,15 +923,9 @@ impl CodexRpcService {
                     result.thread.apply_history_page(page);
                 } else {
                     params.include_turns = Some(true);
-                    let line = match self
-                        .inner
-                        .app_server
-                        .request_raw(&request.request(method, &params)?)
-                        .await
-                    {
-                        Ok(line) => line,
-                        Err(error) => return Err(error.into()),
-                    };
+                    let line = self
+                        .codex_request(&request.request(method, &params)?)
+                        .await?;
                     let history: RpcResponse<ThreadResponse> = RpcResponse::parse(&line)?;
                     *result = match history.into_result() {
                         Ok(result) => result,
@@ -740,8 +961,8 @@ impl CodexRpcService {
         method: &str,
         params: &HistoryParams<'_>,
     ) -> Result<HistoryPage<T>, String> {
-        self.inner
-            .app_server
+        self.codex()
+            .map_err(|error| error.to_string())?
             .request(method, params)
             .await
             .map_err(|error| error.to_string())?
@@ -976,8 +1197,7 @@ impl CodexRpcService {
                 items_view: None,
             };
             let response = self
-                .inner
-                .app_server
+                .codex()?
                 .request::<_, HistoryPage<HistoryItem>>("thread/items/list", &query)
                 .await
                 .map_err(Failure::from)?;
@@ -1007,19 +1227,22 @@ impl CodexRpcService {
         }
     }
 
-    fn start_event_pump(&self) {
+    fn start_codex_event_pump(&self) {
         if self.inner.event_pump_started.set(()).is_err() {
             return;
         }
         // Subscribe before spawning the pump. Otherwise Codex can emit a
         // server request in the scheduling gap and it would be lost before
         // there is a receiver to retain it for the next phone.
-        let mut events = self.inner.app_server.subscribe();
+        let Ok(codex) = &self.inner.codex else {
+            return;
+        };
+        let mut events = codex.subscribe();
         let router = self.inner.router.clone();
-        let thread_watches = self.inner.thread_watches.clone();
-        let stopped = self.inner.stopped.clone();
+        let stopped = self.inner.codex_stopped.clone();
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
+            let mut active_turns = std::collections::HashMap::<String, String>::new();
             loop {
                 match events.recv().await {
                     Ok(PeerEvent::Message(message)) => {
@@ -1027,6 +1250,20 @@ impl CodexRpcService {
                         let Ok(request) = RpcMessage::parse(&line) else {
                             continue;
                         };
+                        if matches!(request.method(), Some("turn/started" | "turn/completed"))
+                            && let Ok(params) = request.params::<serde_json::Value>()
+                            && let (Some(thread), Some(turn)) =
+                                (params["threadId"].as_str(), params["turn"]["id"].as_str())
+                        {
+                            if request.method() == Some("turn/started") {
+                                active_turns.insert(thread.into(), turn.into());
+                            } else if active_turns
+                                .get(thread)
+                                .is_some_and(|active| active == turn)
+                            {
+                                active_turns.remove(thread);
+                            }
+                        }
                         if request.method() == Some("process/exited")
                             && let Some(inner) = inner.upgrade()
                         {
@@ -1076,7 +1313,9 @@ impl CodexRpcService {
                                     return;
                                 };
                                 let line = zeroize::Zeroizing::new(response);
-                                let _ = inner.app_server.send_raw(&line).await;
+                                if let Ok(codex) = &inner.codex {
+                                    let _ = codex.send_raw(&line).await;
+                                }
                             });
                         } else {
                             router.handle_server_message(&request);
@@ -1086,9 +1325,36 @@ impl CodexRpcService {
                     Ok(PeerEvent::Closed(_))
                     | Err(broadcast::error::RecvError::Closed)
                     | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        thread_watches.clear_all();
-                        router.close_all();
                         stopped.cancel();
+                        if let Some(inner) = inner.upgrade() {
+                            if let Ok(codex) = &inner.codex
+                                && let Err(error) = codex.shutdown().await
+                            {
+                                agent_core::diagnostics::error(
+                                    "host.codex.shutdown",
+                                    &error.to_string(),
+                                );
+                            }
+                            let processes =
+                                std::mem::take(&mut *inner.process_directories.lock().unwrap());
+                            for handle in processes.into_keys() {
+                                let line = serde_json::json!({"method":"host/terminal/failed","params":{
+                                    "processHandle":handle,"message":"Codexとの接続が終了しました。Hostを再起動してからターミナルを開き直してください。"
+                                }}).to_string();
+                                router.handle_server_message(
+                                    &RpcMessage::parse(&line)
+                                        .expect("Host notification serializes"),
+                                );
+                            }
+                        }
+                        router.resolve_codex_requests();
+                        for (thread_id, turn_id) in active_turns {
+                            let line = serde_json::json!({"method":"turn/completed","params":{"threadId":thread_id,
+                                "turn":{"id":turn_id,"status":"failed","error":{"message":"Codexとの接続が終了したため、この実行は継続できません。Hostを再起動してから再送信してください。"}}}}).to_string();
+                            router.handle_server_message(
+                                &RpcMessage::parse(&line).expect("Host notification serializes"),
+                            );
+                        }
                         return;
                     }
                 }
