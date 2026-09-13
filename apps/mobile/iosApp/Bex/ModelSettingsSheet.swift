@@ -16,7 +16,7 @@ struct ModelSettingsSheet: View {
     @State private var pollingLogin: Task<Void, Never>?
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             List {
                 ForEach(model.accounts, id: \.id) { account in
                     Section {
@@ -126,7 +126,6 @@ struct ModelSettingsSheet: View {
                     .accessibilityIdentifier("model.close")
             } }
         }
-        .navigationViewStyle(StackNavigationViewStyle())
         .interactiveDismissDisabled(login != nil || startingLogin)
         .onAppear { refresh() }
         .onChange(of: scenePhase) { phase in

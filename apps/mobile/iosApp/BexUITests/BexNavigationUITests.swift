@@ -192,6 +192,7 @@ extension BexLaunchUITests {
             .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
         XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
         XCTAssertFalse(child.exists)
+        try verifyAbsoluteDirectoryNavigation(app, child: child)
         app.buttons["files.close"].tap()
         XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
     }
@@ -228,6 +229,25 @@ extension BexLaunchUITests {
         XCTAssertEqual(message.value as? String, message.placeholderValue)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Claude conversation restored and continued")
+    }
+
+    private func verifyAbsoluteDirectoryNavigation(_ app: XCUIApplication, child: XCUIElement) throws {
+        let path = app.textFields["絶対パス"]
+        let root = try XCTUnwrap(path.value as? String)
+        XCTAssertTrue(root.hasPrefix("/"))
+        path.tap(); path.press(forDuration: 1.2)
+        let selectAll = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == 'Select All' OR label == 'すべてを選択'")).firstMatch
+        XCTAssertTrue(selectAll.waitForExistence(timeout: 5)); selectAll.tap()
+        path.typeText(root + "/nested")
+        for _ in 0 ..< 2 {
+            XCTAssertEqual(path.value as? String, root + "/nested")
+            app.buttons["files.open-path"].tap()
+            XCTAssertTrue(child.waitForExistence(timeout: 10))
+            app.navigationBars["nested"].buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
+            XCTAssertFalse(child.exists)
+        }
     }
 
     func chooseFixtureModel(_ app: XCUIApplication) {

@@ -235,10 +235,6 @@ final class BexAppViewModel: ObservableObject {
                 operations[id] = nil
                 if selectedProfileId == host {
                     publish(owner.snapshot())
-                    if case .failure = result, let error = snapshot.error() {
-                        // Store excludes failures from requests abandoned by navigation.
-                        notice = error
-                    }
                 }
                 completion(result)
             }
@@ -270,7 +266,7 @@ extension BexAppViewModel {
     }
 
     private func publish(_ next: AgentCore.Snapshot) {
-        if let error = snapshot.error(), notice == error, next.error() != error {
+        if snapshot.error() != next.error() {
             notice = next.error()
         }
         let listChanged = !next.listUnchanged(other: snapshot)

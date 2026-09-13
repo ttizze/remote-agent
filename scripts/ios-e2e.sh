@@ -60,6 +60,7 @@ if [[ $# == 0 ]]; then
         testSimulatorCanAttachDownloadAndPrepareAIEdit \
         testSimulatorCanAddASecondPhoto \
         testSimulatorCanAttachPhotosAndVideos \
+        testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery \
         testSimulatorDisplaysImagesInMessagesAndMarkdownAfterReopening \
         testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening
 fi
@@ -112,7 +113,7 @@ for ((attempt=0; attempt<300; attempt++)); do
     sleep 0.1
 done
 [[ -s $fixture/pairing.port ]] || { echo 'UI fixture timed out' >&2; exit 1; }
-runtime=$(xcrun simctl list runtimes -j | jq -er '[.runtimes[] | select(.isAvailable and .platform == "iOS")][0].identifier')
+runtime=$(xcrun simctl list runtimes -j | jq -er '[.runtimes[] | select(.isAvailable and .platform == "iOS" and (.version | startswith("26.")))] | sort_by(.version | split(".") | map(tonumber)) | last.identifier // error("Install a stable iOS 26 Simulator runtime")')
 simulator=$(xcrun simctl create 'Bex isolated E2E' com.apple.CoreSimulator.SimDeviceType.iPhone-17 "$runtime")
 xcrun simctl boot "$simulator"
 xcrun simctl bootstatus "$simulator" -b

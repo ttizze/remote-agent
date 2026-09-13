@@ -1,56 +1,27 @@
-import AgentCore
 import AVFoundation
+import PhotosUI
 import SwiftUI
-import UniformTypeIdentifiers
+import UIKit
 
 /// Media import
 extension ThreadScreen {
-    func importPhotos(_ providers: ArraySlice<NSItemProvider>, draftKey: String) {
-        guard model.draftKey == draftKey else {
-            preparingMedia = false
-            model.transferError = "チャットが切り替わったため、写真・動画をもう一度選択してください。"
-            return
-        }
-        guard let provider = providers.first else { preparingMedia = false; return }
-        let type = provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) ? UTType.movie : UTType.image
-        provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, error in
-            let result = Result {
-                guard let url else { throw error ?? CocoaError(.fileReadUnknown) }
-                return try retainChatMedia(url)
-            }
-            DispatchQueue.main.async {
-                guard model.draftKey == draftKey else {
-                    if case let .success(url) = result {
-                        try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
-                    }
-                    preparingMedia = false
-                    model.transferError = "チャットが切り替わったため、写真・動画をもう一度選択してください。"
-                    return
+    func importPhotos(_ items: [PhotosPickerItem], draftKey: String) async {
+        defer { preparingMedia = false }
+        do {
+            for item in items {
+                guard model.draftKey == draftKey else { throw CocoaError(.userCancelled) }
+                guard let media = try await item.loadTransferable(type: ChatMedia.self) else {
+                    throw CocoaError(.fileReadUnknown)
                 }
-                switch result {
-                case let .success(url):
-                    model.attach(url, temporaryDirectory: url.deletingLastPathComponent()) {
-                        if model.transferError != nil {
-                            preparingMedia = false; return
-                        }
-                        importPhotos(providers.dropFirst(), draftKey: draftKey)
-                    }
-                case let .failure(error):
-                    preparingMedia = false
-                    model.transferError = error.localizedDescription
+                defer {
+                    try? FileManager.default.removeItem(at: media.url.deletingLastPathComponent())
                 }
+                guard model.draftKey == draftKey else { throw CocoaError(.userCancelled) }
+                try await model.attach(media.url)
             }
-        }
-    }
-
-    func finishMediaImport(_ result: Result<URL?, Error>) {
-        preparingMedia = false
-        switch result {
-        case let .success(url):
-            if let url {
-                model.attach(url, temporaryDirectory: url.deletingLastPathComponent())
-            }
-        case let .failure(error): model.transferError = error.localizedDescription
+        } catch {
+            model.transferError = model.draftKey == draftKey ? error.localizedDescription
+                : "チャットが切り替わったため、写真・動画をもう一度選択してください。"
         }
     }
 

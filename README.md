@@ -2,6 +2,26 @@
 
 Bex controls Codex and Claude Code on a trusted computer from a Mac app, an iPhone app, an Android app, or a headless CLI. A Rust Host daemon owns the agent processes; every client connects to it over iroh with the same JSONL RPC peer and dispatches intents to the same Rust `Store`. Terminology is in [CONTEXT.md](CONTEXT.md); design decisions are in [docs/adr](docs/adr); behavior changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## Supported operating systems
+
+Except for Linux (existing CI baseline retained), BEX supports only the latest generally available OS major, including its stable minor/patch releases. Betas, release candidates, older majors and future majors are outside the support contract. Minimum deployment versions prevent installation on older Apple/Android systems; they do not impose a runtime upper-version kill switch.
+
+Verified on **2026-09-13**:
+
+| Platform | Supported major | Build / test baseline |
+| --- | --- | --- |
+| iPhone / iPad | iOS / iPadOS 26 | Xcode 26 stable, deployment target 26.0 in the app, UI tests, Rust and Swift bindings; iOS 26 Simulator |
+| macOS desktop, Host and CLI | macOS Tahoe 26 | Rust deployment target and app/helper bundle minimum 26.0; Swift helper target 26.0 |
+| Android | Android 17 (API 37) | Minimum, compile and target SDK 37; Nix build and test SDK platform 37 |
+| Windows desktop, Host and CLI | Windows 11; Windows Server 2025 | Existing `windows-2025` CI builds/tests on Server 2025, not a Windows 11 UI acceptance test |
+| Linux desktop, Host and CLI | Existing CI environment retained | Existing self-hosted `nix-ci` runner and pinned `nix develop .#native` userspace; no distribution or kernel minimum change |
+
+Sources: [Apple security releases](https://support.apple.com/en-ca/100100), [Android 17 release](https://android-developers.googleblog.com/2026/06/Android-17.html), [API 37 SDK configuration](https://developer.android.com/about/versions/17/setup-sdk), [Windows client releases](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information), and [Windows Server releases](https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info). Windows feature updates such as 25H2/26H1 do not constitute a new Windows major.
+
+Android 17 asks for nearby-device access before opening a LAN connection. Denial retains the permission screen with retry and Settings actions; users can also continue over the Internet (a LAN-only Host still needs permission). Returning from Settings with permission granted opens the app. The Internet choice survives activity recreation; a new launch checks permission again. Saved hosts and drafts remain in the existing repository.
+
+When a new major becomes generally available, verify the vendor release, update these baselines together, remove obsolete compatibility paths, and run client acceptance tests before claiming support. Do not promote a beta/RC because an SDK or runner happens to include it. This policy does not select a Markdown rendering library.
+
 ## Layout
 
 | Path | Role |
@@ -49,11 +69,11 @@ To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続�
 # Mac (requires a signing certificate; BEX_CODE_SIGN_IDENTITY selects it)
 nix develop . --command just build-desktop-macos && open target/Bex.app
 
-# iPhone (iOS 17+): build Simulator libraries, then open Xcode
+# iPhone (iOS 26): build Simulator libraries, then open Xcode
 nix develop . --command scripts/build-agent-ios.sh simulator
 open apps/mobile/iosApp/Bex.xcodeproj
 
-# Android (API 28+)
+# Android 17 (API 37)
 nix develop . --command ./gradlew :apps:mobile:assembleDebug
 ```
 
@@ -79,7 +99,7 @@ Mac conversation file links open the Host's parent directory and file editor in 
 
 On Mac, open **ブラウザ → Chromeから取り込む** and select a Chrome profile to copy its cookies into Bex's browser. Allow the macOS Keychain prompt for **Chrome Safe Storage** when requested. The import leaves Chrome's database unchanged, merges cookies by domain/name/path, and reloads the current page after checking the saved cookies. Persistent cookies retain their expiration across Bex restarts; session cookies remain session-only. This is a one-time copy: repeat the import to refresh a login. Expired cookies and cookies partitioned by top-level site are excluded and counted. Cookie-independent sign-in state (such as local storage or device-bound credentials) is not copied, so some sites still require signing in inside Bex.
 
-Cookie import supports macOS Chrome database versions 23 and 24. Reader and native-attribute regressions run with `nix develop . --command cargo test --locked -p bex-desktop --bin bex-desktop chrome_tests`. On macOS 14 or newer, `nix develop . --command cargo test --locked -p bex-desktop --test chrome_cookie_webview` exercises the real Browser view, encrypted fixture database, denied-access retry, authenticated HTTP, HttpOnly protection, and persistence in a fresh process using a disposable WebKit data store. The test also records the domain-scope loss in the pinned lb-wry `set_cookie` implementation, which is why import uses WebKit's native cookie store directly.
+Cookie import supports macOS Chrome database versions 23 and 24. Reader and native-attribute regressions run with `nix develop . --command cargo test --locked -p bex-desktop --bin bex-desktop chrome_tests`. On macOS 26, `nix develop . --command cargo test --locked -p bex-desktop --test chrome_cookie_webview` exercises the real Browser view, encrypted fixture database, denied-access retry, authenticated HTTP, HttpOnly protection, and persistence in a fresh process using a disposable WebKit data store. The test also records the domain-scope loss in the pinned lb-wry `set_cookie` implementation, which is why import uses WebKit's native cookie store directly.
 
 Desktop conversation lists and titles refresh after messages and completed turns. The execution header shows elapsed time and the latest action; command output has a copy control. Click the change summary or a changed file to open the diff, choose files from its selector, and expand long unchanged sections. During dictation the composer shows a microphone waveform with cancel, stop, and send controls; Escape cancels recording and preserves the draft.
 
@@ -103,9 +123,10 @@ agent-cli <connection> approve '"request-id"' --decision 2   # string request ID
 ```sh
 nix develop . --command cargo test --workspace            # Rust, including the behavior corpus
 nix develop . --command just iroh-e2e                     # real daemon over isolated iroh sessions
+nix develop . --command just android-e2e                  # fresh Android 17 emulator: permission recovery, LAN traffic and native persistence
 nix develop . --command just ios-e2e [TestMethod…]        # Simulator XCUITest against a fixture Host
 nix develop . --command just conversation-ui             # selection, side chat, and activity regressions
-nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop tests, and conversation-ui
+nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop tests, Android emulator and conversation-ui
 ```
 
 Claude contracts run with `nix develop . --command cargo test --locked -p host-fixture --test claude`. They use a deterministic external CLI boundary with real Store, iroh, Host routing, persistence and isolated Git/filesystem state. The opt-in `live_claude_subscription_completes_and_resumes_through_store_and_host` test uses the real authenticated CLI; set `BEX_LIVE_CLAUDE_PROGRAM` to its absolute path and run that test with `-- --ignored --exact` to verify subscription inference, resumption across a Host restart, interruption and successful input after interruption.
