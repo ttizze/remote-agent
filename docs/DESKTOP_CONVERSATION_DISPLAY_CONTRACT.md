@@ -122,6 +122,31 @@ and history reload:
 Unknown future items remain cached and receive a safe fallback row; they are
 never dropped solely because the mobile build does not know their type.
 
+Conversation Markdown uses `markdown` 1.0.0 with GFM parsing, the same library
+and options used by the pinned GPUI renderer. `agent-core::presentation::markdown`
+projects the document into native mobile paragraphs, runs and tables, resolving
+reference links and images against the whole document. Core supplies table-header
+emphasis for both native clients. iPhone maps the shared runs directly to UIKit
+text attributes without reparsing Markdown or creating an intermediate Swift
+`AttributedString`. Android consumes the same paragraph and inline styles. Native
+layout, selection, image loading and link actions remain client responsibilities.
+
+Mac's Host-backed image extraction uses the same core parser. Its existing
+`TextView::markdown` still parses the remaining source internally: GPUI 0.6.0 does
+not expose an input for pre-parsed documents. Retaining that renderer is the
+chosen architecture: share the established grammar, keep core's mobile document
+projection limited to the native clients' needs, and preserve GPUI's layout and
+selection. Platform text conversions are necessary adapters. A future public GPUI
+API can enable parsed-document reuse; this does not require a maintained GPUI fork.
+
+Mobile tables preserve rows, empty cells, column alignment and inline formatting.
+Selectable cells wrap long text and scroll horizontally; a wide table must not
+widen the conversation or hide its final column. Headers stay aligned with body
+rows. Streaming and reopening retain the same cell contents.
+Acceptance: `just ios-markdown`, core `presentation::markdown` tests,
+`testSimulatorRendersMarkdownTableAndReopensIt`, Android `MarkdownTableTest`, and
+Mac `markdown_tables_keep_every_shared_cell_in_desktop_selection`.
+
 Markdown HTTP/HTTPS links open in the system browser. File links resolve on the
 selected Host, including relative paths, URL-escaped spaces and line suffixes.
 Mac opens images in its image viewer and other files in the Files panel with

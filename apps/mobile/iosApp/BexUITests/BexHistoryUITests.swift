@@ -135,6 +135,55 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Earlier answers between followups")
     }
 
+    func testSimulatorRendersMarkdownTableAndReopensIt() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[success] [markdown-table] Render the table")
+        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        let message = app.descendants(matching: .any)["task.message"]
+        let emptyValue = try XCTUnwrap(message.placeholderValue)
+        let cleared = expectation(for: NSPredicate(format: "value == %@", emptyValue), evaluatedWith: message)
+        wait(for: [cleared], timeout: 10)
+        XCTAssertTrue(app.buttons["task.send"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["task.send"].isEnabled)
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        verifyMarkdownTable(app)
+        captureScreen(app, named: "Japanese Markdown table right columns")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 20))
+        verifyMarkdownTable(app)
+        captureScreen(app, named: "Reopened Japanese Markdown table")
+    }
+
+    private func verifyMarkdownTable(_ app: XCUIApplication) {
+        let table = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(table.waitForExistence(timeout: 15))
+        let header = app.textViews["markdown.cell.0.0.0"]
+        let first = app.textViews["markdown.cell.0.1.0"]
+        let second = app.textViews["markdown.cell.0.2.0"]
+        XCTAssertEqual(header.value as? String, "構成")
+        XCTAssertEqual(first.value as? String, "Codexハーネス＋Claude接続")
+        XCTAssertEqual(second.value as? String, "Codex／Claude Codeを並列接続")
+        XCTAssertEqual(header.frame.minX, first.frame.minX, accuracy: 1)
+        XCTAssertEqual(first.frame.minX, second.frame.minX, accuracy: 1)
+        XCTAssertGreaterThan(second.frame.minY, first.frame.maxY)
+        XCTAssertTrue(first.isHittable)
+        let firstRowY = first.frame.minY
+        let headerHeight = header.frame.height
+        captureScreen(app, named: "Japanese Markdown table first column")
+        table.swipeLeft()
+        table.swipeLeft()
+        let burden = app.textViews["markdown.cell.0.1.2"]
+        XCTAssertTrue(burden.isHittable)
+        XCTAssertEqual(burden.value as? String, "通信変換、モデルの挙動、サブスク認証との適合を検証する必要")
+        XCTAssertGreaterThan(burden.frame.height, headerHeight * 2)
+        XCTAssertEqual(app.textViews["markdown.cell.0.2.2"].value as? String, "両者の機能差をBexが吸収する必要")
+        XCTAssertEqual(firstRowY, burden.frame.minY, accuracy: 1)
+    }
+
     func testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText() throws {
         #if !targetEnvironment(simulator)
             throw XCTSkip("Simulator-only isolated Markdown stream fixture")

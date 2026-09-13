@@ -10,6 +10,7 @@ use serde_json::Value;
 pub mod body;
 pub mod conversation;
 pub mod list;
+pub mod markdown;
 
 fn field<'a>(item: &'a Item, key: &str) -> &'a str {
     item.extra

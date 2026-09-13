@@ -17,6 +17,10 @@ build-desktop-macos:
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
+# Headless tests of the production iOS Markdown parser.
+ios-markdown:
+    scripts/test-ios-markdown.sh
+
 # Native conversation contracts used by the post-commit Swift check.
 conversation-ui:
     scripts/ios-e2e.sh \

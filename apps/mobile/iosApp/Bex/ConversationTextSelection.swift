@@ -1,9 +1,10 @@
+import AgentCore
 import SwiftUI
 import UIKit
 
 /// Assistant prose stays selectable in place; user bubbles have their own long-press menu.
 struct AssistantSelectableText: UIViewRepresentable {
-    let blocks: [ConversationMarkdown.Block]
+    let blocks: [ConversationMarkdownContent.Block]
     let model: BexAppViewModel
     @Environment(\.openURL) private var openURL
     @Environment(\.sizeCategory) private var sizeCategory
@@ -46,10 +47,11 @@ struct AssistantSelectableText: UIViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView, context _: Context) -> CGSize? {
         let width = proposal.width ?? ceil(uiView.attributedText.size().width)
         guard width > 0 else { return nil }
-        return uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+        let size = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+        return CGSize(width: width, height: size.height)
     }
 
-    private static func attributedText(_ blocks: [ConversationMarkdown.Block]) -> NSAttributedString {
+    private static func attributedText(_ blocks: [ConversationMarkdownContent.Block]) -> NSAttributedString {
         let text = NSMutableAttributedString(string: "")
         for (index, block) in blocks.enumerated() {
             if index > 0 {
@@ -64,13 +66,18 @@ struct AssistantSelectableText: UIViewRepresentable {
             if let marker = style.marker {
                 text.append(NSAttributedString(string: marker + " ", attributes: [.font: font]))
             }
-            for run in block.content.runs {
+            for run in block.runs {
                 text.append(NSAttributedString(
-                    string: String(block.content[run.range].characters),
+                    string: run.text,
                     attributes: attributes(for: run, font: font)
                 ))
             }
             let paragraph = NSMutableParagraphStyle()
+            switch style.alignment {
+            case .center: paragraph.alignment = .center
+            case .right: paragraph.alignment = .right
+            case .left: paragraph.alignment = .left
+            }
             paragraph.lineSpacing = style.code ? 0 : 5
             paragraph.paragraphSpacing = index + 1 == blocks.count ? 0 : 14
             paragraph.headIndent = style.marker == nil ? (style.quoted ? 12 : 0) : 20
@@ -84,34 +91,32 @@ struct AssistantSelectableText: UIViewRepresentable {
         return text
     }
 
-    private static func attributes(for run: AttributedString.Runs.Run, font: UIFont) -> [NSAttributedString.Key: Any] {
+    private static func attributes(for run: MarkdownRun, font: UIFont) -> [NSAttributedString.Key: Any] {
         var runFont = font
-        let intent = run.inlinePresentationIntent ?? []
-        if intent.contains(.code) {
+        if run.code {
             runFont = UIFont.monospacedSystemFont(
                 ofSize: font.pointSize,
                 weight: .regular
             )
         }
         var traits = runFont.fontDescriptor.symbolicTraits
-        if intent.contains(.stronglyEmphasized) {
+        if run.strong {
             traits.insert(.traitBold)
         }
-        if intent.contains(.emphasized) {
+        if run.emphasis {
             traits.insert(.traitItalic)
         }
         if let descriptor = runFont.fontDescriptor.withSymbolicTraits(traits) {
             runFont = UIFont(descriptor: descriptor, size: runFont.pointSize)
         }
         var attributes: [NSAttributedString.Key: Any] = [.font: runFont, .foregroundColor: UIColor.label]
-        if let link = run.link {
+        if let link = run.link.flatMap(URL.init(string:)) {
             attributes[.link] = link
         }
-        if intent
-            .contains(.strikethrough) {
+        if run.strikethrough {
             attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
         }
-        if intent.contains(.code) {
+        if run.code {
             attributes[.backgroundColor] = UIColor.secondarySystemBackground
         }
         return attributes
@@ -119,7 +124,7 @@ struct AssistantSelectableText: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: AssistantSelectableText
-        var blocks: [ConversationMarkdown.Block] = []
+        var blocks: [ConversationMarkdownContent.Block] = []
         var sizeCategory: ContentSizeCategory?
 
         init(_ parent: AssistantSelectableText) {

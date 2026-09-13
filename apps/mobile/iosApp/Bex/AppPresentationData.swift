@@ -72,7 +72,7 @@ extension Request {
 final class ConversationItem: Sendable {
     let source: RenderedItem
     let data: ItemPresentation
-    let markdown: [ConversationMarkdown.Part]
+    let markdown: [ConversationMarkdownContent.Part]
     var contentVersion: String {
         String(describing: ObjectIdentifier(self))
     }
@@ -80,6 +80,6 @@ final class ConversationItem: Sendable {
     init(_ source: RenderedItem) {
         self.source = source
         data = source.presentation()
-        markdown = data.kind != "user" && !data.collapsible ? ConversationMarkdown.parse(data.body) : []
+        markdown = data.kind != "user" && !data.collapsible ? ConversationMarkdownContent.parse(data.body) : []
     }
 }

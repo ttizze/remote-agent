@@ -76,6 +76,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true }
+    sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("crates/agent-core/tests/fixtures/markdown"))
     sourceSets.getByName("main") {
         kotlin.srcDir(rootProject.file("target/agent-bindings/dev"))
         jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs").get().asFile)
@@ -83,6 +84,8 @@ android {
 }
 
 dependencies {
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.11.2")
+    debugImplementation("androidx.compose.ui:ui-test-manifest:1.11.2")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")

@@ -1,6 +1,10 @@
 # Code shape
 
 - Before adding logic to a client (desktop, iOS, Android), check whether `agent-core` already computes it. Consume it; if it almost does, extend core instead of re-deriving in the client.
+- Before implementing a client bug fix, identify which behavior is shared semantics and which is platform rendering. A report from one platform does not make parsing, normalization, classification, or presentation data platform-specific.
+- If new logic is useful to more than one client, implement it in `agent-core` from the outset, even when no shared implementation exists yet. Native clients consume that result; do not first add a local implementation and defer sharing until another client needs the fix.
+- In the current architecture, Kotlin is Android-only and Swift is iOS-only; their shared layer is Rust `agent-core` via generated bindings. Share document structure and content semantics there. Keep native layout, gestures, selection, and accessibility in the platform UI.
+- For shared behavior changes, cover the common contract in core tests and verify each affected client's production adapter and UI. Remove superseded client logic in the same change; passing a core test alone does not verify the native display.
 - The same rule in two files is a bug. When you find one, delete one in the same change.
 - Do not add an enum variant, error type, generic parameter, trait method, option, or module that has one user. Add it when the second user appears.
 - Each change reports lines added, lines removed, and which existing code the new code replaces. A change that only adds is suspect.

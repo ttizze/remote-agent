@@ -8,6 +8,8 @@
 
 - Add Mac browser cookie import from a selected Chrome profile, including Keychain decryption, live SQLite/WAL reads, preserved domain scope and cookie attributes, verified writes, and page reload. Keep persistent and session-only lifetimes, report excluded expired/partitioned cookies, and allow retry after denied access. Cover encrypted v23/v24 fixtures, native attributes, authenticated WebView requests, and fresh-process persistence with isolated tests.
 
+- Use the Mac renderer's GFM parser for shared mobile Markdown paragraphs and tables, and for Mac image extraction. Remove iPhone's second Markdown parse, source-position reconciliation and intermediate attributed-string conversion, and the desktop-only image parser. Share table-header emphasis between native clients. Preserve table cells, alignment and inline formatting with native wrapping and horizontal scrolling; cover shared document styles, references, streaming, reopening and native selection. Clarify shared-first implementation rules in AGENTS.md.
+
 - Explicitly release local Host and discovery locks on shutdown, so a child process retaining an inherited descriptor cannot keep a stopped Host registered as running. Verify restart and duplicate-start rejection with a real child holding the descriptor.
 
 - Remove four unreferenced root screenshots and the unused Desktop SVG icon (1.93 MB).
