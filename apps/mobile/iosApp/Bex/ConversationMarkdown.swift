@@ -1,10 +1,12 @@
+import AgentCore
 import SwiftUI
 import UniformTypeIdentifiers
 
 /// Shared Markdown semantics render as native selectable content.
 struct ConversationMarkdown: View {
     let blocks: [ConversationMarkdownContent.Part]
-    let model: BexAppViewModel
+    let media: ConversationMediaAccess
+    let selection: ConversationSelectionActions
     @ScaledMetric(relativeTo: .body) private var tableColumnWidth = 220.0
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
@@ -20,11 +22,11 @@ struct ConversationMarkdown: View {
                     image(block, url: imageURL)
                 } else if part.isCode {
                     ScrollView(.horizontal) {
-                        AssistantSelectableText(blocks: part.blocks, model: model)
+                        AssistantSelectableText(blocks: part.blocks, actions: selection)
                             .fixedSize(horizontal: true, vertical: false).padding(12)
                     }.background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 } else {
-                    AssistantSelectableText(blocks: part.blocks, model: model)
+                    AssistantSelectableText(blocks: part.blocks, actions: selection)
                 }
             }
             if let linkError {
@@ -39,7 +41,7 @@ struct ConversationMarkdown: View {
             }
             do {
                 linkError = nil
-                linkTarget = try conversationFileURL(url.absoluteString, cwd: model.cwd)
+                linkTarget = try conversationFileURL(url.absoluteString, cwd: media.cwd)
             } catch { linkError = "リンクを開けません: \(error.localizedDescription)" }
             return .handled
         })
@@ -52,8 +54,8 @@ struct ConversationMarkdown: View {
                 ConversationPreview(
                     url: url,
                     isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true,
-                    model: model,
-                    source: previewSource
+                    media: media,
+                    source: previewSource.map(SessionImage.init(reference:))
                 ) {
                     previewURL = nil
                 }
@@ -67,22 +69,19 @@ struct ConversationMarkdown: View {
         }
         .task(id: linkTarget) {
             guard let target = linkTarget else { return }
-            let host = model.selectedProfileId
-            let (downloaded, error) = await withCheckedContinuation { continuation in
-                model.download(target.path) { url, error in continuation.resume(returning: (url, error)) }
-            }
-            guard !Task.isCancelled, host == model.selectedProfileId else {
-                if let downloaded {
+            do {
+                let downloaded = try await media.download(target.path)
+                guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: downloaded.deletingLastPathComponent())
+                    return
                 }
-                return
-            }
-            if let downloaded {
                 previewDirectory = downloaded.deletingLastPathComponent()
                 previewSource = target.path
                 previewURL = downloaded
-            } else {
-                linkError = error ?? "ファイルを取得できません"
+            } catch {
+                if !Task.isCancelled {
+                    linkError = error.localizedDescription
+                }
             }
             linkTarget = nil
         }
@@ -90,10 +89,10 @@ struct ConversationMarkdown: View {
 
     private func image(_ block: ConversationMarkdownContent.Block, url: URL) -> some View {
         ConversationImage(
-            source: url.scheme == nil ? url.path : url.absoluteString,
+            source: SessionImage(reference: url.scheme == nil ? url.path : url.absoluteString),
             label: block.runs.map(\.text).joined(),
             identifier: "markdown.image.\(block.id)",
-            model: model
+            media: media
         )
     }
 
@@ -109,7 +108,7 @@ struct ConversationMarkdown: View {
                                     if let url = block.imageURL {
                                         image(block, url: url)
                                     } else {
-                                        AssistantSelectableText(blocks: [block], model: model)
+                                        AssistantSelectableText(blocks: [block], actions: selection)
                                     }
                                 }
                             }

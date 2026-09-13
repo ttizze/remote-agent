@@ -1,3 +1,4 @@
+import AgentCore
 import ImageIO
 import Photos
 import QuickLook
@@ -25,11 +26,30 @@ func conversationFileURL(_ source: String, cwd: String) throws -> URL {
     return resolved
 }
 
+extension SessionImage {
+    init(reference: String) {
+        if reference.hasPrefix("data:image/"), let comma = reference.firstIndex(of: ","),
+           reference[..<comma].hasSuffix(";base64") {
+            self.init(source: String(reference[reference.index(after: comma)...]), encoded: true)
+        } else {
+            self.init(source: reference, encoded: false)
+        }
+    }
+}
+
+/// Only the authenticated file and gallery operations are available to media views.
+struct ConversationMediaAccess {
+    let host: String?
+    let cwd: String
+    let download: @MainActor (String) async throws -> URL
+    let sessionImages: (@MainActor () async throws -> [SessionImage])?
+}
+
 struct ConversationImage: View {
-    let source: String
+    let source: SessionImage
     let label: String
     let identifier: String
-    @ObservedObject var model: BexAppViewModel
+    let media: ConversationMediaAccess
     var onSelect: (() -> Void)?
     @State private var image: UIImage?
     @State private var original: Data?
@@ -38,7 +58,7 @@ struct ConversationImage: View {
     @State private var error: String?
     private struct LoadID: Equatable {
         let host: String?
-        let source: String
+        let source: SessionImage
     }
 
     var body: some View {
@@ -88,15 +108,15 @@ struct ConversationImage: View {
             }
         })) {
             if let previewURL {
-                ConversationPreview(url: previewURL, isImage: true, model: model, source: source) { dismissPreview() }
+                ConversationPreview(url: previewURL, isImage: true, media: media, source: source) { dismissPreview() }
             }
         }
-        .task(id: LoadID(host: model.selectedProfileId, source: source)) {
+        .task(id: LoadID(host: media.host, source: source)) {
             image = nil; original = nil; error = nil
             do {
                 let loaded = try await loadConversationImage(
                     source,
-                    model: model,
+                    media: media,
                     maxPixelSize: onSelect == nil ? 1600 : 160
                 )
                 try Task.checkCancellation()
@@ -118,15 +138,15 @@ struct ConversationImage: View {
     }
 }
 
-@MainActor private func conversationImageData(_ source: String, model: BexAppViewModel) async throws -> Data {
+@MainActor private func conversationImageData(_ image: SessionImage,
+                                              media: ConversationMediaAccess) async throws -> Data {
+    let source = image.source
     let data: Data
-    if source.hasPrefix("data:image/"), let comma = source.firstIndex(of: ",") {
-        let header = source[..<comma]
-        let payload = String(source[source.index(after: comma)...])
-        guard header.hasSuffix(";base64"), let decoded = Data(base64Encoded: payload) else {
-            throw CocoaError(.fileReadCorruptFile)
-        }
+    if image.encoded {
+        guard let decoded = Data(base64Encoded: source) else { throw CocoaError(.fileReadCorruptFile) }
         data = decoded
+    } else if source.hasPrefix("data:image/") {
+        throw CocoaError(.fileReadCorruptFile)
     } else if let url = URL(string: source), url.scheme == "https" || url.scheme == "http" {
         let (downloaded, response) = try await URLSession.shared.data(from: url)
         guard let response = response as? HTTPURLResponse, (200 ..< 300).contains(response.statusCode) else {
@@ -134,22 +154,17 @@ struct ConversationImage: View {
         }
         data = downloaded
     } else {
-        let path = try conversationFileURL(source, cwd: model.cwd).path
-        let (url, message) = await withCheckedContinuation { continuation in
-            model.download(path) { url, message in continuation.resume(returning: (url, message)) }
-        }
-        guard let url else {
-            throw NSError(domain: "BexImage", code: 1, userInfo: [NSLocalizedDescriptionKey: message ?? "画像を取得できません"])
-        }
+        let path = try conversationFileURL(source, cwd: media.cwd).path
+        let url = try await media.download(path)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
     }
     return data
 }
 
-@MainActor private func loadConversationImage(_ source: String, model: BexAppViewModel,
+@MainActor private func loadConversationImage(_ source: SessionImage, media: ConversationMediaAccess,
                                               maxPixelSize: Int = 1600) async throws -> (UIImage, Data) {
-    let data = try await conversationImageData(source, model: model)
+    let data = try await conversationImageData(source, media: media)
     return try await Task.detached(priority: .userInitiated) {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -180,13 +195,13 @@ private func writeConversationImage(_ data: Data) throws -> URL {
 struct ConversationPreview: View {
     let url: URL
     let isImage: Bool
-    var model: BexAppViewModel?
-    var source: String?
+    var media: ConversationMediaAccess?
+    var source: SessionImage?
     let close: () -> Void
-    @State private var sources: [String] = []
-    @State private var selected: String?
+    @State private var sources: [SessionImage] = []
+    @State private var selected: SessionImage?
     @State private var selectedURL: URL?
-    @State private var downloaded: [String: URL] = [:]
+    @State private var downloaded: [SessionImage: URL] = [:]
     @State private var galleryError: String?
     private var displayedURL: URL? {
         selected == nil || selected == source ? url : selectedURL
@@ -199,7 +214,7 @@ struct ConversationPreview: View {
     var body: some View {
         NavigationStack {
             HStack(spacing: 0) {
-                if isImage, let model, !sources.isEmpty {
+                if isImage, let media, !sources.isEmpty {
                     ScrollView {
                         LazyVStack(spacing: 12) {
                             ForEach(sources.indices, id: \.self) { index in
@@ -208,7 +223,7 @@ struct ConversationPreview: View {
                                     source: item,
                                     label: "生成画像 \(index + 1)",
                                     identifier: "conversation.preview.thumbnail.\(index)",
-                                    model: model,
+                                    media: media,
                                     onSelect: {
                                         guard !saving else { return }
                                         selected = item
@@ -239,7 +254,7 @@ struct ConversationPreview: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    if let index = sources.firstIndex(of: selected ?? source ?? "") {
+                    if let index = sources.firstIndex(where: { $0 == (selected ?? source) }) {
                         Text("\(index + 1) / \(sources.count)")
                             .accessibilityIdentifier("conversation.preview.position")
                     }
@@ -274,25 +289,26 @@ struct ConversationPreview: View {
         }
         .interactiveDismissDisabled(saving)
         .task {
-            guard isImage, let model, let thread = model.conversation else { return }
-            let (images, error) = await withCheckedContinuation { continuation in
-                model.readSessionImages(thread.id) { images, error in
-                    continuation.resume(returning: (images, error))
+            guard isImage, let load = media?.sessionImages else { return }
+            do {
+                let images = try await load()
+                guard !Task.isCancelled else { return }
+                sources = images
+            } catch {
+                if !Task.isCancelled {
+                    galleryError = error.localizedDescription
                 }
             }
-            guard !Task.isCancelled else { return }
-            sources = images ?? []
-            galleryError = error
         }
         .task(id: selected) {
             saved = false
             selectedURL = nil
-            guard let selected, selected != source, let model else { return }
+            guard let selected, selected != source, let media else { return }
             if let cached = downloaded[selected] {
                 selectedURL = cached; return
             }
             do {
-                let data = try await conversationImageData(selected, model: model)
+                let data = try await conversationImageData(selected, media: media)
                 try Task.checkCancellation()
                 let local = try await Task.detached(priority: .userInitiated) {
                     try writeConversationImage(data)

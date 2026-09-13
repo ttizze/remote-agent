@@ -140,27 +140,35 @@ extension BexLaunchUITests {
         }
     }
 
+    private func selectAttachmentFixture(in app: XCUIApplication) {
+        app.buttons["task.attach"].tap()
+        app.buttons["task.attach.file"].tap()
+        let attachment = app.cells["attachment-fixture, txt"]
+        // The picker restores the app's Documents directory asynchronously.
+        // Wait for that destination before navigating a transient Browse page.
+        if !attachment.waitForExistence(timeout: 10) {
+            let browse = app.buttons["ブラウズ"]
+            if browse.waitForExistence(timeout: 3) {
+                browse.tap()
+            }
+            let onPhone = app.staticTexts["このiPhone内"]
+            if onPhone.waitForExistence(timeout: 3) {
+                onPhone.tap()
+            }
+            let folder = app.staticTexts["Bex"]
+            if folder.waitForExistence(timeout: 3) {
+                folder.tap()
+            }
+        }
+        XCTAssertTrue(attachment.waitForExistence(timeout: 10), app.debugDescription)
+        attachment.tap()
+    }
+
     func testSimulatorCanAttachDownloadAndPrepareAIEdit() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[success] Prepare file operations")
         XCTAssertTrue(prefixedButton(app, prefix: "turn.activity.fixture-turn-").waitForExistence(timeout: 20))
-        app.buttons["task.attach"].tap()
-        app.buttons["task.attach.file"].tap()
-        let browse = app.buttons["ブラウズ"]
-        if browse.waitForExistence(timeout: 3) {
-            browse.tap()
-        }
-        let onPhone = app.staticTexts["このiPhone内"]
-        if onPhone.waitForExistence(timeout: 3) {
-            onPhone.tap()
-        }
-        let folder = app.staticTexts["Bex"]
-        if folder.waitForExistence(timeout: 3) {
-            folder.tap()
-        }
-        let attachment = app.cells["attachment-fixture, txt"]
-        XCTAssertTrue(attachment.waitForExistence(timeout: 10), app.debugDescription)
-        attachment.tap()
+        selectAttachmentFixture(in: app)
         XCTAssertTrue(app.staticTexts["attachment-fixture.txt"].waitForExistence(timeout: 15))
         app.terminate()
         let reopened = try connectedSimulatorApp()

@@ -123,7 +123,7 @@ agent-cli <connection> approve '"request-id"' --decision 2   # string request ID
 ```sh
 nix develop . --command cargo test --workspace            # Rust, including the behavior corpus
 nix develop . --command just iroh-e2e                     # real daemon over isolated iroh sessions
-nix develop . --command just android-e2e                  # fresh Android 17 emulator: permission recovery, LAN traffic and native persistence
+nix develop . --command just android-e2e                  # fresh Android 17 emulator: network permission, Markdown, persistence and Host recovery
 nix develop . --command just ios-e2e [TestMethod…]        # Simulator XCUITest against a fixture Host
 nix develop . --command just conversation-ui             # selection, side chat, and activity regressions
 nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop tests, Android emulator and conversation-ui
@@ -133,7 +133,7 @@ Claude contracts run with `nix develop . --command cargo test --locked -p host-f
 
 Linux CI uses the `nix develop .#native` shell. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
 
-`crates/host-fixture::test_support` shares isolated Host startup, connections and shutdown. `bex-ui-fixture DIRECTORY CODEX PORT_FILE [STREAM_DELAY_MS]` runs the Host and loopback pairing controls together with credentials in memory; Codex remains a subprocess to exercise the stdio boundary. `ios-e2e` removes this process, its fresh Simulator and Xcode build products after the run, and retains results under `target/qa`. Failed, skipped or missing tests fail the command.
+`crates/host-fixture::test_support` shares isolated Host startup, connections and shutdown. `bex-ui-fixture DIRECTORY CODEX PORT_FILE [STREAM_DELAY_MS]` runs the Host and loopback pairing controls together with credentials in memory; Codex remains a subprocess to exercise the stdio boundary. `ios-e2e` removes this process, its fresh Simulator and Xcode build products after the run, and retains results under `target/qa`. Failed, skipped or missing tests fail the command. `android-e2e` similarly owns a fresh emulator and Host, first verifies permission denial/retry and real LAN traffic, then runs the Markdown, Store persistence and model recovery tests against the shipped JNI library and fixture Host. It retains logs and permission screenshots under `target/qa` and rejects missing or failed tests.
 
 Simulator and fixture runs do not verify physical devices, production Keychain access, camera, or real Codex accounts.
 

@@ -7,7 +7,9 @@ struct WorktreeSettingsHost: Identifiable {
 }
 
 struct WorktreeSettingsSheet: View {
-    @ObservedObject var model: BexAppViewModel
+    let connected: Bool
+    let request: SnapshotRequest
+    let settings: WorktreeSettings?
     let host: WorktreeSettingsHost
     @Environment(\.dismiss) private var dismiss
     @State private var createOnNewSession = false
@@ -17,10 +19,6 @@ struct WorktreeSettingsSheet: View {
     @State private var loaded = false
     @State private var busy = false
     @State private var error: String?
-
-    private var connected: Bool {
-        model.isConnected && model.selectedProfileId == host.id
-    }
 
     var body: some View {
         NavigationStack {
@@ -61,7 +59,7 @@ struct WorktreeSettingsSheet: View {
                     Section {
                         Text(error).foregroundColor(.red).accessibilityIdentifier("worktree.error")
                         if !loaded {
-                            Button("再読み込み") { Task { await load() } }.disabled(busy || !connected)
+                            Button("再読み込み", action: load).disabled(busy || !connected)
                         }
                     }
                 }
@@ -74,58 +72,46 @@ struct WorktreeSettingsSheet: View {
                         .accessibilityIdentifier("worktree.cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") { Task { await save() } }.disabled(!loaded || busy || !connected)
+                    Button("保存", action: save).disabled(!loaded || busy || !connected)
                         .accessibilityIdentifier("worktree.save")
                 }
             }
         }
         .interactiveDismissDisabled(busy)
-        .task { await load() }
+        .onAppear(perform: load)
     }
 
-    private func requestSettings(update: WorktreeSettings? = nil) async -> (WorktreeSettings?, String?) {
-        await withCheckedContinuation { continuation in
-            model
-                .perform(update
-                    .map { .updateWorktreeSettings(UpdateWorktreeSettings(settings: $0)) } ??
-                    .readWorktreeSettings(ReadWorktreeSettings())) { result in
-                        if case let .failure(error) = result {
-                            continuation.resume(returning: (nil, error.localizedDescription))
-                        } else {
-                            continuation.resume(returning: (model.snapshot.worktreeSettings(), nil))
-                        }
-                }
+    private func load() {
+        busy = true; error = nil
+        request(.readWorktreeSettings(ReadWorktreeSettings())) { snapshot, result in
+            busy = false
+            if case let .failure(failure) = result {
+                error = failure.localizedDescription; return
+            }
+            guard let settings = snapshot.worktreeSettings() else { error = "設定の応答が無効です。"; return }
+            createOnNewSession = settings.createOnNewSession
+            copyOnCreate = settings.copyOnCreate
+            copyPaths = settings.copyPaths.joined(separator: "\n")
+            directory = settings.worktreeDirectory
+            loaded = true
         }
     }
 
-    private func load() async {
-        busy = true
-        error = nil
-        defer { busy = false }
-        let (settings, failure) = await requestSettings()
-        guard let settings, failure == nil else { error = failure ?? "設定の応答が無効です。"; return }
-        createOnNewSession = settings.createOnNewSession
-        copyOnCreate = settings.copyOnCreate
-        copyPaths = settings.copyPaths.joined(separator: "\n")
-        directory = settings.worktreeDirectory
-        loaded = true
-    }
-
-    private func save() async {
-        busy = true
-        error = nil
-        defer { busy = false }
+    private func save() {
+        busy = true; error = nil
         let paths = copyPaths.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        let (result, failure) = await requestSettings(update: WorktreeSettings(
+        request(.updateWorktreeSettings(UpdateWorktreeSettings(settings: WorktreeSettings(
             createOnNewSession: createOnNewSession, copyOnCreate: copyOnCreate,
             copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines),
-            extra: model.snapshot.worktreeSettings()?.extra ?? [:]
-        ))
-        if result != nil, failure == nil {
+            extra: settings?.extra ?? [:]
+        )))) { snapshot, result in
+            busy = false
+            if case let .failure(failure) = result {
+                error = failure.localizedDescription; return
+            }
+            guard snapshot.worktreeSettings() != nil else { error = "設定を保存できませんでした。"; return }
             dismiss()
-        } else {
-            error = failure ?? "設定を保存できませんでした。"
         }
     }
 }

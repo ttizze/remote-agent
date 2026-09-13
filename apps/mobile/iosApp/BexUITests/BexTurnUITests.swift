@@ -224,6 +224,15 @@ extension BexLaunchUITests {
         let editor = app.textViews["file.editor"]
         XCTAssertTrue(editor.waitForExistence(timeout: 10))
         editor.tap(); editor.typeText("Saved from iPhone\n")
+        XCTAssertTrue(
+            (editor.value as? String ?? "").contains("Saved from iPhone"),
+            "Editor: \(String(describing: editor.value))"
+        )
+        let editable = expectation(
+            for: NSPredicate(format: "isEnabled == true"),
+            evaluatedWith: app.buttons["file.save"]
+        )
+        wait(for: [editable], timeout: 10)
         app.buttons["file.save"].tap()
         let saved = expectation(for: NSPredicate(format: "isEnabled == false"), evaluatedWith: app.buttons["file.save"])
         wait(for: [saved], timeout: 10)

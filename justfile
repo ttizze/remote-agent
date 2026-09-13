@@ -21,8 +21,9 @@ ios-e2e *tests:
 ios-markdown:
     scripts/test-ios-markdown.sh
 
-# Build and test only on a fresh, owned Android 17 emulator.
+# Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
 android-e2e:
+    cargo build --locked -p host-fixture --bins
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
     nix develop .#android-test --command bash scripts/android-e2e.sh
 

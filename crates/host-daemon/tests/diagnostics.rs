@@ -5,16 +5,12 @@ use std::{fs, process::Stdio, time::Duration};
 async fn fatal_startup_errors_survive_process_exit_and_restart() {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("state");
+    fs::create_dir(&state).unwrap();
+    fs::write(state.join("trust.json"), b"invalid trust record").unwrap();
     let codex_home = directory.path().join("codex");
     fs::create_dir(&codex_home).unwrap();
     let missing_program = directory.path().join("missing-codex");
-    let expected_error = agent_core::diagnostics::sanitize(
-        &codex_app_server::Error::ResolveExecutable {
-            program: missing_program.clone(),
-            source: fs::canonicalize(&missing_program).unwrap_err(),
-        }
-        .to_string(),
-    );
+    let expected_error = "saved Host trust is invalid";
     for _ in 0..2 {
         let output = tokio::time::timeout(
             Duration::from_secs(20),

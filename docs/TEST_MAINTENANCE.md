@@ -67,3 +67,8 @@ transfer server just to delete that check would reverse A14.
 
 The full Git/worktree/submission matrices, unseen/cached restored history,
 actual dictation duration, and authorization/revocation boundaries remain.
+
+Integration with the independent-provider Host changes also updates the fatal
+startup logging fixture: a missing Codex executable is recoverable, so corrupt
+isolated trust state now supplies the fatal error. Both process exits, distinct
+process IDs, startup records, and persisted error messages remain asserted.

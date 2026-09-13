@@ -39,8 +39,6 @@ import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownRun
 import dev.remoteagent.core.markdownBlocks
-import dev.remoteagent.core.Intent
-import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.RenderedItem
 
 @Composable
@@ -57,10 +55,10 @@ internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean) {
 }
 
 @Composable
-internal fun ThreadActivityCard(item: RenderedItem, model: AndroidAppModel, turnId: String) {
+internal fun ThreadActivityCard(item: RenderedItem, loadDetails: (String) -> Unit) {
     val content = remember(item) { item.presentation() }
     var expanded by remember(content.id) { mutableStateOf(false) }
-    var detail by remember(item) { mutableStateOf<String?>(null) }
+    val detail = remember(item, expanded) { if (expanded) item.expandedBody() else null }
     Card(
         Modifier.fillMaxWidth()
             .then(
@@ -68,10 +66,7 @@ internal fun ThreadActivityCard(item: RenderedItem, model: AndroidAppModel, turn
                     Modifier.clickable {
                         expanded = !expanded
                         if (expanded && content.deferred) {
-                            val threadId = model.snapshot.navigation().threadId ?: return@clickable
-                            model.perform(
-                                Intent.ReadItem(ReadItem(threadId, turnId, content.nativeId ?: content.id))
-                            )
+                            loadDetails(content.nativeId ?: content.id)
                         }
                     }
                 else Modifier
@@ -82,7 +77,6 @@ internal fun ThreadActivityCard(item: RenderedItem, model: AndroidAppModel, turn
                 (if (content.collapsible) if (expanded) "⌄ " else "› " else "") + content.title,
                 style = MaterialTheme.typography.labelLarge,
             )
-            if (expanded && detail == null) detail = item.expandedBody()
             Text(if (expanded) detail.orEmpty() else content.body, maxLines = if (expanded) Int.MAX_VALUE else 1)
         }
     }
