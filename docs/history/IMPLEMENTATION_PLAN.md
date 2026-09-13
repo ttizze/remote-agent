@@ -40,7 +40,7 @@ The relay operator must not be able to read or modify application traffic.
   Paired Device records use atomic persistence. Secrets never enter logs or
   durable conversation caches. Removing a Paired Device closes its live sessions
   and rejects future authentication. Invitations are local-management operations.
-- Each authenticated SSH subsystem opens its own existing CodexRpcService
+- Each authenticated SSH subsystem opens its own existing HostRpcService
   session. Requests with identical IDs on different devices remain independent.
   Notifications fan out only after Host authorization. The first valid approval
   response wins. Disconnects and restarts never grant approvals.

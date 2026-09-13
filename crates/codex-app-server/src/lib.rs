@@ -78,7 +78,7 @@ pub enum Error {
 
 /// A ready, initialized Codex App Server process.
 pub struct CodexAppServer {
-    child: Child,
+    child: tokio::sync::Mutex<Child>,
     peer: RpcPeer,
     initialize_response: InitializeResponse,
 }
@@ -128,7 +128,7 @@ impl CodexAppServer {
             .await?;
 
         Ok(Self {
-            child,
+            child: tokio::sync::Mutex::new(child),
             peer,
             initialize_response,
         })
@@ -172,9 +172,13 @@ impl CodexAppServer {
         self.peer.send_raw(line).await.map_err(Into::into)
     }
 
-    pub async fn shutdown(mut self) -> Result<(), Error> {
-        self.child.start_kill()?;
-        self.child.wait().await?;
+    /// Stop this backend without consuming other Host services that share it.
+    pub async fn shutdown(&self) -> Result<(), Error> {
+        let mut child = self.child.lock().await;
+        if child.try_wait()?.is_none() {
+            child.start_kill()?;
+        }
+        child.wait().await?;
         Ok(())
     }
 }

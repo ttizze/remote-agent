@@ -671,6 +671,10 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
             }
         });
         let request = read_after_reviews(&mut reader, &mut writer).await;
+        assert!(
+            store.snapshot().error.is_none(),
+            "retry must clear the previous submission error"
+        );
         assert_eq!(
             request["method"],
             if fail_creation {

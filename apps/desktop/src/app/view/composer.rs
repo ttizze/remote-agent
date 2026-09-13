@@ -198,6 +198,12 @@ impl Desktop {
                 column.child(div().text_xs().text_color(rgb(0xff7777)).child(error))
             })
             .child(h_flex().justify_between().child(speed).child(models))
+            .children(
+                self.snapshot
+                    .model_error_messages()
+                    .into_iter()
+                    .map(|error| div().text_xs().text_color(rgb(0xff7777)).child(error)),
+            )
             .child(model_effort_slider(
                 &self.effort_slider,
                 model.map_or(0, |model| model.supported_reasoning_efforts.len()),
@@ -483,7 +489,7 @@ impl Desktop {
                             .appearance(false)
                             .bordered(false)
                             .text_size(px(18.))
-                            .aria_label("Codex に依頼する")
+                            .aria_label("AI に依頼する")
                             .readonly(!self.snapshot.connected),
                     ),
                 )

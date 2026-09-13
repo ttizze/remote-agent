@@ -268,7 +268,7 @@ impl Desktop {
         .detach();
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Codex に依頼する")
+                .placeholder("AI に依頼する")
                 .auto_grow(2, 8)
         });
         let editor_input = cx.new(|cx| EditorState::new(window, cx));
@@ -1023,13 +1023,6 @@ impl Desktop {
             .models
             .iter()
             .find(|model| Some(model.model.as_str()) == self.draft().model.as_deref())
-            .or_else(|| {
-                self.snapshot
-                    .models
-                    .iter()
-                    .find(|model| model.is_default == Some(true))
-            })
-            .or_else(|| self.snapshot.models.first())
     }
     fn active_turn(&self) -> Option<&Turn> {
         self.thread()?

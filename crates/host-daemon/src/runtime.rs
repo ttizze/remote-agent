@@ -1,7 +1,7 @@
 use crate::command_line::StartupConfig;
 use agent_core::transport::{Endpoint, Relays};
 use host_daemon::{
-    CodexRpcService, DesktopProjectStore, HostCredentials, HostRuntime,
+    DesktopProjectStore, HostCredentials, HostRpcService, HostRuntime,
     local_host::{HostLease, LocalHostRegistry},
 };
 use std::sync::Arc;
@@ -53,21 +53,26 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         codex_home: config.codex_home,
         ..Default::default()
     };
-    let app_server = Arc::new(
-        codex_app_server::CodexAppServer::spawn(app_server_config.clone())
-            .await
-            .map_err(|e| e.to_string())?,
-    );
-    let projects = DesktopProjectStore::new(
-        app_server
-            .initialize_response()
-            .codex_home
-            .join(".codex-global-state.json"),
-    );
-    let service = CodexRpcService::new(app_server.clone(), projects);
+    let projects = match &app_server_config.codex_home {
+        Some(home) => DesktopProjectStore::new(home.join(".codex-global-state.json")),
+        None => DesktopProjectStore::from_environment().map_err(|error| error.to_string())?,
+    };
+    let app_server = codex_app_server::CodexAppServer::spawn(app_server_config.clone())
+        .await
+        .map(Arc::new)
+        .map_err(|error| error.to_string());
+    if let Err(error) = &app_server {
+        agent_core::diagnostics::error("host.codex", error);
+    }
+    let service = HostRpcService::new(app_server.clone(), projects);
     service
-        .enable_accounts(directory.join("codex-accounts"), app_server_config)
+        .enable_claude(config.claude, directory.join("claude"))
         .await?;
+    if app_server.is_ok() {
+        service
+            .enable_accounts(directory.join("codex-accounts"), app_server_config)
+            .await?;
+    }
     service.start();
     let runtime = Arc::new(HostRuntime::new(service, endpoint, credentials, config.name).await);
     let ticket = runtime.ticket();
@@ -91,9 +96,12 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         }
     };
     drop(runtime);
-    let app_server =
-        Arc::try_unwrap(app_server).map_err(|_| "active session retained Codex during shutdown")?;
-    app_server.shutdown().await.map_err(|e| e.to_string())?;
+    if let Ok(app_server) = app_server {
+        app_server
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     drop(lease);
     result
 }

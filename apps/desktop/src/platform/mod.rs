@@ -199,6 +199,8 @@ fn start_host(host: &LocalHost, isolated: bool) -> Result<std::process::Child, S
         .arg(&host.directory)
         .arg("--codex")
         .arg(std::env::var_os("BEX_CODEX").unwrap_or_else(|| "codex".into()))
+        .arg("--claude")
+        .arg(std::env::var_os("BEX_CLAUDE").unwrap_or_else(|| "claude".into()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

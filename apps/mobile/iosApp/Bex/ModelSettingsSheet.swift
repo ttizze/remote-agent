@@ -48,20 +48,25 @@ struct ModelSettingsSheet: View {
                                 }.padding(.leading, 36)
                             }
                             .accessibilityIdentifier("model.choice.default")
-                            ForEach(model.models, id: \.id) { choice in
-                                Button { model.chooseModel(choice.model) } label: {
-                                    HStack {
-                                        Text(choice.displayName).foregroundColor(.primary)
-                                        Spacer()
-                                        if model.selectedModel == choice.model {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }.padding(.leading, 36)
-                                }
-                                .accessibilityIdentifier("model.choice." + choice.id)
-                                .accessibilityValue(model.selectedModel == choice.model ? "選択中" : "")
-                            }
                         }
+                    }
+                }
+                Section("モデル") {
+                    ForEach(model.models, id: \.id) { choice in
+                        Button { model.chooseModel(choice.model) } label: {
+                            HStack {
+                                Text(choice.displayName).foregroundColor(.primary)
+                                Spacer()
+                                if model.selectedModel == choice.model {
+                                    Image(systemName: "checkmark")
+                                }
+                            }.padding(.leading, 36)
+                        }
+                        .accessibilityIdentifier("model.choice." + choice.id)
+                        .accessibilityValue(model.selectedModel == choice.model ? "選択中" : "")
+                    }
+                    ForEach(model.snapshot.modelErrorMessages(), id: \.self) { error in
+                        Text(error).font(.caption).foregroundColor(.red)
                     }
                 }
                 if loadingModels || changingAccount {

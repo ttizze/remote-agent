@@ -1,0 +1,194 @@
+//! Deterministic external Claude Code boundary. All conversation state and
+//! tool side effects live in the explicitly supplied working directory.
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::{self, BufRead, Write},
+    path::Path,
+};
+
+fn emit(value: Value) {
+    let mut out = io::stdout().lock();
+    writeln!(out, "{value}").unwrap();
+    out.flush().unwrap();
+}
+
+fn block(session: &str, message: &str, index: usize, kind: &str, text: &str) {
+    let (field, delta) = if kind == "thinking" {
+        ("thinking", "thinking_delta")
+    } else {
+        ("text", "text_delta")
+    };
+    emit(
+        json!({"type":"stream_event","session_id":session,"event":{"type":"content_block_start","index":index,"content_block":{"type":kind,field:""}}}),
+    );
+    emit(
+        json!({"type":"stream_event","session_id":session,"event":{"type":"content_block_delta","index":index,"delta":{"type":delta,field:text}}}),
+    );
+    emit(
+        json!({"type":"assistant","uuid":format!("envelope-{message}-{index}"),"session_id":session,"message":{"id":message,"role":"assistant","content":[{"type":kind,field:text}]}}),
+    );
+    emit(
+        json!({"type":"stream_event","session_id":session,"event":{"type":"content_block_stop","index":index}}),
+    );
+}
+
+fn reply(session: &str, count: usize, text: &str) {
+    let message = format!("message-{count}");
+    emit(
+        json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":message}}}),
+    );
+    block(session, &message, 0, "thinking", "Fixture reasoning");
+    block(session, &message, 1, "text", text);
+    emit(
+        json!({"type":"result","subtype":"success","session_id":session,"is_error":false,"result":text}),
+    );
+}
+
+fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let option = |name: &str| {
+        args.windows(2)
+            .find(|pair| pair[0] == name)
+            .map(|pair| pair[1].clone())
+    };
+    assert!(args.iter().any(|arg| arg == "-p"));
+    assert_eq!(option("--input-format").as_deref(), Some("stream-json"));
+    assert_eq!(option("--output-format").as_deref(), Some("stream-json"));
+    assert_eq!(option("--permission-prompt-tool").as_deref(), Some("stdio"));
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.contains("skip-permissions") || arg == "--bare")
+    );
+    let config: Value = fs::read("claude-fixture.json")
+        .ok()
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+        .unwrap_or(json!({}));
+    let session = option("--resume")
+        .or_else(|| option("--session-id"))
+        .unwrap_or_else(|| "catalog".into());
+    let path = format!("claude-session-{session}.json");
+    let mut inputs: Vec<Value> = if option("--resume").is_some() {
+        serde_json::from_slice(
+            &fs::read(&path).expect("resume must find the original session in its original cwd"),
+        )
+        .unwrap()
+    } else {
+        assert!(
+            !Path::new(&path).exists(),
+            "a new session cannot overwrite a previous session"
+        );
+        Vec::new()
+    };
+    let mut waiting = None;
+    for line in io::stdin().lock().lines() {
+        let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        match value["type"].as_str().unwrap() {
+            "control_request" if value["request"]["subtype"] == "initialize" => {
+                if config["initializeError"] == true {
+                    emit(
+                        json!({"type":"control_response","response":{"subtype":"error","request_id":value["request_id"],"error":"fixture initialization failed"}}),
+                    );
+                } else {
+                    emit(
+                        json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{
+                            "models":[{"value":"default","displayName":"Fixture Claude","supportedEffortLevels":["low","high"]},{"value":"haiku","displayName":"Fixture Haiku"}],
+                            "account":if config["unauthenticated"] == true {json!({})} else {json!({"subscriptionType":"Claude Max"})}
+                        }}}),
+                    );
+                }
+            }
+            "user" => {
+                assert_ne!(session, "catalog");
+                assert_eq!(value["session_id"], session);
+                assert!(
+                    config["unauthenticated"] != true,
+                    "unauthenticated input must never reach Claude"
+                );
+                assert_eq!(option("--model").as_deref(), Some("default"));
+                let content = value["message"]["content"].clone();
+                inputs.push(json!({"content":content,"effort":option("--effort")}));
+                fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+                emit(json!({"type":"system","subtype":"init","session_id":session}));
+                let text = content
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if config["resultError"] == true {
+                    emit(
+                        json!({"type":"result","session_id":session,"is_error":true,"errors":["fixture inference failed"]}),
+                    );
+                } else if text == "wait" {
+                    waiting = Some("wait");
+                    emit(
+                        json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":"waiting"}}}),
+                    );
+                    block(&session, "waiting", 0, "text", "Waiting for interruption");
+                } else if text == "permission" || text == "question" {
+                    let tool = if text == "question" {
+                        "AskUserQuestion"
+                    } else {
+                        "Bash"
+                    };
+                    let input = if text == "question" {
+                        json!({"questions":[{"question":"Which color?","header":"Color","multiSelect":false,"options":[{"label":"Blue","description":"Use blue"},{"label":"Red","description":"Use red"}]}]})
+                    } else {
+                        json!({"command":"printf approved > approved.txt"})
+                    };
+                    emit(
+                        json!({"type":"assistant","uuid":"tool-message","message":{"id":"tool-message","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
+                    );
+                    emit(
+                        json!({"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":tool,"tool_use_id":"tool-1","input":input}}),
+                    );
+                    waiting = Some(if text == "question" {
+                        "question"
+                    } else {
+                        "permission"
+                    });
+                } else {
+                    reply(
+                        &session,
+                        inputs.len(),
+                        &format!("reply {}: {text}", inputs.len()),
+                    );
+                }
+            }
+            "control_response" => {
+                assert_eq!(value["response"]["request_id"], "permission-1");
+                let response = &value["response"]["response"];
+                let allowed = response["behavior"] == "allow";
+                let text = if waiting == Some("question") && allowed {
+                    response["updatedInput"]["answers"]["Which color?"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                } else if allowed {
+                    fs::write("approved.txt", "approved").unwrap();
+                    "approved".into()
+                } else {
+                    "denied".into()
+                };
+                emit(
+                    json!({"type":"user","uuid":"tool-result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":text,"is_error":!allowed}]}}),
+                );
+                reply(&session, inputs.len(), &text);
+                waiting = None;
+            }
+            "control_request" if value["request"]["subtype"] == "interrupt" => {
+                emit(
+                    json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{}}}),
+                );
+                emit(
+                    json!({"type":"result","session_id":session,"is_error":false,"result":"interrupted"}),
+                );
+                waiting = None;
+            }
+            _ => panic!("unexpected fixture input type"),
+        }
+    }
+}

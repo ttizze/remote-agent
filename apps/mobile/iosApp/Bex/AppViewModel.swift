@@ -234,6 +234,9 @@ final class BexAppViewModel: ObservableObject {
                 operations[id] = nil
                 if selectedProfileId == host {
                     publish(owner.snapshot())
+                    if case let .failure(error) = result {
+                        notice = snapshot.error() ?? error.localizedDescription
+                    }
                 }
                 completion(result)
             }

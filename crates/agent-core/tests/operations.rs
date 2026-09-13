@@ -101,7 +101,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             });
             Value::Null
         }
-        "models" => json!(client.models().await?),
+        "models" => json!(client.models().await?.data),
         "sessionImages" => json!(client.session_images(text(command, "threadId")).await?),
         "watchThread" => {
             call!(Watch {

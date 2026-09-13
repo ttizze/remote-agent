@@ -5,7 +5,7 @@ use agent_core::{
 };
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{
-    CodexRpcService, CredentialStore, DesktopProjectStore, HostCredentials, HostRuntime,
+    CredentialStore, DesktopProjectStore, HostCredentials, HostRpcService, HostRuntime,
 };
 use std::{
     path::Path,
@@ -30,7 +30,7 @@ impl CredentialStore for Memory {
 }
 
 pub struct HostFixture {
-    pub server: Arc<CodexAppServer>,
+    server: Option<Arc<CodexAppServer>>,
     pub credentials: Arc<HostCredentials>,
     pub memory: Arc<Memory>,
     pub ticket: Ticket,
@@ -45,6 +45,7 @@ impl HostFixture {
         memory: Arc<Memory>,
         name: &str,
         accounts: bool,
+        claude: Option<&Path>,
     ) -> Result<Self, String> {
         #[cfg(unix)]
         {
@@ -68,16 +69,20 @@ impl HostFixture {
             .await
             .map_err(|error| error.to_string())?;
         let ticket = endpoint.ticket();
-        let server = Arc::new(
-            CodexAppServer::spawn(config.clone())
-                .await
-                .map_err(|error| error.to_string())?,
-        );
-        let service = CodexRpcService::new(
+        let server = CodexAppServer::spawn(config.clone())
+            .await
+            .map(Arc::new)
+            .map_err(|error| error.to_string());
+        let service = HostRpcService::new(
             server.clone(),
             DesktopProjectStore::new(directory.join("projects.json")),
         );
-        if accounts {
+        if let Some(program) = claude {
+            service
+                .enable_claude(program.to_owned(), directory.join("claude"))
+                .await?;
+        }
+        if accounts && server.is_ok() {
             service
                 .enable_accounts(directory.join("state/accounts"), config)
                 .await?;
@@ -88,7 +93,7 @@ impl HostFixture {
         let stop = CancellationToken::new();
         let running = tokio::spawn(runtime.run(stop.clone()));
         Ok(Self {
-            server,
+            server: server.ok(),
             credentials,
             memory,
             ticket,
@@ -109,11 +114,10 @@ impl HostFixture {
     pub async fn close(self) -> Result<(), String> {
         self.stop.cancel();
         self.running.await.map_err(|error| error.to_string())??;
-        Arc::try_unwrap(self.server)
-            .map_err(|_| "Codex process retained")?
-            .shutdown()
-            .await
-            .map_err(|error| error.to_string())
+        if let Some(server) = self.server {
+            server.shutdown().await.map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 

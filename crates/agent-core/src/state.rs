@@ -120,6 +120,8 @@ pub struct Snapshot {
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
     pub threads: Option<Arc<ThreadList>>,
     pub models: Arc<Vec<Model>>,
+    #[serde(default)]
+    pub model_errors: Arc<Map<String, Value>>,
     #[serde(skip)]
     pub requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
@@ -144,6 +146,23 @@ pub struct Snapshot {
     #[serde(skip)]
     pub error: Option<String>,
 }
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl Snapshot {
+    pub fn model_error_messages(&self) -> Vec<String> {
+        self.model_errors
+            .iter()
+            .map(|(provider, error)| {
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| error.to_string());
+                format!("{provider}: {message}")
+            })
+            .collect()
+    }
+}
+
 mod notifications;
 use notifications::notification;
 pub mod operations;
@@ -273,7 +292,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             let key = format!("new:{cwd}");
             if !previous.drafts.contains_key(&key) {
                 let draft = Draft::default();
-                let (model, effort, tier) = supported_settings(&draft, &previous.models);
+                let (model, effort, tier) = supported_settings(&draft, &previous.models, &previous.model_errors);
                 let draft = Draft {
                     model: model.map(str::to_owned),
                     effort: effort.map(str::to_owned),
@@ -369,7 +388,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 _ => unreachable!(),
             };
             if !previous.models.is_empty() {
-                let (model, effort, tier) = supported_settings(&draft, &previous.models);
+                let (model, effort, tier) = supported_settings(&draft, &previous.models, &previous.model_errors);
                 let settings = (
                     model.map(str::to_owned),
                     effort.map(str::to_owned),
@@ -573,7 +592,21 @@ fn clear_session_status(thread: &mut Thread) {
 fn supported_settings<'a>(
     draft: &'a Draft,
     models: &'a [Model],
+    errors: &Map<String, Value>,
 ) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
+    // Absence in an incomplete catalog is not evidence that a saved choice was removed.
+    if !errors.is_empty()
+        && draft.model.is_some()
+        && !models
+            .iter()
+            .any(|model| Some(model.model.as_str()) == draft.model.as_deref())
+    {
+        return (
+            draft.model.as_deref(),
+            draft.effort.as_deref(),
+            draft.service_tier.as_deref(),
+        );
+    }
     let model = models
         .iter()
         .find(|model| Some(model.model.as_str()) == draft.model.as_deref())
@@ -909,6 +942,7 @@ fn submission(
     clear_draft: Option<Arc<Draft>>,
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
+    next.error = None;
     let active = thread_id
         .as_ref()
         .and_then(|id| previous.conversations.get(id))

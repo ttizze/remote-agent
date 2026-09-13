@@ -473,6 +473,7 @@ pub fn request(key: &str, source: &ServerRequest) -> Request {
         "item/commandExecution/requestApproval" => {
             (RequestKind::CommandApproval, "コマンドの承認待ち")
         }
+        "claude/tool/requestApproval" => (RequestKind::CommandApproval, "ツールの承認待ち"),
         "item/fileChange/requestApproval" => (RequestKind::FileApproval, "ファイル変更の承認待ち"),
         "item/permissions/requestApproval" => (RequestKind::Permissions, "権限の承認待ち"),
         "item/tool/requestUserInput" => (RequestKind::Questions, "回答待ち"),
