@@ -33,6 +33,8 @@ conversation-ui:
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorRendersMarkdownTableAndReopensIt \
+        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
         testSimulatorCopiesOwnMessageIntoComposer \
         testSimulatorCopiesOnlySelectedMessageText \
