@@ -489,24 +489,53 @@ impl Desktop {
                 ConversationRowContent::Error { error } => {
                     body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
                 }
-                ConversationRowContent::Response { item, .. } => {
+                ConversationRowContent::Response { item, fork_turn_id } => {
                     body = body.child(self.projected_item(item, turn, cx));
                     if item.data.kind == "agent" {
-                        let item = item.clone();
+                        let text = item.data.body.clone();
                         body = body.child(
-                            h_flex().child(
-                                Button::new(format!("copy-{}", item.data.id))
-                                    .icon(IconName::Copy)
-                                    .small()
-                                    .ghost()
-                                    .tooltip("回答をコピー")
-                                    .accessibility_label("回答をコピー")
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            item.data.body.clone(),
-                                        ));
-                                    }),
-                            ),
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(format!("copy-{}", item.data.id))
+                                        .icon(IconName::Copy)
+                                        .small()
+                                        .ghost()
+                                        .tooltip("回答をコピー")
+                                        .accessibility_label("回答をコピー")
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text.clone(),
+                                            ));
+                                        }),
+                                )
+                                .when_some(fork_turn_id.clone(), |actions, turn_id| {
+                                    let thread_id = self.selected().to_owned();
+                                    actions.child(
+                                        Button::new(format!("fork-{}", item.data.id))
+                                            .small()
+                                            .ghost()
+                                            .tooltip("ここから会話を分岐")
+                                            .accessibility_label("ここから会話を分岐")
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                if !view.snapshot.connected || view.busy > 0 {
+                                                    return;
+                                                }
+                                                view.busy += 1;
+                                                view.perform(
+                                                    Intent::ForkThread(op::ForkThread::new(
+                                                        thread_id.clone(),
+                                                        turn_id.clone(),
+                                                    )),
+                                                    OperationCompletion::Busy,
+                                                );
+                                                cx.notify();
+                                            }))
+                                            .icon(Icon::default().path("bex/branch.svg"))
+                                            .debug_selector(|| "response-fork".into())
+                                            .disabled(!self.snapshot.connected || self.busy > 0),
+                                    )
+                                }),
                         );
                     }
                 }
@@ -931,6 +960,30 @@ mod rendering_tests {
                 }),
                 conversation: project_conversation(&snapshot, Arc::new(source), &None),
             }
+        }
+    }
+
+    #[gpui::test]
+    fn completed_response_offers_fork_but_streaming_response_does_not(cx: &mut TestAppContext) {
+        let _runtime = init(cx);
+        for status in ["completed", "inProgress"] {
+            let source = serde_json::from_value(serde_json::json!({
+                "id": "fixture", "turns": [{
+                    "id": "turn", "status": status, "items": [{
+                        "id": "answer", "type": "agentMessage", "phase": "final_answer",
+                        "text": "Answer"
+                    }]
+                }]
+            }))
+            .unwrap();
+            let (_, window) = cx.add_window_view(|window, cx| {
+                ConversationView::new(Snapshot::default(), source, window, cx)
+            });
+            window.run_until_parked();
+            assert_eq!(
+                window.debug_bounds("response-fork").is_some(),
+                status == "completed"
+            );
         }
     }
 

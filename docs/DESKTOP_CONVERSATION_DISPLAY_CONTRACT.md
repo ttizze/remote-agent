@@ -332,3 +332,17 @@ additional-input case also checks stop, approval removal, and collapsed
 interrupted work. The retry side-chat case retains submission, draft clearing,
 and reopen checks. See [test maintenance](TEST_MAINTENANCE.md) for the complete
 boundary map and manual real-time soak command.
+
+## Response actions
+
+Desktop responses retain Copy and show “ここから会話を分岐” when the shared
+conversation projection supplies `fork_turn_id`, matching iOS. Fork uses the
+selected thread and that turn boundary, opens the returned conversation through
+Store, disables repeat clicks while pending or disconnected, and displays errors
+through the existing operation error surface. Navigation during the request must
+not be overwritten by a late result.
+
+Acceptance: `completed_response_offers_fork_but_streaming_response_does_not`
+checks native button visibility; `fork_opens_the_returned_thread_and_keeps_later_deltas`
+checks Store RPC parameters, returned conversation, subsequent deltas and late
+results after navigation.
