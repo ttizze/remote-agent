@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -26,6 +27,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ListQuery
 import dev.remoteagent.core.ListThreads
@@ -88,6 +90,11 @@ private fun SummaryRow(thread: ThreadSummary, openConversation: (Intent) -> Unit
         Text(thread.title, Modifier.weight(1f))
         if (thread.active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
         else if (thread.unread) Text("● 完了・未確認")
+        if (thread.worktreeMerged) Icon(
+            painterResource(R.drawable.ic_merge), "main にマージ済み",
+            Modifier.padding(start = 8.dp).size(18.dp),
+            tint = MaterialTheme.colorScheme.tertiary,
+        )
     }
 }
 

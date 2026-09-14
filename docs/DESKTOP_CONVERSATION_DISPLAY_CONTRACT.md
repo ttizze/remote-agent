@@ -349,3 +349,11 @@ Acceptance: `completed_response_offers_fork_but_streaming_response_does_not`
 checks native button visibility; `fork_opens_the_returned_thread_and_keeps_later_deltas`
 checks Store RPC parameters, returned conversation, subsequent deltas and late
 results after navigation.
+
+
+### セッション一覧のマージ表示
+
+- 実行ディレクトリが linked worktree のセッションは、作業ブランチの先端がローカル `main` に取り込まれているとき、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_merged` を表示する。
+- 作成直後、main 自体、detached HEAD、Git の確認失敗、作成履歴を確認できない場合は表示しない。ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。squash/rebase による別コミットへの置換は判定対象外。
+- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定し、未マージの追加コミットがあればマークを消す。Git の状態をプロジェクト設定のキャッシュに保存しない。
+- 受け入れ確認: core の `list_preserves_merge_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `mergeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。

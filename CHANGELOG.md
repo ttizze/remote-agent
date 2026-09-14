@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Show the stock Lucide git-merge icon beside session activity on desktop, iOS and Android when the associated worktree is merged into local main; prepare iOS build 52. Acceptance: real Git through Host/Store covers fresh, merged and subsequently changed branches; native list tests cover spinner placement and iOS reopening.
+
 - Reconnect mobile foreground sessions immediately instead of probing the old transport with list/history RPCs and waiting up to 30 seconds. Keep ordinary active reads on their existing connection and preserve navigation and drafts. Acceptance: `reconnect_reloads_selected_state_without_native_dispatch` bounds silent-session recovery to five seconds; `active_reads_retain_transport_navigation_and_draft_after_error` retains normal read-error handling; Android recovery and iOS foreground/retry tests verify refreshed conversations and subsequent submission.
 
 - Create worktrees in `<original-repository>/.worktree/session-XXXXX/<repository-name>` so folder labels retain the repository name. Preserve custom storage roots and existing worktrees, exclude the default storage from Git status, and remove empty session folders after cleanup. Acceptance: isolated Git creation/copy/removal and creation from existing worktrees; Store/iroh/Host submission, completion, cleared drafts, project membership, and reopening with the new checkout path.
