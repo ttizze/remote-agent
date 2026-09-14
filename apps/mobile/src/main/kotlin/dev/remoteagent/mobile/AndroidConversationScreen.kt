@@ -17,7 +17,9 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -33,6 +35,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -129,6 +132,10 @@ private fun BoxScope.LatestMessageButton(
                     follow()
                 }
             },
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = Color.DarkGray,
+                contentColor = Color.White,
+            ),
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
                 .semantics { contentDescription = "最新のメッセージへ" },
         ) { Text("↓") }
@@ -268,7 +275,11 @@ internal fun AttachmentButton(selectionKey: String, attach: (String, Uri, () -> 
 internal fun ConversationHeader(title: String?, showThreads: () -> Unit, scrollToTop: () -> Unit) {
     Row {
         Button(onClick = showThreads) { Text("タスク一覧") }
-        TextButton(onClick = scrollToTop, modifier = Modifier.semantics { contentDescription = "会話の先頭へ" }) {
+        TextButton(
+            onClick = scrollToTop,
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+            modifier = Modifier.semantics { contentDescription = "会話の先頭へ" },
+        ) {
             Text(title?.ifEmpty { "タスク" } ?: "チャット")
         }
     }

@@ -103,11 +103,11 @@ struct ThreadScreen: View {
                                 }
                             } label: {
                                 Image(systemName: "arrow.down").font(.title3.weight(.medium))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 44, height: 44)
+                                    .background(Color(white: 0.19), in: Circle())
                             }
-                            .buttonStyle(.bordered)
-                            .tint(.primary)
-                            .buttonBorderShape(.capsule)
-                            .controlSize(.large)
+                            .buttonStyle(.plain)
                             .accessibilityLabel("最新のメッセージへ")
                             .accessibilityIdentifier("task.latest")
                             .padding(.bottom, 6)
