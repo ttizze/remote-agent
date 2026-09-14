@@ -36,6 +36,9 @@ hydration must not change this default.
 
 ## History pagination and refresh
 
+- List query limits and search are not persisted; reopening restores five-item
+  defaults. Live navigation and reconnection retain the current query.
+
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
 - Retain cached history only when its suffix matches the refreshed page's
