@@ -20,26 +20,43 @@ extension BexLaunchUITests {
         let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: latest)
         wait(for: [visible], timeout: 5)
         captureScreen(app, named: "Long interrupted history at latest message")
-        func loadedItems() -> Int {
-            let value = detail.value as? String ?? ""
-            return Int(value.components(separatedBy: "items=").last ?? "") ?? -1
-        }
-        let initialItems = loadedItems()
+        let initialItems = loadedItems(in: detail)
         XCTAssertGreaterThan(initialItems, 0)
         for _ in 0 ..< 40 {
-            if loadedItems() > initialItems {
+            if loadedItems(in: detail) > initialItems {
                 break
             }
             detail.swipeDown(velocity: .fast)
         }
-        XCTAssertGreaterThan(loadedItems(), initialItems,
+        XCTAssertGreaterThan(loadedItems(in: detail), initialItems,
                              "Scrolling upward must load older items without tapping a button")
         XCTAssertFalse(latest.isHittable, "Prepending history must not jump back to the latest message")
         captureScreen(app, named: "Older history loaded by scrolling")
+        let latestButton = app.buttons["task.latest"]
+        XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
+        latestButton.tap()
+        for scrollToTop in [
+            { app.buttons["task.top"].tap() },
+            { app.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0))
+                .withOffset(CGVector(dx: 0, dy: 32)).tap() }
+        ] {
+            XCTAssertTrue(latest.isHittable)
+            XCTAssertFalse(latestButton.exists)
+            scrollToTop()
+            XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
+            XCTAssertFalse(latest.isHittable, "Top navigation must not snap back to the latest message")
+            latestButton.tap()
+        }
+        XCTAssertTrue(latest.isHittable)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
         XCTAssertTrue(latest.isHittable)
+    }
+
+    private func loadedItems(in detail: XCUIElement) -> Int {
+        let value = detail.value as? String ?? ""
+        return Int(value.components(separatedBy: "items=").last ?? "") ?? -1
     }
 
     func testSimulatorKeepsSmallOlderScrollDuringLiveUpdate() throws {

@@ -20,6 +20,7 @@ struct AssistantSelectableText: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UITextView {
         let view = UITextView()
+        view.scrollsToTop = false
         view.isEditable = false
         view.isSelectable = true
         view.isScrollEnabled = false

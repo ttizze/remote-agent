@@ -403,10 +403,43 @@ impl Desktop {
                     }),
             );
         } else {
-            body = body.child(selection::ConversationSelection::wrap(
-                &self.selection,
-                history,
-            ));
+            let mut viewport = div()
+                .relative()
+                .pl_4()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .child(selection::ConversationSelection::wrap(
+                    &self.selection,
+                    history,
+                ))
+                .child(self.conversation_navigation(cx));
+            if !self.list.is_following_tail() {
+                viewport = viewport.child(
+                    h_flex()
+                        .absolute()
+                        .bottom_2()
+                        .left_0()
+                        .w_full()
+                        .justify_center()
+                        .child(
+                            self.icon_button(
+                                "conversation-latest",
+                                IconName::ArrowDown,
+                                "最新のメッセージへ",
+                                cx,
+                                |view, _, _| {
+                                    view.list.set_follow_mode(FollowMode::Tail);
+                                },
+                            )
+                            .debug_selector(|| "conversation-latest".into())
+                            .rounded_full()
+                            .bg(rgb(0x303030))
+                            .size(px(36.)),
+                        ),
+                );
+            }
+            body = body.child(viewport);
         }
         let key = self.draft_key().to_owned();
         let attachments = &self.draft().attachments;

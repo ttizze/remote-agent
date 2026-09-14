@@ -322,6 +322,7 @@ private struct MessageTextSelection: UIViewRepresentable {
 
     func makeUIView(context _: Context) -> UITextView {
         let view = UITextView()
+        view.scrollsToTop = false
         view.isEditable = false
         view.isSelectable = true
         view.font = .systemFont(ofSize: 18)

@@ -34,6 +34,27 @@ it must not expand adjacent groups. A status transition resets expansion to the
 collapsed default. Activity wording, counts, streaming updates, and history
 hydration must not change this default.
 
+## Conversation navigation
+
+- Desktop, iPhone and Android show a down-arrow button at the bottom center of
+  the conversation when the reader is away from the latest content. Activating it
+  reaches the bottom of the last message, including a message taller than the
+  viewport, and resumes following new output. It disappears at the bottom.
+- Desktop's left conversation navigator uses the shared projected user messages
+  as at most eight evenly spaced turn markers, always including the first and last.
+  Hover expands the target marker to 28 px and its neighbors progressively to the right
+  from a fixed left edge, returning
+  to 7 px when the pointer leaves. It immediately shows the user message and the beginning
+  of its answer beside it; clicking jumps to that turn and pauses following.
+- Tapping the mobile conversation title scrolls to the top of loaded history.
+  iPhone also supports the native status-bar tap. Neither operation may be
+  immediately undone by latest-message following; existing history pagination
+  and retry controls remain available at the top.
+- Acceptance: desktop `conversation_navigation_returns_to_latest_and_resumes_following`,
+  iOS `testSimulatorOpensLongInterruptedHistoryAtLatestMessage` and
+  `testSimulatorKeepsSmallOlderScrollDuringLiveUpdate`, Android
+  `ConversationNavigationTest` exercise the production native conversation views.
+
 ## Selection and copying
 
 - Mac text selection exposes **チャットに追加**, **詳細を表示**, and

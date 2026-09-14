@@ -4,6 +4,8 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -15,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -24,10 +27,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.ActivityExpansion
 import dev.remoteagent.core.ActivityPresentation
@@ -41,6 +48,7 @@ import dev.remoteagent.core.Respond
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.activityIsExpanded
 import java.util.UUID
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun ThreadDetailScreen(
@@ -49,64 +57,81 @@ internal fun ThreadDetailScreen(
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     older: ((String?) -> Unit)?,
     modifier: Modifier = Modifier,
+    scrollToTopRequest: Int = 0,
     composer: @Composable (() -> Unit) -> Unit,
 ) {
     val threadId = snapshot.navigation().threadId
     val listState = rememberLazyListState()
     var activityExpansion by remember(threadId) { mutableStateOf(emptyMap<String, ActivityExpansion>()) }
-    var following by remember { mutableStateOf(true) }
-    ObserveFollowing(listState) { following = it }
-    LaunchedEffect(snapshot) {
-        if (following && older != null) {
-            withFrameNanos {}
-            val last = listState.layoutInfo.totalItemsCount - 1
-            if (last >= 0) listState.scrollToItem(last)
-        }
-    }
+    var following by remember(threadId) { mutableStateOf(true) }
+    ObserveFollowing(listState, snapshot, following && older != null, { following = it }, scrollToTopRequest)
     Column(modifier.fillMaxSize()) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (threadId?.let(snapshot::conversation)?.historyCursor() != null)
-                item(key = "history:turns") {
-                    Button(
-                        onClick = {
-                            following = false
-                            older?.invoke(null)
-                        },
-                        enabled = older != null,
-                    ) {
-                        Text("以前の会話を読み込む")
-                    }
-                }
-            conversationRows(projection?.rows.orEmpty(), activityExpansion) { content ->
-                ConversationContent(
-                    content,
-                    threadId,
-                    perform,
-                    older =
-                        older?.let { load ->
-                            { turnId ->
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (threadId?.let(snapshot::conversation)?.historyCursor() != null)
+                    item(key = "history:turns") {
+                        Button(
+                            onClick = {
                                 following = false
-                                load(turnId)
+                                older?.invoke(null)
+                            },
+                            enabled = older != null,
+                        ) {
+                            Text("以前の会話を読み込む")
+                        }
+                    }
+                conversationRows(projection?.rows.orEmpty(), activityExpansion) { content ->
+                    ConversationContent(
+                        content,
+                        threadId,
+                        perform,
+                        older =
+                            older?.let { load ->
+                                { turnId ->
+                                    following = false
+                                    load(turnId)
+                                }
+                            },
+                        activityHeader = { activity ->
+                            ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
+                                activityExpansion = activityExpansion + (activity.id to choice)
                             }
                         },
-                    activityHeader = { activity ->
-                        ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
-                            activityExpansion = activityExpansion + (activity.id to choice)
-                        }
-                    },
-                )
+                    )
+                }
+                items(projection?.queued.orEmpty(), key = { "queued:${it.id()}" }) {
+                    Text("順番待ち")
+                    ThreadMessageCard(it, true)
+                }
             }
-            items(projection?.queued.orEmpty(), key = { "queued:${it.id()}" }) {
-                Text("順番待ち")
-                ThreadMessageCard(it, true)
-            }
+            LatestMessageButton(listState) { following = true }
         }
         composer { following = true }
+    }
+}
+
+@Composable
+private fun BoxScope.LatestMessageButton(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    follow: () -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    if (listState.canScrollForward) {
+        FilledIconButton(
+            onClick = {
+                scope.launch {
+                    listState.scrollToLatest()
+                    follow()
+                }
+            },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+                .semantics { contentDescription = "最新のメッセージへ" },
+        ) { Text("↓") }
     }
 }
 
@@ -240,21 +265,44 @@ internal fun AttachmentButton(selectionKey: String, attach: (String, Uri, () -> 
 }
 
 @Composable
-internal fun ConversationHeader(title: String?, showThreads: () -> Unit) {
+internal fun ConversationHeader(title: String?, showThreads: () -> Unit, scrollToTop: () -> Unit) {
     Row {
         Button(onClick = showThreads) { Text("タスク一覧") }
-        Text(title?.ifEmpty { "タスク" } ?: "チャット", Modifier.padding(12.dp))
+        TextButton(onClick = scrollToTop, modifier = Modifier.semantics { contentDescription = "会話の先頭へ" }) {
+            Text(title?.ifEmpty { "タスク" } ?: "チャット")
+        }
     }
 }
 
 @Composable
-private fun ObserveFollowing(listState: androidx.compose.foundation.lazy.LazyListState, follow: (Boolean) -> Unit) {
+private fun ObserveFollowing(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    snapshot: Snapshot,
+    following: Boolean,
+    follow: (Boolean) -> Unit,
+    scrollToTopRequest: Int,
+) {
+    LaunchedEffect(scrollToTopRequest) {
+        if (scrollToTopRequest > 0) {
+            follow(false)
+            listState.scrollToItem(0)
+        }
+    }
+    LaunchedEffect(snapshot) {
+        if (following) {
+            withFrameNanos {}
+            listState.scrollToLatest()
+        }
+    }
     LaunchedEffect(listState) {
-        snapshotFlow {
-                listState.isScrollInProgress to
-                    (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ==
-                        listState.layoutInfo.totalItemsCount - 1)
-            }
+        snapshotFlow { listState.isScrollInProgress to !listState.canScrollForward }
             .collect { (scrolling, bottom) -> if (scrolling) follow(bottom) }
     }
+}
+
+private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToLatest() {
+    val last = layoutInfo.totalItemsCount - 1
+    if (last < 0) return
+    scrollToItem(last)
+    scroll { scrollBy(layoutInfo.visibleItemsInfo.lastOrNull()?.size?.toFloat() ?: 0f) }
 }

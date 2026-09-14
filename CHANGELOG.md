@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a desktop conversation navigator with at most eight hover markers that expand with their neighbors, immediate user/answer previews and click-to-jump, plus a bottom-center latest-message button on desktop and Android. Preserve the iPhone latest button, add mobile title-tap navigation to the top, and prevent iPhone status-bar scrolling from snapping back to the bottom. Replace Android's last-row visibility check with actual remaining-scroll detection and share its bottom alignment between following and explicit navigation. Acceptance: native desktop navigation, iOS long-history/top/latest and detached live-update tests, Android top/latest navigation with an oversized final message.
+
 - Reduce development/test debug information to filename and line-number backtraces, disable incremental compilation in quality checks, and replace unbounded inactive Cargo output retention with a 3-day/32-GiB cleanup after checks. Preserve live builds, running executables, application backups, and verification records; verify cleanup and subsequent rebuilds with real isolated Cargo projects.
 
 - Use Espresso 3.7.0 for Android instrumentation, replacing Compose's transitive 3.5.0 dependency and its removed reflective `InputManager.getInstance` call. Preserve the API 37 Markdown, permission, persistence and Host-recovery acceptance tests.

@@ -449,22 +449,22 @@ internal fun RemoteAgentApp(
                             },
                             Modifier.weight(1f),
                         )
-                    else -> {
+                    else -> androidx.compose.runtime.key(model.selectionKey) {
+                        var scrollToTopRequest by remember { mutableStateOf(0) }
                         ConversationHeader(
                             model.snapshot.navigation().threadId?.let(model.snapshot::conversation)?.title(),
                             model::showThreads,
-                        )
-                        androidx.compose.runtime.key(model.selectionKey) {
-                            ThreadDetailScreen(
-                                model.snapshot,
-                                model.conversation,
-                                model::perform,
-                                if (model.loadingHistory) null else model::older,
-                                Modifier.weight(1f),
-                            ) { onSend ->
-                                ThreadComposer(model.snapshot, model::perform, onSend) {
-                                    AttachmentButton(model.selectionKey, model::attach)
-                                }
+                        ) { scrollToTopRequest += 1 }
+                        ThreadDetailScreen(
+                            model.snapshot,
+                            model.conversation,
+                            model::perform,
+                            if (model.loadingHistory) null else model::older,
+                            Modifier.weight(1f),
+                            scrollToTopRequest = scrollToTopRequest,
+                        ) { onSend ->
+                            ThreadComposer(model.snapshot, model::perform, onSend) {
+                                AttachmentButton(model.selectionKey, model::attach)
                             }
                         }
                     }

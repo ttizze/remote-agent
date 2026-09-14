@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 /// History and row presentation
 extension ThreadScreen {
@@ -150,5 +151,89 @@ struct HistoryBoundaryPreferenceKey: PreferenceKey {
     static var defaultValue: [String: CGFloat] = [:]
     static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
         value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+
+/// Stop latest-message following before UIKit starts its status-bar scroll animation.
+struct ConversationScrollToTop: UIViewRepresentable {
+    let onScrollToTop: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScrollToTop)
+    }
+
+    func makeUIView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        view.isUserInteractionEnabled = false
+        view.attach = { [weak coordinator = context.coordinator] view in coordinator?.attach(to: view) }
+        return view
+    }
+
+    func updateUIView(_ view: ObserverView, context: Context) {
+        context.coordinator.onScrollToTop = onScrollToTop
+        context.coordinator.attach(to: view)
+    }
+
+    static func dismantleUIView(_: ObserverView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class ObserverView: UIView {
+        var attach: ((UIView) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if window != nil {
+                attach?(self)
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        var onScrollToTop: () -> Void
+        weak var scrollView: UIScrollView?
+        weak var original: UIScrollViewDelegate?
+
+        init(_ onScrollToTop: @escaping () -> Void) {
+            self.onScrollToTop = onScrollToTop
+        }
+
+        func attach(to view: UIView) {
+            var ancestor = view.superview
+            while let candidate = ancestor {
+                if let scroll = candidate as? UIScrollView {
+                    guard scroll.delegate !== self else { return }
+                    detach()
+                    scrollView = scroll
+                    original = scroll.delegate
+                    scroll.delegate = self
+                    return
+                }
+                ancestor = candidate.superview
+            }
+        }
+
+        func detach() {
+            if scrollView?.delegate === self {
+                scrollView?.delegate = original
+            }
+            scrollView = nil
+            original = nil
+        }
+
+        override func responds(to selector: Selector!) -> Bool {
+            super.responds(to: selector) || original?.responds(to: selector) == true
+        }
+
+        override func forwardingTarget(for _: Selector!) -> Any? {
+            original
+        }
+
+        func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
+            let shouldScroll = original?.scrollViewShouldScrollToTop?(scrollView) ?? true
+            if shouldScroll {
+                onScrollToTop()
+            }
+            return shouldScroll
+        }
     }
 }
