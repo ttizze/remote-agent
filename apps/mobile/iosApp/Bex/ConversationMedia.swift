@@ -200,11 +200,11 @@ struct ConversationPreview: View {
     let close: () -> Void
     @State private var sources: [SessionImage] = []
     @State private var selected: SessionImage?
-    @State private var selectedURL: URL?
     @State private var downloaded: [SessionImage: URL] = [:]
     @State private var galleryError: String?
     private var displayedURL: URL? {
-        selected == nil || selected == source ? url : selectedURL
+        guard let selected, selected != source else { return url }
+        return downloaded[selected]
     }
 
     @State private var saving = false
@@ -213,44 +213,22 @@ struct ConversationPreview: View {
 
     var body: some View {
         NavigationStack {
-            HStack(spacing: 0) {
-                if isImage, let media, !sources.isEmpty {
-                    ScrollView {
-                        LazyVStack(spacing: 12) {
-                            ForEach(sources.indices, id: \.self) { index in
-                                let item = sources[index]
-                                ConversationImage(
-                                    source: item,
-                                    label: "生成画像 \(index + 1)",
-                                    identifier: "conversation.preview.thumbnail.\(index)",
-                                    media: media,
-                                    onSelect: {
-                                        guard !saving else { return }
-                                        selected = item
-                                    }
-                                )
-                                .frame(width: 56, height: 64).clipped()
-                                .padding(4)
-                                .background((selected ?? source) == item ? Color.accentColor.opacity(0.3) : Color.clear)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(
-                                    (selected ?? source) == item ? Color.accentColor : Color.clear,
-                                    lineWidth: 2
-                                ))
-                            }
-                        }.padding(8)
-                    }.frame(width: 80)
+            VStack {
+                if let galleryError {
+                    Text(galleryError).font(.caption).foregroundColor(.red)
                 }
-                VStack {
-                    if let galleryError {
-                        Text(galleryError).font(.caption).foregroundColor(.red)
+                if let displayedURL {
+                    ConversationFilePreview(url: displayedURL) { step in
+                        guard isImage, !saving,
+                              let index = sources.firstIndex(where: { $0 == (selected ?? source) }),
+                              sources.indices.contains(index + step) else { return }
+                        selected = sources[index + step]
                     }
-                    if let displayedURL {
-                        ConversationFilePreview(url: displayedURL)
-                    } else {
-                        ProgressView("画像を読み込み中…")
-                    }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ProgressView("画像を読み込み中…")
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -302,11 +280,8 @@ struct ConversationPreview: View {
         }
         .task(id: selected) {
             saved = false
-            selectedURL = nil
             guard let selected, selected != source, let media else { return }
-            if let cached = downloaded[selected] {
-                selectedURL = cached; return
-            }
+            guard downloaded[selected] == nil else { return }
             do {
                 let data = try await conversationImageData(selected, media: media)
                 try Task.checkCancellation()
@@ -318,7 +293,6 @@ struct ConversationPreview: View {
                     try? FileManager.default.removeItem(at: local.deletingLastPathComponent()); return
                 }
                 downloaded[selected] = local
-                selectedURL = local
                 galleryError = nil
             } catch {
                 if !Task.isCancelled {
@@ -354,28 +328,49 @@ struct ConversationPreview: View {
 
 private struct ConversationFilePreview: UIViewControllerRepresentable {
     let url: URL
+    let swipe: (Int) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(url: url)
+        Coordinator(url: url, swipe: swipe)
     }
 
     func makeUIViewController(context: Context) -> QLPreviewController {
         let controller = QLPreviewController()
         controller.dataSource = context.coordinator
+        for direction: UISwipeGestureRecognizer.Direction in [.left, .right] {
+            let gesture = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swiped))
+            gesture.direction = direction
+            gesture.delegate = context.coordinator
+            controller.view.addGestureRecognizer(gesture)
+        }
         return controller
     }
 
     func updateUIViewController(_ controller: QLPreviewController, context: Context) {
+        context.coordinator.swipe = swipe
         if context.coordinator.url != url {
             context.coordinator.url = url
             controller.reloadData()
         }
     }
 
-    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+    final class Coordinator: NSObject, QLPreviewControllerDataSource, UIGestureRecognizerDelegate {
         var url: URL
-        init(url: URL) {
+        var swipe: (Int) -> Void
+        init(url: URL, swipe: @escaping (Int) -> Void) {
             self.url = url
+            self.swipe = swipe
+        }
+
+        @objc func swiped(_ gesture: UISwipeGestureRecognizer) {
+            swipe(gesture.direction == .left ? 1 : -1)
+        }
+
+        func gestureRecognizer(
+            _: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer
+        ) -> Bool {
+            true
         }
 
         func numberOfPreviewItems(in _: QLPreviewController) -> Int {

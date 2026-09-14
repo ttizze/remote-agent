@@ -71,9 +71,12 @@ extension BexLaunchUITests {
         let position = app.staticTexts["conversation.preview.position"]
         let complete = expectation(for: NSPredicate(format: "label == %@", "8 / 8"), evaluatedWith: position)
         wait(for: [complete], timeout: 30)
-        let first = app.images["conversation.preview.thumbnail.0"]
-        XCTAssertTrue(first.waitForExistence(timeout: 10)); first.tap()
-        XCTAssertEqual(position.label, "1 / 8")
+        XCTAssertFalse(app.images["conversation.preview.thumbnail.0"].exists)
+        swipePreview(app, to: 8, left: true)
+        for index in stride(from: 7, through: 1, by: -1) {
+            swipePreview(app, to: index, left: false)
+        }
+        swipePreview(app, to: 1, left: false)
         let save = app.buttons["conversation.preview.save"]
         let ready = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: save)
         wait(for: [ready], timeout: 15)
@@ -84,8 +87,7 @@ extension BexLaunchUITests {
             evaluatedWith: save
         )
         wait(for: [saved], timeout: 20)
-        app.images["conversation.preview.thumbnail.1"].tap()
-        XCTAssertEqual(position.label, "2 / 8")
+        swipePreview(app, to: 2, left: true)
         let next = expectation(for: NSPredicate(format: "label == %@ AND enabled == true", "保存"), evaluatedWith: save)
         wait(for: [next], timeout: 15)
         app.buttons["conversation.preview.close"].tap()
@@ -125,6 +127,17 @@ extension BexLaunchUITests {
         showImage(inlineImage, in: app, upward: true)
         showImage(hostImage, in: app, upward: false)
         showImage(messageImage, in: app, upward: false)
+    }
+
+    func swipePreview(_ app: XCUIApplication, to index: Int, left: Bool) {
+        let position = app.staticTexts["conversation.preview.position"]
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: left ? 0.8 : 0.2, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: left ? 0.2 : 0.8, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        let changed = expectation(
+            for: NSPredicate(format: "label == %@", "\(index) / 8"), evaluatedWith: position
+        )
+        wait(for: [changed], timeout: 10)
     }
 
     func showImage(_ image: XCUIElement, in app: XCUIApplication, upward: Bool) {
