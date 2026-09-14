@@ -179,6 +179,146 @@ fn model_settings_corpus() {
     }
 }
 #[test]
+fn refresh_keeps_only_contiguous_history_and_its_cursor() {
+    for item_page in [false, true] {
+        for old_cursor in [Value::Null, json!("old-page")] {
+            for (old, new, expected, cursor) in [
+                (
+                    vec!["a", "b"],
+                    vec!["d", "e"],
+                    vec!["d", "e"],
+                    json!("new-page"),
+                ),
+                (
+                    vec!["a", "b"],
+                    vec!["b", "c"],
+                    vec!["a", "b", "c"],
+                    old_cursor.clone(),
+                ),
+                (
+                    vec!["a", "b", "c"],
+                    vec!["b", "d", "e"],
+                    vec!["b", "d", "e"],
+                    json!("new-page"),
+                ),
+                (
+                    vec!["b", "c"],
+                    vec!["a", "b", "c"],
+                    vec!["a", "b", "c"],
+                    json!("new-page"),
+                ),
+                (vec!["a", "b"], vec![], vec![], json!("new-page")),
+                (
+                    vec!["a", "b"],
+                    vec!["a", "b", "c"],
+                    vec!["a", "b", "c"],
+                    json!("new-page"),
+                ),
+                (vec![], vec!["a"], vec!["a"], json!("new-page")),
+                (
+                    vec!["same", "same"],
+                    vec!["same"],
+                    vec!["same"],
+                    json!("new-page"),
+                ),
+            ] {
+                let thread = |ids: Vec<&str>, cursor: Value| {
+                    let values = ids
+                        .into_iter()
+                        .map(|id| json!({"id":id}))
+                        .collect::<Vec<_>>();
+                    serde_json::from_value(if item_page {
+                        json!({"id":"thread","historyCursor":null,"turns":[{"id":"turn",
+                            "items":values,"itemsHasMore":!cursor.is_null(),"itemsNextCursor":cursor}]})
+                    } else {
+                        json!({"id":"thread","historyCursor":cursor,"turns":values})
+                    }).unwrap()
+                };
+                let previous = initial(thread(old, old_cursor.clone()));
+                let (next, _) = applied(
+                    &previous,
+                    op::ReadThread::new("thread".into()),
+                    reply(thread(new, json!("new-page"))),
+                );
+                let result = serde_json::to_value(&next.conversations["thread"]).unwrap();
+                let (values, actual_cursor) = if item_page {
+                    assert_eq!(result["turns"][0]["itemsHasMore"], !cursor.is_null());
+                    (
+                        &result["turns"][0]["items"],
+                        &result["turns"][0]["itemsNextCursor"],
+                    )
+                } else {
+                    (&result["turns"], &result["historyCursor"])
+                };
+                assert_eq!(
+                    values
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|value| value["id"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                assert_eq!(*actual_cursor, cursor);
+                assert_eq!(next.error, None);
+                if old_cursor.is_string() && cursor != old_cursor {
+                    let (late, _) = applied(
+                        &next,
+                        op::ReadOlder::new(
+                            "thread".into(),
+                            item_page.then(|| "turn".into()),
+                            old_cursor.as_str().map(str::to_owned),
+                        ),
+                        reply(thread(vec!["obsolete"], Value::Null)),
+                    );
+                    assert_eq!(
+                        late.conversations, next.conversations,
+                        "late page must not reconnect a discarded window"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn refresh_preserves_deferred_prefix_and_explicitly_unloaded_items() {
+    for unloaded in [false, true] {
+        let previous = serde_json::from_value(json!({"id":"thread","historyCursor":null,"turns":[{
+            "id":"turn","itemsView":"summary","itemsHasMore":true,"itemsNextCursor":"older",
+            "deferredItemIds":["a"],"items":[{"id":"a","text":"summary"},{"id":"b","text":"full body"}]
+        }]})).unwrap();
+        let incoming = serde_json::from_value(json!({"id":"thread","historyCursor":null,"turns":[{
+            "id":"turn","itemsView":if unloaded {"notLoaded"} else {"summary"},
+            "itemsHasMore":true,"itemsNextCursor":null,
+            "deferredItemIds":if unloaded {json!([])} else {json!(["b","c"])},
+            "items":if unloaded {json!([])} else {json!([{"id":"b","text":"summary"},{"id":"c","text":"summary"}])}
+        }]})).unwrap();
+        let (next, _) = applied(
+            &initial(previous),
+            op::ReadThread::new("thread".into()),
+            reply(incoming),
+        );
+        let turn = &next.conversations["thread"].turns.as_ref().unwrap()[0];
+        assert_eq!(
+            turn.items.as_ref().unwrap()[1].text.as_deref(),
+            Some("full body")
+        );
+        assert_eq!(
+            serde_json::to_value(&turn.deferred_item_ids).unwrap(),
+            if unloaded {
+                json!(["a"])
+            } else {
+                json!(["a", "c"])
+            }
+        );
+        assert_eq!(turn.items_next_cursor, Some(Some("older".into())));
+        assert_eq!(turn.items_has_more, Some(true));
+        assert_eq!(turn.items_view.as_deref(), Some("summary"));
+    }
+}
+
+#[test]
 fn history_corpus() {
     let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/history.json")).unwrap();
     assert_eq!(cases.len(), 8);

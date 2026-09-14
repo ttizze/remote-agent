@@ -1635,6 +1635,95 @@ async fn malformed_file_change_delta_does_not_poison_store() {
 }
 
 #[tokio::test]
+async fn refresh_gap_recovers_missing_history_through_store_after_retry() {
+    let previous = serde_json::from_value(json!({"id":"thread","historyCursor":null,
+        "turns":[{"id":"old","items":[]}]}))
+    .unwrap();
+    let (store, mut reader, mut writer) = setup(Snapshot {
+        conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(previous))])),
+        ..Default::default()
+    })
+    .await;
+    let server = tokio::spawn(async move {
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/thread/read");
+        writer.write_line(&json!({"id":request["id"],"result":{"thread":{
+            "id":"thread","historyCursor":"missing-page","turns":[{"id":"latest","items":[]}]}
+        }}).to_string()).await.unwrap();
+        for failed in [true, false] {
+            let request = read(&mut reader).await;
+            assert_eq!(request["method"], "host/thread/turns/list");
+            assert_eq!(request["params"]["cursor"], "missing-page");
+            let response = if failed {
+                json!({"id":request["id"],"error":{"code":-32000,"message":"temporary history failure"}})
+            } else {
+                json!({"id":request["id"],"result":{"thread":{"id":"thread","historyCursor":null,
+                    "turns":[{"id":"old","items":[]},{"id":"missing","items":[
+                        {"id":"question","type":"userMessage","content":[{"type":"text","text":"pi comparison"}]}]}]}}})
+            };
+            writer.write_line(&response.to_string()).await.unwrap();
+        }
+        writer
+    });
+    store
+        .dispatch(Intent::ReadThread(op::ReadThread::new("thread".into())))
+        .await
+        .unwrap();
+    let refreshed = store.snapshot();
+    let thread = &refreshed.conversations["thread"];
+    assert_eq!(
+        thread
+            .turns
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect::<Vec<_>>(),
+        ["latest"]
+    );
+    assert_eq!(thread.history_cursor, Some(Some("missing-page".into())));
+    assert!(
+        store
+            .dispatch(Intent::ReadOlder(op::ReadOlder::new(
+                "thread".into(),
+                None,
+                None
+            )))
+            .await
+            .is_err()
+    );
+    assert_eq!(store.snapshot().conversations, refreshed.conversations);
+    store
+        .dispatch(Intent::ReadOlder(op::ReadOlder::new(
+            "thread".into(),
+            None,
+            None,
+        )))
+        .await
+        .unwrap();
+    let recovered = store.snapshot();
+    let thread = &recovered.conversations["thread"];
+    assert_eq!(
+        thread
+            .turns
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect::<Vec<_>>(),
+        ["old", "missing", "latest"]
+    );
+    assert_eq!(
+        thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap()[0].id,
+        "question"
+    );
+    assert_eq!(thread.history_cursor, Some(None));
+    assert_eq!(recovered.error, None);
+    let _writer = server.await.unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_content() {
     let previous: Thread = serde_json::from_value(json!({"id":"thread","historyCursor":"turn-page",
         "turns":[{"id":"new","status":"completed","items":[{"id":"new-item","type":"agentMessage","text":"new"}]}]})).unwrap();

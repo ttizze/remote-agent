@@ -1052,10 +1052,17 @@ impl HostRpcService {
                 }
             }
             values.reverse();
+            let view = if has_more && values.is_empty() {
+                "notLoaded"
+            } else if has_more {
+                "summary"
+            } else {
+                "full"
+            };
             turn.items = Some(values);
             turn.items_next_cursor = Some(cursor);
             turn.items_has_more = Some(has_more);
-            turn.items_view = Some(if has_more { "summary" } else { "full" }.into());
+            turn.items_view = Some(view.into());
             self.preserve_opening_question(turn, thread_id).await?;
         }
         Ok(())

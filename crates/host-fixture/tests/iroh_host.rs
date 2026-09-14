@@ -1054,6 +1054,73 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
+    use agent_core::{
+        state::{Intent, Snapshot},
+        store::Store,
+    };
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let directory = tempfile::tempdir().unwrap();
+        let turns = (0..12).map(|turn| json!({"id":format!("turn-{turn}"),"status":"completed",
+            "items":(0..if turn == 11 { 620 } else { 1 }).map(|item| json!({
+                "id":format!("item-{turn}-{item}"),"type":"agentMessage","text":format!("answer {turn}/{item}")
+            })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>();
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([{
+            "id":"history","name":"History pagination","cwd":directory.path(),"historyMode":"paginated","turns":turns
+        }])).unwrap()).unwrap();
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
+        let previous = serde_json::from_value(json!({"id":"history","historyCursor":null,
+            "turns":[turns[0], {"id":"turn-11","status":"completed","items":[turns[11]["items"][0]],
+                "itemsHasMore":false,"itemsNextCursor":null}]})).unwrap();
+        let store = Store::new(local.peer, Snapshot {
+            conversations: Arc::new(std::collections::BTreeMap::from([("history".into(), Arc::new(previous))])),
+            ..Default::default()
+        });
+        store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+        store.dispatch(Intent::ReadThread(op::ReadThread::new("history".into()))).await.unwrap();
+        let snapshot = store.snapshot();
+        let thread = &snapshot.conversations["history"];
+        assert_eq!(thread.turns.as_ref().unwrap().len(), 5, "refresh must not attach disconnected cached turns");
+        assert!(thread.history_cursor.as_ref().unwrap().is_some());
+        let latest = thread.turns.as_ref().unwrap().last().unwrap();
+        assert_eq!(latest.items.as_ref().unwrap().len(), 500);
+        assert_eq!(latest.items_has_more, Some(true));
+        assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-120");
+        for _ in 0..20 {
+            let snapshot = store.snapshot();
+            let thread = &snapshot.conversations["history"];
+            let turn = thread.turns.as_ref().unwrap().iter().find(|turn| turn.items_has_more == Some(true));
+            if let Some(turn) = turn {
+                store.dispatch(Intent::ReadOlder(op::ReadOlder::new("history".into(), Some(turn.id.clone()), None))).await.unwrap();
+            } else if thread.history_cursor.as_ref().unwrap().is_some() {
+                store.dispatch(Intent::ReadOlder(op::ReadOlder::new("history".into(), None, None))).await.unwrap();
+            } else { break; }
+        }
+        for reopen in [false, true] {
+            if reopen {
+                store.dispatch(Intent::ReadThread(op::ReadThread::open("history".into()))).await.unwrap();
+            }
+            let snapshot = store.snapshot();
+            let thread = &snapshot.conversations["history"];
+            assert_eq!(thread.history_cursor, Some(None));
+            let loaded = thread.turns.as_ref().unwrap();
+            assert_eq!(loaded.len(), turns.len());
+            for (loaded, expected) in loaded.iter().zip(&turns) {
+                assert_eq!(loaded.id, expected["id"]);
+                assert_eq!(loaded.items_has_more, Some(false));
+                assert_eq!(serde_json::to_value(&loaded.items).unwrap(), expected["items"]);
+            }
+            assert_eq!(snapshot.error, None);
+        }
+        store.close().await.unwrap();
+        local.endpoint.close().await;
+        fixture.close().await.unwrap();
+    }).await.expect("history refresh and recovery exceeded deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();

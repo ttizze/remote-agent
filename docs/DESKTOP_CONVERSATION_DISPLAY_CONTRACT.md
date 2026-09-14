@@ -34,6 +34,33 @@ it must not expand adjacent groups. A status transition resets expansion to the
 collapsed default. Activity wording, counts, streaming updates, and history
 hydration must not change this default.
 
+## History pagination and refresh
+
+- Load the latest bounded page first; request older pages using the server's
+  opaque cursor. A refresh must not fetch the entire conversation.
+- Retain cached history only when its suffix matches the refreshed page's
+  prefix in order. Apply the same rule to turns and to items within a turn,
+  preserving repeated occurrences from the server page. A shared ID elsewhere
+  is not enough; repeated boundary IDs cannot establish which cached occurrence
+  the page continues, so they must not retain a cached prefix.
+- When the windows do not overlap, replace the displayed window with the new
+  page and its cursor. Previously cached messages remain on the server and
+  can be loaded again; never present disconnected windows as complete history.
+- Keep the cursor belonging to the oldest retained boundary. A late older-page
+  reply for a replaced cursor must not alter the new window.
+- `notLoaded` means the Host omitted item hydration, not that the turn is empty.
+  Retain cached items and their deferred-detail markers in that case. If no
+  items are cached, preserve the server's additional-loading state.
+- Failed additional loading preserves the window and cursor. Retrying clears
+  the error and successful loading restores every message in order. Reopening
+  must retain fetched history when its boundary still overlaps.
+
+Acceptance: `refresh_keeps_only_contiguous_history_and_its_cursor`,
+`refresh_gap_recovers_missing_history_through_store_after_retry`, and
+`refreshed_history_pages_recover_every_turn_and_item_through_store` cover the
+window rules, RPC failure/recovery, and bounded Host hydration through complete
+retrieval and reopening.
+
 ## Selection and copying
 
 - Mac text selection exposes **チャットに追加**, **詳細を表示**, and

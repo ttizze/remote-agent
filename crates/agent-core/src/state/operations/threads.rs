@@ -422,6 +422,7 @@ impl rpc::RpcMethod for ReadOlder {
 impl Operation for ReadOlder {
     rpc_operation!();
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        snapshot.error = None;
         if self.cursor.is_none() {
             self.cursor = snapshot
                 .conversations

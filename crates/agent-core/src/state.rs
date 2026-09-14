@@ -802,81 +802,90 @@ pub(crate) fn older(
     Ok(merged)
 }
 
+// A cached suffix must equal the new page's prefix, including repeated IDs.
+// Matching one ID anywhere in each page does not establish continuity.
+fn overlap_start<T>(
+    previous: &[Arc<T>],
+    incoming: &[Arc<T>],
+    id: impl Fn(&T) -> &str,
+) -> Option<usize> {
+    let first = incoming.first()?;
+    let start = (previous.len().saturating_sub(incoming.len())..previous.len()).find(|&start| {
+        id(&previous[start]) == id(first)
+            && previous[start..]
+                .iter()
+                .zip(incoming)
+                .all(|(old, new)| id(old) == id(new))
+    })?;
+    (start == 0
+        || (previous.iter().filter(|item| id(item) == id(first)).count() == 1
+            && incoming.iter().filter(|item| id(item) == id(first)).count() == 1))
+        .then_some(start)
+}
+
 pub(crate) fn refresh(previous: &Thread, incoming: &Thread) -> Thread {
     if incoming.history_cursor.is_none() {
         return incoming.clone();
     }
     let current = previous.turns.as_deref().unwrap_or_default();
-    let mut positions: HashMap<&str, VecDeque<usize>> = HashMap::new();
-    for (index, turn) in current.iter().enumerate() {
-        positions.entry(&turn.id).or_default().push_back(index);
-    }
-    let mut first = None;
-    let mut turns = Vec::new();
-    for incoming in incoming.turns.as_deref().unwrap_or_default() {
-        if let Some(index) = positions
-            .get_mut(incoming.id.as_str())
-            .and_then(VecDeque::pop_front)
-        {
-            first = Some(first.map_or(index, |first: usize| first.min(index)));
-            turns.push(Arc::new(refresh_turn(&current[index], incoming)));
-        } else {
-            turns.push(incoming.clone());
+    let page = incoming.turns.as_deref().unwrap_or_default();
+    let start = overlap_start(current, page, |turn| &turn.id);
+    let prefix = &current[..start.unwrap_or(0)];
+    let mut turns = Vec::with_capacity(prefix.len() + page.len());
+    turns.extend_from_slice(prefix);
+    turns.extend(page.iter().enumerate().map(|(offset, turn)| {
+        match start.and_then(|start| current.get(start + offset)) {
+            Some(old) => Arc::new(refresh_turn(old, turn)),
+            None => turn.clone(),
         }
-    }
-    let prefix = &current[..first.unwrap_or(current.len())];
-    let mut all = Vec::with_capacity(prefix.len() + turns.len());
-    all.extend_from_slice(prefix);
-    all.extend(turns);
+    }));
     let mut merged = incoming.clone();
-    merged.turns = Some(all);
-    if !prefix.is_empty() || first.is_some() {
+    merged.turns = Some(turns);
+    if !prefix.is_empty() {
         merged.history_cursor = previous.history_cursor.clone();
     }
     merged
 }
 fn refresh_turn(previous: &Turn, incoming: &Turn) -> Turn {
+    let current = previous.items.as_deref().unwrap_or_default();
+    let page = incoming.items.as_deref().unwrap_or_default();
+    let unloaded = incoming.items_view.as_deref() == Some("notLoaded");
+    let Some(start) = (if unloaded && !current.is_empty() {
+        Some(current.len())
+    } else {
+        overlap_start(current, page, |item| &item.id)
+    }) else {
+        return incoming.clone();
+    };
     let mut merged = merge_fields(previous, incoming);
     let deferred = incoming.deferred_item_ids.as_deref().unwrap_or_default();
-    let mut items = previous.items.clone().unwrap_or_default();
-    for item in incoming.items.as_deref().unwrap_or_default() {
-        if let Some(index) = items.iter().position(|old| old.id == item.id) {
-            if !deferred.contains(&item.id)
-                || previous
-                    .deferred_item_ids
-                    .as_deref()
-                    .unwrap_or_default()
-                    .contains(&item.id)
+    let old_deferred = previous.deferred_item_ids.as_deref().unwrap_or_default();
+    let mut items = Vec::with_capacity(start + page.len());
+    items.extend_from_slice(&current[..start]);
+    let mut remaining = old_deferred
+        .iter()
+        .filter(|id| current[..start].iter().any(|item| &item.id == *id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for (offset, item) in page.iter().enumerate() {
+        if deferred.contains(&item.id) {
+            if let Some(old) = current.get(start + offset)
+                && !old_deferred.contains(&old.id)
             {
-                items[index] = item.clone();
+                items.push(old.clone());
+                continue;
             }
-        } else {
-            items.push(item.clone());
+            remaining.push(item.id.clone());
         }
+        items.push(item.clone());
     }
     merged.items = Some(items);
-    merged.deferred_item_ids = Some(
-        deferred
-            .iter()
-            .filter(|id| {
-                !previous
-                    .items
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|item| &item.id == *id)
-                    || previous
-                        .deferred_item_ids
-                        .as_deref()
-                        .unwrap_or_default()
-                        .contains(id)
-            })
-            .cloned()
-            .collect(),
-    );
-    if previous.items_has_more != Some(true) {
-        merged.items_has_more = Some(false);
-        merged.items_next_cursor = Some(None);
+    merged.deferred_item_ids = Some(remaining);
+    let boundary = if start == 0 { incoming } else { previous };
+    merged.items_has_more = Some(boundary.items_has_more.unwrap_or(false));
+    merged.items_next_cursor = Some(boundary.items_next_cursor.clone().flatten());
+    if unloaded {
+        merged.items_view = previous.items_view.clone();
     }
     merged
 }
