@@ -2,6 +2,7 @@ import AgentCore
 import AVFoundation
 import Combine
 import Security
+import SwiftUI
 import UIKit
 
 /// Atomic per-Host persistence for lifecycle flushes and completed submissions/media edits.
@@ -255,4 +256,22 @@ private struct AudioSessionConfiguration {
     func restore() throws {
         try AVAudioSession.sharedInstance().setCategory(category, mode: mode, options: options)
     }
+}
+
+struct SharedFile: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+struct FileShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context _: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        controller.completionWithItemsHandler = { _, _, _, _ in
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+        return controller
+    }
+
+    func updateUIViewController(_: UIActivityViewController, context _: Context) {}
 }

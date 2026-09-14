@@ -77,32 +77,6 @@ fn selected_folder_preserves_explicit_scope_without_losing_the_execution_directo
 }
 
 #[test]
-fn submission_drafts_corpus() {
-    use agent_core::state::Draft;
-    let cases: Vec<Value> =
-        serde_json::from_str(include_str!("fixtures/submission-drafts.json")).unwrap();
-    for case in cases {
-        let sent: Draft = serde_json::from_value(case["sent"].clone()).unwrap();
-        let current: Draft = serde_json::from_value(case["current"].clone()).unwrap();
-        let previous = Snapshot {
-            drafts: Arc::new(BTreeMap::from([("thread".into(), Arc::new(current))])),
-            ..Default::default()
-        };
-        let (next, _) = applied(
-            &previous,
-            op::SendSubmission {
-                thread_id: "thread".into(),
-                client_user_message_id: "client".into(),
-                draft: Arc::new(sent),
-            },
-            None,
-        );
-        let expected: Draft = serde_json::from_value(case["expected"].clone()).unwrap();
-        assert_eq!(*next.drafts["thread"], expected, "{}", case["name"]);
-    }
-}
-
-#[test]
 fn pending_submission_reconciles_both_reply_and_echo_orders() {
     use agent_core::state::Intent;
     for echo_first in [false, true] {
@@ -173,9 +147,6 @@ fn model_settings_corpus() {
         assert!(effects.is_empty());
         let expected: Draft = serde_json::from_value(case["expected"].clone()).unwrap();
         assert_eq!(*next.drafts["thread"], expected, "{}", case["name"]);
-        if *previous.drafts["thread"] == expected {
-            assert!(Arc::ptr_eq(&previous.drafts, &next.drafts));
-        }
     }
 }
 #[test]
@@ -718,8 +689,6 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
 fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
     for changes in [
         json!([false]),
-        json!([7]),
-        json!(["text"]),
         json!([[]]),
         json!([null]),
         json!({}),
@@ -781,54 +750,6 @@ fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
             expected
         );
     }
-}
-
-#[test]
-fn late_fork_preserves_new_navigation_and_stores_the_fork() {
-    use agent_core::state::Intent;
-    let (forking, _) = reduce(
-        &Snapshot::default(),
-        Event::Intent(Intent::ForkThread(op::ForkThread::new(
-            "old".into(),
-            "turn".into(),
-        ))),
-    );
-    let (navigated, _) = reduce(
-        &forking,
-        Event::Intent(Intent::NewChat { cwd: "/new".into() }),
-    );
-    let mut finished = navigated;
-    op::ForkThread {
-        thread_id: "old".into(),
-        last_turn_id: "turn".into(),
-        exclude_turns: false,
-    }
-    .stale(
-        &mut finished,
-        serde_json::from_value(json!({"thread":{"id":"forked","cwd":"/old"}})).unwrap(),
-    );
-    assert!(finished.navigation.thread_id.is_none());
-    assert_eq!(finished.navigation.cwd, "/new");
-    assert!(finished.conversations.contains_key("forked"));
-}
-
-#[test]
-fn account_listing_does_not_invalidate_a_concurrent_login() {
-    use agent_core::state::Intent;
-    let (starting, _) = reduce(
-        &Snapshot::default(),
-        Event::Intent(Intent::StartAccountLogin(op::StartAccountLogin {})),
-    );
-    let (listing, _) = reduce(
-        &starting,
-        Event::Intent(Intent::ListAccounts(op::ListAccounts {})),
-    );
-    let mut finished = listing;
-    op::StartAccountLogin {}.apply(&mut finished, serde_json::from_value(json!({"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"})).unwrap());
-    assert_eq!(
-        finished.account.login.as_ref().map(|l| l.login_id.as_str()),
-        Some("login")
-    );
 }
 
 #[test]

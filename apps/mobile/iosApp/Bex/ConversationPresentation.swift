@@ -1,26 +1,34 @@
 import AgentCore
-import Foundation
 
-/// Cache native render values and parsed Markdown; Rust owns all projection policy.
-actor ConversationPresentationCache {
-    private struct CachedTurn {
+/// Immutable native render values; Rust owns projection policy.
+struct ConversationPresentation: Sendable {
+    let source: AgentCore.Thread
+    let id: String
+    let title: String
+    let rows: [ThreadConversationRow]
+    var runningTurnId: String? {
+        for row in rows.reversed() {
+            if case let .native(native, _) = row.content, case let .inProgress(turnId) = native.content {
+                return turnId
+            }
+        }
+        return nil
+    }
+
+    private struct CachedTurn: Sendable {
         let source: RenderedTurn
         let rows: [ThreadConversationRow]
         let items: [String: ConversationItem]
     }
 
-    private var turns: [String: CachedTurn] = [:]
-    private var projection: RenderedConversation?
-    private var previous: ConversationPresentation?
-    private var queued: [String: ConversationItem] = [:]
+    private let turns: [String: CachedTurn]
+    private let projection: RenderedConversation
+    private let queued: [String: ConversationItem]
 
-    func project(_ source: AgentCore.Thread?, snapshot: AgentCore.Snapshot) -> ConversationPresentation? {
-        guard let source else {
-            turns = [:]; projection = nil; previous = nil; queued = [:]
-            return nil
-        }
-        let rendered = AgentCore.projectConversation(snapshot: snapshot, source: source, previous: projection)
-        if let projection, rendered.unchanged(other: projection) {
+    static func project(_ source: AgentCore.Thread?, snapshot: AgentCore.Snapshot, previous: Self?) -> Self? {
+        guard let source else { return nil }
+        let rendered = AgentCore.projectConversation(snapshot: snapshot, source: source, previous: previous?.projection)
+        if let previous, rendered.unchanged(other: previous.projection) {
             return previous
         }
         var next: [String: CachedTurn] = [:]
@@ -30,11 +38,11 @@ actor ConversationPresentationCache {
         }
         for turn in rendered.turns() {
             let id = turn.id()
-            if let cached = turns[id], turn.unchanged(other: cached.source) {
+            if let cached = previous?.turns[id], turn.unchanged(other: cached.source) {
                 next[id] = cached; rows += cached.rows
                 continue
             }
-            let cached = turns[id]?.items ?? [:]
+            let cached = previous?.turns[id]?.items ?? [:]
             var items: [String: ConversationItem] = [:]
             let projected = turn.conversationRows().map { row in
                 let item: ConversationItem? = switch row.content {
@@ -49,18 +57,15 @@ actor ConversationPresentationCache {
         }
         var nextQueued: [String: ConversationItem] = [:]
         rows += rendered.queued().map {
-            let item = Self.item($0, id: $0.id(), previous: queued, next: &nextQueued)
+            let item = Self.item($0, id: $0.id(), previous: previous?.queued ?? [:], next: &nextQueued)
             return ThreadConversationRow(id: item.data.id, content: .queued(item))
         }
-        queued = nextQueued; turns = next; projection = rendered
-        let result = ConversationPresentation(
+        return Self(
             source: source,
             id: source.id(),
             title: source.title(),
-            rows: rows
+            rows: rows, turns: next, projection: rendered, queued: nextQueued
         )
-        previous = result
-        return result
     }
 
     private static func item(_ source: RenderedItem, id: String, previous: [String: ConversationItem],

@@ -656,9 +656,16 @@ mod tests {
         let rendered = project_snapshot(snapshot.clone(), None);
         let rows = rendered.turns[1].conversation_rows();
         let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
-        assert_eq!(ids[0], "history-item:live:opening:occurrence:0");
-        assert!(ids[1].starts_with("history-gap:"));
-        assert_eq!(ids[2], "history-item:live:accepted:occurrence:0");
+        assert!(
+            matches!(&rows[0].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("opening"))
+        );
+        assert!(
+            matches!(&rows[1].content, ConversationRowContent::OlderItems { turn_id } if turn_id == "live")
+        );
+        assert!(
+            matches!(&rows[2].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("user"))
+        );
+        let accepted_id = ids[2].to_owned();
         assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), ids.len());
         assert!(rows.iter().any(|row| matches!(&row.content, ConversationRowContent::Activity { item, .. } if item.data.native_id.as_deref() == Some("command"))));
         assert!(rows.iter().all(|row| !matches!(
@@ -683,10 +690,7 @@ mod tests {
         assert!(
             matches!(&rows.last().unwrap().content, ConversationRowContent::Response { item, fork_turn_id: Some(id) } if id == "live" && item.data.native_id.as_deref() == Some("stream"))
         );
-        assert!(
-            rows.iter()
-                .any(|row| row.id == "history-item:live:accepted:occurrence:0")
-        );
+        assert!(rows.iter().any(|row| row.id == accepted_id));
         for row in rows {
             if let ConversationRowContent::ActivityHeader { activity } = row.content {
                 assert!(!activity_is_expanded(&activity, None));

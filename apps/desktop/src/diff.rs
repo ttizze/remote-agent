@@ -348,17 +348,9 @@ mod tests {
         assert_eq!(view.visible.len(), view.rows.len() - 2);
     }
     #[test]
-    fn unified_patch_preserves_lines_numbers_and_unicode_word_changes() {
-        let patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -3,2 +3,2 @@\n-old 日本語 text\n+new 日本語 text\n unchanged\ndiff --git a/b b/b\nnew file mode 100644\n@@ -0,0 +1 @@\n+added\n";
+    fn unified_patch_emphasizes_word_changes_beside_unicode() {
+        let patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -3,2 +3,2 @@\n-old 日本語 text\n+new 日本語 text\n unchanged\n";
         let (rows, _) = parse(patch);
-        assert_eq!(
-            rows.iter().map(|r| r.text.as_ref()).collect::<Vec<_>>(),
-            patch.lines().collect::<Vec<_>>()
-        );
-        assert_eq!((rows[4].old, rows[4].new), (Some(3), None));
-        assert_eq!((rows[5].old, rows[5].new), (None, Some(3)));
-        assert_eq!((rows[6].old, rows[6].new), (Some(4), Some(4)));
-        assert_eq!(rows[10].new, Some(1));
         assert_eq!(&rows[4].text[rows[4].emphasis[0].clone()], "old");
         assert_eq!(&rows[5].text[rows[5].emphasis[0].clone()], "new");
     }

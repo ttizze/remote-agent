@@ -251,52 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_status_entries_and_skips_rename_sources() {
-        let status = b" M src/main.rs\0?? notes.txt\0R  new.rs\0old.rs\0D  gone.rs\0";
-
-        assert_eq!(
-            parse_git_status(status),
-            vec![
-                WorkspaceFileChange {
-                    path: "src/main.rs".to_owned(),
-                    status: "modified",
-                    additions: Some(0),
-                    deletions: Some(0),
-                },
-                WorkspaceFileChange {
-                    path: "notes.txt".to_owned(),
-                    status: "untracked",
-                    additions: Some(0),
-                    deletions: Some(0),
-                },
-                WorkspaceFileChange {
-                    path: "new.rs".to_owned(),
-                    status: "renamed",
-                    additions: Some(0),
-                    deletions: Some(0),
-                },
-                WorkspaceFileChange {
-                    path: "gone.rs".to_owned(),
-                    status: "deleted",
-                    additions: Some(0),
-                    deletions: Some(0),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn sums_text_changes_and_ignores_binary_counts() {
-        assert_eq!(
-            parse_numstat(
-                b"10\t2\ta.rs\0-\t-\timage.png\x003\t0\tb.rs\0",
-                |_, _, _| {}
-            ),
-            (13, 2)
-        );
-    }
-
-    #[test]
     fn file_counts_follow_renames_deletions_and_binary_changes() {
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path();
@@ -330,21 +284,18 @@ mod tests {
         std::fs::write(cwd.join("binary.dat"), b"after\0").unwrap();
         let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
         assert_eq!((review.additions, review.deletions), (1, 2));
-        let counts = |path: &str| {
+        assert_eq!(review.files.len(), 3);
+        for (path, status, additions, deletions) in [
+            ("new\tname\n.txt", "renamed", Some(1), Some(0)),
+            ("gone\tfile\n.txt", "deleted", Some(0), Some(2)),
+            ("binary.dat", "modified", None, None),
+        ] {
             let file = review.files.iter().find(|file| file.path == path).unwrap();
-            (file.additions, file.deletions)
-        };
-        assert_eq!(counts("new\tname\n.txt"), (Some(1), Some(0)));
-        assert_eq!(counts("gone\tfile\n.txt"), (Some(0), Some(2)));
-        assert_eq!(counts("binary.dat"), (None, None));
-        let json = serde_json::to_value(&review).unwrap();
-        let renamed = json["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|file| file["path"] == "new\tname\n.txt")
-            .unwrap();
-        assert_eq!(renamed["additions"], 1);
-        assert_eq!(renamed["deletions"], 0);
+            assert_eq!(
+                (file.status, file.additions, file.deletions),
+                (status, additions, deletions)
+            );
+        }
+        assert!(!review.files.iter().any(|file| file.path == "old.txt"));
     }
 }

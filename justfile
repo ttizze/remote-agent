@@ -5,6 +5,10 @@ set positional-arguments
 default:
     @just --list
 
+# Prune inactive Cargo outputs older than 3 days or over the 32 GiB idle budget.
+clean-builds *args:
+    python3 scripts/clean-builds.py {{args}}
+
 # Build and verify the certificate-signed Host executable.
 build-host-macos:
     scripts/build-macos.sh host
@@ -17,8 +21,13 @@ build-desktop-macos:
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
-# Build and test only on a fresh, owned Android 17 emulator.
+# Headless tests of the production iOS Markdown parser.
+ios-markdown:
+    scripts/test-ios-markdown.sh
+
+# Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
 android-e2e:
+    cargo build --locked -p host-fixture --bins
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
     nix develop .#android-test --command bash scripts/android-e2e.sh
 
@@ -29,18 +38,20 @@ conversation-ui:
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorRendersMarkdownTableAndReopensIt \
+        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
-        testSimulatorCopiesOwnMessageIntoComposer \
+        testSimulatorBrowsesAllSessionImagesAndSavesTheSelection \
         testSimulatorCopiesOnlySelectedMessageText \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
-        testSimulatorAsksAboutAssistantSelectionInSideChatAndRestoresOriginalDraft \
+        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
         testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorCanStartAConversationInAProject \
         testSimulatorOpensTasksBeforeHistoryReadFinishes \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
+        testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
-        testSimulatorKeepsInterruptedWorkCollapsed \
         testSimulatorReopensCompletedHistoryCollapsed
 
 # Exercise the real iroh Host through the headless client.

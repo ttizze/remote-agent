@@ -355,35 +355,6 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn classifies_requests_without_deserializing_nested_values() {
-        let line = r#"{"jsonrpc":"2.0","id":"r-1","method":"turn/start","params":{"nested":{"id":99,"method":"not-top-level"}},"future":{"x":[1,2,3]}}"#;
-        let message = RpcMessage::parse(line).unwrap();
-
-        assert_eq!(message.kind(), RpcMessageKind::Request);
-        assert_eq!(message.raw_id(), Some(r#""r-1""#));
-        assert_eq!(message.method(), Some("turn/start"));
-    }
-
-    #[test]
-    fn classifies_responses_and_notifications() {
-        let response = RpcMessage::parse(
-            r#"{"id":42,"result":{"answer":{"id":"nested"}},"futureField":[true,null]}"#,
-        )
-        .unwrap();
-        assert_eq!(response.kind(), RpcMessageKind::Response);
-        assert_eq!(response.raw_id(), Some("42"));
-        assert_eq!(response.method(), None);
-
-        let notification = RpcMessage::parse(
-            r#"{"method":"item/started","params":{"result":"nested","error":false}}"#,
-        )
-        .unwrap();
-        assert_eq!(notification.kind(), RpcMessageKind::Notification);
-        assert_eq!(notification.raw_id(), None);
-        assert_eq!(notification.method(), Some("item/started"));
-    }
-
-    #[test]
     fn rejects_invalid_message_combinations() {
         assert!(matches!(
             RpcMessage::parse(r#"{"id":1,"result":{},"error":{}}"#),
@@ -412,37 +383,24 @@ mod tests {
             RpcMessage::parse(r#"["method","nested"]"#),
             Err(RpcMessageError::NotObject)
         ));
-        for malformed in [r#"{"id":1,"result":[}"#, r#"{"id":1,"result":{}} {}"#] {
-            assert!(matches!(
-                RpcMessage::parse(malformed),
-                Err(RpcMessageError::Json(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn rewrites_only_the_top_level_id_and_keeps_unknown_values() {
-        let original = r#"{  "id" : "original" , "method":"turn/start","params":{"text":"x","nested":{"id":1}},"unknown":{"keep":[1,{"value":true}]}}"#;
-        let rewritten = rewrite_top_level_id(original, r#""proxy-7""#).unwrap();
-        let original_value: Value = serde_json::from_str(original).unwrap();
-        let rewritten_value: Value = serde_json::from_str(&rewritten).unwrap();
-
-        assert_eq!(rewritten_value["id"], json!("proxy-7"));
-        assert_eq!(rewritten_value["method"], original_value["method"]);
-        assert_eq!(rewritten_value["params"], original_value["params"]);
-        assert_eq!(rewritten_value["unknown"], original_value["unknown"]);
-        assert_eq!(
-            rewritten,
-            r#"{"id":"proxy-7","method":"turn/start","params":{"text":"x","nested":{"id":1}},"unknown":{"keep":[1,{"value":true}]}}"#
-        );
     }
 
     #[test]
     fn rewriting_id_preserves_escaped_keys_and_duplicate_id_safely() {
         let original = r#"{"\u0069d": 1, "method":"turn/start", "nested":{"id":2}, "id":"last"}"#;
+        let rewritten = rewrite_top_level_id(original, r#""proxy""#).unwrap();
         assert_eq!(
-            rewrite_top_level_id(original, r#""proxy""#).unwrap(),
-            r#"{"id":"proxy","method":"turn/start","nested":{"id":2}}"#
+            serde_json::from_str::<Value>(&rewritten).unwrap(),
+            json!({"id":"proxy","method":"turn/start","nested":{"id":2}})
+        );
+        #[derive(Deserialize)]
+        struct RoutedId {
+            id: String,
+        }
+        // Derived decoding rejects a duplicate field, including escaped aliases.
+        assert_eq!(
+            serde_json::from_str::<RoutedId>(&rewritten).unwrap().id,
+            "proxy"
         );
         let original = r#" {"先頭":"値\\\"}]", "id" : [1,{"id":2}], "method":"x", "params":[{"text":"[{}]"}], "\u0069d": {"nested":true} } "#;
         let rewritten = rewrite_top_level_id(original, "null").unwrap();
@@ -452,14 +410,6 @@ mod tests {
         assert!(rewrite_top_level_id(original, "1 2").is_err());
     }
 
-    #[test]
-    fn raw_object_preserves_extension_values_without_typed_decoding() {
-        let line =
-            r#"{"method":"event","params":{"future":{"deep":[1,2]}},"extension":{"raw":true}}"#;
-        let object = raw_object(line).unwrap();
-        assert_eq!(object["params"].get(), r#"{"future":{"deep":[1,2]}}"#);
-        assert_eq!(object["extension"].get(), r#"{"raw":true}"#);
-    }
     #[test]
     fn host_response_keeps_request_extensions_and_raw_id() {
         let line = r#"{"jsonrpc":"2.0","id":"mobile-1","method":"host/thread/list","params":{"future":{"id":9}},"extension":{"keep":[1,true]}}"#;

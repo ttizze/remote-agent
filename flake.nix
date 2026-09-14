@@ -50,7 +50,7 @@
         {
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
-            packages = with pkgs; [ rustToolchain just jq python3 git pkg-config cmake clang ]
+            packages = with pkgs; [ rustToolchain just jq python3 git lsof pkg-config cmake clang ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
                 libxcb libX11 libXcursor libXi libXrandr
@@ -70,6 +70,7 @@
               just
               jq
               python3
+              lsof
               shellcheck
               gradle
               jdk21

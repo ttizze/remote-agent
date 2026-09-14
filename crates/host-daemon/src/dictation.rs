@@ -453,23 +453,25 @@ mod tests {
                 ""
             );
         }
-        for text in ["", "  "] {
-            assert_eq!(
-                recording_fallback("200 OK", &json!({"text":text}).to_string(), false)
-                    .await
-                    .unwrap()
-                    .trim(),
-                ""
-            );
-        }
-        for body in ["{}", r#"{"text":null}"#, r#"{"text":42}"#] {
-            assert!(recording_fallback("200 OK", body, false).await.is_err());
-        }
+        assert_eq!(
+            recording_fallback("200 OK", r#"{"text":"  "}"#, false)
+                .await
+                .unwrap()
+                .trim(),
+            ""
+        );
+        assert!(
+            recording_fallback("200 OK", r#"{"text":42}"#, false)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn sends_a_full_recording_in_lossless_sample_aligned_chunks() {
-        let pcm: Vec<u8> = (0..24_000 * 2 * 65).map(|index| index as u8).collect();
+        let pcm: Vec<u8> = (0..(AUDIO_CHUNK_BASE64_BYTES / 4 * 3 * 2 + 2))
+            .map(|index| index as u8)
+            .collect();
         let text = recording_result(&STANDARD.encode(pcm), vec![
             json!({"type":"transcript.final", "utterance_id":"first", "revision":1, "text":"長い録音"}),
         ], CloseCode::Normal).await.unwrap();

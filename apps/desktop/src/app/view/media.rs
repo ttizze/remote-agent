@@ -77,23 +77,9 @@ impl Desktop {
                         .map_err(|error| error.to_string())?;
                     Ok(destination.to_string_lossy().into_owned())
                 },
-                move |view, result, _, _| {
-                    if let Some(image) = view.images.get_mut(&returned) {
-                        match result {
-                            Ok(path) => {
-                                image.path = Some(if Path::new(&path).is_absolute() {
-                                    PathBuf::from(path).into()
-                                } else {
-                                    ImageSource::from(path)
-                                })
-                            }
-                            Err(error) => {
-                                agent_core::diagnostics::error("image.load", &error);
-                                image.error = Some(error);
-                            }
-                        }
-                    }
-                    view.list.remeasure();
+                move |result| Update::Image {
+                    key: returned,
+                    result,
                 },
             );
         }
@@ -144,38 +130,13 @@ impl Desktop {
             .get(&id)
             .is_none_or(|cached| cached.source != source)
         {
-            let mut images = Vec::new();
-            let mut rendered = String::new();
-            let mut previous = 0;
-            let mut image_start = None;
-            for (event, range) in
-                pulldown_cmark::Parser::new_ext(source, pulldown_cmark::Options::all())
-                    .into_offset_iter()
-            {
-                match event {
-                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image {
-                        dest_url, ..
-                    }) => {
-                        images.push(dest_url.into_string());
-                        image_start = Some(range.start);
-                    }
-                    pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => {
-                        if let Some(start) = image_start.take() {
-                            rendered.push_str(&source[previous..start]);
-                            previous = range.end;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if !images.is_empty() {
-                rendered.push_str(&source[previous..]);
-            }
+            let (rendered, images) =
+                agent_core::presentation::markdown::markdown_without_images(source);
             let source: SharedString = source.to_owned().into();
             let rendered = if images.is_empty() {
                 source.clone()
             } else {
-                rendered.into()
+                rendered.into_owned().into()
             };
             self.markdown_cache.insert(
                 id.clone(),
@@ -252,42 +213,7 @@ impl Desktop {
             Intent::LoadSessionImages(op::LoadSessionImages {
                 thread_id: self.selected().into(),
             }),
-            move |view, result, _, _| {
-                let Some(gallery) = view
-                    .image_gallery
-                    .as_mut()
-                    .filter(|gallery| gallery.id == id)
-                else {
-                    return;
-                };
-                gallery.loading = false;
-                match result {
-                    Ok(Outcome::SessionImages { images }) => {
-                        let initial = gallery.current_image().clone();
-                        let mut seen = HashSet::new();
-                        let entries: Vec<_> = images
-                            .into_iter()
-                            .filter_map(|image| {
-                                let entry = (Arc::new(image.source), image.encoded);
-                                seen.insert(entry.clone()).then_some(entry)
-                            })
-                            .collect();
-                        gallery.selected = entries.iter().position(|entry| entry == &initial);
-                        gallery
-                            .list
-                            .splice(0..gallery.list.item_count(), entries.len());
-                        gallery.entries = entries;
-                        if let Some(index) = gallery.selected {
-                            gallery.list.scroll_to_reveal_item(index);
-                        }
-                    }
-                    Err(error) => {
-                        agent_core::diagnostics::error("gallery.load", &error);
-                        gallery.error = error;
-                    }
-                    _ => unreachable!("session image outcome"),
-                }
-            },
+            OperationCompletion::Gallery(id),
         );
         cx.notify();
     }
@@ -611,5 +537,50 @@ mod file_panel_tests {
                 assert!(!view.panel_open);
             })
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_core::presentation::markdown::{
+        MarkdownBlock, markdown_blocks, markdown_without_images,
+    };
+    use gpui_kit as gpui;
+    use gpui_kit::{AppContext, TestAppContext, component::text::TextViewState};
+
+    #[gpui::test]
+    fn markdown_tables_keep_every_shared_cell_in_desktop_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/agent-core/tests/fixtures/markdown/table.md"
+        ));
+        let (rendered, images) = markdown_without_images(source);
+        assert!(images.is_empty());
+        let state = cx.new(|cx| TextViewState::markdown(&rendered, cx));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| state.select_all(cx));
+        let selected = state.read_with(cx, |state, _| state.selected_text());
+        let MarkdownBlock::Table { rows, .. } = &markdown_blocks(source.into())[0] else {
+            panic!("expected shared table")
+        };
+        let expected = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        cell.runs
+                            .iter()
+                            .map(|run| run.text.as_str())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(selected.trim_end(), expected);
+        state.update(cx, |state, cx| state.clear_selection(cx));
+        assert_eq!(state.read_with(cx, |state, _| state.selected_text()), "");
     }
 }

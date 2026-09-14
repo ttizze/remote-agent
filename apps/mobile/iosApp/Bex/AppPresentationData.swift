@@ -48,21 +48,6 @@ extension JsonValue {
     }
 }
 
-struct ConversationPresentation: Sendable {
-    let source: AgentCore.Thread
-    let id: String
-    let title: String
-    let rows: [ThreadConversationRow]
-    var runningTurnId: String? {
-        for row in rows.reversed() {
-            if case let .native(native, _) = row.content, case let .inProgress(turnId) = native.content {
-                return turnId
-            }
-        }
-        return nil
-    }
-}
-
 extension Request {
     var paramsJson: String {
         JsonValue.object(fields: params).formatted
@@ -72,14 +57,11 @@ extension Request {
 final class ConversationItem: Sendable {
     let source: RenderedItem
     let data: ItemPresentation
-    let markdown: [ConversationMarkdown.Part]
-    var contentVersion: String {
-        String(describing: ObjectIdentifier(self))
-    }
+    let markdown: [ConversationMarkdownContent.Part]
 
     init(_ source: RenderedItem) {
         self.source = source
         data = source.presentation()
-        markdown = data.kind != "user" && !data.collapsible ? ConversationMarkdown.parse(data.body) : []
+        markdown = data.kind != "user" && !data.collapsible ? ConversationMarkdownContent.parse(data.body) : []
     }
 }

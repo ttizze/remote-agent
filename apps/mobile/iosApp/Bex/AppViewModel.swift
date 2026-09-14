@@ -25,7 +25,6 @@ final class BexAppViewModel: ObservableObject {
     @Published private(set) var conversation: ConversationPresentation?
     private(set) var list: ThreadList?
     private(set) var models: [Model] = []
-    private let presentation = ConversationPresentationCache()
     private var presentationTask: Task<Void, Never>?
     private var pendingPresentation: PresentationInput?
     private struct PresentationInput {
@@ -235,6 +234,9 @@ final class BexAppViewModel: ObservableObject {
                 operations[id] = nil
                 if selectedProfileId == host {
                     publish(owner.snapshot())
+                    if case let .failure(error) = result {
+                        notice = snapshot.error() ?? error.localizedDescription
+                    }
                 }
                 completion(result)
             }
@@ -303,7 +305,10 @@ extension BexAppViewModel {
         presentationTask = Task { [weak self] in
             while let self, let input = pendingPresentation {
                 pendingPresentation = nil
-                let rendered = await presentation.project(input.source, snapshot: input.snapshot)
+                let previous = conversation
+                let rendered = await Task.detached(priority: .userInitiated) {
+                    ConversationPresentation.project(input.source, snapshot: input.snapshot, previous: previous)
+                }.value
                 if selectedProfileId == input.host, snapshot.requestsUnchanged(other: input.snapshot),
                    snapshot.navigation().threadId == input.source?.id() {
                     conversation = rendered

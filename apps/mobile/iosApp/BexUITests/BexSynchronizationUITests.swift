@@ -183,22 +183,6 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.descendants(matching: .any)["tasks.row.\(identifier)"].waitForExistence(timeout: 20),
                       "Foreground return did not fetch the conversation created by another client")
         XCTAssertFalse(app.staticTexts["notice"].exists)
-        captureScreen(app, named: "New conversation fetched on foreground")
-    }
-
-    func testSimulatorShowsWorkspaceConversationInsideItsProject() throws {
-        #if !targetEnvironment(simulator)
-            throw XCTSkip("This test uses the isolated Simulator fixture")
-        #endif
-        let app = try connectedSimulatorApp()
-        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
-        let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
-        let identifier = try XCTUnwrap(created?["threadId"])
-        app.buttons["tasks.menu"].tap()
-        app.buttons["tasks.refresh"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.row.\(identifier)"].waitForExistence(timeout: 20),
-                      "The project conversation was absent from the refreshed list")
         let project = prefixedButton(app, prefix: "tasks.project.")
         XCTAssertTrue(project.waitForExistence(timeout: 10)); project.tap()
         let row = app.descendants(matching: .any)["tasks.row.\(identifier)"]
@@ -206,7 +190,7 @@ extension BexLaunchUITests {
         wait(for: [hidden], timeout: 10)
         project.tap()
         XCTAssertTrue(row.waitForExistence(timeout: 10))
-        captureScreen(app, named: "Workspace conversation displayed inside its project")
+        captureScreen(app, named: "New conversation fetched on foreground")
     }
 
     func testSimulatorFetchesNewTaskWhenReturningToList() throws {

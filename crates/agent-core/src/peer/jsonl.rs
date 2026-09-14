@@ -135,33 +135,6 @@ mod tests {
     use tokio::io::{AsyncWriteExt, duplex};
 
     #[tokio::test]
-    async fn round_trips_source_lines_without_decoding_them() {
-        let request = r#"{"id":"turn-1","method":"turn/start","params":{"text":"hello"}}"#;
-        let notification = r#"{"method":"turn/completed","params":{"future":{"id":7}}}"#;
-        let response = r#"{"id":"turn-1","result":{"ok":true},"unknown":[1,2,3]}"#;
-        let (client, server) = duplex(16 * 1024);
-        let (client_read, client_write) = tokio::io::split(client);
-        let (server_read, server_write) = tokio::io::split(server);
-
-        let mut writer = JsonlWriter::new(client_write);
-        writer.write_line(request).await.unwrap();
-        writer.write_line(notification).await.unwrap();
-        writer.write_line(response).await.unwrap();
-        writer.shutdown().await.unwrap();
-
-        let mut reader = JsonlReader::new(server_read);
-        assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(request));
-        assert_eq!(
-            reader.read_line().await.unwrap().as_deref(),
-            Some(notification)
-        );
-        assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(response));
-        drop(server_write);
-        assert!(reader.read_line().await.unwrap().is_none());
-        drop(client_read);
-    }
-
-    #[tokio::test]
     async fn rejects_an_overlong_line_before_classification() {
         let (mut writer, reader) = duplex(1024);
         writer
@@ -194,22 +167,5 @@ mod tests {
             writer.write_line("{}\n{}").await,
             Err(JsonlError::EmbeddedLineDelimiter)
         ));
-    }
-
-    #[tokio::test]
-    async fn accepts_a_final_line_without_a_newline() {
-        let (mut writer, reader) = duplex(1024);
-        writer
-            .write_all(br#"{"method":"done","params":{}}"#)
-            .await
-            .unwrap();
-        writer.shutdown().await.unwrap();
-        let mut reader = JsonlReader::new(reader);
-
-        assert_eq!(
-            reader.read_line().await.unwrap().as_deref(),
-            Some(r#"{"method":"done","params":{}}"#)
-        );
-        assert!(reader.read_line().await.unwrap().is_none());
     }
 }

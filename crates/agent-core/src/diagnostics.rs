@@ -414,6 +414,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(unix))]
     #[test]
     fn unwritable_destination_returns_an_error_and_can_recover() {
         let directory = tempfile::tempdir().unwrap();

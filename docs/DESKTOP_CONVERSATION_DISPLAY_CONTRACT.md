@@ -61,6 +61,27 @@ Acceptance: `refresh_keeps_only_contiguous_history_and_its_cursor`,
 window rules, RPC failure/recovery, and bounded Host hydration through complete
 retrieval and reopening.
 
+## Conversation navigation
+
+- Desktop, iPhone and Android show a down-arrow button at the bottom center of
+  the conversation when the reader is away from the latest content. Activating it
+  reaches the bottom of the last message, including a message taller than the
+  viewport, and resumes following new output. It disappears at the bottom.
+- Desktop's left conversation navigator uses the shared projected user messages
+  as at most eight evenly spaced turn markers, always including the first and last.
+  Hover expands the target marker to 28 px and its neighbors progressively to the right
+  from a fixed left edge, returning
+  to 7 px when the pointer leaves. It immediately shows the user message and the beginning
+  of its answer beside it; clicking jumps to that turn and pauses following.
+- Tapping the mobile conversation title scrolls to the top of loaded history.
+  iPhone also supports the native status-bar tap. Neither operation may be
+  immediately undone by latest-message following; existing history pagination
+  and retry controls remain available at the top.
+- Acceptance: desktop `conversation_navigation_returns_to_latest_and_resumes_following`,
+  iOS `testSimulatorOpensLongInterruptedHistoryAtLatestMessage` and
+  `testSimulatorKeepsSmallOlderScrollDuringLiveUpdate`, Android
+  `ConversationNavigationTest` exercise the production native conversation views.
+
 ## Selection and copying
 
 - Mac text selection exposes **チャットに追加**, **詳細を表示**, and
@@ -157,6 +178,31 @@ and history reload:
 
 Unknown future items remain cached and receive a safe fallback row; they are
 never dropped solely because the mobile build does not know their type.
+
+Conversation Markdown uses `markdown` 1.0.0 with GFM parsing, the same library
+and options used by the pinned GPUI renderer. `agent-core::presentation::markdown`
+projects the document into native mobile paragraphs, runs and tables, resolving
+reference links and images against the whole document. Core supplies table-header
+emphasis for both native clients. iPhone maps the shared runs directly to UIKit
+text attributes without reparsing Markdown or creating an intermediate Swift
+`AttributedString`. Android consumes the same paragraph and inline styles. Native
+layout, selection, image loading and link actions remain client responsibilities.
+
+Mac's Host-backed image extraction uses the same core parser. Its existing
+`TextView::markdown` still parses the remaining source internally: GPUI 0.6.0 does
+not expose an input for pre-parsed documents. Retaining that renderer is the
+chosen architecture: share the established grammar, keep core's mobile document
+projection limited to the native clients' needs, and preserve GPUI's layout and
+selection. Platform text conversions are necessary adapters. A future public GPUI
+API can enable parsed-document reuse; this does not require a maintained GPUI fork.
+
+Mobile tables preserve rows, empty cells, column alignment and inline formatting.
+Selectable cells wrap long text and scroll horizontally; a wide table must not
+widen the conversation or hide its final column. Headers stay aligned with body
+rows. Streaming and reopening retain the same cell contents.
+Acceptance: `just ios-markdown`, core `presentation::markdown` tests,
+`testSimulatorRendersMarkdownTableAndReopensIt`, Android `MarkdownTableTest`, and
+Mac `markdown_tables_keep_every_shared_cell_in_desktop_selection`.
 
 Markdown HTTP/HTTPS links open in the system browser. File links resolve on the
 selected Host, including relative paths, URL-escaped spaces and line suffixes.
@@ -265,3 +311,11 @@ field, so it must never be looked up in `Item::extra`. Deferred items retain
 file headers while their diff bodies are fetched separately.
 
 When a provider is unavailable, the model menu displays the remaining catalog and the provider error. An existing draft keeps its saved model and settings until the user changes them; a new draft selects an available default. iOS exposes the model catalog without requiring a Codex account. Codex exit fails its active turn but leaves the Host connection and Claude approvals/conversations usable.
+
+
+The September 2026 test consolidation preserves the assertions above. Full and
+partial user-message copying share one Simulator conversation; the accepted
+additional-input case also checks stop, approval removal, and collapsed
+interrupted work. The retry side-chat case retains submission, draft clearing,
+and reopen checks. See [test maintenance](TEST_MAINTENANCE.md) for the complete
+boundary map and manual real-time soak command.

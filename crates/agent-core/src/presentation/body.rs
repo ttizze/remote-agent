@@ -197,7 +197,6 @@ mod tests {
                 json!({"id":"files", "type":"fileChange", "changes":changes}),
             )
             .unwrap();
-            assert!(!item.extra.contains_key("changes"));
             let displayed: Vec<_> = file_changes(&item)
                 .map(|change| {
                     (

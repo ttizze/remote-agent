@@ -1356,13 +1356,15 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
             assert_eq!(read["thread"]["projectId"], "workspace");
         }
         let mut chat_ids = Vec::new();
-        for method in ["thread/start", "host/thread/start"] {
-            for params in [json!({}), json!({"cwd":""}), json!({"cwd":"  "})] {
+        for (method, params) in [
+            ("thread/start", json!({})),
+            ("host/thread/start", json!({"cwd":"  "})),
+            ("thread/start", json!({"cwd":""})),
+        ] {
                 let global = request(&service, &mut session, method, params).await;
                 assert_eq!(global["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
                 assert_eq!(global["thread"]["projectId"], Value::Null);
                 chat_ids.push(global["thread"]["id"].clone());
-            }
         }
         let restarted = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(&project_state));
         let mut restarted_session = restarted.open_session(64);
@@ -1596,8 +1598,18 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn passive_client_receives_replayed_approval_and_completes_without_a_dummy_request() {
+    passive_approval_after(Duration::ZERO).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "301-second QUIC soak; run by the manual Native clients workflow"]
 async fn passive_client_can_approve_after_five_minutes_without_reconnecting() {
-    tokio::time::timeout(Duration::from_secs(330), async {
+    passive_approval_after(Duration::from_secs(301)).await;
+}
+
+async fn passive_approval_after(delay: Duration) {
+    tokio::time::timeout(delay + Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
         let sender = fixture.local().await.unwrap();
@@ -1609,7 +1621,7 @@ async fn passive_client_can_approve_after_five_minutes_without_reconnecting() {
         let passive = fixture.local().await.unwrap();
         let mut events = passive.peer.subscribe();
         let request = next_method(&mut events, "item/commandExecution/requestApproval").await;
-        tokio::time::sleep(Duration::from_secs(301)).await;
+        tokio::time::sleep(delay).await;
         passive.peer.respond_raw(&request["id"].to_string(), "result", r#"{"decision":"accept"}"#).await.unwrap();
         assert_eq!(next_method(&mut events, "turn/completed").await["params"]["turn"]["status"], "completed");
         passive.close().await.unwrap();

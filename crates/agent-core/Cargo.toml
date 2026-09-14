@@ -26,4 +26,8 @@ tempfile = "3"
 scopeguard = "1.2"
 pin-project-lite = "0.2"
 regex = "1"
+markdown = "=1.0.0"
 url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

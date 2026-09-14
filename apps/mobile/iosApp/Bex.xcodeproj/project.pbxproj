@@ -18,6 +18,7 @@
 		F9897A4D00C8F44425414C1F /* ConversationRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A4ABC2B38DF545C243FD72 /* ConversationRows.swift */; };
 		2DCDAABCD1000D782FF1BE5B /* ConversationMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63950266A2798560BC414B70 /* ConversationMedia.swift */; };
 		FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */; };
+		AAC15282ED580E15F2FE6024 /* ConversationMarkdownContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */; };
 		1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */; };
 		A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */; };
 		B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2036041A039EEBAA78D55844 /* AppPresentationData.swift */; };
@@ -39,9 +40,10 @@
 		C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* CodexModelSettings.swift */; };
 		C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000002 /* ModelSettingsSheet.swift */; };
 		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
-		C0DE00000000000000000104 /* ConversationPresentationCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000004 /* ConversationPresentationCache.swift */; };
+		C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000004 /* ConversationPresentation.swift */; };
 		C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000005 /* ConversationTextSelection.swift */; };
 		C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000006 /* ConversationSideChat.swift */; };
+		CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -60,6 +62,7 @@
 		F6A4ABC2B38DF545C243FD72 /* ConversationRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationRows.swift; sourceTree = "<group>"; };
 		63950266A2798560BC414B70 /* ConversationMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMedia.swift; sourceTree = "<group>"; };
 		D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdown.swift; sourceTree = "<group>"; };
+		AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdownContent.swift; sourceTree = "<group>"; };
 		CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMediaPickers.swift; sourceTree = "<group>"; };
 		2036041A039EEBAA78D55844 /* AppPresentationData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresentationData.swift; sourceTree = "<group>"; };
@@ -81,9 +84,10 @@
 		C0DE00000000000000000001 /* CodexModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelSettings.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000002 /* ModelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsSheet.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000004 /* ConversationPresentationCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentationCache.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000004 /* ConversationPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentation.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000005 /* ConversationTextSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTextSelection.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000006 /* ConversationSideChat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSideChat.swift; sourceTree = "<group>"; };
+		1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFileEditor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -141,7 +145,7 @@
 				109E523F621AEB123226918A /* ConversationHistory.swift */,
 				2036041A039EEBAA78D55844 /* AppPresentationData.swift */,
 				1DBDDA3779489C57B929936E /* AppViewModel.swift */,
-				C0DE00000000000000000004 /* ConversationPresentationCache.swift */,
+				C0DE00000000000000000004 /* ConversationPresentation.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
@@ -153,7 +157,9 @@
 				C0DE00000000000000000005 /* ConversationTextSelection.swift */,
 				C0DE00000000000000000006 /* ConversationSideChat.swift */,
 				D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */,
+				AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */,
 				CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */,
+				1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */,
 				8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */,
 				A10000000000000000000016 /* Info.plist */,
 				A10000000000000000000018 /* Assets.xcassets */,
@@ -274,7 +280,7 @@
 				556D7396D1777928A463D2DF /* ConversationHistory.swift in Sources */,
 				B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */,
 				FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */,
-				C0DE00000000000000000104 /* ConversationPresentationCache.swift in Sources */,
+				C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
@@ -286,7 +292,9 @@
 				C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */,
 				C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */,
 				FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */,
+				AAC15282ED580E15F2FE6024 /* ConversationMarkdownContent.swift in Sources */,
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
+				CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */,
 				A8615FCED64D982B6FDB0740 /* ChatMediaPickers.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -339,7 +347,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 50;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -367,7 +375,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 47;
+				CURRENT_PROJECT_VERSION = 50;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";

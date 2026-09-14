@@ -331,17 +331,7 @@ impl Desktop {
         self.worktree_busy = true;
         self.perform(
             Intent::RemoveWorktree(op::RemoveWorktree { path }),
-            |s, result, window, cx| {
-                s.worktree_busy = false;
-                match result {
-                    Ok(_) => s.worktree_removal = None,
-                    Err(error) => {
-                        s.set_error(error);
-                        s.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
-                    }
-                }
-                s.accept_snapshot(window, cx);
-            },
+            OperationCompletion::RemoveWorktree,
         );
     }
 }

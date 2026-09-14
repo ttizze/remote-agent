@@ -20,6 +20,7 @@ struct ThreadScreen: View {
     @State var isFollowingLatest = true
     @State private var isNearLatest = true
     @State var scrollingToOlder = false
+    @State private var scrollToTopRequest = 0
     @State var historyBoundaries = [String: CGFloat]()
     @State var historyRequestPending = false
     @State var expandedItemIds = Set<String>()
@@ -46,7 +47,7 @@ struct ThreadScreen: View {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
-                let rows = conversationRows(thread)
+                let rows = conversationRows(thread, expansion: activityExpansionOverrides)
                 let latestRowId = rows.last?.id
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -59,6 +60,10 @@ struct ThreadScreen: View {
                         }
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
+                        .background(ConversationScrollToTop {
+                            isFollowingLatest = false
+                            scrollingToOlder = false
+                        })
                     }
                     .accessibilityIdentifier("task.detail")
                     .accessibilityValue(threadAccessibilityValue(thread))
@@ -73,6 +78,13 @@ struct ThreadScreen: View {
                             isFollowingLatest = true
                         }
                     })
+                    .onChange(of: scrollToTopRequest) {
+                        isFollowingLatest = false
+                        scrollingToOlder = false
+                        if let first = rows.first {
+                            withAnimation { proxy.scrollTo(first.id, anchor: .top) }
+                        }
+                    }
                     .onScrollGeometryChange(for: CGFloat.self) { geometry in
                         geometry.contentSize.height - geometry.visibleRect.maxY
                     } action: { _, remaining in
@@ -91,10 +103,11 @@ struct ThreadScreen: View {
                                 }
                             } label: {
                                 Image(systemName: "arrow.down").font(.title3.weight(.medium))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 44, height: 44)
+                                    .background(Color(white: 0.19), in: Circle())
                             }
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.capsule)
-                            .controlSize(.large)
+                            .buttonStyle(.plain)
                             .accessibilityLabel("最新のメッセージへ")
                             .accessibilityIdentifier("task.latest")
                             .padding(.bottom, 6)
@@ -214,7 +227,14 @@ struct ThreadScreen: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 if !isSideChat, !model.isNewThread {
-                    conversationTitle
+                    Button {
+                        scrollToTopRequest += 1
+                    } label: {
+                        conversationTitle
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("会話の先頭へ")
+                    .accessibilityIdentifier("task.top")
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {

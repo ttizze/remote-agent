@@ -364,6 +364,11 @@ mod tests {
         let host = fixture.path().join("mobile-host");
         let desktop = fixture.path().join("desktop");
         let lease = registry.acquire(&host, Some(KeyStorage::File)).unwrap();
+        fs::write(host.join("host.ticket"), "stale invalid ticket").unwrap();
+        assert!(matches!(
+            registry.resolve(&desktop).unwrap().state,
+            LocalHostState::Starting
+        ));
         let credentials = crate::HostCredentials::load(
             lease.key_storage().open(lease.directory()).unwrap(),
             lease.directory().to_owned(),
@@ -375,6 +380,10 @@ mod tests {
             .unwrap();
         lease.publish(&endpoint.ticket()).unwrap();
         let location = registry.resolve(&desktop).unwrap();
+        assert_eq!(location.directory, host.canonicalize().unwrap());
+        assert!(
+            matches!(location.state, LocalHostState::Ready(ref ticket) if *ticket == endpoint.ticket())
+        );
         assert_eq!(location.key_storage, Some(KeyStorage::File));
         assert_eq!(
             location.load_identity().unwrap().node_id(),
@@ -390,7 +399,12 @@ mod tests {
         let location = registry.resolve(&desktop).unwrap();
         assert!(matches!(location.state, LocalHostState::Stopped));
         assert_eq!(location.key_storage, Some(KeyStorage::File));
+        assert_eq!(location.directory, host.canonicalize().unwrap());
         let lease = registry.acquire(&location.directory, None).unwrap();
+        assert!(matches!(
+            registry.resolve(&desktop).unwrap().state,
+            LocalHostState::Starting
+        ));
         assert_eq!(lease.key_storage(), KeyStorage::File);
         let restored = crate::HostCredentials::load(
             lease.key_storage().open(lease.directory()).unwrap(),
@@ -433,57 +447,6 @@ mod tests {
                 .is_err()
         );
         assert!(!fixture.path().join("third").exists());
-    }
-
-    #[test]
-    fn different_state_directories_cannot_start_two_normal_hosts() {
-        let fixture = tempfile::tempdir().unwrap();
-        let registry = LocalHostRegistry::new(fixture.path().join("registry"));
-        let first = fixture.path().join("first");
-        let second = fixture.path().join("second");
-        let _running = registry.acquire(&first, None).unwrap();
-        assert!(
-            registry.acquire(&second, None).is_err(),
-            "a different credential directory must not create a second normal Host"
-        );
-        assert!(
-            !second.exists(),
-            "reject before provisioning another identity"
-        );
-    }
-
-    #[tokio::test]
-    async fn startup_hides_stale_tickets_and_restart_remembers_the_credential_directory() {
-        let fixture = tempfile::tempdir().unwrap();
-        let registry = LocalHostRegistry::new(fixture.path().join("registry"));
-        let custom = fixture.path().join("custom");
-        let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled)
-            .await
-            .unwrap();
-        let lease = registry.acquire(&custom, None).unwrap();
-        fs::write(custom.join("host.ticket"), "stale invalid ticket").unwrap();
-        assert!(matches!(
-            registry.resolve(registry.directory()).unwrap().state,
-            LocalHostState::Starting
-        ));
-        lease.publish(&endpoint.ticket()).unwrap();
-        let location = registry.resolve(registry.directory()).unwrap();
-        assert_eq!(location.directory, custom.canonicalize().unwrap());
-        assert!(
-            matches!(location.state, LocalHostState::Ready(ticket) if ticket == endpoint.ticket())
-        );
-        drop(lease);
-        let registry = LocalHostRegistry::new(registry.directory().to_owned());
-        let location = registry.resolve(registry.directory()).unwrap();
-        assert!(matches!(location.state, LocalHostState::Stopped));
-        assert_eq!(location.directory, custom.canonicalize().unwrap());
-        let lease = registry.acquire(&location.directory, None).unwrap();
-        assert!(matches!(
-            registry.resolve(registry.directory()).unwrap().state,
-            LocalHostState::Starting
-        ));
-        drop(lease);
-        endpoint.close().await;
     }
 
     #[tokio::test]
@@ -549,6 +512,21 @@ mod tests {
             .map(|handle| handle.join().unwrap())
             .collect();
         assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let loser = if results[0].is_err() {
+            "first"
+        } else {
+            "second"
+        };
+        let loser = fixture.path().join(loser);
+        assert!(
+            !loser.exists(),
+            "reject before provisioning another identity"
+        );
+        assert!(
+            registry.acquire(&loser, None).is_err(),
+            "the winner remains exclusive after startup"
+        );
+        assert!(!loser.exists());
         assert!(matches!(
             registry.resolve(registry.directory()).unwrap().state,
             LocalHostState::Starting

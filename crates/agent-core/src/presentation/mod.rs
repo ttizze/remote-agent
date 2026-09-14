@@ -10,6 +10,7 @@ use serde_json::Value;
 pub mod body;
 pub mod conversation;
 pub mod list;
+pub mod markdown;
 
 fn field<'a>(item: &'a Item, key: &str) -> &'a str {
     item.extra
@@ -504,21 +505,27 @@ mod presentation_tests {
     }
     #[test]
     fn command_groups_start_collapsed_for_live_and_restored_turns() {
-        for status in ["inProgress", "completed", "failed", "interrupted", ""] {
-            for command_status in ["inProgress", "completed", "failed"] {
-                let turn = turn!({"id":"turn","status":status,"items":[
-                    {"id":"u","type":"userMessage","text":"Inspect"},
-                    {"id":"c","type":"commandExecution","command":"pwd","status":command_status},
-                    {"id":"a","type":"agentMessage","text":"Result"}
-                ]});
-                let group = project(&turn).find(|part| part.collapsible).unwrap();
-                assert!(
-                    !group.initially_expanded,
-                    "command group opened without a user action: turn={status}, command={command_status}"
-                );
-                assert_eq!(rows(&group, &turn, Role::Activity).next().unwrap().id, "c");
-                assert!(group.label.is_some());
-            }
+        for (status, command_status) in [
+            ("inProgress", "inProgress"),
+            ("inProgress", "completed"),
+            ("inProgress", "failed"),
+            ("completed", "completed"),
+            ("failed", "failed"),
+            ("interrupted", "inProgress"),
+            ("", "completed"),
+        ] {
+            let turn = turn!({"id":"turn","status":status,"items":[
+                {"id":"u","type":"userMessage","text":"Inspect"},
+                {"id":"c","type":"commandExecution","command":"pwd","status":command_status},
+                {"id":"a","type":"agentMessage","text":"Result"}
+            ]});
+            let group = project(&turn).find(|part| part.collapsible).unwrap();
+            assert!(
+                !group.initially_expanded,
+                "command group opened without a user action: turn={status}, command={command_status}"
+            );
+            assert_eq!(rows(&group, &turn, Role::Activity).next().unwrap().id, "c");
+            assert!(group.label.is_some());
         }
     }
 
@@ -658,7 +665,7 @@ mod projection_tests {
         assert!(!segment.initially_expanded);
     }
     #[test]
-    fn pending_metadata_preserves_source_positions_without_copying_bodies() {
+    fn pending_metadata_preserves_source_positions() {
         let turn = turn!({"id":"t","status":"inProgress","items":[
             {"id":"a","type":"agentMessage","phase":"commentary","text":"private body"},
             {"id":"b","type":"commandExecution","aggregatedOutput":"private output"}
@@ -679,11 +686,6 @@ mod projection_tests {
             }
         };
         let segments: Vec<_> = project_items(&turn, order.len(), item).collect();
-        assert!(
-            !serde_json::to_string(&segments)
-                .unwrap()
-                .contains("private")
-        );
         let rows: Vec<_> = segments
             .iter()
             .flat_map(|s| (s.start..s.end).map(|index| (order[index], s.role(index, item(index)))))

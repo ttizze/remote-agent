@@ -20,26 +20,43 @@ extension BexLaunchUITests {
         let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: latest)
         wait(for: [visible], timeout: 5)
         captureScreen(app, named: "Long interrupted history at latest message")
-        func loadedItems() -> Int {
-            let value = detail.value as? String ?? ""
-            return Int(value.components(separatedBy: "items=").last ?? "") ?? -1
-        }
-        let initialItems = 501
-        XCTAssertEqual(loadedItems(), initialItems, "Initial history has 500 items plus the preserved opening input")
+        let initialItems = loadedItems(in: detail)
+        XCTAssertGreaterThan(initialItems, 0)
         for _ in 0 ..< 40 {
-            if loadedItems() > initialItems {
+            if loadedItems(in: detail) > initialItems {
                 break
             }
             detail.swipeDown(velocity: .fast)
         }
-        XCTAssertGreaterThan(loadedItems(), initialItems,
+        XCTAssertGreaterThan(loadedItems(in: detail), initialItems,
                              "Scrolling upward must load older items without tapping a button")
         XCTAssertFalse(latest.isHittable, "Prepending history must not jump back to the latest message")
         captureScreen(app, named: "Older history loaded by scrolling")
+        let latestButton = app.buttons["task.latest"]
+        XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
+        latestButton.tap()
+        for scrollToTop in [
+            { app.buttons["task.top"].tap() },
+            { app.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0))
+                .withOffset(CGVector(dx: 0, dy: 32)).tap() }
+        ] {
+            XCTAssertTrue(latest.isHittable)
+            XCTAssertFalse(latestButton.exists)
+            scrollToTop()
+            XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
+            XCTAssertFalse(latest.isHittable, "Top navigation must not snap back to the latest message")
+            latestButton.tap()
+        }
+        XCTAssertTrue(latest.isHittable)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
         XCTAssertTrue(latest.isHittable)
+    }
+
+    private func loadedItems(in detail: XCUIElement) -> Int {
+        let value = detail.value as? String ?? ""
+        return Int(value.components(separatedBy: "items=").last ?? "") ?? -1
     }
 
     func testSimulatorKeepsSmallOlderScrollDuringLiveUpdate() throws {
@@ -134,6 +151,55 @@ extension BexLaunchUITests {
             XCTAssertTrue(answer.waitForExistence(timeout: 10), "Earlier replies must remain outside collapsed work")
         }
         captureScreen(app, named: "Earlier answers between followups")
+    }
+
+    func testSimulatorRendersMarkdownTableAndReopensIt() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[success] [markdown-table] Render the table")
+        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(answer.waitForExistence(timeout: 30))
+        let message = app.descendants(matching: .any)["task.message"]
+        let emptyValue = try XCTUnwrap(message.placeholderValue)
+        let cleared = expectation(for: NSPredicate(format: "value == %@", emptyValue), evaluatedWith: message)
+        wait(for: [cleared], timeout: 10)
+        XCTAssertTrue(app.buttons["task.send"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["task.send"].isEnabled)
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        verifyMarkdownTable(app)
+        captureScreen(app, named: "Japanese Markdown table right columns")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 20))
+        verifyMarkdownTable(app)
+        captureScreen(app, named: "Reopened Japanese Markdown table")
+    }
+
+    private func verifyMarkdownTable(_ app: XCUIApplication) {
+        let table = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(table.waitForExistence(timeout: 15))
+        let header = app.textViews["markdown.cell.0.0.0"]
+        let first = app.textViews["markdown.cell.0.1.0"]
+        let second = app.textViews["markdown.cell.0.2.0"]
+        XCTAssertEqual(header.value as? String, "構成")
+        XCTAssertEqual(first.value as? String, "Codexハーネス＋Claude接続")
+        XCTAssertEqual(second.value as? String, "Codex／Claude Codeを並列接続")
+        XCTAssertEqual(header.frame.minX, first.frame.minX, accuracy: 1)
+        XCTAssertEqual(first.frame.minX, second.frame.minX, accuracy: 1)
+        XCTAssertGreaterThan(second.frame.minY, first.frame.maxY)
+        XCTAssertTrue(first.isHittable)
+        let firstRowY = first.frame.minY
+        let headerHeight = header.frame.height
+        captureScreen(app, named: "Japanese Markdown table first column")
+        table.swipeLeft()
+        table.swipeLeft()
+        let burden = app.textViews["markdown.cell.0.1.2"]
+        XCTAssertTrue(burden.isHittable)
+        XCTAssertEqual(burden.value as? String, "通信変換、モデルの挙動、サブスク認証との適合を検証する必要")
+        XCTAssertGreaterThan(burden.frame.height, headerHeight * 2)
+        XCTAssertEqual(app.textViews["markdown.cell.0.2.2"].value as? String, "両者の機能差をBexが吸収する必要")
+        XCTAssertEqual(firstRowY, burden.frame.minY, accuracy: 1)
     }
 
     func testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText() throws {

@@ -24,7 +24,7 @@ struct ThreadActivityHeader: View {
 
 struct ThreadRequestRow: View {
     let request: Request
-    let model: BexAppViewModel
+    let respond: (Answer, @escaping (String?) -> Void) -> Void
     @State private var answers: [String: String] = [:]
     @State private var rawResponse = "{}"
     @State private var busy = false
@@ -112,7 +112,7 @@ struct ThreadRequestRow: View {
     private func submit(_ answer: Answer) {
         busy = true
         error = nil
-        model.respond(request, answer: answer) { message in
+        respond(answer) { message in
             busy = false; error = message; resolved = message == nil
         }
     }
@@ -146,8 +146,9 @@ struct ThreadErrorRow: View {
 struct ThreadMessageRow: View {
     let item: ConversationItem
     let isUser: Bool
-    let model: BexAppViewModel
-    var forkTurnId: String?
+    let media: ConversationMediaAccess
+    let selection: ConversationSelectionActions
+    var fork: ((@escaping (String?) -> Void) -> Void)?
     @State private var forking = false
     @State private var forkError: String?
     @State private var copied = false
@@ -159,17 +160,17 @@ struct ThreadMessageRow: View {
                 let sources = item.data.imageSources
                 ForEach(sources.indices, id: \.self) { index in
                     ConversationImage(
-                        source: sources[index],
+                        source: SessionImage(reference: sources[index]),
                         label: item.data.kind == "imageGeneration" ? "生成画像" : "添付画像",
                         identifier: "message.image.\(item.data.id).\(index)",
-                        model: model
+                        media: media
                     )
                 }
                 if !item.data.body.isEmpty {
                     if isUser {
                         Text(item.data.body).font(.system(size: 18))
                     } else {
-                        ConversationMarkdown(blocks: item.markdown, model: model)
+                        ConversationMarkdown(blocks: item.markdown, media: media, selection: selection)
                     }
                 }
             }
@@ -201,8 +202,11 @@ struct ThreadMessageRow: View {
                     Button { UIPasteboard.general.string = item.data.body; copied = true } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     }.accessibilityLabel(copied ? "コピーしました" : "回答をコピー")
-                    if let forkTurnId {
-                        Button { fork(through: forkTurnId) } label: {
+                    if let fork {
+                        Button {
+                            forking = true; forkError = nil
+                            fork { error in forking = false; forkError = error }
+                        } label: {
                             Image(systemName: "arrow.triangle.branch")
                         }
                         .disabled(forking)
@@ -231,27 +235,12 @@ struct ThreadMessageRow: View {
             }
         }
     }
-
-    private func fork(through turnId: String) {
-        guard !forking, let threadId = model.selectedThreadId,
-              let host = model.selectedProfileId else { return }
-        forking = true
-        forkError = nil
-        model.forkThread(threadId, through: turnId) { result, error in
-            forking = false
-            guard model.selectedProfileId == host, model.selectedThreadId == threadId else { return }
-            if let id = result {
-                model.openThread(id)
-            } else {
-                forkError = error ?? "会話を分岐できませんでした。"
-            }
-        }
-    }
 }
 
 struct ThreadItemRow: View {
     let item: ConversationItem
-    let model: BexAppViewModel
+    let media: ConversationMediaAccess
+    let selection: ConversationSelectionActions
     let isExpanded: Bool
     let toggleExpanded: () -> Void
     let loadDetails: () async -> String?
@@ -281,12 +270,21 @@ struct ThreadItemRow: View {
                     if isExpanded {
                         let body = item.data.deferred ? "" : item.source.expandedBody()
                         if item.data.deferred {
-                            if let detailError {
-                                Text(detailError).font(.caption).foregroundColor(.red)
-                                Button("再読み込み") { retry += 1 }
-                            } else {
-                                ProgressView("詳細を読み込み中…")
+                            VStack(alignment: .leading, spacing: 10) {
+                                if let detailError {
+                                    Text(detailError).font(.caption).foregroundColor(.red)
+                                    Button("再読み込み") { retry += 1 }
+                                } else {
+                                    ProgressView("詳細を読み込み中…")
+                                }
                             }
+                            .task(id: retry) {
+                                detailError = nil
+                                let error = await loadDetails()
+                                guard !Task.isCancelled else { return }
+                                detailError = error
+                            }
+                            .id(ObjectIdentifier(item))
                         }
                         if !body.isEmpty {
                             Text(body).font(.system(.subheadline, design: .monospaced)).textSelection(.enabled)
@@ -308,20 +306,13 @@ struct ThreadItemRow: View {
                         .accessibilityIdentifier("item.\(item.data.id)")
                 }
             } else {
-                ConversationMarkdown(blocks: item.markdown, model: model)
+                ConversationMarkdown(blocks: item.markdown, media: media, selection: selection)
                     .foregroundColor(item.data.kind == "agent" || item.data.kind == "user" ? .primary : .secondary)
                     .accessibilityIdentifier("item.\(item.data.id)")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
-        .task(id: "\(isExpanded):\(item.contentVersion):\(retry)") {
-            guard isExpanded, item.data.deferred else { return }
-            detailError = nil
-            let error = await loadDetails()
-            guard !Task.isCancelled else { return }
-            detailError = error
-        }
     }
 }
 
@@ -331,6 +322,7 @@ private struct MessageTextSelection: UIViewRepresentable {
 
     func makeUIView(context _: Context) -> UITextView {
         let view = UITextView()
+        view.scrollsToTop = false
         view.isEditable = false
         view.isSelectable = true
         view.font = .systemFont(ofSize: 18)
