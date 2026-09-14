@@ -802,6 +802,18 @@ impl HostRpcService {
             titles.push(thread);
         }
         let mut page = titles.finish();
+        let merged = crate::worktrees::merged_directories(
+            page.data
+                .iter()
+                .filter_map(|thread| thread.cwd.clone())
+                .collect(),
+        )
+        .await
+        .map_err(|error| Failure::new("worktree_status_failed", error))?;
+        for thread in &mut page.data {
+            thread.worktree_merged =
+                Some(thread.cwd.as_ref().is_some_and(|cwd| merged.contains(cwd)));
+        }
         if !provider_errors.is_empty() {
             page.extra
                 .insert("providerErrors".into(), provider_errors.into());

@@ -99,7 +99,7 @@ curl --fail --silent --show-error "http://127.0.0.1:$(cat "$fixture/pairing.port
 adb -P "$server_port" -s "$serial" shell run-as dev.remoteagent.mobile mkdir -p cache
 adb -P "$server_port" -s "$serial" shell "run-as dev.remoteagent.mobile sh -c 'cat > cache/fixture-invitation.json'" <"$fixture/invitation.json"
 adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \
-    -e class dev.remoteagent.mobile.StorePersistenceTest,dev.remoteagent.mobile.ConversationRecoveryTest,dev.remoteagent.mobile.MarkdownTableTest,dev.remoteagent.mobile.ConversationNavigationTest \
+    -e class dev.remoteagent.mobile.StorePersistenceTest,dev.remoteagent.mobile.ConversationRecoveryTest,dev.remoteagent.mobile.MarkdownTableTest,dev.remoteagent.mobile.ConversationNavigationTest,dev.remoteagent.mobile.ThreadListTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.store.log"
-grep -qx 'OK (7 tests)' "$log.store.log"
-echo "Android API 37: 8 tests passed; $log.network.log and $log.store.log"
+grep -qx 'OK (8 tests)' "$log.store.log"
+echo "Android API 37: 9 tests passed; $log.network.log and $log.store.log"

@@ -12,6 +12,7 @@ if [[ ${1:-} == --without-codex ]]; then
 fi
 if [[ $# == 0 ]]; then
     set -- \
+        testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
         testSimulatorEditsHostWorktreeSettingsFromTaskMenu \
         testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject \
         testSimulatorLoadsLatestFiveTitlesPerProjectAndExpandsOneProject \

@@ -1,7 +1,7 @@
 use agent_core::models::{Worktree, WorktreeSettings};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -248,6 +248,54 @@ impl Worktrees {
         .await
         .map_err(|e| e.to_string())?
     }
+}
+
+/// Inspect each visible execution directory once per list request. Git state must
+/// not share the project settings cache: main can move without settings changing.
+pub(crate) async fn merged_directories(
+    directories: HashSet<String>,
+) -> Result<HashSet<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        directories
+            .into_iter()
+            .filter(|cwd| merged_into_main(Path::new(cwd)).unwrap_or(false))
+            .collect()
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+fn merged_into_main(cwd: &Path) -> Result<bool, String> {
+    let git_dir = crate::git::text(cwd, &["rev-parse", "--absolute-git-dir"])?;
+    let common_dir = crate::git::text(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    if git_dir.trim() == common_dir.trim() {
+        return Ok(false);
+    }
+    let branch = crate::git::text(cwd, &["symbolic-ref", "--quiet", "HEAD"])?;
+    let branch = branch.trim();
+    if branch == "refs/heads/main" {
+        return Ok(false);
+    }
+    let head = crate::git::text(cwd, &["rev-parse", "--verify", branch])?;
+    let history = crate::git::text(cwd, &["reflog", "show", "--format=%H", branch])?;
+    let contained = crate::git::output(
+        cwd,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            head.trim(),
+            "refs/heads/main",
+        ],
+    )
+    .is_ok();
+    Ok(agent_core::presentation::list::worktree_branch_merged(
+        head.trim(),
+        history.lines().last(),
+        contained,
+    ))
 }
 
 fn inspect(path: &str, project: &str) -> Result<(String, Option<String>), String> {
