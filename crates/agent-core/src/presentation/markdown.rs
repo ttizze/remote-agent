@@ -8,6 +8,9 @@ use std::{borrow::Cow, collections::HashMap};
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum MarkdownBlock {
+    Visualization {
+        path: String,
+    },
     Paragraph {
         runs: Vec<MarkdownRun>,
         style: MarkdownStyle,
@@ -271,6 +274,13 @@ fn block(
         }
         _ => {}
     }
+    if let Node::Paragraph(paragraph) = node
+        && let [Node::Text(text)] = paragraph.children.as_slice()
+        && let Some(path) = super::visualize::visualization_reference(&text.value)
+    {
+        blocks.push(MarkdownBlock::Visualization { path });
+        return;
+    }
     if matches!(node, Node::Paragraph(_) | Node::Heading(_) | Node::Html(_)) {
         let mut runs = Vec::new();
         inline(node, definitions, MarkdownRun::default(), &mut runs);
@@ -289,6 +299,29 @@ fn block(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visualize_reference_is_a_distinct_block() {
+        let blocks = markdown_blocks("Before\n\nvisualize{\"path\":\"/fixture/icon-options.html\",\"mode\":\"wide\"}\n\nAfter".into());
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            blocks[1],
+            MarkdownBlock::Visualization {
+                path: "/fixture/icon-options.html".into()
+            }
+        );
+        for source in [
+            "`visualize{\"path\":\"x.html\"}`",
+            "```text\nvisualize{\"path\":\"x.html\"}\n```",
+            "visualize{broken}",
+            "visualize{\"path\":\"x.html\"}",
+        ] {
+            assert!(matches!(
+                markdown_blocks(source.into())[0],
+                MarkdownBlock::Paragraph { .. }
+            ));
+        }
+    }
 
     const TABLE: &str = include_str!("../../tests/fixtures/markdown/table.md");
 

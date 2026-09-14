@@ -250,6 +250,13 @@ pub(super) async fn run(
     }
     let mut response_text = if prompt.contains("[selection]") {
         "Needle Alpha Bravo.\n\nSecond paragraph stays unselected.".to_owned()
+    } else if prompt.contains("[visualize]") {
+        let path = context.home.join(format!("icon-options-{suffix}.html"));
+        fs::write(
+            &path,
+            include_str!("../../../agent-core/tests/fixtures/visualize/icon-options.html"),
+        )?;
+        format!("visualize{}", json!({"path": path}))
     } else if prompt.contains("[markdown-table]") {
         include_str!("../../../agent-core/tests/fixtures/markdown/table.md").to_owned()
     } else if scenario == "history" {

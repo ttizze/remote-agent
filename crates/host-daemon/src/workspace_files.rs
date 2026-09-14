@@ -52,6 +52,8 @@ enum GrantFile {
 pub(crate) enum FileRequest {
     #[serde(rename = "host/file/list")]
     List(PathParams),
+    #[serde(rename = "host/visualize/read")]
+    Visualization(agent_core::state::operations::LoadVisualization),
     #[serde(rename = "host/file/read")]
     Read(PathParams),
     #[serde(rename = "host/file/write")]
@@ -83,6 +85,7 @@ pub(crate) struct Upload {
 #[serde(untagged)]
 pub(crate) enum FileResponse {
     List(FileList),
+    Visualization(String),
     Content(FileContent),
     Grant(TransferGrant),
 }
@@ -116,6 +119,36 @@ impl WorkspaceFiles {
 
     fn dispatch(&self, session: SessionId, request: FileRequest) -> Result<FileResponse, String> {
         match request {
+            FileRequest::Visualization(params) => {
+                use agent_core::presentation::visualize::{
+                    visualization_document, visualization_path,
+                };
+                let path = visualization_path(&params.path, &params.cwd)?;
+                let directory = self.upload_directory.join("visualizations");
+                let archive = directory.join(hash(path.to_string_lossy().as_bytes()));
+                let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+                let bytes = if path.try_exists().map_err(io_error)? {
+                    let bytes = read_bounded(&path, EDIT_LIMIT)?;
+                    std::str::from_utf8(&bytes).map_err(|_| "visualize HTML is not UTF-8")?;
+                    fs::create_dir_all(&directory).map_err(io_error)?;
+                    atomicwrites::AtomicFile::new(&archive, atomicwrites::AllowOverwrite)
+                        .write_with_options(
+                            |file| file.write_all(&bytes),
+                            crate::platform::private_file_options(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    bytes
+                } else {
+                    read_bounded(&archive, EDIT_LIMIT).map_err(
+                        |_| "表示ファイルが見つかりません。HostでHTMLを再作成してください。",
+                    )?
+                };
+                let fragment =
+                    std::str::from_utf8(&bytes).map_err(|_| "visualize HTML is not UTF-8")?;
+                Ok(FileResponse::Visualization(visualization_document(
+                    fragment,
+                )))
+            }
             FileRequest::List(params) => {
                 let path = absolute_path(&params.path)?
                     .canonicalize()
@@ -492,6 +525,44 @@ mod tests {
         let token = &grant.token;
         stream.write_u32(token.len() as u32).await.unwrap();
         stream.write_all(token.as_bytes()).await.unwrap();
+    }
+
+    #[test]
+    fn visualization_archive_survives_file_service_recreation_and_rejects_invalid_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("comparison.html");
+        fs::write(
+            &source,
+            include_str!("../../agent-core/tests/fixtures/visualize/icon-options.html"),
+        )
+        .unwrap();
+        let request = || {
+            FileRequest::Visualization(agent_core::state::operations::LoadVisualization {
+                path: "comparison.html".into(),
+                cwd: directory.path().to_str().unwrap().into(),
+            })
+        };
+        let files = WorkspaceFiles::new(directory.path().join("attachments"));
+        let FileResponse::Visualization(original) = files.dispatch(1, request()).unwrap() else {
+            panic!("expected HTML")
+        };
+        fs::remove_file(&source).unwrap();
+        drop(files);
+        let files = WorkspaceFiles::new(directory.path().join("attachments"));
+        let FileResponse::Visualization(reopened) = files.dispatch(2, request()).unwrap() else {
+            panic!("expected archive")
+        };
+        assert_eq!(original, reopened);
+        for bytes in [vec![b'x'; EDIT_LIMIT as usize + 1], vec![0xff]] {
+            fs::write(&source, bytes).unwrap();
+            assert!(
+                files.dispatch(2, request()).is_err(),
+                "invalid content must not silently reuse an older archive"
+            );
+        }
+        fs::remove_file(&source).unwrap();
+        fs::create_dir(&source).unwrap();
+        assert!(files.dispatch(2, request()).is_err());
     }
 
     #[tokio::test]

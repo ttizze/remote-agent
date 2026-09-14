@@ -39,15 +39,18 @@ import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownRun
 import dev.remoteagent.core.markdownBlocks
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.RenderedItem
 
 @Composable
-internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean) {
+internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String = "",
+    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)? = null) {
     val content = remember(item) { item.presentation() }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
         Card {
             Column(Modifier.padding(12.dp)) {
-                if (isUser) Text(content.body) else ConversationBody(content.body)
+                if (isUser) Text(content.body) else ConversationBody(content.body, cwd, perform)
                 content.imageSources.forEach { Text("画像: $it", style = MaterialTheme.typography.bodySmall) }
             }
         }
@@ -83,7 +86,8 @@ internal fun ThreadActivityCard(item: RenderedItem, loadDetails: (String) -> Uni
 }
 
 @Composable
-internal fun ConversationBody(body: String) {
+internal fun ConversationBody(body: String, cwd: String = "",
+    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)? = null) {
     val blocks = remember(body) { markdownBlocks(body) }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         blocks.forEachIndexed { index, block ->
@@ -99,6 +103,7 @@ internal fun ConversationBody(body: String) {
                     fontFamily = if (block.style.code) FontFamily.Monospace else FontFamily.Default,
                     modifier = Modifier.padding(start = if (block.style.quoted) 12.dp else 0.dp),
                 )
+                is MarkdownBlock.Visualization -> ConversationVisualization(block.path, cwd, perform)
                 is MarkdownBlock.Table -> MarkdownTable(block, index)
             }
         }

@@ -246,3 +246,19 @@ impl Operation for RemoveWorktree {
         vec![Effect::execute(ListWorktrees {})]
     }
 }
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadVisualization {
+    pub path: String,
+    pub cwd: String,
+}
+rpc::rpc_method!(LoadVisualization, String, "host/visualize/read");
+impl Operation for LoadVisualization {
+    rpc_operation!();
+    fn outcome(output: &mut Self::Output) -> Outcome {
+        Outcome::Visualization {
+            html: std::mem::take(output),
+        }
+    }
+}

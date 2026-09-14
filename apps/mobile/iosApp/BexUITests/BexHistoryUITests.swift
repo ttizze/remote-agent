@@ -153,6 +153,35 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Earlier answers between followups")
     }
 
+    func testSimulatorRendersVisualizationAndReopensIt() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[success] [visualize] Compare twelve icons")
+        let expand = app.buttons["visualize.expand"]
+        XCTAssertTrue(expand.waitForExistence(timeout: 30))
+        let message = app.descendants(matching: .any)["task.message"]
+        XCTAssertEqual(message.value as? String, message.placeholderValue)
+        captureScreen(app, named: "Visualization loaded with twelve choices")
+        XCTAssertTrue(app.buttons["task.send"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["task.send"].isEnabled)
+        XCTAssertFalse(prefixedButton(app, prefix: "turn.interrupt.").exists)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        func verify() {
+            let second = app.webViews.switches["02 ブランチ＋チェックをプレビュー"]
+            XCTAssertTrue(second.waitForExistence(timeout: 20))
+            second.tap()
+            XCTAssertEqual(second.value as? String, "1")
+            XCTAssertTrue(app.webViews.staticTexts["02 · ブランチ＋チェック"].waitForExistence(timeout: 5))
+        }
+        verify()
+        captureScreen(app, named: "Visualization selected second icon")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let row = prefixedElement(app, prefix: "tasks.row.fixture-thread-")
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
+        XCTAssertTrue(expand.waitForExistence(timeout: 20))
+        verify()
+        captureScreen(app, named: "Reopened visualization selected second icon")
+    }
+
     func testSimulatorRendersMarkdownTableAndReopensIt() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[success] [markdown-table] Render the table")

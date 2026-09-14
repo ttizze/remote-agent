@@ -11,6 +11,7 @@ pub mod body;
 pub mod conversation;
 pub mod list;
 pub mod markdown;
+pub mod visualize;
 
 fn field<'a>(item: &'a Item, key: &str) -> &'a str {
     item.extra

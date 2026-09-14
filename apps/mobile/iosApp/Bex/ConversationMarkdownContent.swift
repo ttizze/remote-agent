@@ -13,6 +13,7 @@ enum ConversationMarkdownContent {
         let id: Int
         let blocks: [Block]
         let tableRows: [[[Block]]]
+        var visualizationPath: String?
 
         var image: Block? {
             blocks.first.flatMap { $0.imageURL == nil ? nil : $0 }
@@ -30,6 +31,10 @@ enum ConversationMarkdownContent {
             switch block {
             case let .paragraph(runs, style):
                 paragraphs.append(contentsOf: blocks(runs, style: style, startingID: paragraphs.count))
+            case let .visualization(path):
+                appendParts(paragraphs, to: &result)
+                paragraphs.removeAll(keepingCapacity: true)
+                result.append(Part(id: result.count, blocks: [], tableRows: [], visualizationPath: path))
             case let .table(columns, rows):
                 appendParts(paragraphs, to: &result)
                 paragraphs.removeAll(keepingCapacity: true)

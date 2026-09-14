@@ -73,6 +73,7 @@ pub enum Intent {
     UploadAttachment(UploadAttachment),
     DownloadFile(DownloadFile),
     LoadSessionImages(LoadSessionImages),
+    LoadVisualization(LoadVisualization),
     LoadHostManagement(LoadHostManagement),
     PairRemoteHost(PairRemoteHost),
     NewChat {

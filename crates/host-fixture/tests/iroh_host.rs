@@ -2080,3 +2080,122 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
         fixture.close().await.unwrap();
     }).await.expect("worktree management exceeded its deadline");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn visualization_reaches_store_and_reopens_after_source_removal() {
+    use agent_core::{
+        presentation::markdown::{MarkdownBlock, markdown_blocks},
+        state::Intent,
+        store::{Outcome, Store},
+    };
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let endpoint = Endpoint::bind(
+            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
+            Relays::Disabled,
+        )
+        .await
+        .unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+            .await
+            .unwrap();
+        let prompt = "[success] [visualize] Compare twelve icons";
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: "new:".into(),
+                text: prompt.into(),
+            })
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "visualize".into(),
+            })
+            .await
+            .unwrap();
+        let id = store.snapshot().navigation.thread_id.clone().unwrap();
+        let mut updates = store.subscribe();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            if snapshot.conversations[&id]
+                .turns
+                .as_ref()
+                .is_some_and(|turns| {
+                    turns
+                        .iter()
+                        .any(|turn| turn.status.as_deref() == Some("completed"))
+                })
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+        fn reference(snapshot: &agent_core::state::Snapshot, id: &str, prompt: &str) -> String {
+            assert!(snapshot.error.is_none());
+            assert!(snapshot.pending_submissions.is_empty());
+            assert!(snapshot.drafts[id].text.is_empty());
+            let turns = snapshot.conversations[id].turns.as_ref().unwrap();
+            assert_eq!(turns.last().unwrap().status.as_deref(), Some("completed"));
+            let items: Vec<_> = turns
+                .iter()
+                .flat_map(|turn| turn.items.iter().flatten())
+                .collect();
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.text.as_deref() == Some(prompt))
+            );
+            items
+                .iter()
+                .filter_map(|item| item.text.as_ref())
+                .flat_map(|text| markdown_blocks(text.clone()))
+                .find_map(|block| match block {
+                    MarkdownBlock::Visualization { path } => Some(path),
+                    _ => None,
+                })
+                .expect("visualization must reach conversation")
+        }
+        let path = reference(&store.snapshot(), &id, prompt);
+        let load = || {
+            Intent::LoadVisualization(op::LoadVisualization {
+                path: path.clone(),
+                cwd: String::new(),
+            })
+        };
+        let Outcome::Visualization { html: original } = store.dispatch(load()).await.unwrap()
+        else {
+            panic!("missing HTML")
+        };
+        assert!(original.contains("Git の合流") && original.contains("folder-check"));
+        assert!(original.contains("sandbox=\"allow-scripts\""));
+        std::fs::remove_file(&path).unwrap();
+        let persisted =
+            serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap()).unwrap();
+        store.close().await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, persisted, None)
+            .await
+            .unwrap();
+        store.dispatch(Intent::ShowThreadList).await.unwrap();
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+            .await
+            .unwrap();
+        assert_eq!(reference(&store.snapshot(), &id, prompt), path);
+        assert_eq!(
+            store.dispatch(load()).await.unwrap(),
+            Outcome::Visualization { html: original }
+        );
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("visualization round trip deadline");
+}

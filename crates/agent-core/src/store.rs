@@ -27,6 +27,9 @@ pub enum Outcome {
     RemoteHostPaired {
         id: String,
     },
+    Visualization {
+        html: String,
+    },
     SessionImages {
         images: Vec<SessionImage>,
     },

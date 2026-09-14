@@ -558,8 +558,12 @@ impl HostRpcService {
                     )
                     .await,
                 )?,
-                "host/file/list" | "host/file/read" | "host/file/write" | "host/blob/upload"
-                | "host/blob/download" => request.response(
+                "host/file/list"
+                | "host/file/read"
+                | "host/file/write"
+                | "host/blob/upload"
+                | "host/blob/download"
+                | "host/visualize/read" => request.response(
                     run_handler(
                         serde_json::from_str(line).map_err(|_| "invalid file parameters"),
                         "file_operation_failed",

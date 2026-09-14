@@ -16,7 +16,9 @@ struct ConversationMarkdown: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             ForEach(blocks) { part in
-                if !part.tableRows.isEmpty {
+                if let path = part.visualizationPath {
+                    ConversationVisualization(path: path, media: media)
+                } else if !part.tableRows.isEmpty {
                     table(part)
                 } else if let block = part.image, let imageURL = block.imageURL {
                     image(block, url: imageURL)

@@ -1,0 +1,109 @@
+<div id="merge-icon-options" aria-label="マージ済みアイコンの12案">
+  <style>
+    #merge-icon-options { --mi-bg:light-dark(#ffffff,#08080a); --mi-fg:light-dark(#202024,#f4f4f7); --mi-sub:light-dark(#64646e,#aaaab6); --mi-line:light-dark(#dddde5,#303039); --mi-accent:light-dark(#8046d6,#b58aff); --mi-soft:light-dark(#f0e9fc,#282035); color:var(--mi-fg); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    #merge-icon-options * { box-sizing:border-box; }
+    #merge-icon-options .mi-preview { background:var(--mi-bg); border:1px solid var(--mi-line); border-radius:18px; padding:20px 22px; margin-bottom:20px; }
+    #merge-icon-options .mi-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--mi-sub); font-size:13px; }
+    #merge-icon-options .mi-header strong { color:var(--mi-fg); font-weight:500; }
+    #merge-icon-options .mi-row { display:flex; align-items:center; gap:10px; min-height:46px; font-size:16px; }
+    #merge-icon-options .mi-title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    #merge-icon-options .mi-loading { display:flex; color:var(--mi-sub); flex-shrink:0; }
+    #merge-icon-options .mi-loading svg { width:17px; height:17px; }
+    #merge-icon-options .mi-dot { width:7px; height:7px; border-radius:50%; background:var(--mi-fg); margin:0 5px; }
+    #merge-icon-options .mi-mark { color:var(--mi-accent); width:var(--mi-size,18px); height:var(--mi-size,18px); display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; position:relative; }
+    #merge-icon-options .mi-mark > svg { width:100%; height:100%; stroke-width:1.9; }
+    #merge-icon-options .mi-mark.mi-circle { padding:3px; border-radius:50%; background:var(--mi-soft); }
+    #merge-icon-options .mi-mark.mi-square { padding:3px; border-radius:5px; background:var(--mi-soft); }
+    #merge-icon-options .mi-mark .mi-check { position:absolute; right:-3px; bottom:-2px; width:56%; height:56%; display:flex; border-radius:50%; background:var(--mi-bg); }
+    #merge-icon-options .mi-check svg { width:100%; height:100%; stroke-width:3; }
+    #merge-icon-options .mi-options { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+    #merge-icon-options .mi-option { color:var(--mi-fg); background:var(--mi-bg); border:1px solid var(--mi-line); border-radius:12px; text-align:left; padding:14px; cursor:pointer; min-width:0; font:inherit; }
+    #merge-icon-options .mi-option[aria-pressed=true] { border-color:var(--mi-accent); box-shadow:inset 0 0 0 1px var(--mi-accent); }
+    #merge-icon-options .mi-option:focus-visible { outline:2px solid var(--mi-accent); outline-offset:3px; }
+    #merge-icon-options .mi-option-head { display:flex; justify-content:space-between; gap:6px; color:var(--mi-sub); font-size:12px; }
+    #merge-icon-options .mi-large { display:flex; align-items:center; justify-content:center; height:64px; }
+    #merge-icon-options .mi-large .mi-mark { width:32px; height:32px; }
+    #merge-icon-options .mi-name { font-size:13px; font-weight:500; margin-bottom:13px; }
+    #merge-icon-options .mi-mini { display:flex; gap:7px; align-items:center; font-size:12px; color:var(--mi-sub); }
+    #merge-icon-options .mi-mini > span:first-child { flex:1; }
+    #merge-icon-options .mi-mini .mi-mark { width:18px; height:18px; }
+    #merge-icon-options .mi-mini .mi-loading svg { width:14px; height:14px; }
+    @media(max-width:480px) { #merge-icon-options .mi-options { grid-template-columns:repeat(2,minmax(0,1fr)); } #merge-icon-options .mi-preview { padding:15px; } #merge-icon-options .mi-row { font-size:14px; } }
+  </style>
+  <div class="mi-preview" aria-label="選択したアイコンの一覧プレビュー">
+    <div class="mi-header"><strong>一覧での見え方</strong><span id="mi-current" aria-live="polite">01 · Git の合流</span></div>
+    <div class="mi-row"><span class="mi-title">セッション一覧の改善</span><span class="mi-loading" aria-label="実行中"><i data-lucide="loader" aria-hidden="true"></i></span><span class="mi-selected"></span></div>
+    <div class="mi-row"><span class="mi-title">通知の不具合を修正</span><span class="mi-dot" aria-label="完了・未確認"></span><span class="mi-selected"></span></div>
+    <div class="mi-row"><span class="mi-title">設定画面の調整</span><span class="mi-selected"></span></div>
+  </div>
+  <div class="mi-options" aria-label="アイコン候補"></div>
+  <script>
+  (() => {
+    const root = document.getElementById('merge-icon-options');
+    const options = [
+      {name:'Git の合流',icon:'git-merge',note:'おすすめ'},
+      {name:'ブランチ＋チェック',icon:'git-branch',check:true,note:'おすすめ'},
+      {name:'合流・丸バッジ',icon:'git-merge',shape:'circle'},
+      {name:'合流・角丸バッジ',icon:'git-merge',shape:'square'},
+      {name:'丸チェック',icon:'circle-check'},
+      {name:'大きな丸チェック',icon:'circle-check-big'},
+      {name:'認証バッジ',icon:'badge-check'},
+      {name:'ダブルチェック',icon:'check-check'},
+      {name:'四角チェック',icon:'square-check'},
+      {name:'レイヤー＋チェック',icon:'layers',check:true},
+      {name:'フォルダ＋チェック',icon:'folder-check'},
+      {name:'合流＋チェック',icon:'git-merge',check:true}
+    ];
+    const state = {selected:0,size:18,color:'#b58aff'};
+    function icon(name) {
+      const element=document.createElement('i');
+      element.setAttribute('data-lucide',name);
+      element.setAttribute('aria-hidden','true');
+      return element;
+    }
+    function mark(option) {
+      const element=document.createElement('span');
+      element.className='mi-mark'+(option.shape?' mi-'+option.shape:'');
+      element.setAttribute('aria-label','main にマージ済み');
+      element.append(icon(option.icon));
+      if(option.check) {
+        const check=document.createElement('span'); check.className='mi-check'; check.append(icon('check')); element.append(check);
+      }
+      return element;
+    }
+    function refreshIcons() {
+      if(globalThis.lucide) globalThis.lucide.createIcons({attrs:{width:18,height:18}});
+    }
+    function render() {
+      root.style.setProperty('--mi-size',state.size+'px');
+      if(state.color!=='#b58aff') root.style.setProperty('--mi-accent',state.color);
+      else root.style.removeProperty('--mi-accent');
+      root.querySelectorAll('.mi-selected').forEach(element=>element.replaceChildren(mark(options[state.selected])));
+      root.querySelector('#mi-current').textContent=String(state.selected+1).padStart(2,'0')+' · '+options[state.selected].name;
+      root.querySelectorAll('.mi-option').forEach((element,index)=>element.setAttribute('aria-pressed',String(index===state.selected)));
+      refreshIcons();
+    }
+    options.forEach((option,index)=>{
+      const button=document.createElement('button');button.type='button';button.className='mi-option';
+      button.setAttribute('aria-label',String(index+1).padStart(2,'0')+' '+option.name+'をプレビュー');
+      const header=document.createElement('div');header.className='mi-option-head';
+      const number=document.createElement('span');number.textContent=String(index+1).padStart(2,'0');
+      const note=document.createElement('span');note.textContent=option.note||'';header.append(number,note);
+      const large=document.createElement('div');large.className='mi-large';large.append(mark(option));
+      const name=document.createElement('div');name.className='mi-name';name.textContent=option.name;
+      const mini=document.createElement('div');mini.className='mi-mini';
+      const label=document.createElement('span');label.textContent='セッション';
+      const loading=document.createElement('span');loading.className='mi-loading';loading.append(icon('loader'));
+      mini.append(label,loading,mark(option));button.append(header,large,name,mini);
+      button.addEventListener('click',()=>{state.selected=index;render();});
+      root.querySelector('.mi-options').append(button);
+    });
+    render();
+    if(globalThis.Tweak) {
+      const tweak=new Tweak({container:root,onChange:render});
+      tweak.addSlider(state,'size',{label:'一覧のアイコンサイズ',min:14,max:24,step:1,unit:'px'});
+      tweak.addColorPicker(state,'color',{label:'アイコンの色',reference:'--mi-accent'});
+    }
+  })();
+  </script>
+</div>

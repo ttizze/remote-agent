@@ -16,6 +16,13 @@ struct MarkdownTests {
 
     static func main() throws {
         let table = try String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)
+        let visual = ConversationMarkdownContent
+            .parse("Before\n\nvisualize{\"path\":\"/fixture/options.html\"}\n\nAfter")
+        check(
+            visual.count == 3 && visual[1].visualizationPath == "/fixture/options.html",
+            "visualize must reach its native view in document order"
+        )
+        check(text(visual[0].blocks) == "Before" && text(visual[2].blocks) == "After", "surrounding Markdown survives")
         reportedTable(table)
         formattedCells()
         surroundingContent(table)

@@ -92,6 +92,7 @@ internal fun ThreadDetailScreen(
                     ConversationContent(
                         content,
                         threadId,
+                        snapshot.navigation().cwd,
                         perform,
                         older =
                             older?.let { load ->
@@ -163,15 +164,16 @@ private fun LazyListScope.conversationRows(
 private fun ConversationContent(
     content: ConversationRowContent,
     threadId: String?,
+    cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    older: ((String) -> Unit)?,
+    older: ((String) -> Unit)? = null,
     activityHeader: @Composable (ActivityPresentation) -> Unit,
 ) {
     when (content) {
         is ConversationRowContent.OlderItems ->
             Button(onClick = { older?.invoke(content.turnId) }, enabled = older != null) { Text("途中の履歴を読み込む") }
         is ConversationRowContent.User -> ThreadMessageCard(content.item, true)
-        is ConversationRowContent.Response -> ThreadMessageCard(content.item, false)
+        is ConversationRowContent.Response -> ThreadMessageCard(content.item, false, cwd, perform)
         is ConversationRowContent.Activity ->
             ThreadActivityCard(content.item) { itemId ->
                 if (threadId != null) perform(Intent.ReadItem(ReadItem(threadId, content.turnId, itemId))) {}

@@ -1,0 +1,11 @@
+{
+  "name": "bex-visualize-runtime",
+  "private": true,
+  "description": "Offline shared visualization runtime assets",
+  "scripts": {
+    "vendor": "cp node_modules/lucide/dist/umd/lucide.min.js lucide.min.js && cp node_modules/lucide/LICENSE LUCIDE-LICENSE"
+  },
+  "dependencies": {
+    "lucide": "0.468.0"
+  }
+}

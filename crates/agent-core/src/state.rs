@@ -223,7 +223,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, StartThread,
         ReadThread, ReadItem, ResizeTerminal,
         Interrupt, Watch, Unwatch,
-        WriteTerminal, DownloadFile, LoadSessionImages,
+        WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
         LoadHostManagement, ReadOlder, LoadModels,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {

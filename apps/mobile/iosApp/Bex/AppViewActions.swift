@@ -245,7 +245,13 @@ extension BexAppViewModel {
         return ConversationMediaAccess(host: host, cwd: cwd, download: { [self] path in
             guard selectedProfileId == host else { throw CancellationError() }
             return try await download(path)
-        }, sessionImages: images)
+        }, sessionImages: images, visualization: { [self, cwd] path in
+            guard selectedProfileId == host else { throw CancellationError() }
+            let result = try await outcome(for: .loadVisualization(LoadVisualization(path: path, cwd: cwd)))
+            guard selectedProfileId == host else { throw CancellationError() }
+            guard case let .visualization(html) = result else { throw URLError(.badServerResponse) }
+            return html
+        })
     }
 
     func forkAndOpen(through turnId: String, completion: @escaping (String?) -> Void) {

@@ -84,8 +84,12 @@ pathlib.Path(sys.argv[2]).write_text(result.stdout)
 print(result.stdout)
 assert result.returncode == 0 and re.search(r'^OK \(1 test\)', result.stdout, re.M), "Android tests did not all pass"
 PYTHON
+if [[ $test_status != 0 ]]; then
+    adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.startup-failure.png" || true
+    adb -P "$server_port" -s "$serial" logcat -d -t 150 -s AndroidRuntime ActivityManager >"$log.startup-failure.log" || true
+    exit "$test_status"
+fi
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png"
-[[ $test_status == 0 ]] || exit "$test_status"
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-granted.png "$log.granted.png"
 # The permission test starts denied and leaves LAN access granted for the real Host checks.
 "$target/debug/bex-ui-fixture" "$fixture/host" "$target/debug/bex-codex-fixture" "$fixture/pairing.port" 100 >"$fixture/host.log" 2>&1 &
@@ -95,11 +99,25 @@ for ((attempt=0; attempt<100; attempt++)); do
     kill -0 "$host" || { cat "$fixture/host.log"; exit 1; }
     sleep 0.1
 done
-curl --fail --silent --show-error "http://127.0.0.1:$(cat "$fixture/pairing.port")/pairing" >"$fixture/invitation.json"
-adb -P "$server_port" -s "$serial" shell run-as dev.remoteagent.mobile mkdir -p cache
-adb -P "$server_port" -s "$serial" shell "run-as dev.remoteagent.mobile sh -c 'cat > cache/fixture-invitation.json'" <"$fixture/invitation.json"
+prepare_pairing() {
+    curl --fail --silent --show-error "http://127.0.0.1:$(cat "$fixture/pairing.port")/pairing" >"$fixture/invitation.json"
+    adb -P "$server_port" -s "$serial" shell run-as dev.remoteagent.mobile mkdir -p cache
+    adb -P "$server_port" -s "$serial" shell "run-as dev.remoteagent.mobile sh -c 'cat > cache/fixture-invitation.json'" <"$fixture/invitation.json"
+}
+prepare_pairing
 adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \
     -e class dev.remoteagent.mobile.StorePersistenceTest,dev.remoteagent.mobile.ConversationRecoveryTest,dev.remoteagent.mobile.MarkdownTableTest,dev.remoteagent.mobile.ConversationNavigationTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.store.log"
+adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.final.png"
 grep -qx 'OK (7 tests)' "$log.store.log"
-echo "Android API 37: 8 tests passed; $log.network.log and $log.store.log"
+# Each paired test gets a fresh single-use invitation and isolated credentials.
+prepare_pairing
+adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \
+    -e class dev.remoteagent.mobile.VisualizationTest \
+    dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.visualize.log"
+adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.visualize-final.png"
+grep -qx 'OK (1 test)' "$log.visualize.log"
+echo "Android API 37: 9 tests passed; $log.network.log, $log.store.log and $log.visualize.log"
+
+adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-selected.png "$log.visualize-selected.png"
+adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-reopened.png "$log.visualize-reopened.png"

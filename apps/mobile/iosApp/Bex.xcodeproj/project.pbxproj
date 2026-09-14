@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		123AEE37BEE0000000000001 /* ConversationVisualization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 123AEE37BEE0000000000002 /* ConversationVisualization.swift */; };
 		A10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* Assets.xcassets */; };
 		A10000000000000000000001 /* BexIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* BexIOSApp.swift */; };
 		A10000000000000000000002 /* PlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* PlatformServices.swift */; };
@@ -47,6 +48,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		123AEE37BEE0000000000002 /* ConversationVisualization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationVisualization.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000010 /* Bex.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bex.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000011 /* BexIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexIOSApp.swift; sourceTree = "<group>"; };
@@ -157,6 +159,7 @@
 				C0DE00000000000000000005 /* ConversationTextSelection.swift */,
 				C0DE00000000000000000006 /* ConversationSideChat.swift */,
 				D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */,
+				123AEE37BEE0000000000002 /* ConversationVisualization.swift */,
 				AA74DC0F6B272156A6A39ED4 /* ConversationMarkdownContent.swift */,
 				CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */,
 				1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */,
@@ -292,6 +295,7 @@
 				C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */,
 				C0DE00000000000000000106 /* ConversationSideChat.swift in Sources */,
 				FCD15282ED580E15F2FE6024 /* ConversationMarkdown.swift in Sources */,
+				123AEE37BEE0000000000001 /* ConversationVisualization.swift in Sources */,
 				AAC15282ED580E15F2FE6024 /* ConversationMarkdownContent.swift in Sources */,
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
 				CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */,

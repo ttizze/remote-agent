@@ -43,6 +43,7 @@ struct ConversationMediaAccess {
     let cwd: String
     let download: @MainActor (String) async throws -> URL
     let sessionImages: (@MainActor () async throws -> [SessionImage])?
+    var visualization: (@MainActor (String) async throws -> String)?
 }
 
 struct ConversationImage: View {
