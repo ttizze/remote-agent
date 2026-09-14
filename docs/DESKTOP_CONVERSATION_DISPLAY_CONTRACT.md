@@ -85,6 +85,16 @@ retrieval and reopening.
   `testSimulatorKeepsSmallOlderScrollDuringLiveUpdate`, Android
   `ConversationNavigationTest` exercise the production native conversation views.
 
+## Workspace folder labels
+
+New managed worktrees use `<original-repository>/.worktree/session-XXXXX/<repository-name>`.
+A custom storage root replaces `<original-repository>/.worktree`. The folder label
+therefore retains the repository name while the selected execution directory stays
+in the worktree, including in side chats. Starting from a selected subdirectory
+preserves that relative subdirectory. Existing worktrees stay at their current paths.
+Acceptance: Host worktree tests cover creation from old and new checkouts; Store/Host
+submission tests cover completion, project membership, cleared drafts and reopening.
+
 ## Selection and copying
 
 - Mac text selection exposes **チャットに追加**, **詳細を表示**, and

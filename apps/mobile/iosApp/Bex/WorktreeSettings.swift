@@ -36,7 +36,7 @@ struct WorktreeSettingsSheet: View {
                         .accessibilityLabel("ワークツリーの保存先")
                         .accessibilityIdentifier("worktree.directory")
                 } header: { Text("作成と保存先") }
-                    footer: { Text("指定フォルダ内にセッションごとのフォルダを作ります。空欄ならリポジトリのGit管理領域に保存します。既存のワークツリーは移動しません。") }
+                    footer: { Text("保存先に「セッション名/リポジトリ名」の構成で作ります。空欄なら元のリポジトリ内の .worktree に保存します。既存のワークツリーは移動しません。") }
                     .disabled(!loaded || busy || !connected)
                 Section {
                     Toggle("作成時にファイルをコピー", isOn: $copyOnCreate)

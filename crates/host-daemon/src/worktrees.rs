@@ -72,6 +72,17 @@ impl Worktrees {
                 // Keep the branch so commits remain reachable even if not merged.
                 crate::git::text(Path::new(root), &["worktree", "remove", "--", &target])?;
             }
+            // Only remove the empty session container used by the named-checkout layout.
+            // Old worktrees and any unrelated files in the container stay untouched.
+            let target_path = Path::new(&target);
+            if target_path.file_name() == Path::new(root).file_name()
+                && let Some(parent) = target_path.parent()
+                && parent
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("session-"))
+            {
+                let _ = fs::remove_dir(parent);
+            }
             state.workspace_roots.remove(&target);
             save(&path, &state)
         })
@@ -122,25 +133,65 @@ impl Worktrees {
             .canonicalize()
             .map_err(|e| e.to_string())?;
             let relative_cwd = cwd.strip_prefix(&root).map_err(|e| e.to_string())?;
+            let original = match state
+                .workspace_roots
+                .get(root.to_str().ok_or("project path is not UTF-8")?)
+            {
+                Some(original) => PathBuf::from(original),
+                None => PathBuf::from(
+                    crate::git::text(&root, &["worktree", "list", "--porcelain", "-z"])?
+                        .split('\0')
+                        .next()
+                        .and_then(|line| line.strip_prefix("worktree "))
+                        .ok_or("Git did not return the original repository")?,
+                ),
+            };
             let parent = if state.settings.worktree_directory.is_empty() {
-                PathBuf::from(
+                let exclude = PathBuf::from(
                     crate::git::text(
                         &root,
-                        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                        &[
+                            "rev-parse",
+                            "--path-format=absolute",
+                            "--git-path",
+                            "info/exclude",
+                        ],
                     )?
                     .trim_end(),
-                )
-                .join("bex-worktrees")
+                );
+                let existing = match fs::read_to_string(&exclude) {
+                    Ok(existing) => existing,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(error) => return Err(error.to_string()),
+                };
+                if !existing.lines().any(|line| line == "/.worktree/") {
+                    fs::create_dir_all(exclude.parent().ok_or("Git exclude has no parent")?)
+                        .map_err(|e| e.to_string())?;
+                    fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(exclude)
+                        .and_then(|mut file| file.write_all(b"\n/.worktree/\n"))
+                        .map_err(|e| e.to_string())?;
+                }
+                original.join(".worktree")
             } else {
                 PathBuf::from(&state.settings.worktree_directory)
             };
             fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
             // Resolve aliases such as /tmp before checking copy destination ancestors.
             let parent = parent.canonicalize().map_err(|e| e.to_string())?;
-            let destination = crate::platform::worktree_directory(&parent)
+            let session = crate::platform::worktree_directory(&parent)
                 .map_err(|e| e.to_string())?
                 .keep();
-            let branch = format!("bex/{}", destination.file_name().unwrap().to_string_lossy());
+            scopeguard::defer! { let _ = fs::remove_dir(&session); }
+            let destination = session.join(
+                original
+                    .file_name()
+                    .ok_or("repository has no folder name")?,
+            );
+            crate::platform::create_state_directory(&destination).map_err(|e| e.to_string())?;
+            let branch = format!("bex/{}", session.file_name().unwrap().to_string_lossy());
             let destination_text = destination.to_str().ok_or("worktree path is not UTF-8")?;
             if let Err(error) = crate::git::text(
                 &root,
@@ -172,14 +223,10 @@ impl Worktrees {
                 if !target.is_dir() {
                     return Err("working directory does not exist in HEAD".into());
                 }
-                let original = state
-                    .workspace_roots
-                    .get(root.to_str().ok_or("project path is not UTF-8")?)
-                    .cloned()
-                    .unwrap_or_else(|| root.to_string_lossy().into_owned());
-                state
-                    .workspace_roots
-                    .insert(destination_text.to_owned(), original);
+                state.workspace_roots.insert(
+                    destination_text.to_owned(),
+                    original.to_string_lossy().into_owned(),
+                );
                 save(&path, &state)?;
                 Ok(target)
             })();
@@ -329,6 +376,9 @@ fn no_symlinks(root: &Path, relative: &Path) -> Result<(), String> {
 }
 
 fn copy(source: &Path, target: &Path) -> Result<(), String> {
+    if target.starts_with(source) {
+        return Err("cannot copy a directory into itself".into());
+    }
     let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
     if let Some(parent) = target.parent() {
         for ancestor in parent.ancestors() {
@@ -500,6 +550,7 @@ mod tests {
         crate::git::text(&first, &["checkout", &branch]).unwrap();
         worktrees.remove(first_path.clone()).await.unwrap();
         assert!(!first.exists());
+        assert!(!first.parent().unwrap().exists());
         assert!(other.join("tracked.txt").exists());
         assert_eq!(
             crate::git::text(&root, &["rev-parse", &branch]).unwrap(),
@@ -519,8 +570,11 @@ mod tests {
         let other_path = other.to_str().unwrap();
         crate::git::text(&root, &["worktree", "remove", "--", other_path]).unwrap();
         assert!(restarted.list().await.unwrap()[0].blocked_reason.is_none());
+        let unrelated = other.parent().unwrap().join("keep.txt");
+        fs::write(&unrelated, "preserve").unwrap();
         restarted.remove(other_path.into()).await.unwrap();
         assert!(Worktrees::new(&state).list().await.unwrap().is_empty());
+        assert_eq!(fs::read_to_string(unrelated).unwrap(), "preserve");
     }
 
     #[tokio::test]
@@ -542,7 +596,11 @@ mod tests {
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.configure(None).await.unwrap(), settings);
         let first = loaded.prepare(root.to_str()).await.unwrap().unwrap();
-        assert_eq!(first.parent().unwrap(), root.join(".git/bex-worktrees"));
+        assert_eq!(first.file_name(), root.file_name());
+        assert_eq!(
+            first.parent().unwrap().parent().unwrap(),
+            root.join(".worktree")
+        );
         assert_eq!(
             fs::read_to_string(first.join("tracked.txt")).unwrap(),
             "committed\n"
@@ -612,7 +670,7 @@ mod tests {
         let store = Worktrees::new(&root.join("projects.json"));
         let before = crate::git::text(root, &["worktree", "list", "--porcelain"]).unwrap();
         let branches = crate::git::text(root, &["branch", "--list"]).unwrap();
-        for path in ["link", "nested/value"] {
+        for path in ["link", "nested/value", ".worktree"] {
             if path == "link" {
                 symlink(root.join("tracked.txt"), root.join("link")).unwrap();
             }
@@ -639,6 +697,7 @@ mod tests {
                 crate::git::text(root, &["branch", "--list"]).unwrap(),
                 branches
             );
+            assert_eq!(fs::read_dir(root.join(".worktree")).unwrap().count(), 0);
         }
     }
 
@@ -695,7 +754,11 @@ mod tests {
         store.configure(Some(settings.clone())).await.unwrap();
         let restarted = Worktrees::new(&projects);
         let first = restarted.prepare(root.to_str()).await.unwrap().unwrap();
-        assert_eq!(first.parent().unwrap(), real_parent.join("new folder"));
+        assert_eq!(first.file_name(), root.file_name());
+        assert_eq!(
+            first.parent().unwrap().parent().unwrap(),
+            real_parent.join("new folder")
+        );
         assert_eq!(
             fs::read(first.join(".env")).unwrap(),
             fs::read(root.join(".env")).unwrap()
@@ -708,11 +771,127 @@ mod tests {
         settings["worktreeDirectory"] = json!(real_parent.join("second"));
         store.configure(Some(settings)).await.unwrap();
         let second = restarted.prepare(first.to_str()).await.unwrap().unwrap();
-        assert_eq!(second.parent().unwrap(), real_parent.join("second"));
+        assert_eq!(second.file_name(), root.file_name());
+        assert_eq!(
+            second.parent().unwrap().parent().unwrap(),
+            real_parent.join("second")
+        );
         assert!(first.join(".env").is_file());
         let roots = workspace_roots(&projects).await.unwrap();
         assert_eq!(roots[first.to_str().unwrap()], root.to_str().unwrap());
         assert_eq!(roots[second.to_str().unwrap()], root.to_str().unwrap());
+    }
+
+    #[tokio::test]
+    async fn existing_checkouts_keep_original_name_location_and_selected_subdirectory() {
+        for registered in [false, true] {
+            let repository = repository();
+            let root = repository.path().canonicalize().unwrap();
+            let state_directory = tempfile::tempdir().unwrap();
+            let projects = state_directory.path().join("projects.json");
+            let legacy = root.join(".git/bex-worktrees/session-legacy");
+            crate::git::text(
+                &root,
+                &["worktree", "add", "-b", "legacy", legacy.to_str().unwrap()],
+            )
+            .unwrap();
+            fs::create_dir_all(legacy.join("packages/app")).unwrap();
+            fs::write(
+                legacy.join("packages/app/source.txt"),
+                "worktree-only commit",
+            )
+            .unwrap();
+            crate::git::text(&legacy, &["add", "packages"]).unwrap();
+            crate::git::text(
+                &legacy,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "worktree-only",
+                ],
+            )
+            .unwrap();
+            let exclude = root.join(".git/info/exclude");
+            fs::write(
+                &exclude,
+                "# preserve existing settings without a final newline",
+            )
+            .unwrap();
+            let mut state = State::default();
+            state.settings.create_on_new_session = true;
+            if registered {
+                state.workspace_roots.insert(
+                    legacy.to_str().unwrap().into(),
+                    root.to_str().unwrap().into(),
+                );
+            }
+            save(&projects.with_file_name("bex-worktrees.json"), &state).unwrap();
+            let store = Worktrees::new(&projects);
+            let first = store
+                .prepare(legacy.join("packages/app").to_str())
+                .await
+                .unwrap()
+                .unwrap();
+            let checkout = first.parent().unwrap().parent().unwrap();
+            assert_eq!(
+                first.strip_prefix(checkout).unwrap(),
+                Path::new("packages/app")
+            );
+            assert_eq!(checkout.file_name(), root.file_name());
+            assert_eq!(
+                checkout.parent().unwrap().parent().unwrap(),
+                root.join(".worktree")
+            );
+            assert_eq!(
+                fs::read_to_string(first.join("source.txt")).unwrap(),
+                "worktree-only commit"
+            );
+            assert_eq!(
+                crate::git::text(checkout, &["rev-parse", "HEAD"]).unwrap(),
+                crate::git::text(&legacy, &["rev-parse", "HEAD"]).unwrap()
+            );
+            assert!(!root.join("packages/app/source.txt").exists());
+            let second = Worktrees::new(&projects)
+                .prepare(first.to_str())
+                .await
+                .unwrap()
+                .unwrap();
+            let second_checkout = second.parent().unwrap().parent().unwrap();
+            assert_eq!(second_checkout.file_name(), root.file_name());
+            assert_eq!(
+                second_checkout.parent().unwrap().parent().unwrap(),
+                root.join(".worktree")
+            );
+            assert!(!checkout.join(".worktree").exists());
+            let roots = workspace_roots(&projects).await.unwrap();
+            assert_eq!(roots[checkout.to_str().unwrap()], root.to_str().unwrap());
+            assert_eq!(
+                roots[second_checkout.to_str().unwrap()],
+                root.to_str().unwrap()
+            );
+            assert_eq!(
+                fs::read_to_string(&exclude).unwrap(),
+                "# preserve existing settings without a final newline\n/.worktree/\n"
+            );
+            assert!(
+                crate::git::text(&root, &["status", "--porcelain", "--untracked-files=all"])
+                    .unwrap()
+                    .is_empty()
+            );
+            if registered {
+                store.remove(legacy.to_str().unwrap().into()).await.unwrap();
+                assert!(!legacy.exists());
+                assert!(root.join(".git/bex-worktrees").is_dir());
+            }
+            assert!(first.join("source.txt").is_file());
+        }
     }
 
     #[tokio::test]

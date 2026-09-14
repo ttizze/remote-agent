@@ -705,7 +705,10 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                         }
                         let cwd = store.snapshot().navigation.cwd.clone();
                         if let Some(previous) = &session_cwd { assert_eq!(&cwd, previous); }
-                        if automatic && project { assert_eq!(Path::new(&cwd).parent().unwrap(), destination); }
+                        if automatic && project {
+                            assert_eq!(Path::new(&cwd).file_name(), workspace.file_name());
+                            assert_eq!(Path::new(&cwd).parent().unwrap().parent().unwrap(), destination);
+                        }
                         else if project { assert_eq!(Path::new(&cwd), &workspace); }
                         else {
                             assert!(store.snapshot().selected_directory().is_empty(), "an unselected chat must remain unselected: {cwd}");
@@ -1358,7 +1361,8 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
             let thread = &started["thread"];
             let cwd = std::path::PathBuf::from(thread["cwd"].as_str().unwrap());
             assert_ne!(cwd, workspace);
-            assert_eq!(cwd.parent().unwrap(), destination);
+            assert_eq!(cwd.file_name(), workspace.file_name());
+            assert_eq!(cwd.parent().unwrap().parent().unwrap(), destination);
             assert_eq!(std::fs::read(cwd.join(".env")).unwrap(), std::fs::read(workspace.join(".env")).unwrap());
             assert_eq!(thread["projectId"], "workspace");
             assert_eq!(thread["model"], "fixture-model");
@@ -1966,6 +1970,16 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                             assert!(snapshot.pending_submissions.is_empty());
                             assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
                             assert!(snapshot.drafts[&id].text.is_empty());
+                            if scoped {
+                                let selected = snapshot.selected_directory();
+                                let cwd = Path::new(&selected);
+                                assert_eq!(cwd.file_name(), project.file_name());
+                                if automatic {
+                                    assert_eq!(cwd.parent().unwrap().parent().unwrap(), project.join(".worktree"));
+                                } else {
+                                    assert_eq!(cwd, project);
+                                }
+                            }
                             break;
                         }
                         updates.changed().await.unwrap();

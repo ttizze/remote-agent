@@ -32,7 +32,7 @@ impl Desktop {
                 .child("ワークツリーの保存先")
                 .child(Input::new(&self.worktree_directory).aria_label("ワークツリーの保存先")
                     .disabled(!self.snapshot.connected || self.snapshot.workspace.settings.is_none() || self.busy > 0))
-                .child("指定フォルダ内にセッションごとのフォルダを作ります。空欄ならリポジトリのGit管理領域に保存します。既存のワークツリーは移動しません。")
+                .child("保存先に「セッション名/リポジトリ名」の構成で作ります。空欄なら元のリポジトリ内の .worktree に保存します。既存のワークツリーは移動しません。")
                 .child(switch::Switch::new("worktree-copy")
                     .label("ワークツリー作成時にファイルをコピー")
                     .checked(self.snapshot.workspace.settings.as_ref().is_some_and(|settings| settings.copy_on_create))

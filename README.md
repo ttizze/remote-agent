@@ -59,7 +59,7 @@ Normal launches share one Host per OS user, including when desktop and daemon st
 
 State that must be backed up and never committed: the identity keys (keyring entry `app.bex.host`, or `identity.keys` with `--key-storage file`) and `trust.json` (invitations, allowlist, remote tickets). Errors append to `logs/host.jsonl` (desktop: `logs/desktop.jsonl`), rotated at 5 MiB with four archives and best-effort credential redaction.
 
-Host preferences for worktrees (`bex-worktrees.json`) and the directory for chats without a project (`bex-chats/`) live beside the Codex project state, normally `$CODEX_HOME` or `~/.codex`. Worktree settings are edited from Mac **設定 → ワークツリー** or iPhone **タスク一覧 → … → ワークツリー設定**.
+Host preferences for worktrees (`bex-worktrees.json`) and the directory for chats without a project (`bex-chats/`) live beside the Codex project state, normally `$CODEX_HOME` or `~/.codex`. New worktrees default to `<original-repository>/.worktree/session-XXXXX/<repository-name>`; a custom directory replaces `.worktree` as the storage root. The repository name remains the checkout folder name, including when starting from another worktree. Existing worktrees stay in place. The default `.worktree` directory is excluded through Git’s local `info/exclude`. Worktree settings are edited from Mac **設定 → ワークツリー** or iPhone **タスク一覧 → … → ワークツリー設定**.
 
 To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続を解除** and confirm. This deletes its authentication key on that iPhone and prevents reconnection after relaunch, while retaining Host conversation data. On Mac, **設定 → 端末と接続 → 接続を解除** revokes the device’s access and closes active connections. Pair again to reconnect. Removing a PC on iPhone does not remove the old device entry from the Mac.
 
