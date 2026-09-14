@@ -133,6 +133,9 @@ fn route(
             }
         }
         "/worktree-conversation" => worktree_conversation(root)?,
+        "/merge-worktree/fresh" | "/merge-worktree/merged" | "/merge-worktree/new-work" => {
+            merge_worktree(root, path)?
+        }
         "/worktree/unavailable" => fs::rename(
             root.join("review-worktree"),
             root.join("review-worktree-unavailable"),
@@ -219,6 +222,64 @@ fn route(
         _ => return Ok((404, Vec::new())),
     }
     Ok((204, Vec::new()))
+}
+
+fn merge_worktree(root: &Path, path: &str) -> Result<()> {
+    let repo = root.join("project/merge-repository");
+    let checkout = root.join("project/merge-checkout");
+    let git = |cwd: &Path, args: &[&str]| -> Result<()> {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .output()?;
+        if !output.status.success() {
+            return Err("merge fixture Git command failed".into());
+        }
+        Ok(())
+    };
+    match path {
+        "/merge-worktree/fresh" => {
+            fs::create_dir(&repo)?;
+            git(&repo, &["init", "-b", "main"])?;
+            git(&repo, &["commit", "--allow-empty", "-m", "base"])?;
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "task",
+                    checkout.to_str().ok_or("fixture path is not UTF-8")?,
+                ],
+            )?;
+        }
+        "/merge-worktree/merged" => {
+            git(&checkout, &["commit", "--allow-empty", "-m", "work"])?;
+            git(&repo, &["merge", "--ff-only", "task"])?;
+        }
+        _ => {
+            git(&checkout, &["commit", "--allow-empty", "-m", "new work"])?;
+        }
+    }
+    write_json(
+        root.join("list-fixture.json"),
+        &json!([
+            {"id":"merge-active","cwd":checkout,"name":"Merged running task","updatedAt":20000,"status":{"type":"active"}},
+            {"id":"merge-idle","cwd":checkout,"name":"Merged idle task","updatedAt":19999,"status":{"type":"idle"}}
+        ]),
+    )
 }
 
 fn worktree_conversation(root: &Path) -> Result<()> {

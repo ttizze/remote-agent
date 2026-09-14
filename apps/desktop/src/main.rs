@@ -23,6 +23,7 @@ impl AssetSource for DesktopAssets {
         let bytes: &'static [u8] = match path {
             "bex/microphone.svg" => include_bytes!("../assets/microphone.svg"),
             "bex/gauge.svg" => include_bytes!("../assets/gauge.svg"),
+            "bex/merge.svg" => include_bytes!("../assets/merge.svg"),
             "bex/branch.svg" => include_bytes!("../assets/branch.svg"),
             "bex/pencil.svg" => include_bytes!("../assets/pencil.svg"),
             "bex/stop.svg" => include_bytes!("../assets/stop.svg"),
@@ -39,6 +40,7 @@ impl AssetSource for DesktopAssets {
                 "bex/stop.svg",
                 "bex/pencil.svg",
                 "bex/branch.svg",
+                "bex/merge.svg",
             ]
             .into_iter()
             .filter(|item| item.starts_with(path))

@@ -241,6 +241,14 @@ private struct ThreadListRow: View {
                         .accessibilityLabel("完了・未確認")
                         .accessibilityIdentifier("tasks.completed.\(thread.id)")
                 }
+                if thread.worktreeMerged {
+                    Image("GitMerge")
+                        .resizable()
+                        .frame(width: 18, height: 18)
+                        .foregroundStyle(.purple)
+                        .accessibilityLabel("main にマージ済み")
+                        .accessibilityIdentifier("tasks.merged.\(thread.id)")
+                }
             }
             .padding(.leading, indented ? 40 : 0)
             .contentShape(Rectangle())

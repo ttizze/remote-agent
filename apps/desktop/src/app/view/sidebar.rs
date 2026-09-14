@@ -224,14 +224,34 @@ impl Desktop {
     ) -> SidebarMenuItem {
         let id = thread.id.clone();
         let active = thread.active;
+        let unread = thread.unread;
+        let merged = thread.worktree_merged;
+        let merged_id = format!("thread-merged-{}", thread.id);
         SidebarMenuItem::new(thread.title.clone())
             .active(id == self.selected() && self.tab != Tab::Settings)
             .disable(self.busy > 0)
-            .when(active, |item| {
-                item.suffix(|_, _| spinner::Spinner::new().small())
-            })
-            .when(!active && thread.unread, |item| {
-                item.suffix(|_, _| div().size(px(8.)).rounded_full().bg(rgb(0xffffff)))
+            .suffix(move |_, _| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(active, |row| row.child(spinner::Spinner::new().small()))
+                    .when(!active && unread, |row| {
+                        row.child(div().size(px(8.)).rounded_full().bg(rgb(0xffffff)))
+                    })
+                    .when(merged, |row| {
+                        row.child(
+                            div()
+                                .id(merged_id.clone())
+                                .role(Role::Image)
+                                .child(Icon::default().path("bex/merge.svg").size_4())
+                                .text_color(rgb(0xa78bfa))
+                                .aria_label("main にマージ済み")
+                                .tooltip(|window, cx| {
+                                    tooltip::Tooltip::new("main にマージ済み").build(window, cx)
+                                }),
+                        )
+                    })
             })
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.open_chat(id.clone());

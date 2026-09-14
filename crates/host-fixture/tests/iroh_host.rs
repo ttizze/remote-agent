@@ -2199,3 +2199,132 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
     .await
     .expect("visualization round trip deadline");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
+    use agent_core::{
+        state::{Intent, Snapshot},
+        store::Store,
+    };
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let result = std::process::Command::new("git")
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    }
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let repo = root.join("repo");
+        let checkout = root.join("checkout");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "base"]);
+        git(
+            &repo,
+            &["worktree", "add", "-b", "task", checkout.to_str().unwrap()],
+        );
+        std::fs::create_dir(checkout.join("nested")).unwrap();
+        let fixture = start_host(&root).await;
+        let local = fixture.local().await.unwrap();
+        let mut ids = Vec::new();
+        for cwd in [&checkout, &checkout.join("nested"), &repo, &root] {
+            let reply = rpc(&local.peer, "host/thread/start", json!({"cwd":cwd})).await;
+            ids.push(reply["thread"]["id"].as_str().unwrap().to_owned());
+        }
+        let store = Store::new(local.peer, Snapshot::default());
+        for (step, expected) in [
+            ("fresh", false),
+            ("commit", false),
+            ("merge", true),
+            ("new-work", false),
+        ] {
+            match step {
+                "commit" | "new-work" => {
+                    git(&checkout, &["commit", "--allow-empty", "-m", step]);
+                }
+                "merge" => {
+                    git(&repo, &["merge", "--ff-only", "task"]);
+                }
+                _ => {}
+            }
+            store
+                .dispatch(Intent::ListThreads(
+                    op::ListThreads::new(Default::default()),
+                ))
+                .await
+                .unwrap();
+            let snapshot = store.snapshot();
+            let list = snapshot.thread_list().unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                let row = list.threads.iter().find(|row| &row.id == id).unwrap();
+                assert_eq!(
+                    row.worktree_merged,
+                    index < 2 && expected,
+                    "{step}: {index}"
+                );
+            }
+            assert_eq!(snapshot.error, None);
+        }
+        git(&repo, &["merge", "--no-ff", "-m", "merge task", "task"]);
+        store
+            .dispatch(Intent::ListThreads(
+                op::ListThreads::new(Default::default()),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .snapshot()
+                .thread_list()
+                .unwrap()
+                .threads
+                .iter()
+                .find(|row| row.id == ids[0])
+                .unwrap()
+                .worktree_merged
+        );
+        git(&checkout, &["checkout", "--detach"]);
+        store
+            .dispatch(Intent::ListThreads(
+                op::ListThreads::new(Default::default()),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .snapshot()
+                .thread_list()
+                .unwrap()
+                .threads
+                .iter()
+                .find(|row| row.id == ids[0])
+                .unwrap()
+                .worktree_merged
+        );
+        store.close().await.unwrap();
+        local.endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("worktree merge list deadline");
+}

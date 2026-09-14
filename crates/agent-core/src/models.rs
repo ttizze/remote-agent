@@ -49,6 +49,8 @@ pub struct Thread {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_merged: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ThreadStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<Vec<Arc<Turn>>>,

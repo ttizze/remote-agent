@@ -969,3 +969,34 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         assert!(state.model_errors.is_empty());
     }
 }
+
+#[test]
+fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
+    for connected in [false, true] {
+        let mut snapshot = initial(
+            serde_json::from_value(json!({
+                "id":"task", "status":{"type":"active"},
+                "turns":[{"id":"turn","status":"inProgress","items":[]}]
+            }))
+            .unwrap(),
+        );
+        snapshot.connected = connected;
+        let (next, effects) = reduce(
+            &snapshot,
+            Event::Notification {
+                method: "item/completed".into(),
+                params: json!({"threadId":"task","turnId":"turn","item":{
+                    "id":"merge","type":"commandExecution","command":"git merge task","status":"completed","exitCode":0
+                }}),
+            },
+        );
+        assert_eq!(effects.len(), usize::from(connected));
+        assert_eq!(
+            next.conversations["task"].turns.as_ref().unwrap()[0]
+                .status
+                .as_deref(),
+            Some("inProgress")
+        );
+        assert_eq!(next.error, None);
+    }
+}

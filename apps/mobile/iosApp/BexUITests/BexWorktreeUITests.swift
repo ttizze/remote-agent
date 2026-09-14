@@ -1,6 +1,42 @@
 import XCTest
 
 extension BexLaunchUITests {
+    func testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus() throws {
+        let app = try connectedSimulatorApp(expandProject: false)
+        try useSimulatorListFixture("merge-worktree/fresh")
+        func refresh() {
+            app.buttons["tasks.menu"].tap()
+            app.buttons["tasks.refresh"].tap()
+        }
+        refresh()
+        let project = app.buttons["tasks.project.simulator-project"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        project.tap()
+        let running = app.descendants(matching: .any)["tasks.running.merge-active"]
+        XCTAssertTrue(running.waitForExistence(timeout: 10))
+        let merged = app.descendants(matching: .any)["tasks.merged.merge-active"]
+        XCTAssertFalse(merged.exists)
+        try simulatorFixture("merge-worktree/merged")
+        refresh()
+        XCTAssertTrue(merged.waitForExistence(timeout: 10))
+        XCTAssertTrue(running.exists)
+        XCTAssertGreaterThan(merged.frame.minX, running.frame.maxX)
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.merged.merge-idle"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Merged worktree session list"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.terminate()
+        app.launch()
+        expandSimulatorProject(app)
+        XCTAssertTrue(merged.waitForExistence(timeout: 10))
+        try simulatorFixture("merge-worktree/new-work")
+        refresh()
+        let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: merged)
+        wait(for: [removed], timeout: 10)
+        XCTAssertTrue(running.exists)
+    }
+
     func useAutomaticWorktrees(_ app: XCUIApplication) throws {
         openWorktreeSettings(app)
         let create = app.switches["worktree.create"]

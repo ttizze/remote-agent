@@ -1,0 +1,7 @@
+<!-- Lucide git-merge v0.468.0; see docs/licenses/lucide.txt. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="18dp" android:height="18dp" android:viewportWidth="24" android:viewportHeight="24">
+    <path android:fillColor="@android:color/transparent" android:strokeColor="#000000"
+        android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M21,18a3,3 0,1 0,-6,0a3,3 0,1 0,6,0M9,6a3,3 0,1 0,-6,0a3,3 0,1 0,6,0M6,21V9a9,9 0,0 0,9,9" />
+</vector>

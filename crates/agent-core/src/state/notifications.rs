@@ -157,13 +157,15 @@ pub(super) fn notification(
     }
     let mut effects = if kind == Kind::TurnCompleted
         || (method == "item/completed"
-            && params
-                .item
-                .as_ref()
-                .is_some_and(|item| item.kind.as_deref() == Some("userMessage")))
-    {
+            && params.item.as_ref().is_some_and(|item| {
+                matches!(
+                    item.kind.as_deref(),
+                    Some("userMessage" | "commandExecution")
+                )
+            })) {
         // A newly started thread need not be present in the provider's state DB
         // until its first turn is persisted. The pre-submission list is too early.
+        // Completed commands can also move main while the turn is still active.
         refresh_list(previous)
     } else {
         Vec::new()
