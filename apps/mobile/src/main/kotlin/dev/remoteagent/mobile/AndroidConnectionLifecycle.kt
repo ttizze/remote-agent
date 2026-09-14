@@ -4,7 +4,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 
 /**
- * Refresh the selected Host on foreground and persist on background, retaining a live connection.
+ * Reconnect the selected Host on foreground and persist on background.
  */
 class AndroidConnectionLifecycle(private val onForeground: () -> Unit, private val onBackground: () -> Unit) :
     DefaultLifecycleObserver {

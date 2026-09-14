@@ -195,6 +195,7 @@ final class BexAppViewModel: ObservableObject {
               !isConnecting else { return }
         isConnecting = true
         connectionError = nil
+        notice = nil
         connection = Task { [weak self] in
             do {
                 try await owner.reconnect(connection: Connection(ticket: profile.ticket,
