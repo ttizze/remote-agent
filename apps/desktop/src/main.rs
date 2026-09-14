@@ -23,6 +23,7 @@ impl AssetSource for DesktopAssets {
         let bytes: &'static [u8] = match path {
             "bex/microphone.svg" => include_bytes!("../assets/microphone.svg"),
             "bex/gauge.svg" => include_bytes!("../assets/gauge.svg"),
+            "bex/branch.svg" => include_bytes!("../assets/branch.svg"),
             "bex/pencil.svg" => include_bytes!("../assets/pencil.svg"),
             "bex/stop.svg" => include_bytes!("../assets/stop.svg"),
             _ => return gpui_kit::assets::Assets.load(path),
@@ -37,6 +38,7 @@ impl AssetSource for DesktopAssets {
                 "bex/gauge.svg",
                 "bex/stop.svg",
                 "bex/pencil.svg",
+                "bex/branch.svg",
             ]
             .into_iter()
             .filter(|item| item.starts_with(path))
