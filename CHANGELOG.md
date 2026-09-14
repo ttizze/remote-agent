@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Replace the iOS expanded-image thumbnail sidebar with left/right swipes in the existing Quick Look preview; prepare iOS build 53. Acceptance: `testSimulatorBrowsesAllSessionImagesAndSavesTheSelection` verifies the missing sidebar, traversal of all eight images, both boundaries, saving the selection and returning to the conversation.
+- Replace the iOS expanded-image thumbnail sidebar with native Quick Look paging, keeping selection stable during image downloads; prepare iOS build 53. Acceptance: `testSimulatorBrowsesAllSessionImagesAndSavesTheSelection` verifies the missing sidebar, traversal of all eight images, both boundaries, saving the selection and returning to the conversation.
 
 - Show the stock Lucide git-merge icon beside session activity on desktop, iOS and Android when the associated worktree is merged into local main; prepare iOS build 52. Acceptance: real Git through Host/Store covers fresh, merged and subsequently changed branches; native list tests cover spinner placement and iOS reopening.
 

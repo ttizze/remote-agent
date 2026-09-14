@@ -195,12 +195,16 @@ struct ConversationPreview: View {
     var source: SessionImage?
     let close: () -> Void
     @State private var sources: [SessionImage] = []
-    @State private var selected: SessionImage?
+    @State private var selected = 0
     @State private var downloaded: [SessionImage: URL] = [:]
     @State private var galleryError: String?
+    private var urls: [URL] {
+        sources.isEmpty ? [url] : sources.map { $0 == source ? url : downloaded[$0] ?? url }
+    }
+
     private var displayedURL: URL? {
-        guard let selected, selected != source else { return url }
-        return downloaded[selected]
+        guard sources.indices.contains(selected), sources[selected] != source else { return url }
+        return downloaded[sources[selected]]
     }
 
     @State private var saving = false
@@ -213,26 +217,22 @@ struct ConversationPreview: View {
                 if let galleryError {
                     Text(galleryError).font(.caption).foregroundColor(.red)
                 }
-                ConversationFilePreview(url: displayedURL ?? url) { step in
-                    guard isImage, !saving,
-                          let index = sources.firstIndex(where: { $0 == (selected ?? source) }),
-                          sources.indices.contains(index + step) else { return }
-                    selected = sources[index + step]
-                }
-                .overlay {
-                    if displayedURL == nil {
-                        ProgressView("画像を読み込み中…")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(Color(uiColor: .systemBackground))
+                ConversationFilePreview(urls: urls, selected: $selected)
+                    .disabled(saving)
+                    .overlay {
+                        if displayedURL == nil {
+                            ProgressView("画像を読み込み中…")
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color(uiColor: .systemBackground))
+                        }
                     }
-                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    if let index = sources.firstIndex(where: { $0 == (selected ?? source) }) {
-                        Text("\(index + 1) / \(sources.count)")
+                    if !sources.isEmpty {
+                        Text("\(selected + 1) / \(sources.count)")
                             .accessibilityIdentifier("conversation.preview.position")
                     }
                 }
@@ -264,41 +264,28 @@ struct ConversationPreview: View {
                 Button("OK") { saveError = nil }
             } message: { Text(saveError ?? "") }
         }
-        .interactiveDismissDisabled(saving)
+        .interactiveDismissDisabled(isImage || saving)
         .task {
             guard isImage, let load = media?.sessionImages else { return }
             do {
                 let images = try await load()
                 guard !Task.isCancelled else { return }
+                guard let source, let index = images.firstIndex(of: source) else { return }
+                selected = index
                 sources = images
+                for image in images where image != source {
+                    guard let media else { break }
+                    let data = try await conversationImageData(image, media: media)
+                    try Task.checkCancellation()
+                    downloaded[image] = try writeConversationImage(data)
+                }
             } catch {
                 if !Task.isCancelled {
                     galleryError = error.localizedDescription
                 }
             }
         }
-        .task(id: selected) {
-            saved = false
-            guard let selected, selected != source, let media else { return }
-            guard downloaded[selected] == nil else { return }
-            do {
-                let data = try await conversationImageData(selected, media: media)
-                try Task.checkCancellation()
-                let local = try await Task.detached(priority: .userInitiated) {
-                    try writeConversationImage(data)
-                }.value
-                if Task
-                    .isCancelled {
-                    try? FileManager.default.removeItem(at: local.deletingLastPathComponent()); return
-                }
-                downloaded[selected] = local
-                galleryError = nil
-            } catch {
-                if !Task.isCancelled {
-                    galleryError = error.localizedDescription
-                }
-            }
-        }
+        .onChange(of: selected) { _ in saved = false }
         .onDisappear {
             for local in downloaded
                 .values {
@@ -326,58 +313,58 @@ struct ConversationPreview: View {
 }
 
 private struct ConversationFilePreview: UIViewControllerRepresentable {
-    let url: URL
-    let swipe: (Int) -> Void
+    let urls: [URL]
+    @Binding var selected: Int
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(url: url, swipe: swipe)
+        Coordinator(urls: urls, selected: $selected)
     }
 
     func makeUIViewController(context: Context) -> QLPreviewController {
         let controller = QLPreviewController()
         controller.dataSource = context.coordinator
-        let gesture = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swiped))
-        gesture.maximumNumberOfTouches = 1
-        gesture.delegate = context.coordinator
-        controller.view.addGestureRecognizer(gesture)
+        controller.isModalInPresentation = true
+        controller.currentPreviewItemIndex = selected
+        let coordinator = context.coordinator
+        coordinator.observation = controller.observe(
+            \.currentPreviewItemIndex, options: [.new]
+        ) { [weak coordinator] _, change in
+            guard let coordinator, !coordinator.updating, let index = change.newValue,
+                  coordinator.urls.indices.contains(index) else { return }
+            coordinator.selected.wrappedValue = index
+        }
         return controller
     }
 
     func updateUIViewController(_ controller: QLPreviewController, context: Context) {
-        context.coordinator.swipe = swipe
-        if context.coordinator.url != url {
-            context.coordinator.url = url
+        context.coordinator.updating = true
+        defer { context.coordinator.updating = false }
+        context.coordinator.selected = $selected
+        if context.coordinator.urls != urls {
+            context.coordinator.urls = urls
             controller.reloadData()
+        }
+        if controller.currentPreviewItemIndex != selected {
+            controller.currentPreviewItemIndex = selected
         }
     }
 
-    final class Coordinator: NSObject, QLPreviewControllerDataSource, UIGestureRecognizerDelegate {
-        var url: URL
-        var swipe: (Int) -> Void
-        init(url: URL, swipe: @escaping (Int) -> Void) {
-            self.url = url
-            self.swipe = swipe
-        }
-
-        @objc func swiped(_ gesture: UIPanGestureRecognizer) {
-            let distance = gesture.translation(in: gesture.view)
-            guard gesture.state == .ended, abs(distance.x) > 60, abs(distance.x) > abs(distance.y) else { return }
-            swipe(distance.x < 0 ? 1 : -1)
-        }
-
-        func gestureRecognizer(
-            _: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith _: UIGestureRecognizer
-        ) -> Bool {
-            true
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var urls: [URL]
+        var selected: Binding<Int>
+        var observation: NSKeyValueObservation?
+        var updating = false
+        init(urls: [URL], selected: Binding<Int>) {
+            self.urls = urls
+            self.selected = selected
         }
 
         func numberOfPreviewItems(in _: QLPreviewController) -> Int {
-            1
+            urls.count
         }
 
-        func previewController(_: QLPreviewController, previewItemAt _: Int) -> QLPreviewItem {
-            url as NSURL
+        func previewController(_: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            urls[index] as NSURL
         }
     }
 }
