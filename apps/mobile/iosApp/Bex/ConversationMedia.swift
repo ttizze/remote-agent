@@ -50,7 +50,6 @@ struct ConversationImage: View {
     let label: String
     let identifier: String
     let media: ConversationMediaAccess
-    var onSelect: (() -> Void)?
     @State private var image: UIImage?
     @State private var original: Data?
     @State private var previewURL: URL?
@@ -70,9 +69,6 @@ struct ConversationImage: View {
                     .accessibilityLabel(label.isEmpty ? "画像" : label)
                     .accessibilityIdentifier(identifier)
                     .onTapGesture {
-                        if let onSelect {
-                            onSelect(); return
-                        }
                         guard !preparingPreview, let original else { return }
                         preparingPreview = true
                         Task {
@@ -117,11 +113,11 @@ struct ConversationImage: View {
                 let loaded = try await loadConversationImage(
                     source,
                     media: media,
-                    maxPixelSize: onSelect == nil ? 1600 : 160
+                    maxPixelSize: 1600
                 )
                 try Task.checkCancellation()
                 image = loaded.0
-                original = onSelect == nil ? loaded.1 : nil
+                original = loaded.1
             } catch {
                 if !Task.isCancelled {
                     self.error = error.localizedDescription
@@ -217,15 +213,18 @@ struct ConversationPreview: View {
                 if let galleryError {
                     Text(galleryError).font(.caption).foregroundColor(.red)
                 }
-                if let displayedURL {
-                    ConversationFilePreview(url: displayedURL) { step in
-                        guard isImage, !saving,
-                              let index = sources.firstIndex(where: { $0 == (selected ?? source) }),
-                              sources.indices.contains(index + step) else { return }
-                        selected = sources[index + step]
+                ConversationFilePreview(url: displayedURL ?? url) { step in
+                    guard isImage, !saving,
+                          let index = sources.firstIndex(where: { $0 == (selected ?? source) }),
+                          sources.indices.contains(index + step) else { return }
+                    selected = sources[index + step]
+                }
+                .overlay {
+                    if displayedURL == nil {
+                        ProgressView("画像を読み込み中…")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color(uiColor: .systemBackground))
                     }
-                } else {
-                    ProgressView("画像を読み込み中…")
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -337,12 +336,10 @@ private struct ConversationFilePreview: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> QLPreviewController {
         let controller = QLPreviewController()
         controller.dataSource = context.coordinator
-        for direction: UISwipeGestureRecognizer.Direction in [.left, .right] {
-            let gesture = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swiped))
-            gesture.direction = direction
-            gesture.delegate = context.coordinator
-            controller.view.addGestureRecognizer(gesture)
-        }
+        let gesture = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swiped))
+        gesture.maximumNumberOfTouches = 1
+        gesture.delegate = context.coordinator
+        controller.view.addGestureRecognizer(gesture)
         return controller
     }
 
@@ -362,8 +359,10 @@ private struct ConversationFilePreview: UIViewControllerRepresentable {
             self.swipe = swipe
         }
 
-        @objc func swiped(_ gesture: UISwipeGestureRecognizer) {
-            swipe(gesture.direction == .left ? 1 : -1)
+        @objc func swiped(_ gesture: UIPanGestureRecognizer) {
+            let distance = gesture.translation(in: gesture.view)
+            guard gesture.state == .ended, abs(distance.x) > 60, abs(distance.x) > abs(distance.y) else { return }
+            swipe(distance.x < 0 ? 1 : -1)
         }
 
         func gestureRecognizer(
