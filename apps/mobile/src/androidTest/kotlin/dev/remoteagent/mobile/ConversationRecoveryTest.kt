@@ -65,7 +65,7 @@ class ConversationRecoveryTest {
                     while (true) {
                         val thread =
                             JSONObject(model.snapshot.serialize().decodeToString())
-                                .getJSONObject("conversations")
+                                .getJSONObject("conversations_v2")
                                 .getJSONObject(id)
                         val turns = thread.getJSONArray("turns")
                         if (

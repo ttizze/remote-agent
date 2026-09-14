@@ -37,7 +37,7 @@ class ConversationNavigationTest {
         val persisted = JSONObject(Snapshot.empty().serialize().decodeToString())
             .put("navigation", JSONObject()
                 .put("thread_id", "thread").put("draft_key", "thread").put("cwd", "/fixture"))
-            .put("conversations", JSONObject()
+            .put("conversations_v2", JSONObject()
                 .put("thread", JSONObject().put("id", "thread").put("turns", turns)))
         val store = AgentStore.offline(persisted.toString().encodeToByteArray())
         try {

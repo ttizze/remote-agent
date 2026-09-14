@@ -117,6 +117,8 @@ pub struct Snapshot {
     pub account: Arc<AccountState>,
     #[serde(skip)]
     pub terminals: Arc<BTreeMap<String, Arc<Terminal>>>,
+    // Older caches may already contain gaps that page overlap cannot detect.
+    #[serde(default, rename = "conversations_v2")]
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
     pub threads: Option<Arc<ThreadList>>,
     pub models: Arc<Vec<Model>>,

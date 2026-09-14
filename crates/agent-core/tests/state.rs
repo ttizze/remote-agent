@@ -37,6 +37,59 @@ fn reply(thread: Thread) -> ThreadResponse {
 }
 
 #[test]
+fn legacy_history_cache_is_discarded_without_losing_drafts_or_navigation() {
+    let mut snapshot = initial(
+        serde_json::from_value(json!({
+            "id":"thread", "historyCursor":null,
+            "turns":[{"id":"oldest"},{"id":"latest"}]
+        }))
+        .unwrap(),
+    );
+    snapshot.drafts = Arc::new(BTreeMap::from([(
+        "thread".into(),
+        Arc::new(agent_core::state::Draft {
+            text: "unsent input".into(),
+            ..Default::default()
+        }),
+    )]));
+    snapshot.navigation = Arc::new(agent_core::state::Navigation {
+        thread_id: Some("thread".into()),
+        cwd: "/fixture".into(),
+        draft_key: "thread".into(),
+        ..Default::default()
+    });
+    snapshot.pending_submissions = Arc::new(BTreeMap::from([(
+        "sent".into(),
+        Arc::new(agent_core::state::PendingSubmission {
+            draft_key: "thread".into(),
+            draft: snapshot.drafts["thread"].clone(),
+            turn_id: Some("latest".into()),
+            after_item_id: None,
+            accepted: true,
+            recovery_text: None,
+            clear_draft: None,
+        }),
+    )]));
+    let mut legacy = serde_json::to_value(&snapshot).unwrap();
+    legacy.as_object_mut().unwrap().remove("conversations_v2");
+    legacy["conversations"] = serde_json::to_value(&snapshot.conversations).unwrap();
+    let restored: Snapshot = serde_json::from_value(legacy).unwrap();
+    let mut expected = snapshot.clone();
+    expected.conversations = Arc::default();
+    assert_eq!(
+        restored, expected,
+        "legacy gaps cannot be trusted, but user state must survive"
+    );
+
+    let restored: Snapshot =
+        serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    assert_eq!(
+        restored, snapshot,
+        "new caches must retain loaded history after reopening"
+    );
+}
+
+#[test]
 fn selected_folder_preserves_explicit_scope_without_losing_the_execution_directory() {
     for (project_id, selected) in [
         (None, "/workspace"),

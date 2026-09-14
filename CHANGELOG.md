@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep refreshed history contiguous using ordered page overlap for both turns and items. Replace disconnected cached windows with the latest server page and its cursor, preserve explicitly unhydrated bodies, and clear additional-loading errors on retry. Retain the five-turn/500-item initial budget. Acceptance: gap/overlap and repeated-ID state checks, Store retry recovery, and complete retrieval/reopening through the isolated Host.
+- Keep refreshed history contiguous using ordered page overlap for both turns and items. Replace disconnected cached windows with the latest server page and its cursor, preserve explicitly unhydrated bodies, and clear additional-loading errors on retry. Invalidate history windows saved by the old merge while retaining drafts and navigation; the new cache format preserves fetched history on reopening. Retain the five-turn/500-item initial budget. Acceptance: gap/overlap and repeated-ID state checks, Store retry recovery, and complete retrieval/reopening through the isolated Host.
 
 - Use neutral gray mobile conversation navigation buttons instead of accent blue; prepare iOS build 50. Acceptance: iOS top/latest history navigation and Android conversation navigation.
 

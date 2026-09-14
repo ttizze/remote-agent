@@ -51,6 +51,9 @@ hydration must not change this default.
 - `notLoaded` means the Host omitted item hydration, not that the turn is empty.
   Retain cached items and their deferred-detail markers in that case. If no
   items are cached, preserve the server's additional-loading state.
+- Discard legacy persisted history windows on upgrade: they may already contain
+  undetectable gaps. Preserve drafts, pending submissions, preferences and navigation.
+  Fetch through normal bounded pages; new-format caches retain fetched history.
 - Failed additional loading preserves the window and cursor. Retrying clears
   the error and successful loading restores every message in order. Reopening
   must retain fetched history when its boundary still overlaps.
