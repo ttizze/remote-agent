@@ -86,41 +86,8 @@ impl AgentStore {
 
     pub async fn reconnect(&self, connection: Connection) -> Result<(), AgentError> {
         let secret = Zeroizing::new(connection.identity);
-        let snapshot = self.store.snapshot();
-        if snapshot.connected() {
-            use crate::{peer::PeerError, state::operations as op};
-            let list = self
-                .store
-                .dispatch(Intent::ListThreads(op::ListThreads::new(
-                    (*snapshot.list_query).clone(),
-                )));
-            let history = async {
-                if let Some(id) = &snapshot.navigation.thread_id {
-                    self.store
-                        .dispatch(Intent::ReadThread(op::ReadThread::new(id.clone())))
-                        .await?;
-                }
-                Ok(Outcome::Applied)
-            };
-            let (list, history) = tokio::join!(list, history);
-            let errors = [list.err(), history.err()];
-            if !errors
-                .iter()
-                .flatten()
-                .any(|error| matches!(error, PeerError::ConnectionClosed(_)))
-            {
-                // Navigation can supersede an in-flight refresh and its errors.
-                return if self.store.snapshot().epoch != snapshot.epoch {
-                    Ok(())
-                } else {
-                    errors
-                        .into_iter()
-                        .flatten()
-                        .next()
-                        .map_or(Ok(()), |failure| Err(error(failure)))
-                };
-            }
-        }
+        // Foreground recovery must not probe a suspended transport with normal
+        // RPCs: their 30-second deadline would delay opening the new session.
         self.store.disconnect().await.map_err(error)?;
         let bytes = Zeroizing::new(
             <[u8; 32]>::try_from(secret.as_slice())
@@ -231,7 +198,7 @@ mod tests {
         use crate::peer::{JsonlReader, JsonlWriter};
         use crate::transport::Trust;
         use serde_json::{Value, json};
-        for recovery in ["disconnected", "closed", "silent"] {
+        for recovery in ["silent", "disconnected", "closed"] {
             tokio::time::timeout(Duration::from_secs(40), async {
             let identity = Identity::generate();
             let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
@@ -266,13 +233,8 @@ mod tests {
             }
             assert_eq!(methods, ["host/thread/list", "host/thread/read", "model/list"].map(str::to_owned).into());
             let server = async {
-                if recovery != "disconnected" {
-                    for _ in 0..2 {
-                        assert!(old.read_line().await.unwrap().is_some());
-                    }
-                    if recovery == "closed" { first.close(); }
-                }
-                assert!(!matches!(old.read_line().await, Ok(Some(_))));
+                assert!(!matches!(old.read_line().await, Ok(Some(_))),
+                    "reconnect must close the old stream without probing it with list/history reads");
                 let next = host.accept().await.unwrap().unwrap().authorize(&trust).unwrap();
                 let (read, write) = tokio::io::split(next.accept_stream().await.unwrap());
                 let mut reader = JsonlReader::new(read);
@@ -299,7 +261,9 @@ mod tests {
             };
             let client = async {
                 if recovery == "disconnected" { store.store.disconnect().await.unwrap(); }
-                store.reconnect(connection()).await.unwrap();
+                if recovery == "closed" { first.close(); }
+                tokio::time::timeout(Duration::from_secs(5), store.reconnect(connection()))
+                    .await.expect("reconnect must not wait for the old 30-second RPC deadline").unwrap();
                 let mut updates = store.store.subscribe();
                 loop {
                     let ready = {
@@ -325,7 +289,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn connected_refresh_retains_transport_navigation_and_draft_after_error() {
+    async fn active_reads_retain_transport_navigation_and_draft_after_error() {
         use crate::peer::{JsonlReader, JsonlWriter};
         use crate::transport::Trust;
         use serde_json::{Value, json};
@@ -377,15 +341,29 @@ mod tests {
                         updates.changed().await.unwrap();
                     }
                     store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "preserved".into() }).unwrap().wait().await.unwrap();
+                    let refresh = || async {
+                        use crate::state::operations as op;
+                        let list = store.store.dispatch(Intent::ListThreads(op::ListThreads::new(
+                            (*store.snapshot().list_query).clone(),
+                        )));
+                        let history = async {
+                            if selected {
+                                store.store.dispatch(Intent::ReadThread(op::ReadThread::new("thread".into()))).await?;
+                            }
+                            Ok(Outcome::Applied)
+                        };
+                        let (list, history) = tokio::join!(list, history);
+                        list.and(history)
+                    };
                     let before = store.snapshot();
-                    assert!(store.reconnect(connection()).await.is_err());
+                    assert!(refresh().await.is_err());
                     assert!(store.snapshot().connected());
                     assert!(store.snapshot().error.as_ref().unwrap().contains("temporary read error"));
                     if selected {
-                        assert!(store.reconnect(connection()).await.unwrap_err().to_string().contains("timed out"));
+                        assert!(refresh().await.unwrap_err().to_string().contains("timed out"));
                         assert!(store.snapshot().connected());
                     }
-                    store.reconnect(connection()).await.unwrap();
+                    refresh().await.unwrap();
                     let after = store.snapshot();
                     assert!(after.connected());
                     assert!(after.error.is_none());

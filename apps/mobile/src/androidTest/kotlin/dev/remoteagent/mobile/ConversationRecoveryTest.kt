@@ -88,6 +88,28 @@ class ConversationRecoveryTest {
                     model.notice = "local persistence failure"
                     perform(Intent.ReadThread(ReadThread(id, open = true))).getOrThrow()
                     assertEquals("local persistence failure", model.notice)
+                    // The foreground adapter calls this same method. Reconnect
+                    // while the cached flag is still connected, retaining the draft.
+                    model.connect()
+                    while (model.busy) delay(10)
+                    assertTrue(model.snapshot.connected())
+                    assertEquals(id, model.snapshot.navigation().threadId)
+                    assertEquals("preserved draft", model.snapshot.draft(id).text)
+                    assertNull(model.notice)
+                    perform(Intent.Submit(id, UUID.randomUUID().toString())).getOrThrow()
+                    while (true) {
+                        val thread = JSONObject(model.snapshot.serialize().decodeToString())
+                            .getJSONObject("conversations_v2").getJSONObject(id)
+                        val turns = thread.getJSONArray("turns")
+                        if (turns.length() == 2 && turns.getJSONObject(1).getString("status") == "completed") {
+                            assertTrue(turns.getJSONObject(1).toString().contains("preserved draft"))
+                            break
+                        }
+                        delay(10)
+                    }
+                    assertEquals("", model.snapshot.draft(id).text)
+                    assertNull(model.snapshot.error())
+                    assertNull(model.notice)
                 } finally {
                     models.clear()
                 }
