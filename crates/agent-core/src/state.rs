@@ -139,7 +139,7 @@ pub struct Snapshot {
     pub activity: Arc<Activity>,
     #[serde(default)]
     pub management: Arc<HostManagement>,
-    #[serde(default)]
+    #[serde(skip)]
     pub list_query: Arc<ListQuery>,
     #[serde(default)]
     pub epoch: u64,

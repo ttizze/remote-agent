@@ -212,7 +212,13 @@ mod tests {
                 navigation: Arc::new(crate::state::Navigation { thread_id: Some("thread".into()), draft_key: "thread".into(), ..Default::default() }),
                 ..Default::default()
             };
-            let store = AgentStore::offline(serde_json::to_vec(&cached).unwrap()).await.unwrap();
+            let mut saved = serde_json::to_value(&cached).unwrap();
+            assert!(saved.get("list_query").is_none());
+            saved["list_query"] = serde_json::to_value(&cached.list_query).unwrap();
+            let restored = AgentStore::offline(serde_json::to_vec(&saved).unwrap()).await.unwrap();
+            assert_eq!(*restored.snapshot().list_query, crate::models::ListQuery::default());
+            restored.shutdown().await.unwrap();
+            let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached) });
             let (connected, incoming) = tokio::join!(store.reconnect(connection()), host.accept());
             connected.unwrap();
             let first = incoming.unwrap().unwrap().authorize(&trust).unwrap();
