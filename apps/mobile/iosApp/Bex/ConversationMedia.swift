@@ -346,9 +346,11 @@ private struct ConversationFilePreview: UIViewControllerRepresentable {
         if context.coordinator.urls != urls {
             context.coordinator.urls = urls
             controller.reloadData()
-        }
-        if controller.currentPreviewItemIndex != selected {
-            controller.currentPreviewItemIndex = selected
+            // Quick Look owns selection while swiping. Only a new gallery
+            // supplies a programmatic index; view refreshes must not restore it.
+            if controller.currentPreviewItemIndex != selected {
+                controller.currentPreviewItemIndex = selected
+            }
         }
     }
 
