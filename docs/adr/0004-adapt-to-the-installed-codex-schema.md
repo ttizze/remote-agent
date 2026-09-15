@@ -4,6 +4,28 @@ The Host starts the installed Codex App Server and completes its initialize hand
 
 Codex-native RPC payloads pass through without a second stable RPC schema. The mobile adapter projects known response and notification shapes; unknown item payloads remain visible. Unsupported requests return explicit errors. Installed-Codex runtime checks remain necessary: for example, lifecycle notifications with `itemsView: summary` contain only a subset of items and must preserve previously streamed history.
 
+## Host provider boundary
+
+`host_rpc::providers` owns provider selection and the adaptation of Codex and
+Claude protocols. The Codex adapter owns its account state, event subscription,
+process-directory tracking, external-thread watches and history hydration. The
+Claude adapter owns its CLI sessions and persisted conversation records. The
+Host service prepares workspaces, enriches project membership and manages files
+and authenticated client connections; it does not inspect provider ID prefixes
+or decode provider history pages. A shared catalog merges histories before the
+Host applies project limits, retaining partial-provider errors and blocking
+worktree removal when activity cannot be checked.
+
+Server-request routing stores the issuing provider alongside the opaque upstream
+ID. Response arbitration, reconnect replay and provider shutdown use that pair,
+so identical IDs from different providers remain independent. Provider identity
+is never inferred from an approval ID's spelling.
+
+This is an internal ownership boundary, not a new public wire schema. Existing
+conversation IDs, model IDs, unknown payload fields and per-provider unsupported
+operations retain their contracts. Switching between Codex and Claude still
+requires a new conversation; no context transfer or durable input queue is added.
+
 
 ## iPhone history projection
 
