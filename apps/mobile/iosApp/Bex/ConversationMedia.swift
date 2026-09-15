@@ -272,14 +272,16 @@ struct ConversationPreview: View {
                 let images = try await load()
                 guard !Task.isCancelled else { return }
                 guard let source, let index = images.firstIndex(of: source) else { return }
-                selected = index
-                sources = images
                 for image in images where image != source {
                     guard let media else { break }
                     let data = try await conversationImageData(image, media: media)
                     try Task.checkCancellation()
                     downloaded[image] = try writeConversationImage(data)
                 }
+                // Publish the gallery once its URLs are stable. Reloading Quick
+                // Look as downloads finish can reset an in-progress swipe.
+                selected = index
+                sources = images
             } catch {
                 if !Task.isCancelled {
                     galleryError = error.localizedDescription
@@ -344,9 +346,11 @@ private struct ConversationFilePreview: UIViewControllerRepresentable {
         if context.coordinator.urls != urls {
             context.coordinator.urls = urls
             controller.reloadData()
-        }
-        if controller.currentPreviewItemIndex != selected {
-            controller.currentPreviewItemIndex = selected
+            // Quick Look owns selection while swiping. Only a new gallery
+            // supplies a programmatic index; view refreshes must not restore it.
+            if controller.currentPreviewItemIndex != selected {
+                controller.currentPreviewItemIndex = selected
+            }
         }
     }
 

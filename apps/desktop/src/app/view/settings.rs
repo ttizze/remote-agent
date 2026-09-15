@@ -340,7 +340,7 @@ impl Desktop {
 
 impl Desktop {
     pub(in crate::app) fn account_operation(&mut self, intent: Intent) {
-        if self.account_busy || !self.snapshot.connected {
+        if self.account_busy || self.session.is_none() || !self.snapshot.connected {
             return;
         }
         self.account_busy = true;
@@ -353,7 +353,7 @@ impl Desktop {
             .child(div().text_xl().child("Codex アカウント"))
             .child("選択中の Host のアカウントを管理します。変更は同じ Host に接続する端末にも適用されます。");
         if let Some(accounts) = &self.snapshot.account.accounts {
-            if accounts.selected_id.is_none() {
+            if accounts.selected_id.is_none() && accounts.error.is_none() {
                 body = body.child("ログインするアカウントを追加または選択してください。");
             }
             for (index, account) in accounts.accounts.iter().enumerate() {
@@ -436,7 +436,6 @@ impl Desktop {
                                 "キャンセル",
                                 cx,
                                 move |s, _, _| {
-                                    s.account_polling = false;
                                     s.account_operation(Intent::CancelAccountLogin(
                                         op::CancelAccountLogin {
                                             id: cancel_id.clone(),

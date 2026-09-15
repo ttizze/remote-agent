@@ -1,4 +1,3 @@
-mod claude;
 mod codex_accounts;
 mod desktop_projects;
 mod dictation;

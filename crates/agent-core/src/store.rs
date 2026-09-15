@@ -39,17 +39,18 @@ enum Command {
     Disconnect(oneshot::Sender<Result<(), PeerError>>),
     Attach {
         connection: Connection,
+        attempt: CancellationToken,
         complete: oneshot::Sender<Result<(), PeerError>>,
     },
 }
 struct Connection {
-    peer: RpcPeer,
+    peer: Arc<RpcPeer>,
     session: Option<crate::transport::Session>,
 }
-impl Connection {
-    async fn close(self) {
-        let _ = self.peer.close().await;
-        if let Some(session) = self.session {
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // Includes candidates dropped from the command queue during shutdown.
+        if let Some(session) = &self.session {
             session.close();
         }
     }
@@ -81,27 +82,27 @@ pub struct Store {
     updates: watch::Receiver<Arc<Snapshot>>,
     publications: Mutex<Option<watch::Sender<Arc<Snapshot>>>>,
     commands: mpsc::UnboundedSender<Command>,
+    connection_attempt: Mutex<CancellationToken>,
     stop: CancellationToken,
     _close_on_drop: DropGuard,
     finished: watch::Receiver<Option<Result<(), String>>>,
 }
 impl Store {
     pub fn new(peer: RpcPeer, snapshot: Snapshot) -> Self {
-        Self::start(Some(peer), snapshot, None)
+        Self::start(Some(peer), snapshot)
     }
     pub fn offline(snapshot: Snapshot) -> Self {
         let (snapshot, _) = reduce(&snapshot, Event::Disconnected("Host not connected".into()));
-        Self::start(None, snapshot, None)
+        Self::start(None, snapshot)
     }
-    fn start(
-        peer: Option<RpcPeer>,
-        snapshot: Snapshot,
-        session: Option<crate::transport::Session>,
-    ) -> Self {
+    fn start(peer: Option<RpcPeer>, snapshot: Snapshot) -> Self {
         let (writer, updates) = watch::channel(Arc::new(snapshot));
         let connection = peer.map(|peer| {
             (
-                Connection { peer, session },
+                Connection {
+                    peer: Arc::new(peer),
+                    session: None,
+                },
                 apply(&writer, Event::Connected),
             )
         });
@@ -114,13 +115,12 @@ impl Store {
             let mut connection = connection;
             let mut result = Ok(());
             loop {
-                if let Some((Connection { peer, session }, effects)) = connection.take() {
+                if let Some((connection, effects)) = connection.take() {
                     result = run(
-                        peer,
+                        connection,
                         publications.clone(),
                         &mut incoming,
                         shutdown.clone(),
-                        session,
                         effects,
                     )
                     .await;
@@ -138,6 +138,7 @@ impl Store {
             updates,
             publications: Mutex::new(Some(writer)),
             commands,
+            connection_attempt: Mutex::new(stop.child_token()),
             _close_on_drop: stop.clone().drop_guard(),
             stop,
             finished,
@@ -153,15 +154,32 @@ impl Store {
         store.reconnect(endpoint, ticket, invitation).await?;
         Ok(store)
     }
-    /// Prepare transport while the actor continues to accept local edits.
+    /// Replace transport while retaining local edits. A newer reconnect or
+    /// disconnect cancels setup before it can attach an obsolete connection.
     pub async fn reconnect(
         &self,
         endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
         invitation: Option<uuid::Uuid>,
     ) -> Result<(), crate::transport::TransportError> {
-        let session = endpoint.connect(ticket).await?;
+        let (attempt, disconnected) = {
+            let mut current = self.connection_attempt.lock().unwrap();
+            current.cancel();
+            *current = self.stop.child_token();
+            // Queue replacement under the same lock as cancellation so callers
+            // cannot reorder a newer attempt behind an older disconnect.
+            (current.clone(), self.request_disconnect()?)
+        };
+        let guard = attempt.clone().drop_guard();
         let setup = async {
+            disconnected
+                .await
+                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
+            // Do not probe a suspended connection: its RPC deadline would delay
+            // foreground recovery. The actor releases it before setup begins.
+            let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| {
+                session.close();
+            });
             let peer = session
                 .open_peer(std::time::Duration::from_secs(30), 64)
                 .await?;
@@ -169,45 +187,50 @@ impl Store {
                 peer.request::<_, <Pair as RpcMethod>::Output>(Pair::METHOD, &Pair { invitation })
                     .await?;
             }
-            Ok::<_, crate::transport::TransportError>(peer)
-        }
-        .await;
-        match setup {
-            Ok(peer) => {
-                let (complete, result) = oneshot::channel();
-                let command = Command::Attach {
-                    connection: Connection {
-                        peer,
-                        session: Some(session),
-                    },
-                    complete,
-                };
-                if let Err(failed) = self.commands.send(command) {
-                    if let Command::Attach { connection, .. } = failed.0 {
-                        connection.close().await;
-                    }
-                    return Err(PeerError::ConnectionClosed("store is closed".into()).into());
-                }
-                result
-                    .await
-                    .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
+            let (complete, result) = oneshot::channel();
+            let command = Command::Attach {
+                connection: Connection {
+                    peer: Arc::new(peer),
+                    session: Some(scopeguard::ScopeGuard::into_inner(session)),
+                },
+                attempt: attempt.clone(),
+                complete,
+            };
+            self.commands
+                .send(command)
+                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+            result
+                .await
+                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
+            Ok::<_, crate::transport::TransportError>(())
+        };
+        tokio::select! {
+            biased;
+            _ = attempt.cancelled() => Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
+            result = setup => {
+                result?;
+                guard.disarm();
                 Ok(())
-            }
-            Err(error) => {
-                session.close();
-                Err(error)
             }
         }
     }
     /// Release the current transport while retaining offline editing and observers.
     pub async fn disconnect(&self) -> Result<(), PeerError> {
+        let result = {
+            let current = self.connection_attempt.lock().unwrap();
+            current.cancel();
+            self.request_disconnect()?
+        };
+        result
+            .await
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?
+    }
+    fn request_disconnect(&self) -> Result<oneshot::Receiver<Result<(), PeerError>>, PeerError> {
         let (complete, result) = oneshot::channel();
         self.commands
             .send(Command::Disconnect(complete))
             .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
-        result
-            .await
-            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?
+        Ok(result)
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.updates.borrow().clone()
@@ -446,15 +469,15 @@ fn decode_message(line: &str) -> Result<Event, PeerError> {
     })
 }
 async fn run(
-    peer: RpcPeer,
+    connection: Connection,
     updates: watch::Sender<Arc<Snapshot>>,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     stop: CancellationToken,
-    session: Option<crate::transport::Session>,
     mut effects: Vec<Scheduled>,
 ) -> Result<(), PeerError> {
+    let peer = &connection.peer;
+    let session = &connection.session;
     let mut events = peer.subscribe();
-    let peer = Arc::new(peer);
     let client = Client::new(peer.clone());
     let ordered = Mutex::new(BTreeSet::new());
     let mut jobs = FuturesUnordered::new();
@@ -482,7 +505,7 @@ async fn run(
             }
             jobs.push(perform(
                 Some(&client),
-                Some(&peer),
+                Some(peer),
                 &ordered,
                 session.as_ref(),
                 captured,
@@ -500,7 +523,7 @@ async fn run(
             terminal_running = true;
             jobs.push(perform(
                 Some(&client),
-                Some(&peer),
+                Some(peer),
                 &ordered,
                 session.as_ref(),
                 captured,
@@ -521,8 +544,8 @@ async fn run(
                         disconnected = Some(complete);
                         break "Host disconnected".into();
                     }
-                    Command::Attach { connection, complete } => {
-                        connection.close().await;
+                    Command::Attach { connection, complete, .. } => {
+                        drop(connection);
                         let _ = complete.send(Err(PeerError::ConnectionClosed("store is already connected".into())));
                         continue;
                     }
@@ -599,9 +622,7 @@ async fn run(
         }
     }
     let result = peer.close().await;
-    if let Some(session) = session {
-        session.close();
-    }
+    drop(connection);
     apply(&updates, Event::Disconnected(reason));
     if let Some(complete) = disconnected {
         let _ = complete.send(Ok(()));
@@ -629,8 +650,16 @@ async fn run_offline(
             }
             Command::Attach {
                 connection,
+                attempt,
                 complete,
             } => {
+                if attempt.is_cancelled() {
+                    drop(connection);
+                    let _ = complete.send(Err(PeerError::ConnectionClosed(
+                        "connection attempt cancelled".into(),
+                    )));
+                    continue;
+                }
                 let effects = apply(updates, Event::Connected);
                 let _ = complete.send(Ok(()));
                 return Some((connection, effects));

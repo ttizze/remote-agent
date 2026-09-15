@@ -188,12 +188,7 @@ impl Desktop {
                     || !self.snapshot.connected,
                 move |intent, _, cx| {
                     let _ = entity.update(cx, |view, cx| {
-                        if view.busy > 0
-                            || view.account_busy
-                            || view.snapshot.account.login.is_some()
-                            || view.session.is_none()
-                            || !view.snapshot.connected
-                        {
+                        if view.busy > 0 || view.snapshot.account.login.is_some() {
                             return;
                         }
                         view.account_operation(intent);
