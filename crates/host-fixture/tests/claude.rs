@@ -185,7 +185,12 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                         let user = items.iter().find(|item| item.kind.as_deref() == Some("userMessage")).unwrap();
                         assert_eq!(user.client_id.as_deref(), Some(format!("client-{number}").as_str()));
                         assert_eq!(user.extra["content"][0]["text"], format!("message {number}"));
-                        let session = id.strip_prefix("claude:").unwrap();
+                        let session_id = id.strip_prefix("claude:").unwrap();
+                        let journal = std::fs::read_to_string(root.join("claude").join(format!("{session_id}.jsonl"))).unwrap();
+                        let checkpoint = journal.lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
+                            .rfind(|record| record["event"]["type"] == "provider_state").unwrap();
+                        let session = checkpoint["event"]["state"]["session_id"].as_str().unwrap();
+                        assert_ne!(session, session_id, "Host identity must be independent of the provider resume identity");
                         let inputs: Value = serde_json::from_slice(&std::fs::read(Path::new(&cwd).join(format!("claude-session-{session}.json"))).unwrap()).unwrap();
                         assert_eq!(inputs.as_array().unwrap().len(), number + 1);
                         assert_eq!(inputs[number]["effort"], "low");
