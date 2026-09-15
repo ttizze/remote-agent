@@ -496,10 +496,6 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Event::Disconnected(reason) => {
             reset_session(&mut next);
             next.connected = false;
-            next.requests = Arc::default();
-            let navigation = Arc::make_mut(&mut next.navigation);
-            navigation.watch_id = None;
-            navigation.watch_thread_id = None;
             for terminal in Arc::make_mut(&mut next.terminals).values_mut() {
                 if matches!(
                     terminal.phase,
