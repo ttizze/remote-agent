@@ -207,8 +207,9 @@ class BuildCleanupTest(unittest.TestCase):
         source = (root / "src/main.rs").read_bytes()
         self.age(root / "target/debug", 30)
         for flags, action in [(["--dry-run"], "would-clean"), ([], "cleaned")]:
+            # The CLI scans open files twice; each scan has its own 60-second limit.
             result = subprocess.run([sys.executable, "-B", str(SCRIPT), *flags], cwd=root, env=self.env,
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=180)
             self.assertEqual(result.returncode, 0, result.stderr)
             report = json.loads(result.stdout)
             self.assertEqual(report["entries"][0]["action"], action)

@@ -48,10 +48,38 @@ extension BexLaunchUITests {
             latestButton.tap()
         }
         XCTAssertTrue(latest.isHittable)
-        app.navigationBars.buttons.element(boundBy: 0).tap()
-        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+        for _ in 0 ..< 4 {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+            XCTAssertTrue(latest.waitForExistence(timeout: 20))
+            XCTAssertTrue(latest.isHittable, "Every reopen must render the latest message in the viewport")
+        }
+    }
+
+    func testSimulatorReopensRunningLongHistoryWithoutBlankViewport() throws {
+        let app = try connectedSimulatorApp()
+        try useSimulatorListFixture("long-conversation")
+        app.terminate(); app.launch()
+        expandSimulatorProject(app)
+        let row = app.descendants(matching: .any)["tasks.row.fixture-long-history"]
+        XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
+        let latest = app.descendants(matching: .any)["item.long-latest-message"]
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
-        XCTAssertTrue(latest.isHittable)
+        let message = app.descendants(matching: .any)["task.message"]
+        message.tap(); message.typeText("[approval] Reopen while this turn is running")
+        app.buttons["task.send"].tap()
+        let running = prefixedButton(app, prefix: "turn.interrupt.")
+        XCTAssertTrue(running.waitForExistence(timeout: 10))
+        let approval = app.buttons["request.accept"]
+        XCTAssertTrue(approval.waitForExistence(timeout: 10))
+        for _ in 0 ..< 4 {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+            XCTAssertTrue(running.waitForExistence(timeout: 10))
+            XCTAssertTrue(approval.waitForExistence(timeout: 10))
+            XCTAssertTrue(approval.isHittable, "Running history must render immediately after reopening")
+        }
+        captureScreen(app, named: "Running long history reopened without a blank viewport")
     }
 
     private func loadedItems(in detail: XCUIElement) -> Int {

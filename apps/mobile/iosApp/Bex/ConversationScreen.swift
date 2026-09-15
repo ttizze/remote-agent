@@ -89,7 +89,11 @@ struct ThreadScreen: View {
                         geometry.contentSize.height - geometry.visibleRect.maxY
                     } action: { _, remaining in
                         isNearLatest = remaining <= 80
-                        if isFollowingLatest, remaining > 1, let latestRowId {
+                    }
+                    // Offset changes must not request another scroll. Follow only content
+                    // growth; lazy row measurement can otherwise keep re-entering layout.
+                    .onScrollGeometryChange(for: CGSize.self) { $0.contentSize } action: { _, _ in
+                        if isFollowingLatest, let latestRowId {
                             proxy.scrollTo(latestRowId, anchor: .bottom)
                         }
                     }
