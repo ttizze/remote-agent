@@ -61,6 +61,16 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
         let item = last["items"].as_array_mut().unwrap().last_mut().unwrap();
         item["id"] = "long-latest-message".into();
         item["text"] = "Latest interrupted conversation message is visible.".into();
+        drop(last);
+        // Keep turns started through the fixture when the client reopens history.
+        // Only the list's placeholder turn is replaced by the synthetic archive.
+        turns.extend(
+            thread
+                .turns
+                .iter()
+                .filter(|turn| turn.borrow()["id"] != "turn-fixture-long-history")
+                .cloned(),
+        );
     }
     if gallery && let Some(last) = turns.last_mut() {
         let mut latest = last.borrow().clone();
