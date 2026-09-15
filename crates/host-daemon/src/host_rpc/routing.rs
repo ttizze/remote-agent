@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+use super::providers::Provider;
 use agent_core::peer::{RpcMessage, RpcMessageKind};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -14,8 +15,15 @@ pub type SessionId = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseRoute {
-    Forward(String),
+    Forward(UpstreamRequest),
     Unknown,
+}
+
+/// Provider-owned request identity; never inferred from the wire ID's spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct UpstreamRequest {
+    pub provider: Provider,
+    pub id: String,
 }
 
 /// A live authenticated session's bounded outbound queue.
@@ -65,8 +73,8 @@ struct State {
 /// Owned protocol data. Transitions neither lock nor send to client queues.
 struct Routing {
     next_proxy_id: u64,
-    pending: HashMap<String, PendingServerRequest>,
-    proxy_to_upstream: HashMap<ProxyKey, String>,
+    pending: HashMap<UpstreamRequest, PendingServerRequest>,
+    proxy_to_upstream: HashMap<ProxyKey, UpstreamRequest>,
 }
 
 struct PendingServerRequest {
@@ -152,11 +160,12 @@ impl SessionRouter {
         remove_session_locked(&mut lock_state(&self.state), session);
     }
 
-    /// Resolve only requests belonging to the stopped Codex backend. Claude
+    /// Resolve only requests belonging to the stopped provider. Other
     /// approvals and authenticated client connections remain live.
-    pub(crate) fn resolve_codex_requests(&self) {
+    pub(crate) fn resolve_provider_requests(&self, provider: Provider) {
         let mut state = lock_state(&self.state);
-        let (routing, deliveries) = std::mem::take(&mut state.routing).resolve_codex_requests();
+        let (routing, deliveries) =
+            std::mem::take(&mut state.routing).resolve_provider_requests(provider);
         state.routing = routing;
         deliver_locked(&mut state, deliveries);
     }
@@ -191,10 +200,13 @@ impl SessionRouter {
 
     /// Fan out a backend notification or server request. Notifications are
     /// sent unchanged; server requests get one unique id per phone.
-    pub(crate) fn handle_server_message(&self, message: &RpcMessage<'_>) {
+    pub(crate) fn handle_server_message(&self, provider: Provider, message: &RpcMessage<'_>) {
         let mut state = lock_state(&self.state);
-        let (routing, deliveries) =
-            std::mem::take(&mut state.routing).message(message, state.sessions.keys().copied());
+        let (routing, deliveries) = std::mem::take(&mut state.routing).message(
+            provider,
+            message,
+            state.sessions.keys().copied(),
+        );
         state.routing = routing;
         deliver_locked(&mut state, deliveries);
     }
@@ -210,18 +222,19 @@ impl SessionRouter {
 }
 
 impl Routing {
-    fn resolve_codex_requests(mut self) -> (Self, Vec<Delivery>) {
+    fn resolve_provider_requests(mut self, provider: Provider) -> (Self, Vec<Delivery>) {
         let ids: Vec<_> = self
             .pending
             .keys()
-            .filter(|id| !crate::claude::is_permission_id(id))
+            .filter(|request| request.provider == provider)
             .cloned()
             .collect();
         let mut deliveries = Vec::new();
-        for id in ids {
+        for upstream in ids {
+            let id = &upstream.id;
             let notification =
                 format!(r#"{{"method":"serverRequest/resolved","params":{{"requestId":{id}}}}}"#);
-            resolve_request(&mut self, &id, &notification, &mut deliveries);
+            resolve_request(&mut self, &upstream, &notification, &mut deliveries);
         }
         (self, deliveries)
     }
@@ -229,7 +242,7 @@ impl Routing {
     fn replay(
         mut self,
         session: SessionId,
-        upstream: String,
+        upstream: UpstreamRequest,
         line: &str,
     ) -> (Self, Option<String>) {
         let line = RpcMessage::parse(line)
@@ -241,7 +254,7 @@ impl Routing {
     fn alias(
         &mut self,
         session: SessionId,
-        upstream: String,
+        upstream: UpstreamRequest,
         message: &RpcMessage<'_>,
     ) -> Option<String> {
         let proxy = allocate_proxy_id(self);
@@ -257,6 +270,7 @@ impl Routing {
 
     fn message(
         mut self,
+        provider: Provider,
         message: &RpcMessage<'_>,
         sessions: impl Iterator<Item = SessionId>,
     ) -> (Self, Vec<Delivery>) {
@@ -264,7 +278,12 @@ impl Routing {
         match message.kind() {
             RpcMessageKind::Notification => {
                 let resolved = resolved_server_request_id(message).is_some_and(|id| {
-                    resolve_request(&mut self, &id, message.line(), &mut deliveries)
+                    resolve_request(
+                        &mut self,
+                        &UpstreamRequest { provider, id },
+                        message.line(),
+                        &mut deliveries,
+                    )
                 });
                 if !resolved {
                     deliveries.extend(
@@ -272,7 +291,9 @@ impl Routing {
                     );
                 }
             }
-            RpcMessageKind::Request => route_request(&mut self, message, sessions, &mut deliveries),
+            RpcMessageKind::Request => {
+                route_request(&mut self, provider, message, sessions, &mut deliveries)
+            }
             RpcMessageKind::Response => {}
         }
         (self, deliveries)
@@ -329,12 +350,19 @@ fn deliver_locked(state: &mut State, deliveries: Vec<Delivery>) {
 
 fn route_request(
     state: &mut Routing,
+    provider: Provider,
     message: &RpcMessage<'_>,
     sessions: impl Iterator<Item = SessionId>,
     deliveries: &mut Vec<Delivery>,
 ) {
-    let upstream_id = message.raw_id().expect("classified request has an ID");
-    if state.pending.contains_key(upstream_id) {
+    let upstream_id = UpstreamRequest {
+        provider,
+        id: message
+            .raw_id()
+            .expect("classified request has an ID")
+            .to_owned(),
+    };
+    if state.pending.contains_key(&upstream_id) {
         return;
     }
     state.pending.insert(
@@ -365,7 +393,7 @@ fn resolved_server_request_id(message: &RpcMessage<'_>) -> Option<String> {
 /// per session and retire the replayable pending request atomically.
 fn resolve_request(
     state: &mut Routing,
-    upstream_id: &str,
+    upstream_id: &UpstreamRequest,
     line: &str,
     deliveries: &mut Vec<Delivery>,
 ) -> bool {
@@ -456,8 +484,10 @@ mod tests {
     fn routing_decisions_are_reproducible_without_queues_or_a_runtime() {
         let request =
             RpcMessage::parse(r#"{"id":17,"method":"request","params":{"future":true}}"#).unwrap();
-        let (routing, deliveries) = Routing::default().message(&request, [3, 9].into_iter());
-        let (_, repeated) = Routing::default().message(&request, [3, 9].into_iter());
+        let (routing, deliveries) =
+            Routing::default().message(Provider::Codex, &request, [3, 9].into_iter());
+        let (_, repeated) =
+            Routing::default().message(Provider::Codex, &request, [3, 9].into_iter());
         assert_eq!(deliveries, repeated);
         assert_eq!(deliveries.len(), 2);
         let ids: Vec<_> = deliveries
@@ -477,15 +507,35 @@ mod tests {
             })
             .collect();
         let (routing, first) = routing.respond(ids[0].0, &ids[0].1);
-        assert_eq!(first, ResponseRoute::Forward("17".into()));
+        assert_eq!(
+            first,
+            ResponseRoute::Forward(UpstreamRequest {
+                provider: Provider::Codex,
+                id: "17".into()
+            })
+        );
         let (routing, second) = routing.respond(ids[1].0, &ids[1].1);
         assert_eq!(second, ResponseRoute::Unknown);
-        assert!(routing.pending["17"].response_claimed);
-        assert_eq!(routing.pending["17"].proxies.len(), 2);
+        assert!(
+            routing.pending[&UpstreamRequest {
+                provider: Provider::Codex,
+                id: "17".into()
+            }]
+                .response_claimed
+        );
+        assert_eq!(
+            routing.pending[&UpstreamRequest {
+                provider: Provider::Codex,
+                id: "17".into()
+            }]
+                .proxies
+                .len(),
+            2
+        );
         let resolved =
             RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"requestId":17}}"#)
                 .unwrap();
-        let (routing, deliveries) = routing.message(&resolved, [3, 9].into_iter());
+        let (routing, deliveries) = routing.message(Provider::Codex, &resolved, [3, 9].into_iter());
         assert!(routing.pending.is_empty());
         assert!(routing.proxy_to_upstream.is_empty());
         assert_eq!(deliveries.len(), 2);
@@ -503,13 +553,69 @@ mod tests {
     }
 
     #[test]
+    fn colliding_provider_ids_keep_responses_replay_and_shutdown_independent() {
+        let router = SessionRouter::new();
+        let mut first = router.open_session(8);
+        let line = r#"{"id":"claude-permission:shared","method":"request","params":{}}"#;
+        let request = RpcMessage::parse(line).unwrap();
+        router.handle_server_message(Provider::Codex, &request);
+        router.handle_server_message(Provider::Claude, &request);
+        let codex = first.receiver.try_recv().unwrap();
+        let claude = first.receiver.try_recv().unwrap();
+        let id = |line: &str| {
+            RpcMessage::parse(line)
+                .unwrap()
+                .raw_id()
+                .unwrap()
+                .to_owned()
+        };
+        assert_ne!(id(&codex), id(&claude));
+        assert_eq!(
+            router.resolve_response(first.id(), &id(&codex)),
+            ResponseRoute::Forward(UpstreamRequest {
+                provider: Provider::Codex,
+                id: request.raw_id().unwrap().into(),
+            })
+        );
+        // Stopping Codex retires even an ID spelled like a Claude approval.
+        router.resolve_provider_requests(Provider::Codex);
+        let resolved: Value = serde_json::from_str(&first.receiver.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            resolved["params"]["requestId"],
+            serde_json::from_str::<Value>(&id(&codex)).unwrap()
+        );
+        assert!(first.receiver.try_recv().is_err());
+        drop(first);
+        let mut reconnected = router.open_session(8);
+        let replay = reconnected.receiver.try_recv().unwrap();
+        assert!(reconnected.receiver.try_recv().is_err());
+        assert_eq!(
+            router.resolve_response(reconnected.id(), &id(&replay)),
+            ResponseRoute::Forward(UpstreamRequest {
+                provider: Provider::Claude,
+                id: request.raw_id().unwrap().into(),
+            })
+        );
+        let resolved = RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"requestId":"claude-permission:shared"}}"#).unwrap();
+        router.handle_server_message(Provider::Claude, &resolved);
+        let resolution: Value =
+            serde_json::from_str(&reconnected.receiver.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            resolution["params"]["requestId"],
+            serde_json::from_str::<Value>(&id(&replay)).unwrap()
+        );
+        assert!(router.open_session(8).receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn failed_delivery_removes_aliases_and_retains_requests_for_reconnect() {
         let router = SessionRouter::new();
         let mut slow = router.open_session(1);
         let mut healthy = router.open_session(4);
         let notification = r#"{"method":"event","params":{}}"#;
-        router.handle_server_message(&RpcMessage::parse(notification).unwrap());
+        router.handle_server_message(Provider::Codex, &RpcMessage::parse(notification).unwrap());
         router.handle_server_message(
+            Provider::Codex,
             &RpcMessage::parse(r#"{"id":8,"method":"request","params":{}}"#).unwrap(),
         );
         assert!(router.ensure_session(slow.id()).is_err());
@@ -535,13 +641,19 @@ mod tests {
             .to_owned();
         assert_ne!(old_id, replay_id);
         assert!(
-            !lock_state(&router.state).routing.pending["8"]
+            !lock_state(&router.state).routing.pending[&UpstreamRequest {
+                provider: Provider::Codex,
+                id: "8".into()
+            }]
                 .proxies
                 .contains_key(&slow.id())
         );
         assert_eq!(
             router.resolve_response(reconnected.id(), &replay_id),
-            ResponseRoute::Forward("8".into())
+            ResponseRoute::Forward(UpstreamRequest {
+                provider: Provider::Codex,
+                id: "8".into()
+            })
         );
         assert_eq!(
             router.resolve_response(healthy.id(), &old_id),
@@ -556,7 +668,7 @@ mod tests {
         let mut first = router.open_session(4);
         let mut second = router.open_session(4);
         let line = r#" {"method":"future/event","params":{"unknown":[1,{"id":2}]} } "#;
-        router.handle_server_message(&RpcMessage::parse(line).unwrap());
+        router.handle_server_message(Provider::Codex, &RpcMessage::parse(line).unwrap());
         assert_eq!(first.recv().await.unwrap(), line);
         assert_eq!(second.recv().await.unwrap(), line);
     }
@@ -566,7 +678,7 @@ mod tests {
         let router = SessionRouter::new();
         let mut first = router.open_session(4);
         let mut second = router.open_session(4);
-        router.handle_server_message(&RpcMessage::parse(r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1","future":{"id":7}},"unknown":{"keep":true}}"#).unwrap());
+        router.handle_server_message(Provider::Codex, &RpcMessage::parse(r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1","future":{"id":7}},"unknown":{"keep":true}}"#).unwrap());
         let first_request = first.recv().await.unwrap();
         let second_request = second.recv().await.unwrap();
         let first_id = RpcMessage::parse(&first_request)
@@ -589,7 +701,10 @@ mod tests {
         assert_eq!(object["unknown"].get(), r#"{"keep":true}"#);
         assert_eq!(
             router.resolve_response(first.id(), &first_id),
-            ResponseRoute::Forward(r#""codex-1""#.to_owned())
+            ResponseRoute::Forward(UpstreamRequest {
+                provider: Provider::Codex,
+                id: r#""codex-1""#.to_owned()
+            })
         );
         assert_eq!(
             router.resolve_response(second.id(), &second_id),
@@ -601,7 +716,7 @@ mod tests {
             "an answered request must not be replayed while Codex resolves it"
         );
 
-        router.handle_server_message(&RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#).unwrap());
+        router.handle_server_message(Provider::Codex, &RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#).unwrap());
 
         let first_resolved: Value = serde_json::from_str(&first.recv().await.unwrap()).unwrap();
         let second_resolved: Value = serde_json::from_str(&second.recv().await.unwrap()).unwrap();
@@ -631,6 +746,7 @@ mod tests {
         let router = SessionRouter::new();
         let mut first = router.open_session(4);
         router.handle_server_message(
+            Provider::Codex,
             &RpcMessage::parse(r#"{"id":1,"method":"request","params":{}}"#).unwrap(),
         );
         let _ = first.recv().await.unwrap();

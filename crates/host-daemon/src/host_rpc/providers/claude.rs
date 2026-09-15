@@ -20,14 +20,11 @@ use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::{Provider, catalog::updated_at};
 use crate::host_rpc::routing::SessionRouter;
 use process::Process;
 
 pub(crate) const MODEL_PREFIX: &str = "claude:";
-
-pub(crate) fn is_permission_id(raw_id: &str) -> bool {
-    raw_id.starts_with("\"claude-permission:")
-}
 
 pub(crate) struct Claude {
     program: PathBuf,
@@ -783,8 +780,10 @@ impl Worker {
                 sender: self.input.clone(),
             },
         );
-        self.router
-            .handle_server_message(&RpcMessage::parse(&line).map_err(|error| error.to_string())?);
+        self.router.handle_server_message(
+            Provider::Claude,
+            &RpcMessage::parse(&line).map_err(|error| error.to_string())?,
+        );
         Ok(())
     }
 
@@ -997,13 +996,6 @@ fn status(kind: &str) -> ThreadStatus {
         extra: Default::default(),
     }
 }
-pub(crate) fn updated_at(thread: &Thread) -> u64 {
-    thread
-        .updated_at
-        .as_ref()
-        .and_then(|number| number.as_u64())
-        .unwrap_or_default()
-}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1018,5 +1010,8 @@ fn save(directory: &Path, record: &Record) -> Result<(), String> {
 }
 fn emit(router: &SessionRouter, method: &str, params: Value) {
     let line = json!({"method":method,"params":params}).to_string();
-    router.handle_server_message(&RpcMessage::parse(&line).expect("serialized notification"));
+    router.handle_server_message(
+        Provider::Claude,
+        &RpcMessage::parse(&line).expect("serialized notification"),
+    );
 }

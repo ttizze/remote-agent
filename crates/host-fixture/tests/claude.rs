@@ -348,6 +348,87 @@ async fn claude_approval_replays_after_disconnect_denial_is_effective_and_interr
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provider_selection_cannot_redirect_an_existing_conversation() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        let codex_model = store
+            .snapshot()
+            .models
+            .iter()
+            .find(|model| !model.model.starts_with("claude:"))
+            .unwrap()
+            .model
+            .clone();
+        for (original, other) in [
+            (codex_model.as_str(), "claude:default"),
+            ("claude:default", codex_model.as_str()),
+        ] {
+            store
+                .dispatch(Intent::NewChat { cwd: String::new() })
+                .await
+                .unwrap();
+            let key = store.snapshot().navigation.draft_key.clone();
+            store
+                .dispatch(Intent::SelectModel {
+                    thread_id: key,
+                    model: original.into(),
+                })
+                .await
+                .unwrap();
+            let id = send(&store, "original provider", &format!("{original}-start")).await;
+            completed(&store, &id, 1, "completed").await;
+
+            store
+                .dispatch(Intent::SelectModel {
+                    thread_id: id.clone(),
+                    model: other.into(),
+                })
+                .await
+                .unwrap();
+            draft(&store, "keep this input").await;
+            assert!(
+                store
+                    .dispatch(Intent::Submit {
+                        thread_id: Some(id.clone()),
+                        client_user_message_id: format!("{original}-mismatch"),
+                    })
+                    .await
+                    .is_err()
+            );
+            let snapshot = store.snapshot();
+            assert_eq!(snapshot.navigation.thread_id.as_deref(), Some(id.as_str()));
+            assert_eq!(snapshot.drafts[&id].text, "keep this input");
+            assert!(snapshot.error.as_ref().unwrap().contains("新しい会話"));
+            assert!(snapshot.pending_submissions.is_empty());
+            assert_eq!(snapshot.conversations[&id].turns.as_ref().unwrap().len(), 1);
+
+            store
+                .dispatch(Intent::SelectModel {
+                    thread_id: id.clone(),
+                    model: original.into(),
+                })
+                .await
+                .unwrap();
+            send(
+                &store,
+                "continue with original provider",
+                &format!("{original}-retry"),
+            )
+            .await;
+            let snapshot = completed(&store, &id, 2, "completed").await;
+            assert!(snapshot.error.is_none());
+        }
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("provider selection deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_claude_keeps_codex_usable() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let root = tempfile::tempdir().unwrap();
