@@ -2,6 +2,7 @@ pub mod client;
 pub mod diagnostics;
 pub mod models;
 pub mod peer;
+pub mod session;
 pub mod state;
 pub mod store;
 pub mod transfers;

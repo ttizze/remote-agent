@@ -1,7 +1,7 @@
 //! Local discovery shares one normal Host across credential directories. The
 //! short registry lock serializes discovery/startup; host.lock owns the process
 //! lifetime. A stale registry survives crashes without reviving a stale ticket.
-use crate::KeyStorage;
+use crate::{KeyStorage, platform::FileLock};
 use agent_core::transport::{Identity, Ticket};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -44,17 +44,6 @@ pub struct HostLease {
     key_storage: KeyStorage,
     registry: LocalHostRegistry,
     _lock: FileLock,
-}
-
-struct FileLock(File);
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // A concurrently forked child can retain this open file description
-        // until exec. Releasing ownership must not wait for its descriptor.
-        if let Err(error) = self.0.unlock() {
-            agent_core::diagnostics::error("release local Host lock", &error.to_string());
-        }
-    }
 }
 
 impl LocalHostRegistry {

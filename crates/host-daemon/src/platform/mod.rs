@@ -68,3 +68,14 @@ pub fn save_private_json(path: &Path, value: &impl serde::Serialize) -> Result<(
         )
         .map_err(|error| error.to_string())
 }
+
+/// Own an already acquired file lock. Explicit release also covers descriptors
+/// temporarily inherited by a concurrently spawned child process.
+pub(crate) struct FileLock(pub fs::File);
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            agent_core::diagnostics::error("release state file lock", &error.to_string());
+        }
+    }
+}
