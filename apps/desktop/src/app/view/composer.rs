@@ -182,17 +182,25 @@ impl Desktop {
             .child(div().text_sm().child("Codex アカウント"))
             .child(account_selector(
                 accounts,
-                self.busy > 0 || !self.snapshot.connected,
+                self.busy > 0
+                    || self.account_busy
+                    || self.snapshot.account.login.is_some()
+                    || !self.snapshot.connected,
                 move |intent, _, cx| {
                     let _ = entity.update(cx, |view, cx| {
-                        if view.busy > 0 || view.session.is_none() || !view.snapshot.connected {
+                        if view.busy > 0 || view.snapshot.account.login.is_some() {
                             return;
                         }
-                        view.busy += 1;
-                        view.perform(intent, OperationCompletion::Busy);
+                        view.account_operation(intent);
                         cx.notify();
                     });
                 },
+            ))
+            .child(self.button(
+                "manage-accounts",
+                "アカウントを管理",
+                cx,
+                |s, _, _| s.open_settings(),
             ))
             .when_some(account_error, |column, error| {
                 column.child(div().text_xs().text_color(rgb(0xff7777)).child(error))

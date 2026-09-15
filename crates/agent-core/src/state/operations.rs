@@ -27,6 +27,7 @@ macro_rules! rpc_operation {
 pub enum Intent {
     ListAccounts(ListAccounts),
     SelectAccount(SelectAccount),
+    LogoutAccount(LogoutAccount),
     StartAccountLogin(StartAccountLogin),
     ReadAccountLogin(ReadAccountLogin),
     CancelAccountLogin(CancelAccountLogin),

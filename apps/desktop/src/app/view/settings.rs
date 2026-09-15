@@ -3,6 +3,7 @@ use super::*;
 impl Desktop {
     pub(super) fn open_settings(&mut self) {
         self.tab = Tab::Settings;
+        self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
         self.worktree_removal = None;
         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
         self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
@@ -17,6 +18,7 @@ impl Desktop {
         if let Some(hosts) = &self.hosts {
             body = body.child(hosts.clone());
         }
+        body = body.child(self.account_settings(cx));
         body = body.child(
             v_flex().gap_3()
                 .child(div().text_xl().child("ワークツリー"))
@@ -333,5 +335,141 @@ impl Desktop {
             Intent::RemoveWorktree(op::RemoveWorktree { path }),
             OperationCompletion::RemoveWorktree,
         );
+    }
+}
+
+impl Desktop {
+    pub(in crate::app) fn account_operation(&mut self, intent: Intent) {
+        if self.account_busy || self.session.is_none() || !self.snapshot.connected {
+            return;
+        }
+        self.account_busy = true;
+        self.perform(intent, OperationCompletion::Account);
+    }
+
+    fn account_settings(&self, cx: &Context<Self>) -> AnyElement {
+        let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
+        let mut body = v_flex().gap_3()
+            .child(div().text_xl().child("Codex アカウント"))
+            .child("選択中の Host のアカウントを管理します。変更は同じ Host に接続する端末にも適用されます。");
+        if let Some(accounts) = &self.snapshot.account.accounts {
+            if accounts.selected_id.is_none() && accounts.error.is_none() {
+                body = body.child("ログインするアカウントを追加または選択してください。");
+            }
+            for (index, account) in accounts.accounts.iter().enumerate() {
+                let select_id = account.id.clone();
+                let logout_id = account.id.clone();
+                let selected = accounts.selected_id.as_ref() == Some(&account.id);
+                body = body.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(account.email.clone().unwrap_or_else(|| account.id.clone())),
+                        )
+                        .child(
+                            self.button(
+                                format!("settings-account-select-{index}"),
+                                if selected {
+                                    "使用中"
+                                } else {
+                                    "使用する"
+                                },
+                                cx,
+                                move |s, _, _| {
+                                    s.account_operation(Intent::SelectAccount(op::SelectAccount {
+                                        id: select_id.clone(),
+                                    }));
+                                },
+                            )
+                            .disabled(
+                                disabled || selected || self.snapshot.account.login.is_some(),
+                            ),
+                        )
+                        .child(
+                            self.button(
+                                format!("settings-account-logout-{index}"),
+                                "ログアウト",
+                                cx,
+                                move |s, _, _| {
+                                    s.account_operation(Intent::LogoutAccount(op::LogoutAccount {
+                                        id: logout_id.clone(),
+                                    }));
+                                },
+                            )
+                            .disabled(disabled || self.snapshot.account.login.is_some()),
+                        ),
+                );
+            }
+            if let Some(error) = &accounts.error {
+                body = body.child(div().text_sm().child(error.clone()));
+            }
+        }
+        if let Some(login) = &self.snapshot.account.login {
+            let code = login.user_code.clone();
+            let url = login.verification_url.clone();
+            let cancel_id = login.login_id.clone();
+            body = body
+                .child("ブラウザでログインし、次のコードを入力してください。")
+                .child(div().text_xl().child(login.user_code.clone()))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(self.button(
+                            "account-copy-code",
+                            "コードをコピー",
+                            cx,
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                            },
+                        ))
+                        .child(self.button(
+                            "account-open-login",
+                            "ブラウザでログイン",
+                            cx,
+                            move |_, _, cx| cx.open_url(&url),
+                        ))
+                        .child(
+                            self.button(
+                                "account-cancel-login",
+                                "キャンセル",
+                                cx,
+                                move |s, _, _| {
+                                    s.account_operation(Intent::CancelAccountLogin(
+                                        op::CancelAccountLogin {
+                                            id: cancel_id.clone(),
+                                        },
+                                    ));
+                                },
+                            )
+                            .disabled(disabled),
+                        ),
+                )
+                .child(
+                    self.button(
+                        "account-check-login",
+                        "ログイン状態を確認",
+                        cx,
+                        |s, _, _| {
+                            s.account_polling = true;
+                        },
+                    )
+                    .disabled(disabled),
+                );
+        } else {
+            body = body.child(
+                self.button(
+                    "account-start-login",
+                    "アカウントを追加・再ログイン",
+                    cx,
+                    |s, _, _| {
+                        s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {}));
+                    },
+                )
+                .disabled(disabled),
+            );
+        }
+        body.into_any_element()
     }
 }

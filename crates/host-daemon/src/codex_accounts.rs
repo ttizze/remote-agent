@@ -27,6 +27,8 @@ pub(crate) struct Account {
 struct Registry {
     accounts: Vec<Account>,
     selected_id: Option<String>,
+    #[serde(default)]
+    signed_out: bool,
 }
 
 struct Login {
@@ -57,6 +59,8 @@ pub(crate) enum AccountRequest {
     List(Empty),
     #[serde(rename = "host/account/select")]
     Select(op::SelectAccount),
+    #[serde(rename = "host/account/logout")]
+    Logout(op::LogoutAccount),
     #[serde(rename = "host/account/login/start")]
     LoginStart(Empty),
     #[serde(rename = "host/account/login/status")]
@@ -113,7 +117,12 @@ impl Accounts {
             completed_login: None,
             restoration_error,
         };
-        if let Some(id) = accounts.registry.selected_id.clone() {
+        if accounts.registry.signed_out {
+            rpc(primary, "account/logout", json!({})).await?;
+            accounts
+                .restoration_error
+                .send_replace(Some("ログインするアカウントを選択してください。".into()));
+        } else if let Some(id) = accounts.registry.selected_id.clone() {
             let error = accounts.select(primary, &id).await.err();
             accounts.restoration_error.send_replace(error);
         }
@@ -204,6 +213,52 @@ impl Accounts {
                     persistence_error: self.save().await.err(),
                 })
             }
+            AccountRequest::Logout(params) => {
+                if !self
+                    .registry
+                    .accounts
+                    .iter()
+                    .any(|account| account.id == params.id)
+                {
+                    return Err("アカウントが見つかりません。".into());
+                }
+                let selected = self
+                    .registry
+                    .selected_id
+                    .as_deref()
+                    .or((!self.registry.signed_out).then_some("desktop"))
+                    == Some(params.id.as_str());
+                if selected {
+                    // Persist the explicit signed-out state before touching credentials,
+                    // so a restart cannot silently select another saved account.
+                    let was_signed_out = self.registry.signed_out;
+                    self.registry.signed_out = true;
+                    if let Err(error) = self.save().await {
+                        self.registry.signed_out = was_signed_out;
+                        return Err(error);
+                    }
+                    self.restoration_error
+                        .send_replace(Some("ログインするアカウントを選択してください。".into()));
+                    rpc(primary, "account/logout", json!({})).await?;
+                }
+                rpc(self.helper(&params.id).await?, "account/logout", json!({})).await?;
+                self.helpers.remove(&params.id);
+                if self
+                    .completed_login
+                    .as_ref()
+                    .is_some_and(|(_, id)| id == &params.id)
+                {
+                    self.completed_login = None;
+                }
+                self.registry
+                    .accounts
+                    .retain(|account| account.id != params.id);
+                if selected {
+                    self.registry.selected_id = None;
+                }
+                self.save().await?;
+                Ok(AccountResponse::Empty(Empty {}))
+            }
             AccountRequest::LoginStart(_) => {
                 if self.login.is_some() {
                     self.cancel_login().await?;
@@ -255,7 +310,11 @@ impl Accounts {
                 {
                     return Ok(AccountResponse::Empty(Empty {}));
                 }
-                let login = self.login.as_ref().ok_or("ログイン手続きがありません。")?;
+                // A failed/expired status read may already have discarded the helper.
+                // Let clients dismiss that login and start again.
+                let Some(login) = self.login.as_ref() else {
+                    return Ok(AccountResponse::Empty(Empty {}));
+                };
                 if params.id != login.id {
                     return Err("ログイン手続きが一致しません。".into());
                 }
@@ -353,6 +412,7 @@ impl Accounts {
         )
         .await?;
         self.registry.selected_id = Some(id.to_owned());
+        self.registry.signed_out = false;
         self.restoration_error.send_replace(None);
         Ok(())
     }

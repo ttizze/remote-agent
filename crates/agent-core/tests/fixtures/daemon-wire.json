@@ -141,7 +141,8 @@
         "status": {
           "type": "idle"
         },
-        "updatedAt": 1
+        "updatedAt": 1,
+        "worktreeMerged": false
       }
     ],
     "hasMoreChats": false,

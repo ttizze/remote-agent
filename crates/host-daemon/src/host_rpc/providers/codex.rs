@@ -100,6 +100,7 @@ impl Codex {
             Ok::<_, RpcMessageError>(match method {
                 "host/account/list"
                 | "host/account/select"
+                | "host/account/logout"
                 | "host/account/login/start"
                 | "host/account/login/status"
                 | "host/account/login/cancel" => {
