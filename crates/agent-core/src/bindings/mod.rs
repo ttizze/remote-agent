@@ -86,9 +86,6 @@ impl AgentStore {
 
     pub async fn reconnect(&self, connection: Connection) -> Result<(), AgentError> {
         let secret = Zeroizing::new(connection.identity);
-        // Foreground recovery must not probe a suspended transport with normal
-        // RPCs: their 30-second deadline would delay opening the new session.
-        self.store.disconnect().await.map_err(error)?;
         let bytes = Zeroizing::new(
             <[u8; 32]>::try_from(secret.as_slice())
                 .map_err(|_| error("identity must contain 32 bytes"))?,

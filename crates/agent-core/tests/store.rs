@@ -1972,6 +1972,79 @@ async fn reconnect_preserves_edits_made_during_pairing() {
 }
 
 #[tokio::test]
+async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
+    use agent_core::transport::{Endpoint, Identity, Relays, Trust};
+    for action in ["reconnect", "disconnect", "close", "drop"] {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let client = Arc::new(Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap());
+            let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
+            let (store, mut old_reader, _old_writer) = setup(Snapshot::default()).await;
+            let connecting = {
+                let store = store.clone();
+                let client = client.clone();
+                let ticket = host.ticket();
+                tokio::spawn(async move { store.reconnect(&client, &ticket, Some(uuid::Uuid::new_v4())).await })
+            };
+            let pending = host.accept().await.unwrap().unwrap().pairing().await.unwrap();
+            assert!(old_reader.read_line().await.unwrap().is_none(), "core must release the old connection before pairing");
+            assert!(!store.snapshot().connected);
+            store.dispatch(Intent::SetDraftText { thread_id: "local".into(), text: "接続待ち中の編集".into() }).await.unwrap();
+            let drafts = store.snapshot().drafts.clone();
+            let replacement = match action {
+                "reconnect" => {
+                    let ticket = host.ticket();
+                    let (result, incoming) = tokio::join!(store.reconnect(&client, &ticket, None), host.accept());
+                    result.unwrap();
+                    Some(incoming.unwrap().unwrap().authorize(&trust).unwrap())
+                }
+                "disconnect" => { store.disconnect().await.unwrap(); None }
+                "close" => { store.close().await.unwrap(); None }
+                "drop" => { connecting.abort(); None }
+                _ => unreachable!(),
+            };
+            if action == "drop" {
+                assert!(connecting.await.unwrap_err().is_cancelled());
+            } else {
+                assert!(connecting.await.unwrap().is_err(), "obsolete pairing must not succeed: {action}");
+            }
+            // A delayed authorization cannot revive the superseded connection.
+            if let Ok((session, peer, _events)) = pending.authorize(&trust).await {
+                let _ = peer.close().await;
+                session.close();
+            }
+            if let Some(session) = replacement {
+                let (read, write) = tokio::io::split(session.accept_stream().await.unwrap());
+                let mut reader = JsonlReader::new(read);
+                let mut writer = JsonlWriter::new(write);
+                assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+                for _ in 0..2 {
+                    let request = serde_json::from_str::<Value>(&reader.read_line().await.unwrap().unwrap()).unwrap();
+                    let result = match request["method"].as_str().unwrap() {
+                        "host/thread/list" => json!({"data":[{"id":"replacement","name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                        "model/list" => json!({"data":[],"nextCursor":null}),
+                        other => panic!("unexpected bootstrap: {other}"),
+                    };
+                    writer.write_line(&json!({"id":request["id"],"result":result}).to_string()).await.unwrap();
+                }
+                wait_for(&store, |state| state.threads.as_ref().is_some_and(|threads| threads.data.iter().any(|thread| thread.id.as_deref() == Some("replacement")))).await;
+                assert!(store.snapshot().connected);
+                assert!(store.snapshot().error.is_none());
+                store.close().await.unwrap();
+                session.close();
+            } else {
+                assert!(!store.snapshot().connected, "cancelled setup must remain offline: {action}");
+                store.close().await.unwrap();
+            }
+            assert!(Arc::ptr_eq(&drafts, &store.snapshot().drafts));
+            assert_eq!(store.snapshot().drafts["local"].text, "接続待ち中の編集");
+            client.close().await;
+            host.close().await;
+        }).await.unwrap_or_else(|_| panic!("timed out: {action}"));
+    }
+}
+
+#[tokio::test]
 async fn dispatch_publishes_edits_before_returning_to_the_native_input_control() {
     let store = Store::offline(Snapshot::default());
     let navigation = store.dispatch(Intent::NewChat {
