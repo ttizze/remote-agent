@@ -95,6 +95,8 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(before["result"]["thread"]["turns"].as_array().unwrap().len(), 1);
         let canceled = call(&service, &mut session, "host/account/login/start", json!({})).await;
         assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
+        // Dismissing an already discarded login must still allow another attempt.
+        assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"].as_array().unwrap().len(), 1);
         let login = call(&service, &mut session, "host/account/login/start", json!({})).await;
@@ -159,6 +161,13 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
         completed_turn(&service, &mut session, started["result"]["thread"]["id"].as_str().unwrap(), "recovered account").await;
+        let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":second})).await;
+        assert!(logged_out.get("error").is_none(), "{logged_out}");
+        let remaining = call(&service, &mut session, "host/account/list", json!({})).await;
+        assert_eq!(remaining["result"]["accounts"].as_array().unwrap().len(), 1);
+        assert_eq!(remaining["result"]["accounts"][0]["id"], "desktop");
+        assert!(remaining["result"]["selectedId"].is_null(), "logout must not select another saved account");
+
         drop(session); drop(service);
         server.shutdown().await.unwrap();
     }).await.expect("account switching stalled");
@@ -235,4 +244,68 @@ async fn helper_initialization_does_not_block_completed_turns() {
     })
     .await
     .expect("concurrent account/turn fixture stalled");
+}
+
+#[tokio::test]
+async fn logout_removes_credentials_survives_restart_and_allows_login_again() {
+    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("codex");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(home.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
+        let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
+        let accounts_dir = directory.path().join("accounts");
+        let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
+        let service = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(home.join("projects.json")));
+        service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
+        let mut session = service.open_session(256);
+        let listed = call(&service, &mut session, "host/account/list", json!({})).await;
+        assert_eq!(listed["result"]["selectedId"], "desktop");
+        let invalid = call(&service, &mut session, "host/account/logout", json!({"accountId":"missing"})).await;
+        assert!(invalid.get("error").is_some());
+        assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "desktop");
+        // Failed persistence must leave the account and its credentials usable.
+        let registry = std::fs::read(accounts_dir.join("accounts.json")).unwrap();
+        std::fs::remove_file(accounts_dir.join("accounts.json")).unwrap();
+        std::fs::create_dir(accounts_dir.join("accounts.json")).unwrap();
+        let failed = call(&service, &mut session, "host/account/logout", json!({"accountId":"desktop"})).await;
+        assert!(failed.get("error").is_some());
+        assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "desktop");
+        assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selectedId"], "desktop");
+        std::fs::remove_dir(accounts_dir.join("accounts.json")).unwrap();
+        std::fs::write(accounts_dir.join("accounts.json"), registry).unwrap();
+        let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":"desktop"})).await;
+        assert!(logged_out.get("error").is_none(), "{logged_out}");
+        assert!(rpc(&server, "fixture/account/current", json!({})).await["accountId"].is_null());
+        assert!(!home.join("account-fixture.json").exists());
+        let listed = call(&service, &mut session, "host/account/list", json!({})).await;
+        assert_eq!(listed["result"]["accounts"], json!([]));
+        assert!(listed["result"]["selectedId"].is_null());
+        drop(session); drop(service);
+        server.shutdown().await.unwrap();
+        let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
+        let service = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(home.join("projects.json")));
+        service.enable_accounts(accounts_dir.clone(), config).await.unwrap();
+        let mut session = service.open_session(256);
+        let listed = call(&service, &mut session, "host/account/list", json!({})).await;
+        assert_eq!(listed["result"]["accounts"], json!([]));
+        assert!(listed["result"]["selectedId"].is_null());
+        let login = call(&service, &mut session, "host/account/login/start", json!({})).await;
+        let status = loop {
+            let status = call(&service, &mut session, "host/account/login/status", json!({"loginId":login["result"]["loginId"]})).await;
+            assert!(status.get("error").is_none(), "{status}");
+            if status["result"]["completed"] == true { break status; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        let account_id = status["result"]["accountId"].as_str().unwrap();
+        let selected = call(&service, &mut session, "host/account/select", json!({"accountId":account_id})).await;
+        assert!(selected.get("error").is_none(), "{selected}");
+        assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
+        let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":account_id})).await;
+        assert!(logged_out.get("error").is_none(), "{logged_out}");
+        assert!(!accounts_dir.join(account_id).join("account-fixture.json").exists());
+        assert_eq!(call(&service, &mut session, "fixture/account/refresh", json!({"previousAccountId":"second"})).await["result"]["hasToken"], false);
+        drop(session); drop(service);
+        server.shutdown().await.unwrap();
+    }).await.expect("logout and login stalled");
 }

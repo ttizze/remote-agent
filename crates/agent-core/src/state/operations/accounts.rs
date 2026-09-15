@@ -30,7 +30,10 @@ impl Operation for SelectAccount {
             Arc::make_mut(accounts).selected_id = Some(selected_id);
         }
         snapshot.error = persistence_error;
-        vec![Effect::execute(LoadModels {})]
+        vec![
+            Effect::execute(ListAccounts {}),
+            Effect::execute(LoadModels {}),
+        ]
     }
 }
 
@@ -102,5 +105,25 @@ impl Operation for CancelAccountLogin {
         account.login = None;
         account.login_status = None;
         Vec::new()
+    }
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogoutAccount {
+    #[serde(rename = "accountId")]
+    pub id: String,
+}
+rpc::rpc_method!(LogoutAccount, Map<String, Value>, "host/account/logout");
+
+impl Operation for LogoutAccount {
+    rpc_operation!();
+    const INVALIDATES: bool = true;
+    fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.account).accounts = None;
+        vec![
+            Effect::execute(ListAccounts {}),
+            Effect::execute(LoadModels {}),
+        ]
     }
 }

@@ -1778,7 +1778,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let request = read(&mut reader).await;
-    writer.write_line(&json!({"id":request["id"],"result":{"accounts":[{"id":"a"},{"id":"b"}],"selectedId":"a","error":null}}).to_string()).await.unwrap();
+    writer.write_line(&json!({"id":request["id"],"result":{"accounts":[{"id":"a"}],"selectedId":"a","error":null}}).to_string()).await.unwrap();
     listing.await.unwrap();
     assert_eq!(
         store
@@ -1808,12 +1808,29 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
         Some("b")
     );
     assert_eq!(store.snapshot().error.as_deref(), Some("store unavailable"));
-    let models = read(&mut reader).await;
-    assert_eq!(models["method"], "model/list");
-    writer
-        .write_line(&json!({"id":models["id"],"result":{"data":[]}}).to_string())
-        .await
-        .unwrap();
+    // Selecting a newly logged-in account invalidates the login completion's
+    // pending list request, so selection must fetch the new entry itself.
+    for _ in 0..2 {
+        let request = read(&mut reader).await;
+        let result = match request["method"].as_str().unwrap() {
+            "host/account/list" => {
+                json!({"accounts":[{"id":"a"},{"id":"b"}],"selectedId":"b","error":null})
+            }
+            "model/list" => json!({"data":[]}),
+            method => panic!("unexpected account refresh: {method}"),
+        };
+        writer
+            .write_line(&json!({"id":request["id"],"result":result}).to_string())
+            .await
+            .unwrap();
+    }
+    wait_for(&store, |s| {
+        s.account.accounts.as_ref().is_some_and(|accounts| {
+            accounts.accounts.iter().any(|account| account.id == "b")
+                && accounts.selected_id.as_deref() == Some("b")
+        })
+    })
+    .await;
     store.close().await.unwrap();
 }
 

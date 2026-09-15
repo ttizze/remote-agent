@@ -215,7 +215,7 @@ macro_rules! prepare_operations {
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
-        ListAccounts, SelectAccount, StartAccountLogin,
+        ListAccounts, SelectAccount, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, ForkThread,
         StartTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,

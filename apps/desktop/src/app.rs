@@ -52,6 +52,8 @@ enum OperationCompletion {
     Request(String),
     Dictation(uuid::Uuid),
     RemoveWorktree,
+    Account,
+    AccountLoginStatus,
     Gallery(uuid::Uuid),
 }
 enum Update {
@@ -196,6 +198,8 @@ pub(crate) struct Desktop {
     worktree_save_pending: bool,
     worktree_removal: Option<String>,
     worktree_busy: bool,
+    account_busy: bool,
+    account_polling: bool,
     expanded_projects: HashSet<String>,
     expanded_items: HashSet<String>,
     expanded_work: HashMap<String, ActivityExpansion>,
@@ -255,6 +259,18 @@ impl Desktop {
                     .await;
                 if view
                     .update(cx, |view, cx| {
+                        if view.account_polling
+                            && !view.account_busy
+                            && view.snapshot.connected
+                            && let Some(login) = &view.snapshot.account.login
+                        {
+                            let id = login.login_id.clone();
+                            view.account_busy = true;
+                            view.perform(
+                                Intent::ReadAccountLogin(op::ReadAccountLogin { id }),
+                                OperationCompletion::AccountLoginStatus,
+                            );
+                        }
                         if let Some(turn) = view.active_turn() {
                             view.remeasure_item(&turn.id);
                             cx.notify();
@@ -464,6 +480,8 @@ impl Desktop {
             worktree_save_pending: false,
             worktree_removal: None,
             worktree_busy: false,
+            account_busy: false,
+            account_polling: false,
             expanded_projects: HashSet::new(),
             expanded_items: HashSet::new(),
             expanded_work: HashMap::new(),
@@ -505,6 +523,8 @@ impl Desktop {
         self.busy = 0;
         self.worktree_removal = None;
         self.worktree_busy = false;
+        self.account_busy = false;
+        self.account_polling = false;
         self.error = self.runtime.logging_error.clone().unwrap_or_default();
         let epoch = self.epoch;
         let remote = self.remote.clone();
@@ -748,6 +768,28 @@ impl Desktop {
                 self.busy = self.busy.saturating_sub(1);
                 if let Err(error) = result {
                     self.set_error(error);
+                }
+                return;
+            }
+            OperationCompletion::Account | OperationCompletion::AccountLoginStatus => {
+                self.account_busy = false;
+                let polling = matches!(kind, OperationCompletion::AccountLoginStatus);
+                if let Err(error) = result {
+                    self.account_polling = false;
+                    self.set_error(error);
+                    self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
+                } else {
+                    self.accept_snapshot(window, cx);
+                    self.account_polling = self.snapshot.account.login.is_some();
+                    if polling
+                        && let Some(status) = &self.snapshot.account.login_status
+                        && status.completed
+                        && let Some(id) = &status.account_id
+                    {
+                        self.account_operation(Intent::SelectAccount(op::SelectAccount {
+                            id: id.clone(),
+                        }));
+                    }
                 }
                 return;
             }
