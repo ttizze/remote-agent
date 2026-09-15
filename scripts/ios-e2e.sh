@@ -53,6 +53,7 @@ if [[ $# == 0 ]]; then
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
         testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorCanAttachDownloadAndPrepareAIEdit \
