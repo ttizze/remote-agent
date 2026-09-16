@@ -1,0 +1,31 @@
+---
+source: crates/agent-core/src/presentation/markdown.rs
+expression: rows.iter().map(|row| row.iter().map(cell_text).collect::<Vec<_>>()).collect::<Vec<_>>()
+---
+[
+  [
+    "Left",
+    "Center",
+    "Right"
+  ],
+  [
+    "bold and link",
+    "",
+    "code"
+  ],
+  [
+    "",
+    "",
+    ""
+  ],
+  [
+    "last",
+    "escaped | pipe",
+    "gone"
+  ],
+  [
+    "",
+    "",
+    ""
+  ]
+]

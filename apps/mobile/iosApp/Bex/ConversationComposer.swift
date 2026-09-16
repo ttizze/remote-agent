@@ -128,7 +128,8 @@ extension ThreadScreen {
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if let runningTurnId = conversation?.runningTurnId,
+                    if let threadId = model.selectedThreadId,
+                       let runningTurnId = model.snapshot.conversation(id: threadId)?.activeTurnId(),
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, attachments
                        .isEmpty {

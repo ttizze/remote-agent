@@ -238,7 +238,7 @@ pub(crate) struct Desktop {
 }
 impl Desktop {
     fn set_error(&mut self, error: String) {
-        agent_core::diagnostics::error("desktop", &error);
+        tracing::error!(target: "bex", operation = "desktop", message = %error);
         self.error = error;
     }
     pub(crate) fn new(mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -278,8 +278,8 @@ impl Desktop {
                                 OperationCompletion::AccountLoginStatus,
                             );
                         }
-                        if let Some(turn) = view.active_turn() {
-                            view.remeasure_item(&turn.id);
+                        if let Some(id) = view.thread().and_then(|thread| thread.active_turn_id()) {
+                            view.remeasure_item(&id);
                             cx.notify();
                         }
                     })
@@ -583,7 +583,8 @@ impl Desktop {
                         remote.as_ref().map(|remote| remote.ticket.as_str()),
                         snapshot,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
                 Ok::<_, String>((Arc::new(store), path))
             }
             .await;
@@ -690,7 +691,7 @@ impl Desktop {
                             })
                         }
                         Err(error) => {
-                            agent_core::diagnostics::error("image.load", &error);
+                            tracing::error!(target: "bex", operation = "image.load", message = %error);
                             image.error = Some(error);
                         }
                     }
@@ -849,7 +850,7 @@ impl Desktop {
                         }
                     }
                     Err(error) => {
-                        agent_core::diagnostics::error("gallery.load", &error);
+                        tracing::error!(target: "bex", operation = "gallery.load", message = %error);
                         gallery.error = error;
                     }
                     _ => unreachable!("session image outcome"),
@@ -872,7 +873,7 @@ impl Desktop {
         if previous.error != self.snapshot.error
             && let Some(error) = &self.snapshot.error
         {
-            agent_core::diagnostics::error("store", error);
+            tracing::error!(target: "bex", operation = "store", message = %error);
         }
         sync_error_banner(
             &mut self.error,
@@ -1075,15 +1076,6 @@ impl Desktop {
             .models
             .iter()
             .find(|model| Some(model.model.as_str()) == self.draft().model.as_deref())
-    }
-    fn active_turn(&self) -> Option<&Turn> {
-        self.thread()?
-            .turns
-            .as_ref()?
-            .iter()
-            .rev()
-            .find(|turn| turn.status.as_deref() == Some("inProgress"))
-            .map(Arc::as_ref)
     }
     fn remote_key(&self) -> &str {
         self.remote.as_ref().map_or("local", |remote| &remote.id)

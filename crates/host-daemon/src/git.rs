@@ -1,23 +1,24 @@
+use anyhow::{Context as _, Result, anyhow};
 use std::{
     path::Path,
     process::{Command, Output},
 };
 
-pub(crate) fn text(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn text(cwd: &Path, args: &[&str]) -> Result<String> {
     let output = output(cwd, args)?;
-    String::from_utf8(output.stdout).map_err(|_| "git returned non-UTF-8 output".to_owned())
+    String::from_utf8(output.stdout).context("git returned non-UTF-8 output")
 }
 
-pub(crate) fn output(cwd: &Path, args: &[&str]) -> Result<Output, String> {
+pub(crate) fn output(cwd: &Path, args: &[&str]) -> Result<Output> {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)
         .output()
-        .map_err(|error| format!("failed to run git: {error}"))?;
+        .context("failed to run git")?;
     if output.status.success() {
         return Ok(output);
     }
-    Err(failure(&output))
+    Err(anyhow!(failure(&output)))
 }
 
 pub(crate) fn failure(output: &Output) -> String {

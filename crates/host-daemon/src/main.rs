@@ -14,12 +14,13 @@ async fn main() {
     };
 
     if let Err(error) = runtime::run(config).await {
-        agent_core::diagnostics::error("host.runtime", &error);
+        let error = format!("{error:#}");
+        tracing::error!(target: "bex", operation = "host.runtime", message = %error);
         eprintln!(
             "host daemon failed: {}",
             agent_core::diagnostics::sanitize(&error)
         );
         std::process::exit(1);
     }
-    agent_core::diagnostics::shutdown();
+    tracing::info!(target: "bex", operation = "shutdown", "Bex shutting down");
 }

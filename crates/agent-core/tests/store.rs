@@ -1393,13 +1393,6 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
                 .await
                 .unwrap();
         }
-        let close = read(&mut reader).await;
-        assert_eq!(close["method"], "process/kill");
-        assert_eq!(close["params"]["processHandle"], "terminal");
-        writer
-            .write_line(&json!({"id":close["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
         // Keep the transport alive until Store closes it.
         assert!(reader.read_line().await.unwrap().is_none());
     });
@@ -1449,6 +1442,24 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
     assert!(store.snapshot().terminals["terminal"].output.is_empty());
     store.close().await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn disconnect_does_not_wait_for_a_terminal_start_reply() {
+    let (store, mut reader, _writer) = setup(Snapshot::default()).await;
+    let starting = store.dispatch(Intent::StartTerminal(op::StartTerminal {
+        handle: "starting".into(),
+        cwd: "/fixture".into(),
+        size: agent_core::client::TerminalSize { cols: 80, rows: 24 },
+    }));
+    assert_eq!(read(&mut reader).await["method"], "host/terminal/start");
+    // Keep the response pending: Host cleanup is triggered by connection EOF.
+    tokio::time::timeout(Duration::from_secs(1), store.close())
+        .await
+        .expect("disconnect waited for terminal startup")
+        .unwrap();
+    assert!(reader.read_line().await.unwrap().is_none());
+    assert!(starting.await.is_err());
 }
 
 #[tokio::test]

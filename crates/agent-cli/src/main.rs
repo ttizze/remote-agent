@@ -8,6 +8,7 @@ use agent_core::{
     store::{Outcome, Store},
     transport::{Endpoint, Identity, Relays, Ticket},
 };
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
@@ -70,8 +71,17 @@ fn parse_json(value: &str) -> Result<Value, serde_json::Error> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+async fn main() {
+    if let Err(error) = run(Args::parse()).await {
+        eprintln!(
+            "Error: {}",
+            agent_core::diagnostics::sanitize(&format!("{error:#}"))
+        );
+        std::process::exit(1);
+    }
+}
+
+async fn run(args: Args) -> anyhow::Result<()> {
     let mut snapshot = Snapshot::default();
     match &args.command {
         Command::List {
@@ -103,7 +113,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
-            .spawn()?;
+            .spawn()
+            .context("cannot start stdio provider")?;
         let peer = RpcPeer::open(
             JsonlReader::new(process.stdout.take().expect("piped stdout")),
             process.stdin.take().expect("piped stdin"),
@@ -113,11 +124,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         child = Some(process);
         Store::new(peer, snapshot)
     } else {
-        let secret =
-            tokio::fs::read(args.identity_file.expect("identity required with ticket")).await?;
+        let secret = tokio::fs::read(args.identity_file.expect("identity required with ticket"))
+            .await
+            .context("cannot read client identity file")?;
         let bytes: [u8; 32] = secret
             .try_into()
-            .map_err(|_| "identity file must contain exactly 32 bytes")?;
+            .map_err(|_| anyhow::anyhow!("identity file must contain exactly 32 bytes"))?;
         let endpoint = Endpoint::bind(
             Identity::from_bytes(bytes),
             if args.no_relay {
@@ -126,9 +138,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Relays::Default
             },
         )
-        .await?;
-        let ticket: Ticket = args.ticket.expect("connection required").parse()?;
-        Store::connect(&endpoint, &ticket, snapshot, args.invitation).await?
+        .await
+        .context("cannot bind client endpoint")?;
+        let ticket: Ticket = args
+            .ticket
+            .expect("connection required")
+            .parse()
+            .context("cannot parse Host ticket")?;
+        Store::connect(&endpoint, &ticket, snapshot, args.invitation)
+            .await
+            .context("cannot connect to Host")?
     };
     let mut updates = store.subscribe();
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -143,16 +162,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Command::Approve { .. } => true,
                 };
                 if ready {
-                    return Ok::<_, Box<dyn std::error::Error>>(());
+                    return Ok::<_, anyhow::Error>(());
                 }
                 if let Some(error) = &snapshot.error {
-                    return Err(error.clone().into());
+                    return Err(anyhow::Error::msg(error.clone()));
                 }
             }
             updates.changed().await?;
         }
     })
-    .await??;
+    .await
+    .context("timed out waiting for initial Host state")?
+    .context("cannot load initial Host state")?;
     match args.command {
         Command::List { .. } => {
             println!("{}", serde_json::to_string(&store.snapshot().threads)?);

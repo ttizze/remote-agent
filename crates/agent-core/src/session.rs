@@ -394,11 +394,8 @@ pub struct Capabilities {
     pub rename: bool,
     pub model_change: bool,
 }
-pub fn capabilities(thread: &Thread) -> Capabilities {
-    thread.capabilities.unwrap_or_default()
-}
 pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
-    (!capabilities(thread).additional_input && thread.turns.iter().flatten().any(|turn| turn.status.as_deref() == Some("inProgress")))
+    (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status.as_deref() == Some("inProgress")))
         .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
 }
 

@@ -1,5 +1,5 @@
 use agent_core::{
-    state::{Intent, Snapshot, operations as op},
+    state::Snapshot,
     store::Store,
     transport::{Endpoint, Relays, Ticket},
 };
@@ -53,12 +53,10 @@ impl Connections {
         &self,
         remote: Option<&str>,
         snapshot: Snapshot,
-    ) -> Result<Store, String> {
+    ) -> anyhow::Result<Store> {
         let startup = self.startup.lock().await;
         if let Some(remote) = remote {
-            let ticket = remote
-                .parse::<Ticket>()
-                .map_err(|error| error.to_string())?;
+            let ticket = remote.parse::<Ticket>()?;
             let endpoint = match self.endpoint.get() {
                 Some((_, _, endpoint)) => endpoint,
                 None => self.endpoint_for(&discover_local_host().await?).await?,
@@ -66,64 +64,54 @@ impl Connections {
             drop(startup);
             return Store::connect(endpoint, &ticket, snapshot, None)
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(Into::into);
         }
         self.connect_local(snapshot).await
     }
 
-    async fn endpoint_for(&self, host: &LocalHost) -> Result<&Endpoint, String> {
-        let directory = tokio::fs::canonicalize(&host.directory)
-            .await
-            .map_err(|error| error.to_string())?;
+    async fn endpoint_for(&self, host: &LocalHost) -> anyhow::Result<&Endpoint> {
+        let directory = tokio::fs::canonicalize(&host.directory).await?;
         let storage = host.key_storage.unwrap_or_default();
         let (identity_directory, identity_storage, endpoint) = self
             .endpoint
             .get_or_try_init(|| async {
                 let mut host = host.clone();
                 host.directory = directory.clone();
-                let identity = tokio::task::spawn_blocking(move || host.load_identity())
-                    .await
-                    .map_err(|error| error.to_string())??;
-                let endpoint = Endpoint::bind(identity, Relays::Default)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok::<_, String>((directory.clone(), storage, endpoint))
+                let identity = tokio::task::spawn_blocking(move || host.load_identity()).await??;
+                let endpoint = Endpoint::bind(identity, Relays::Default).await?;
+                Ok::<_, anyhow::Error>((directory.clone(), storage, endpoint))
             })
             .await?;
         if identity_directory != &directory || identity_storage != &storage {
-            return Err("Local Host changed; restart Bex to use its identity".into());
+            return Err(anyhow::anyhow!(
+                "Local Host changed; restart Bex to use its identity"
+            ));
         }
         Ok(endpoint)
     }
 
-    async fn connect_local(&self, snapshot: Snapshot) -> Result<Store, String> {
+    async fn connect_local(&self, snapshot: Snapshot) -> anyhow::Result<Store> {
         let isolated = isolated_host()?;
         let mut child = None;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let mut last_error = "Host startup timed out".to_owned();
+        let mut last_error = anyhow::anyhow!("Host startup timed out");
         let ready = async {
             loop {
                 let location = discover_local_host().await?;
                 match &location.state {
                     LocalHostState::Ready(ticket) => {
                         let endpoint = self.endpoint_for(&location).await?;
-                        // Legacy Hosts do not mark a startup generation. Verify the
-                        // live management route before exposing a possibly stale ticket.
-                        let attempt = tokio::time::timeout(Duration::from_secs(1), async {
-                            let store = Store::connect(endpoint, ticket, snapshot.clone(), None)
-                                .await
-                                .map_err(|error| error.to_string())?;
-                            store
-                                .dispatch(Intent::LoadHostManagement(op::LoadHostManagement {}))
-                                .await
-                                .map_err(|error| error.to_string())?;
-                            Ok::<_, String>(store)
-                        })
+                        let attempt = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            Store::connect(endpoint, ticket, snapshot.clone(), None),
+                        )
                         .await;
                         match attempt {
                             Ok(Ok(store)) => break Ok(store),
-                            Ok(Err(error)) => last_error = error,
-                            Err(_) => last_error = "Host did not answer during startup".into(),
+                            Ok(Err(error)) => last_error = error.into(),
+                            Err(_) => {
+                                last_error = anyhow::anyhow!("Host did not answer during startup")
+                            }
                         }
                     }
                     LocalHostState::Stopped if child.is_none() => {
@@ -132,10 +120,10 @@ impl Connections {
                     _ => {}
                 }
                 if let Some(child) = child.as_mut()
-                    && let Some(status) = child.try_wait().map_err(|error| error.to_string())?
+                    && let Some(status) = child.try_wait()?
                     && matches!(location.state, LocalHostState::Stopped)
                 {
-                    break Err(format!("Host exited during startup ({status})"));
+                    break Err(anyhow::anyhow!("Host exited during startup ({status})"));
                 }
                 if tokio::time::Instant::now() >= deadline {
                     break Err(last_error);
@@ -159,17 +147,19 @@ impl Connections {
     }
 }
 
-fn isolated_host() -> Result<bool, String> {
+fn isolated_host() -> anyhow::Result<bool> {
     match std::env::var("BEX_ISOLATED_HOST").as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("0") => Ok(false),
         Ok("1") if std::env::var_os("BEX_STATE_DIR").is_some() => Ok(true),
-        Ok("1") => Err("BEX_ISOLATED_HOST=1 requires BEX_STATE_DIR".into()),
-        _ => Err("BEX_ISOLATED_HOST must be 0 or 1".into()),
+        Ok("1") => Err(anyhow::anyhow!(
+            "BEX_ISOLATED_HOST=1 requires BEX_STATE_DIR"
+        )),
+        _ => Err(anyhow::anyhow!("BEX_ISOLATED_HOST must be 0 or 1")),
     }
 }
 
-async fn discover_local_host() -> Result<LocalHost, String> {
-    let preferred = state_dir()?;
+async fn discover_local_host() -> anyhow::Result<LocalHost> {
+    let preferred = state_dir().map_err(anyhow::Error::msg)?;
     let isolated = isolated_host()?;
     tokio::task::spawn_blocking(move || {
         let registry = if isolated {
@@ -179,11 +169,10 @@ async fn discover_local_host() -> Result<LocalHost, String> {
         };
         registry.resolve(&preferred)
     })
-    .await
-    .map_err(|error| error.to_string())?
+    .await?
 }
 
-fn start_host(host: &LocalHost, isolated: bool) -> Result<std::process::Child, String> {
+fn start_host(host: &LocalHost, isolated: bool) -> anyhow::Result<std::process::Child> {
     let executable = std::env::var_os("BEX_HOST_DAEMON")
         .map(PathBuf::from)
         .map(Ok)
@@ -191,8 +180,7 @@ fn start_host(host: &LocalHost, isolated: bool) -> Result<std::process::Child, S
             std::env::current_exe().map(|path| {
                 path.with_file_name(format!("host-daemon{}", std::env::consts::EXE_SUFFIX))
             })
-        })
-        .map_err(|error| error.to_string())?;
+        })?;
     let mut command = Command::new(executable);
     command
         .arg("--state-dir")
@@ -216,7 +204,7 @@ fn start_host(host: &LocalHost, isolated: bool) -> Result<std::process::Child, S
         command.arg("--isolated");
     }
     os::prepare_host(&mut command);
-    command.spawn().map_err(|error| error.to_string())
+    command.spawn().map_err(Into::into)
 }
 
 pub(crate) fn choose_files() -> Option<Vec<PathBuf>> {

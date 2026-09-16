@@ -5,6 +5,7 @@ use agent_core::{
     peer::{PeerEvent, RpcPeer},
     transport::{Endpoint, IncomingSession, NodeId, Session, Ticket, authorize},
 };
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -43,7 +44,7 @@ impl HostRuntime {
     pub fn ticket(&self) -> Ticket {
         self.endpoint.ticket()
     }
-    pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<(), String> {
+    pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<()> {
         self.service.start();
         let mut sessions = JoinSet::new();
         let authorized_slots = Arc::new(tokio::sync::Semaphore::new(64));
@@ -69,14 +70,14 @@ impl HostRuntime {
                                     runtime.serve(incoming, stop, permit, authorized_slots).await
                                 });
                             }
-                            Some(Err(error)) => agent_core::diagnostics::error("host.accept", &error.to_string()),
+                            Some(Err(error)) => tracing::error!(target: "bex", operation = "host.accept", message = %error),
                             None => break Ok(()),
                         }
                     },
                     Some(result) = sessions.join_next(), if !sessions.is_empty() => {
                         match result {
-                            Ok(Err(error)) => agent_core::diagnostics::error("host.session", &error),
-                            Err(error) => agent_core::diagnostics::error("host.session", &error.to_string()),
+                            Ok(Err(error)) => tracing::error!(target: "bex", operation = "host.session", message = %format_args!("{error:#}")),
+                            Err(error) => tracing::error!(target: "bex", operation = "host.session", message = %error),
                             Ok(Ok(())) => {}
                         }
                     }
@@ -95,40 +96,37 @@ impl HostRuntime {
         stop: CancellationToken,
         permit: tokio::sync::OwnedSemaphorePermit,
         authorized_slots: Arc<tokio::sync::Semaphore>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let node = incoming.node_id();
         let establish = async {
             let record = self.credentials.record.lock().await;
             if record.trust.allowed.contains(&node) {
-                let connection = scopeguard::guard(
-                    incoming
-                        .authorize(&record.trust)
-                        .map_err(|e| e.to_string())?,
-                    |session| session.close(),
-                );
+                let connection = scopeguard::guard(incoming.authorize(&record.trust)?, |session| {
+                    session.close()
+                });
                 drop(record);
-                let stream = connection
-                    .accept_stream()
-                    .await
-                    .map_err(|e| e.to_string())?;
+                let stream = connection.accept_stream().await?;
                 let (read, write) = tokio::io::split(stream);
                 let peer =
-                    RpcPeer::open(agent_core::peer::JsonlReader::new(read), write, None, 128)
-                        .map_err(|e| e.to_string())?;
+                    RpcPeer::open(agent_core::peer::JsonlReader::new(read), write, None, 128)?;
                 let events = peer.subscribe();
-                Ok((scopeguard::ScopeGuard::into_inner(connection), peer, events))
+                Ok::<_, anyhow::Error>((
+                    scopeguard::ScopeGuard::into_inner(connection),
+                    peer,
+                    events,
+                ))
             } else {
                 drop(record);
-                let pairing = incoming.pairing().await.map_err(|e| e.to_string())?;
+                let pairing = incoming.pairing().await?;
                 self.pair_node(node, pairing.invitation).await?;
                 let trust = self.credentials.record.lock().await.trust.clone();
-                pairing.authorize(&trust).await.map_err(|e| e.to_string())
+                Ok(pairing.authorize(&trust).await?)
             }
         };
         let (connection, peer, events) = tokio::select! {
             _ = stop.cancelled() => return Ok(()),
             result = tokio::time::timeout(Duration::from_secs(15), establish) =>
-                result.map_err(|_| "session establishment timed out")??,
+                result.context("session establishment timed out")??,
         };
         let connection = scopeguard::guard(connection, |session| session.close());
         let _permit = if Arc::ptr_eq(permit.semaphore(), &authorized_slots) {
@@ -137,7 +135,7 @@ impl HostRuntime {
             // Paired sessions move out of the pre-authorization pool.
             let authorized = authorized_slots
                 .try_acquire_owned()
-                .map_err(|_| "maximum authorized sessions reached")?;
+                .context("maximum authorized sessions reached")?;
             drop(permit);
             authorized
         };
@@ -150,14 +148,14 @@ impl HostRuntime {
         peer: Arc<RpcPeer>,
         events: tokio::sync::broadcast::Receiver<PeerEvent>,
         stop: CancellationToken,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let node = connection.node_id();
         let session = {
             // Registration and revocation use the same lock order. A revoked node
             // cannot become active in the gap after initial authentication.
             let record = self.credentials.record.lock().await;
             if !record.trust.allowed.contains(&node) {
-                return Err("peer is not authorized".into());
+                return Err(anyhow::anyhow!("peer is not authorized"));
             }
             let session = self.service.open_session(128);
             self.active
@@ -187,7 +185,7 @@ impl HostRuntime {
                         let service = self.service.clone();
                         transfers.spawn(async move { service.files().transfer(id, stream).await });
                     }
-                    Err(error) => break Err(error.to_string()),
+                    Err(error) => break Err(error.into()),
                 },
                 Some(_) = transfers.join_next(), if !transfers.is_empty() => {}
             }
@@ -198,14 +196,12 @@ impl HostRuntime {
         while transfers.join_next().await.is_some() {}
         self.active.lock().unwrap().remove(&id);
         self.service.close_session(id);
-        let closed = peer.close().await.map_err(|e| e.to_string());
+        let closed = peer.close().await.map_err(Into::into);
         result.and(rpc_result).and(closed)
     }
-    async fn pair_node(&self, node: NodeId, invitation: uuid::Uuid) -> Result<(), String> {
+    async fn pair_node(&self, node: NodeId, invitation: uuid::Uuid) -> Result<()> {
         let mut record = self.credentials.record.lock().await;
-        if let Some(trust) =
-            authorize(&record.trust, node, Some(invitation), now()).map_err(|e| e.to_string())?
-        {
+        if let Some(trust) = authorize(&record.trust, node, Some(invitation), now())? {
             let mut next = record.clone();
             next.trust = trust;
             *record = self.credentials.persist(next).await?;
@@ -217,7 +213,7 @@ impl HostRuntime {
         node: NodeId,
         session: SessionId,
         message: &RpcMessage<'_>,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>> {
         let management = matches!(
             message.method(),
             Some(
@@ -237,20 +233,26 @@ impl HostRuntime {
                 // already consumed at the transport gate.
                 Ok(json!({}))
             } else if node != self.local_node {
-                Err("management requires the local node".into())
+                Err(anyhow::anyhow!("management requires the local node"))
             } else {
-                self.manage(method, message.params().map_err(|e| e.to_string())?)
-                    .await
+                self.manage(method, message.params()?).await
             };
             return message
-                .response(result.map_err(|message| json!({"code": -32602, "message": message})))
+                .response(
+                    result.map_err(
+                        |message| json!({"code": -32602, "message": format!("{message:#}")}),
+                    ),
+                )
                 .map(Some)
-                .map_err(|e| e.to_string());
+                .map_err(Into::into);
         }
-        self.service.dispatch(session, message).await?;
+        self.service
+            .dispatch(session, message)
+            .await
+            .map_err(anyhow::Error::msg)?;
         Ok(None)
     }
-    async fn manage(&self, method: &str, params: Value) -> Result<Value, String> {
+    async fn manage(&self, method: &str, params: Value) -> Result<Value> {
         match method {
             "host/status" => {
                 let record = self.credentials.record.lock().await;
@@ -268,7 +270,7 @@ impl HostRuntime {
                         self.service.provider_errors(),
                     )]),
                 })
-                .map_err(|error| error.to_string())
+                .map_err(Into::into)
             }
             "host/invite" => {
                 let ticket = Invitation {
@@ -284,7 +286,7 @@ impl HostRuntime {
                     .invitations
                     .insert(ticket.invitation, ticket.expires_at);
                 *record = self.credentials.persist(next).await?;
-                serde_json::to_value(ticket).map_err(|e| e.to_string())
+                serde_json::to_value(ticket).map_err(Into::into)
             }
             "host/revoke" => {
                 #[derive(Deserialize)]
@@ -292,10 +294,9 @@ impl HostRuntime {
                 struct Revoke {
                     node_id: NodeId,
                 }
-                let params: Revoke =
-                    serde_json::from_value(params).map_err(|_| "invalid node ID")?;
+                let params: Revoke = serde_json::from_value(params).context("invalid node ID")?;
                 if params.node_id == self.local_node {
-                    return Err("cannot revoke the local node".into());
+                    return Err(anyhow::anyhow!("cannot revoke the local node"));
                 }
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
@@ -317,7 +318,7 @@ impl HostRuntime {
                     .values()
                     .collect::<Vec<_>>(),
             )
-            .map_err(|e| e.to_string()),
+            .map_err(Into::into),
             "host/registerRemote" => {
                 #[derive(Deserialize)]
                 struct Register {
@@ -325,7 +326,7 @@ impl HostRuntime {
                     name: String,
                 }
                 let params: Register =
-                    serde_json::from_value(params).map_err(|_| "invalid remote profile")?;
+                    serde_json::from_value(params).context("invalid remote profile")?;
                 // Pairing runs on the client's existing endpoint. The Host only
                 // persists its local client's destination; it never binds that key.
                 let node_id = params.ticket.node_id();
@@ -339,22 +340,21 @@ impl HostRuntime {
                 let mut next = record.clone();
                 next.remotes.insert(node_id, profile.clone());
                 *record = self.credentials.persist(next).await?;
-                serde_json::to_value(profile).map_err(|e| e.to_string())
+                serde_json::to_value(profile).map_err(Into::into)
             }
             "host/removeRemote" => {
                 #[derive(Deserialize)]
                 struct Remove {
                     id: NodeId,
                 }
-                let params: Remove =
-                    serde_json::from_value(params).map_err(|_| "invalid remote ID")?;
+                let params: Remove = serde_json::from_value(params).context("invalid remote ID")?;
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
                 next.remotes.remove(&params.id);
                 *record = self.credentials.persist(next).await?;
                 Ok(json!({}))
             }
-            _ => Err("unknown management method".into()),
+            _ => Err(anyhow::anyhow!("unknown management method")),
         }
     }
 }

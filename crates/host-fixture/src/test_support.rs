@@ -3,6 +3,7 @@ use agent_core::{
     peer::RpcPeer,
     transport::{Endpoint, Identity, Relays, Session, Ticket},
 };
+use anyhow::{Context, Result};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{
     CredentialStore, DesktopProjectStore, HostCredentials, HostRpcService, HostRuntime,
@@ -20,10 +21,10 @@ pub struct Memory {
     bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,
 }
 impl CredentialStore for Memory {
-    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
         Ok(self.bytes.lock().unwrap().clone())
     }
-    fn save(&self, bytes: &[u8]) -> Result<(), String> {
+    fn save(&self, bytes: &[u8]) -> Result<()> {
         *self.bytes.lock().unwrap() = Some(Zeroizing::new(bytes.to_vec()));
         Ok(())
     }
@@ -35,7 +36,7 @@ pub struct HostFixture {
     pub memory: Arc<Memory>,
     pub ticket: Ticket,
     pub stop: CancellationToken,
-    pub running: tokio::task::JoinHandle<Result<(), String>>,
+    pub running: tokio::task::JoinHandle<Result<()>>,
     _stop_on_drop: DropGuard,
 }
 impl HostFixture {
@@ -46,7 +47,7 @@ impl HostFixture {
         name: &str,
         accounts: bool,
         claude: Option<&Path>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         #[cfg(unix)]
         {
             use rustix::process::{Resource, getrlimit, setrlimit};
@@ -55,9 +56,9 @@ impl HostFixture {
             let mut limit = getrlimit(Resource::Nofile);
             if limit.current.is_some_and(|current| current < 4096) {
                 limit.current = Some(4096);
-                setrlimit(Resource::Nofile, limit).map_err(|error| {
+                setrlimit(Resource::Nofile, limit).with_context(|| {
                     format!(
-                        "Host fixtures require 4096 file descriptors (hard limit {:?}): {error}",
+                        "Host fixtures require 4096 file descriptors (hard limit {:?})",
                         limit.maximum
                     )
                 })?;
@@ -65,9 +66,7 @@ impl HostFixture {
         }
         let credentials =
             Arc::new(HostCredentials::load(memory.clone(), directory.join("state")).await?);
-        let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
-            .await
-            .map_err(|error| error.to_string())?;
+        let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled).await?;
         let ticket = endpoint.ticket();
         let server = CodexAppServer::spawn(config.clone())
             .await
@@ -89,7 +88,8 @@ impl HostFixture {
         if accounts && server.is_ok() {
             service
                 .enable_accounts(directory.join("state/accounts"), config)
-                .await?;
+                .await
+                .map_err(anyhow::Error::msg)?;
         }
         service.start();
         let runtime =
@@ -115,11 +115,11 @@ impl HostFixture {
         self.connect(self.credentials.local_identity().await).await
     }
 
-    pub async fn close(self) -> Result<(), String> {
+    pub async fn close(self) -> Result<()> {
         self.stop.cancel();
-        self.running.await.map_err(|error| error.to_string())??;
+        self.running.await??;
         if let Some(server) = self.server {
-            server.shutdown().await.map_err(|error| error.to_string())?;
+            server.shutdown().await?;
         }
         Ok(())
     }

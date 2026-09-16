@@ -1,0 +1,21 @@
+---
+source: crates/agent-core/src/presentation/markdown.rs
+expression: rows.iter().map(|row| row.iter().map(cell_text).collect::<Vec<_>>()).collect::<Vec<_>>()
+---
+[
+  [
+    "構成",
+    "利点",
+    "負担"
+  ],
+  [
+    "Codexハーネス＋Claude接続",
+    "ツール実行・承認・履歴・委譲を一本化できる",
+    "通信変換、モデルの挙動、サブスク認証との適合を検証する必要"
+  ],
+  [
+    "Codex／Claude Codeを並列接続",
+    "それぞれの標準機能・認証を使える",
+    "両者の機能差をBexが吸収する必要"
+  ]
+]

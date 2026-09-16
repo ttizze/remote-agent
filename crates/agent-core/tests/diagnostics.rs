@@ -9,6 +9,18 @@ use tokio::io::AsyncWriteExt;
 #[tokio::test]
 async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
     let directory = tempfile::tempdir().unwrap();
+    // Calling the same RPC log site before initialization must not disable it
+    // after the process-wide subscriber is installed.
+    diagnostics::rpc_error(
+        "before-initialize",
+        None,
+        serde_json::value::RawValue::from_string(
+            r#"{"message":"PRIVATE_BEFORE_INITIALIZE"}"#.into(),
+        )
+        .unwrap()
+        .as_ref(),
+    );
+    assert!(!directory.path().join("logs").exists());
     diagnostics::initialize(
         directory.path(),
         diagnostics::Component::Desktop,
@@ -77,8 +89,8 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
         .unwrap();
     assert_eq!(reply.value["ok"], true);
     fixture.await.unwrap();
-    diagnostics::shutdown();
-    let after = fs::read_to_string(path).unwrap();
+    tracing::info!(target: "bex", operation = "shutdown", "Bex shutting down");
+    let after = fs::read_to_string(&path).unwrap();
     assert!(after.starts_with(&before));
     assert!(!after.contains("PRIVATE_"));
     let notification: Value = after
@@ -97,4 +109,33 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
         .map(|record| record["message"].as_str().unwrap())
         .collect();
     assert_eq!(causes, ["object error", "stream disconnected"]);
+
+    // Exercise the process-wide subscriber used by Host and Desktop, including
+    // events emitted from async workers above and explicit field filtering here.
+    tracing::error!(target: "dependency", operation = "ignored", "PRIVATE_DEPENDENCY");
+    tracing::debug!(target: "bex", operation = "ignored", "PRIVATE_DEBUG");
+    tracing::error!(target: "bex", operation = "upload", request_id = 42u64,
+        payload = "PRIVATE_PAYLOAD", message = "failed password=PRIVATE_PASSWORD");
+    diagnostics::rpc_error(
+        "read",
+        Some(43),
+        serde_json::value::RawValue::from_string(
+            r#"{"message":"failed","code":"provider_failed","data":"PRIVATE_DATA"}"#.into(),
+        )
+        .unwrap()
+        .as_ref(),
+    );
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(contents.starts_with(&after));
+    assert!(!contents.contains("PRIVATE_"), "{contents}");
+    let records: Vec<Value> = contents[after.len()..]
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["requestId"], 42);
+    assert_eq!(records[0]["operation"], "upload");
+    assert_eq!(records[0]["message"], "failed [credential omitted]");
+    assert_eq!(records[1]["errorCode"], "provider_failed");
+    assert_eq!(records[1]["requestId"], 43);
 }

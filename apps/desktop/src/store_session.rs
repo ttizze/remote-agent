@@ -32,7 +32,7 @@ impl StoreSession {
     }
 
     pub(crate) async fn publish<E: Send>(
-        result: Result<Arc<Store>, String>,
+        result: anyhow::Result<Arc<Store>>,
         runtime: Runtime,
         updates: async_channel::Sender<E>,
         connected: impl FnOnce(Result<Self, String>) -> E,
@@ -41,7 +41,7 @@ impl StoreSession {
         let store = match result {
             Ok(store) => store,
             Err(error) => {
-                let _ = updates.send(connected(Err(error))).await;
+                let _ = updates.send(connected(Err(format!("{error:#}")))).await;
                 return;
             }
         };
@@ -83,10 +83,10 @@ impl StoreSession {
                         host_daemon::platform::save_private_json(&path, &snapshot)
                     })
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(anyhow::Error::from)
                     .and_then(|result| result);
                     if let Err(error) = result {
-                        let _ = updates.send(failure(error)).await;
+                        let _ = updates.send(failure(format!("{error:#}"))).await;
                     }
                 }
             },
@@ -235,10 +235,10 @@ mod tests {
             let store = Arc::new(Store::offline(Snapshot::default()));
             let (updates, incoming) = async_channel::unbounded();
             StoreSession::publish(
-                Err("connection failed".into()), runtime.clone(), updates.clone(),
+                Err(anyhow::anyhow!("connection failed").context("cannot open session")), runtime.clone(), updates.clone(),
                 Update::Connected, |_| Update::Snapshot,
             ).await;
-            assert!(matches!(incoming.recv().await.unwrap(), Update::Connected(Err(error)) if error == "connection failed"));
+            assert!(matches!(incoming.recv().await.unwrap(), Update::Connected(Err(error)) if error == "cannot open session: connection failed"));
             assert!(incoming.try_recv().is_err());
             drop(incoming);
             StoreSession::publish(

@@ -1,3 +1,4 @@
+use anyhow::{Context as _, Result, anyhow};
 use std::{
     collections::HashMap,
     fs::{self, File},
@@ -107,11 +108,9 @@ impl WorkspaceFiles {
         &self,
         session: SessionId,
         request: FileRequest,
-    ) -> Result<FileResponse, String> {
+    ) -> Result<FileResponse> {
         let files = self.clone();
-        tokio::task::spawn_blocking(move || files.dispatch(session, request))
-            .await
-            .map_err(|error| error.to_string())?
+        tokio::task::spawn_blocking(move || files.dispatch(session, request)).await?
     }
 
     pub(crate) fn clear_session(&self, session: SessionId) {
@@ -127,16 +126,16 @@ impl WorkspaceFiles {
         &self,
         session: SessionId,
         bytes: Vec<u8>,
-    ) -> Result<TransferGrant, String> {
+    ) -> Result<TransferGrant> {
         let files = self.clone();
         tokio::task::spawn_blocking(move || {
             use std::io::{Seek, SeekFrom};
             if bytes.len() as u64 > TRANSFER_LIMIT {
-                return Err("transfer exceeds 512 MiB".into());
+                return Err(anyhow!("transfer exceeds 512 MiB"));
             }
-            let mut file = tempfile::tempfile().map_err(io_error)?;
-            file.write_all(&bytes).map_err(io_error)?;
-            file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            let mut file = tempfile::tempfile()?;
+            file.write_all(&bytes)?;
+            file.seek(SeekFrom::Start(0))?;
             files.grant(Grant {
                 session,
                 expires: Instant::now() + GRANT_LIFETIME,
@@ -145,61 +144,57 @@ impl WorkspaceFiles {
                 digest: hash(&bytes),
             })
         })
-        .await
-        .map_err(io_error)?
+        .await?
     }
 
-    fn dispatch(&self, session: SessionId, request: FileRequest) -> Result<FileResponse, String> {
+    fn dispatch(&self, session: SessionId, request: FileRequest) -> Result<FileResponse> {
         match request {
             FileRequest::Visualization(params) => {
                 use agent_core::presentation::visualize::{
                     visualization_document, visualization_path,
                 };
-                let path = visualization_path(&params.path, &params.cwd)?;
+                let path =
+                    visualization_path(&params.path, &params.cwd).map_err(anyhow::Error::msg)?;
                 let directory = self.upload_directory.join("visualizations");
                 let archive = directory.join(hash(path.to_string_lossy().as_bytes()));
                 let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
-                let bytes = if path.try_exists().map_err(io_error)? {
+                let bytes = if path.try_exists()? {
                     let bytes = read_bounded(&path, EDIT_LIMIT)?;
-                    std::str::from_utf8(&bytes).map_err(|_| "visualize HTML is not UTF-8")?;
-                    fs::create_dir_all(&directory).map_err(io_error)?;
+                    std::str::from_utf8(&bytes).context("visualize HTML is not UTF-8")?;
+                    fs::create_dir_all(&directory)?;
                     atomicwrites::AtomicFile::new(&archive, atomicwrites::AllowOverwrite)
                         .write_with_options(
                             |file| file.write_all(&bytes),
                             crate::platform::private_file_options(),
-                        )
-                        .map_err(|e| e.to_string())?;
+                        )?;
                     bytes
                 } else {
-                    read_bounded(&archive, EDIT_LIMIT).map_err(
-                        |_| "表示ファイルが見つかりません。HostでHTMLを再作成してください。",
-                    )?
+                    read_bounded(&archive, EDIT_LIMIT)
+                        .context("表示ファイルが見つかりません。HostでHTMLを再作成してください。")?
                 };
                 let fragment =
-                    std::str::from_utf8(&bytes).map_err(|_| "visualize HTML is not UTF-8")?;
+                    std::str::from_utf8(&bytes).context("visualize HTML is not UTF-8")?;
                 Ok(FileResponse::Visualization(visualization_document(
                     fragment,
                 )))
             }
             FileRequest::List(params) => {
-                let path = absolute_path(&params.path)?
-                    .canonicalize()
-                    .map_err(io_error)?;
+                let path = absolute_path(&params.path)?.canonicalize()?;
                 let mut entries = Vec::new();
                 let mut truncated = false;
-                for entry in fs::read_dir(&path).map_err(io_error)? {
-                    let entry = entry.map_err(io_error)?;
+                for entry in fs::read_dir(&path)? {
+                    let entry = entry?;
                     if entries.len() == 2000 {
                         truncated = true;
                         break;
                     }
-                    let metadata = entry.metadata().map_err(io_error)?;
+                    let metadata = entry.metadata()?;
                     entries.push(FileEntry {
                         name: entry.file_name().to_string_lossy().into_owned(),
                         path: entry
                             .path()
                             .to_str()
-                            .ok_or("file path is not UTF-8")?
+                            .context("file path is not UTF-8")?
                             .into(),
                         directory: metadata.is_dir(),
                         size: metadata.len(),
@@ -208,60 +203,59 @@ impl WorkspaceFiles {
                 }
                 entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.name.cmp(&b.name)));
                 Ok(FileResponse::List(FileList {
-                    path: path.to_str().ok_or("directory path is not UTF-8")?.into(),
+                    path: path.to_str().context("directory path is not UTF-8")?.into(),
                     entries,
                     truncated,
                     extra: Default::default(),
                 }))
             }
             FileRequest::Read(params) => {
-                let path = absolute_path(&params.path)?
-                    .canonicalize()
-                    .map_err(io_error)?;
+                let path = absolute_path(&params.path)?.canonicalize()?;
                 read_editable(&path).map(FileResponse::Content)
             }
             FileRequest::Write(params) => {
-                let path = absolute_path(&params.path)?
-                    .canonicalize()
-                    .map_err(io_error)?;
+                let path = absolute_path(&params.path)?.canonicalize()?;
                 let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
                 let original = read_bounded(&path, EDIT_LIMIT)?;
                 if hash(&original) != params.revision {
-                    return Err("revision_conflict: file changed; reload before saving".into());
+                    return Err(anyhow!(
+                        "revision_conflict: file changed; reload before saving"
+                    ));
                 }
                 let bom = original.starts_with(&[0xef, 0xbb, 0xbf]);
                 let original_text =
                     std::str::from_utf8(if bom { &original[3..] } else { &original })
-                        .map_err(|_| "file is not UTF-8")?;
+                        .context("file is not UTF-8")?;
                 let text = if line_ending(original_text) == "crlf" {
                     params.text.replace("\r\n", "\n").replace('\n', "\r\n")
                 } else {
                     params.text
                 };
                 if text.len() as u64 + if bom { 3 } else { 0 } > EDIT_LIMIT {
-                    return Err("file exceeds editor size limit".into());
+                    return Err(anyhow!("file exceeds editor size limit"));
                 }
                 atomicwrites::AtomicFile::new(&path, atomicwrites::AllowOverwrite)
                     .write_with_options(
-                        |output| -> Result<(), String> {
-                            output
-                                .set_permissions(
-                                    fs::metadata(&path).map_err(io_error)?.permissions(),
-                                )
-                                .map_err(io_error)?;
+                        |output| -> Result<()> {
+                            output.set_permissions(fs::metadata(&path)?.permissions())?;
                             if bom {
-                                output.write_all(&[0xef, 0xbb, 0xbf]).map_err(io_error)?;
+                                output.write_all(&[0xef, 0xbb, 0xbf])?;
                             }
-                            output.write_all(text.as_bytes()).map_err(io_error)?;
+                            output.write_all(text.as_bytes())?;
                             // Other editors don't share our mutex; recheck before replacement.
                             if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision {
-                                return Err("revision_conflict: file changed while saving".into());
+                                return Err(anyhow!(
+                                    "revision_conflict: file changed while saving"
+                                ));
                             }
                             Ok(())
                         },
                         crate::platform::private_file_options(),
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| match error {
+                        atomicwrites::Error::Internal(error) => anyhow::Error::new(error),
+                        atomicwrites::Error::User(error) => error,
+                    })?;
                 read_editable(&path).map(FileResponse::Content)
             }
             FileRequest::Upload(params) => {
@@ -269,14 +263,14 @@ impl WorkspaceFiles {
                 // Host-owned storage; explicit destinations remain absolute.
                 let directory = if params.directory.as_os_str().is_empty() {
                     let directory = absolute_path(&self.upload_directory)?;
-                    crate::platform::create_state_directory(directory).map_err(io_error)?;
+                    crate::platform::create_state_directory(directory)?;
                     directory
                 } else {
                     absolute_path(&params.directory)?
                 };
-                let directory = directory.canonicalize().map_err(io_error)?;
+                let directory = directory.canonicalize()?;
                 if !directory.is_dir() {
-                    return Err("upload directory is unavailable".into());
+                    return Err(anyhow!("upload directory is unavailable"));
                 }
                 if params.file_name.is_empty()
                     || params.file_name.len() > 200
@@ -286,7 +280,7 @@ impl WorkspaceFiles {
                         != Some(params.file_name.as_str())
                     || params.file_name.chars().any(char::is_control)
                 {
-                    return Err("invalid attachment display name".into());
+                    return Err(anyhow!("invalid attachment display name"));
                 }
                 validate_digest(&params.sha256)?;
                 self.grant(Grant {
@@ -303,13 +297,13 @@ impl WorkspaceFiles {
             }
             FileRequest::Download(params) => {
                 let path = absolute_path(&params.path)?;
-                let mut file = File::open(path).map_err(io_error)?;
-                if !file.metadata().map_err(io_error)?.is_file() {
-                    return Err("download target is not a regular file".into());
+                let mut file = File::open(path)?;
+                if !file.metadata()?.is_file() {
+                    return Err(anyhow!("download target is not a regular file"));
                 }
                 let (size, digest) = digest_file(&mut file)?;
                 use std::io::{Seek, SeekFrom};
-                file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+                file.seek(SeekFrom::Start(0))?;
                 self.grant(Grant {
                     session,
                     expires: Instant::now() + GRANT_LIFETIME,
@@ -322,9 +316,9 @@ impl WorkspaceFiles {
         }
     }
 
-    fn grant(&self, grant: Grant) -> Result<TransferGrant, String> {
+    fn grant(&self, grant: Grant) -> Result<TransferGrant> {
         if grant.size > TRANSFER_LIMIT {
-            return Err("transfer exceeds 512 MiB".into());
+            return Err(anyhow!("transfer exceeds 512 MiB"));
         }
         let mut grants = self.grants.lock().unwrap_or_else(|e| e.into_inner());
         grants.retain(|_, grant| grant.expires > Instant::now());
@@ -335,12 +329,12 @@ impl WorkspaceFiles {
                 .count()
                 >= 8
         {
-            return Err("too many pending transfers".into());
+            return Err(anyhow!("too many pending transfers"));
         }
         let mut random = [0; 32];
         SystemRandom::new()
             .fill(&mut random)
-            .map_err(|_| "secure random generation failed")?;
+            .map_err(|_| anyhow!("secure random generation failed"))?;
         let token = URL_SAFE_NO_PAD.encode(random);
         let response = TransferGrant {
             token: token.clone(),
@@ -351,23 +345,23 @@ impl WorkspaceFiles {
         Ok(response)
     }
 
-    pub(crate) async fn transfer<S>(&self, session: SessionId, mut stream: S) -> Result<(), String>
+    pub(crate) async fn transfer<S>(&self, session: SessionId, mut stream: S) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
         tokio::time::timeout(Duration::from_secs(120), async {
-            let length = stream.read_u32().await.map_err(io_error)?;
+            let length = stream.read_u32().await?;
             if length != 43 {
-                return Err("invalid transfer token length".into());
+                return Err(anyhow!("invalid transfer token length"));
             }
             let mut token = [0; 43];
-            stream.read_exact(&mut token).await.map_err(io_error)?;
-            let token = std::str::from_utf8(&token).map_err(|_| "invalid transfer token")?;
+            stream.read_exact(&mut token).await?;
+            let token = std::str::from_utf8(&token).context("invalid transfer token")?;
             let grant = {
                 let mut grants = self.grants.lock().unwrap_or_else(|e| e.into_inner());
-                let grant = grants.get(token).ok_or("unknown or consumed transfer")?;
+                let grant = grants.get(token).context("unknown or consumed transfer")?;
                 if grant.session != session || grant.expires <= Instant::now() {
-                    return Err("transfer is not authorized for this session".into());
+                    return Err(anyhow!("transfer is not authorized for this session"));
                 }
                 grants.remove(token).unwrap()
             };
@@ -376,56 +370,44 @@ impl WorkspaceFiles {
                     directory,
                     file_name,
                 } => {
-                    let output = tempfile::NamedTempFile::new_in(&directory).map_err(io_error)?;
-                    let async_file = output.reopen().map_err(io_error)?;
+                    let output = tempfile::NamedTempFile::new_in(&directory)?;
+                    let async_file = output.reopen()?;
                     let mut writer = tokio::fs::File::from_std(async_file);
                     let mut digest = Context::new(&SHA256);
                     let mut remaining = grant.size;
                     let mut buffer = [0; 32768];
                     while remaining > 0 {
                         let amount = remaining.min(buffer.len() as u64) as usize;
-                        stream
-                            .read_exact(&mut buffer[..amount])
-                            .await
-                            .map_err(io_error)?;
+                        stream.read_exact(&mut buffer[..amount]).await?;
                         digest.update(&buffer[..amount]);
-                        writer
-                            .write_all(&buffer[..amount])
-                            .await
-                            .map_err(io_error)?;
+                        writer.write_all(&buffer[..amount]).await?;
                         remaining -= amount as u64;
                     }
                     // Explicit end-of-upload prevents silently accepting extra
                     // bytes or a sender declaring a truncated object size.
                     let mut end = [0];
-                    if stream.read(&mut end).await.map_err(io_error)? != 0 {
-                        return Err("upload exceeds declared size".into());
+                    if stream.read(&mut end).await? != 0 {
+                        return Err(anyhow!("upload exceeds declared size"));
                     }
                     if URL_SAFE_NO_PAD.encode(digest.finish().as_ref()) != grant.digest {
-                        return Err("upload digest mismatch".into());
+                        return Err(anyhow!("upload digest mismatch"));
                     }
-                    writer.sync_all().await.map_err(io_error)?;
+                    writer.sync_all().await?;
                     drop(writer);
                     let random = output
                         .path()
                         .file_name()
-                        .ok_or("temporary upload path missing")?
+                        .context("temporary upload path missing")?
                         .to_string_lossy();
                     let path =
                         directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name));
-                    output
-                        .persist_noclobber(&path)
-                        .map_err(|error| io_error(error.error))?;
+                    output.persist_noclobber(&path)?;
                     let response = serde_json::to_vec(
                         &json!({"path":path,"size":grant.size,"sha256":grant.digest}),
-                    )
-                    .map_err(io_error)?;
-                    stream
-                        .write_u32(response.len() as u32)
-                        .await
-                        .map_err(io_error)?;
-                    stream.write_all(&response).await.map_err(io_error)?;
-                    stream.shutdown().await.map_err(io_error)?;
+                    )?;
+                    stream.write_u32(response.len() as u32).await?;
+                    stream.write_all(&response).await?;
+                    stream.shutdown().await?;
                 }
                 GrantFile::Download(file) => {
                     let mut file = tokio::fs::File::from_std(file);
@@ -433,36 +415,28 @@ impl WorkspaceFiles {
                     let mut buffer = [0; 32768];
                     while remaining > 0 {
                         let amount = remaining.min(buffer.len() as u64) as usize;
-                        file.read_exact(&mut buffer[..amount])
-                            .await
-                            .map_err(io_error)?;
-                        stream
-                            .write_all(&buffer[..amount])
-                            .await
-                            .map_err(io_error)?;
+                        file.read_exact(&mut buffer[..amount]).await?;
+                        stream.write_all(&buffer[..amount]).await?;
                         remaining -= amount as u64;
                     }
-                    stream.shutdown().await.map_err(io_error)?;
+                    stream.shutdown().await?;
                 }
             }
             Ok(())
         })
         .await
-        .map_err(|_| "transfer timed out")?
+        .context("transfer timed out")?
     }
 }
 
-fn io_error(error: impl std::fmt::Display) -> String {
-    error.to_string()
-}
-fn absolute_path(path: &Path) -> Result<&Path, String> {
+fn absolute_path(path: &Path) -> Result<&Path> {
     if path.is_absolute() {
         Ok(path)
     } else {
-        Err("an absolute filesystem path is required".into())
+        Err(anyhow!("an absolute filesystem path is required"))
     }
 }
-fn validate_digest(value: &str) -> Result<(), String> {
+fn validate_digest(value: &str) -> Result<()> {
     let mut bytes = [0; 32];
     if value.len() == 43
         && URL_SAFE_NO_PAD
@@ -471,36 +445,36 @@ fn validate_digest(value: &str) -> Result<(), String> {
     {
         Ok(())
     } else {
-        Err("invalid SHA-256 digest".into())
+        Err(anyhow!("invalid SHA-256 digest"))
     }
 }
 fn hash(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, bytes).as_ref())
 }
-fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let file = File::open(path).map_err(io_error)?;
-    if !file.metadata().map_err(io_error)?.is_file() {
-        return Err("path is not a regular file".into());
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(anyhow!("path is not a regular file"));
     }
     let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
+    file.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
-        return Err("file exceeds editor size limit; download it instead".into());
+        return Err(anyhow!(
+            "file exceeds editor size limit; download it instead"
+        ));
     }
     Ok(bytes)
 }
-fn read_editable(path: &Path) -> Result<FileContent, String> {
+fn read_editable(path: &Path) -> Result<FileContent> {
     let bytes = read_bounded(path, EDIT_LIMIT)?;
     let bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
     let text = std::str::from_utf8(if bom { &bytes[3..] } else { &bytes })
-        .map_err(|_| "file is not UTF-8; download it instead")?;
+        .context("file is not UTF-8; download it instead")?;
     if text.contains('\0') {
-        return Err("binary file; download it instead".into());
+        return Err(anyhow!("binary file; download it instead"));
     }
     Ok(FileContent {
-        path: path.to_str().ok_or("file path is not UTF-8")?.into(),
+        path: path.to_str().context("file path is not UTF-8")?.into(),
         revision: hash(&bytes),
         text: text.into(),
         bom,
@@ -528,18 +502,18 @@ fn line_ending(text: &str) -> &'static str {
         "lf"
     }
 }
-fn digest_file(file: &mut File) -> Result<(u64, String), String> {
+fn digest_file(file: &mut File) -> Result<(u64, String)> {
     let mut digest = Context::new(&SHA256);
     let mut buffer = [0; 32768];
     let mut size = 0;
     loop {
-        let read = file.read(&mut buffer).map_err(io_error)?;
+        let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
         size += read as u64;
         if size > TRANSFER_LIMIT {
-            return Err("transfer exceeds 512 MiB".into());
+            return Err(anyhow!("transfer exceeds 512 MiB"));
         }
         digest.update(&buffer[..read]);
     }
@@ -614,6 +588,7 @@ mod tests {
                     .transfer(2, server)
                     .await
                     .unwrap_err()
+                    .to_string()
                     .contains("not authorized")
             );
             let (mut client, server) = tokio::io::duplex(1024);
@@ -629,6 +604,7 @@ mod tests {
                     .transfer(1, server)
                     .await
                     .unwrap_err()
+                    .to_string()
                     .contains("consumed")
             );
             let grant = files
@@ -699,7 +675,7 @@ mod tests {
                         size: 0,
                         sha256: hash(b""),
                     })),
-                    Err(error) if error == "an absolute filesystem path is required"
+                    Err(error) if error.to_string() == "an absolute filesystem path is required"
                 ));
             }
             assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);

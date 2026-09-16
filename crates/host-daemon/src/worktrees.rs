@@ -1,4 +1,5 @@
 use agent_core::models::{Worktree, WorktreeSettings};
+use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -27,7 +28,7 @@ impl Worktrees {
         }
     }
 
-    pub(crate) async fn list(&self) -> Result<Vec<Worktree>, String> {
+    pub(crate) async fn list(&self) -> Result<Vec<Worktree>> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
@@ -37,7 +38,7 @@ impl Worktrees {
                 .into_iter()
                 .map(|(path, project_path)| {
                     let (branch, blocked_reason) = inspect(&path, &project_path)
-                        .unwrap_or_else(|error| (String::new(), Some(error)));
+                        .unwrap_or_else(|error| (String::new(), Some(format!("{error:#}"))));
                     Worktree {
                         path,
                         project_path,
@@ -50,11 +51,10 @@ impl Worktrees {
             entries.sort_by(|a, b| (&a.project_path, &a.path).cmp(&(&b.project_path, &b.path)));
             Ok(entries)
         })
-        .await
-        .map_err(|error| error.to_string())?
+        .await?
     }
 
-    pub(crate) async fn remove(&self, target: String) -> Result<(), String> {
+    pub(crate) async fn remove(&self, target: String) -> Result<()> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
@@ -62,11 +62,11 @@ impl Worktrees {
             let root = state
                 .workspace_roots
                 .get(&target)
-                .ok_or("Bexが作成したワークツリーではありません。")?;
+                .context("Bexが作成したワークツリーではありません。")?;
             if !already_removed(&target, root)? {
                 let (_, blocked) = inspect(&target, root)?;
                 if let Some(reason) = blocked {
-                    return Err(reason);
+                    return Err(anyhow!(reason));
                 }
                 // Git rechecks tracked/untracked changes and locks at removal time.
                 // Keep the branch so commits remain reachable even if not merged.
@@ -86,23 +86,22 @@ impl Worktrees {
             state.workspace_roots.remove(&target);
             save(&path, &state)
         })
-        .await
-        .map_err(|error| error.to_string())?
+        .await?
     }
 
     pub(crate) async fn settings(
         &self,
         update: Option<WorktreeSettings>,
-    ) -> Result<WorktreeSettings, String> {
+    ) -> Result<WorktreeSettings> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
             if let Some(settings) = update {
-                if !settings.extra.is_empty() { return Err("unknown worktree setting".into()); }
+                if !settings.extra.is_empty() { return Err(anyhow!("unknown worktree setting")); }
                 for entry in &settings.copy_paths { relative_path(entry)?; }
                 if !settings.worktree_directory.is_empty() && !Path::new(&settings.worktree_directory).is_absolute() {
-                    return Err("worktree directory must be an absolute path on the Host, or empty for the default".into());
+                    return Err(anyhow!("worktree directory must be an absolute path on the Host, or empty for the default"));
                 }
                 state.settings = settings;
                 save(&path, &state)?;
@@ -110,10 +109,10 @@ impl Worktrees {
             Ok(state.settings)
         })
         .await
-        .map_err(|e| e.to_string())?
+        ?
     }
 
-    pub(crate) async fn prepare(&self, cwd: Option<&str>) -> Result<Option<PathBuf>, String> {
+    pub(crate) async fn prepare(&self, cwd: Option<&str>) -> Result<Option<PathBuf>> {
         // Automatic worktrees need an explicitly selected checkout.
         let Some(cwd) = cwd else {
             return Ok(None);
@@ -126,16 +125,15 @@ impl Worktrees {
             if !state.settings.create_on_new_session {
                 return Ok(None);
             }
-            let cwd = cwd.canonicalize().map_err(|e| e.to_string())?;
+            let cwd = cwd.canonicalize()?;
             let root = PathBuf::from(
                 crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
             )
-            .canonicalize()
-            .map_err(|e| e.to_string())?;
-            let relative_cwd = cwd.strip_prefix(&root).map_err(|e| e.to_string())?;
+            .canonicalize()?;
+            let relative_cwd = cwd.strip_prefix(&root)?;
             let original = match state
                 .workspace_roots
-                .get(root.to_str().ok_or("project path is not UTF-8")?)
+                .get(root.to_str().context("project path is not UTF-8")?)
             {
                 Some(original) => PathBuf::from(original),
                 None => PathBuf::from(
@@ -143,7 +141,7 @@ impl Worktrees {
                         .split('\0')
                         .next()
                         .and_then(|line| line.strip_prefix("worktree "))
-                        .ok_or("Git did not return the original repository")?,
+                        .context("Git did not return the original repository")?,
                 ),
             };
             let parent = if state.settings.worktree_directory.is_empty() {
@@ -162,37 +160,33 @@ impl Worktrees {
                 let existing = match fs::read_to_string(&exclude) {
                     Ok(existing) => existing,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(error.into()),
                 };
                 if !existing.lines().any(|line| line == "/.worktree/") {
-                    fs::create_dir_all(exclude.parent().ok_or("Git exclude has no parent")?)
-                        .map_err(|e| e.to_string())?;
+                    fs::create_dir_all(exclude.parent().context("Git exclude has no parent")?)?;
                     fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(exclude)
-                        .and_then(|mut file| file.write_all(b"\n/.worktree/\n"))
-                        .map_err(|e| e.to_string())?;
+                        .and_then(|mut file| file.write_all(b"\n/.worktree/\n"))?;
                 }
                 original.join(".worktree")
             } else {
                 PathBuf::from(&state.settings.worktree_directory)
             };
-            fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+            fs::create_dir_all(&parent)?;
             // Resolve aliases such as /tmp before checking copy destination ancestors.
-            let parent = parent.canonicalize().map_err(|e| e.to_string())?;
-            let session = crate::platform::worktree_directory(&parent)
-                .map_err(|e| e.to_string())?
-                .keep();
+            let parent = parent.canonicalize()?;
+            let session = crate::platform::worktree_directory(&parent)?.keep();
             scopeguard::defer! { let _ = fs::remove_dir(&session); }
             let destination = session.join(
                 original
                     .file_name()
-                    .ok_or("repository has no folder name")?,
+                    .context("repository has no folder name")?,
             );
-            crate::platform::create_state_directory(&destination).map_err(|e| e.to_string())?;
+            crate::platform::create_state_directory(&destination)?;
             let branch = format!("bex/{}", session.file_name().unwrap().to_string_lossy());
-            let destination_text = destination.to_str().ok_or("worktree path is not UTF-8")?;
+            let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
             if let Err(error) = crate::git::text(
                 &root,
                 &["worktree", "add", "-b", &branch, destination_text, "HEAD"],
@@ -207,7 +201,7 @@ impl Worktrees {
                         let source = root.join(relative);
                         match fs::symlink_metadata(&source) {
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                            Err(e) => return Err(e.to_string()),
+                            Err(e) => return Err(e.into()),
                             Ok(_) => {}
                         }
                         // Check every ancestor as well as the leaf before following it.
@@ -221,7 +215,7 @@ impl Worktrees {
                     destination.join(relative_cwd)
                 };
                 if !target.is_dir() {
-                    return Err("working directory does not exist in HEAD".into());
+                    return Err(anyhow!("working directory does not exist in HEAD"));
                 }
                 state.workspace_roots.insert(
                     destination_text.to_owned(),
@@ -240,46 +234,60 @@ impl Worktrees {
                     .and_then(|_| crate::git::text(&root, &["branch", "-D", &branch]));
                     match cleanup {
                         Ok(_) => Err(error),
-                        Err(cleanup) => Err(format!("{error}; worktree cleanup failed: {cleanup}")),
+                        Err(cleanup) => {
+                            Err(error.context(format!("worktree cleanup failed: {cleanup:#}")))
+                        }
                     }
                 }
             }
         })
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
     }
 }
 
 /// Inspect each visible execution directory once per list request. Git state must
 /// not share the project settings cache: main can move without settings changing.
-pub(crate) async fn merged_directories(
-    directories: HashSet<String>,
-) -> Result<HashSet<String>, String> {
-    tokio::task::spawn_blocking(move || {
-        directories
-            .into_iter()
-            .filter(|cwd| merged_into_main(Path::new(cwd)).unwrap_or(false))
-            .collect()
-    })
-    .await
-    .map_err(|error| error.to_string())
+pub(crate) async fn merged_directories(directories: HashSet<String>) -> Result<HashSet<String>> {
+    use futures_util::{StreamExt, TryStreamExt};
+    // Bound process fan-out while avoiding a serial Git round trip for every
+    // visible conversation. Recompute on every request so new commits stay fresh.
+    let results: Vec<_> = futures_util::stream::iter(directories)
+        .map(|cwd| async move {
+            tokio::task::spawn_blocking(move || {
+                merged_into_main(Path::new(&cwd))
+                    .unwrap_or(false)
+                    .then_some(cwd)
+            })
+            .await
+        })
+        .buffer_unordered(4)
+        .try_collect()
+        .await?;
+    Ok(results.into_iter().flatten().collect())
 }
 
-fn merged_into_main(cwd: &Path) -> Result<bool, String> {
-    let git_dir = crate::git::text(cwd, &["rev-parse", "--absolute-git-dir"])?;
-    let common_dir = crate::git::text(
+fn merged_into_main(cwd: &Path) -> Result<bool> {
+    let identity = crate::git::text(
         cwd,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        &[
+            "rev-parse",
+            "--absolute-git-dir",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "HEAD",
+            "--symbolic-full-name",
+            "HEAD",
+        ],
     )?;
-    if git_dir.trim() == common_dir.trim() {
+    let mut fields = identity.lines();
+    let (Some(git_dir), Some(common_dir), Some(head), Some(branch)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Ok(false);
+    };
+    if git_dir == common_dir || branch == "refs/heads/main" || !branch.starts_with("refs/heads/") {
         return Ok(false);
     }
-    let branch = crate::git::text(cwd, &["symbolic-ref", "--quiet", "HEAD"])?;
-    let branch = branch.trim();
-    if branch == "refs/heads/main" {
-        return Ok(false);
-    }
-    let head = crate::git::text(cwd, &["rev-parse", "--verify", branch])?;
     let history = crate::git::text(cwd, &["reflog", "show", "--format=%H", branch])?;
     let contained = crate::git::output(
         cwd,
@@ -298,25 +306,25 @@ fn merged_into_main(cwd: &Path) -> Result<bool, String> {
     ))
 }
 
-fn inspect(path: &str, project: &str) -> Result<(String, Option<String>), String> {
+fn inspect(path: &str, project: &str) -> Result<(String, Option<String>)> {
     if already_removed(path, project)? {
         return Ok(("削除済み（登録を解除できます）".into(), None));
     }
     let target = Path::new(path)
         .canonicalize()
-        .map_err(|error| format!("ワークツリーを確認できません: {error}"))?;
+        .context("ワークツリーを確認できません")?;
     let project = Path::new(project)
         .canonicalize()
-        .map_err(|error| format!("元のリポジトリを確認できません: {error}"))?;
+        .context("元のリポジトリを確認できません")?;
     if target != Path::new(path) || target == project {
-        return Err("登録されたワークツリーの場所が変わっています。".into());
+        return Err(anyhow!("登録されたワークツリーの場所が変わっています。"));
     }
     let listing = crate::git::text(&project, &["worktree", "list", "--porcelain", "-z"])?;
     let expected = format!("worktree {path}");
     let entry = listing
         .split("\0\0")
         .find(|entry| entry.split('\0').next() == Some(expected.as_str()))
-        .ok_or("元のリポジトリに登録されたワークツリーではありません。")?;
+        .context("元のリポジトリに登録されたワークツリーではありません。")?;
     let branch = entry
         .split('\0')
         .find_map(|field| field.strip_prefix("branch refs/heads/"));
@@ -351,11 +359,11 @@ fn inspect(path: &str, project: &str) -> Result<(String, Option<String>), String
 
 // A registry write can fail after Git has removed the directory. Allow retrying
 // that write only when both the filesystem and Git agree removal is complete.
-fn already_removed(path: &str, project: &str) -> Result<bool, String> {
+fn already_removed(path: &str, project: &str) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => return Ok(false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error.into()),
     }
     let listing = crate::git::text(
         Path::new(project),
@@ -365,26 +373,22 @@ fn already_removed(path: &str, project: &str) -> Result<bool, String> {
     Ok(!listing.split('\0').any(|field| field == expected))
 }
 
-pub(crate) async fn workspace_roots(
-    project_state: &Path,
-) -> Result<HashMap<String, String>, String> {
+pub(crate) async fn workspace_roots(project_state: &Path) -> Result<HashMap<String, String>> {
     let path = project_state.with_file_name("bex-worktrees.json");
-    tokio::task::spawn_blocking(move || read(&path).map(|state| state.workspace_roots))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || read(&path).map(|state| state.workspace_roots)).await?
 }
 
-fn read(path: &Path) -> Result<State, String> {
+fn read(path: &Path) -> Result<State> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| e.to_string()),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(Into::into),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(e.into()),
     }
 }
 
-fn save(path: &Path, state: &State) -> Result<(), String> {
-    let parent = path.parent().ok_or("settings have no parent directory")?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+fn save(path: &Path, state: &State) -> Result<()> {
+    let parent = path.parent().context("settings have no parent directory")?;
+    fs::create_dir_all(parent)?;
     atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
         .write_with_options(
             |file| {
@@ -393,92 +397,83 @@ fn save(path: &Path, state: &State) -> Result<(), String> {
             },
             crate::platform::private_file_options(),
         )
-        .map_err(|e| e.to_string())
+        .map_err(Into::into)
 }
 
-fn relative_path(value: &str) -> Result<&Path, String> {
+fn relative_path(value: &str) -> Result<&Path> {
     let path = Path::new(value);
     if value.is_empty()
         || !path
             .components()
             .all(|part| matches!(part, Component::Normal(name) if name != ".git"))
     {
-        return Err("copy paths must be relative paths without '..' or '.git'".into());
+        return Err(anyhow!(
+            "copy paths must be relative paths without '..' or '.git'"
+        ));
     }
     Ok(path)
 }
 
-fn no_symlinks(root: &Path, relative: &Path) -> Result<(), String> {
+fn no_symlinks(root: &Path, relative: &Path) -> Result<()> {
     let mut path = root.to_path_buf();
     for part in relative.components() {
         path.push(part);
-        if fs::symlink_metadata(&path)
-            .map_err(|e| e.to_string())?
-            .file_type()
-            .is_symlink()
-        {
-            return Err("copy paths cannot contain symbolic links".into());
+        if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            return Err(anyhow!("copy paths cannot contain symbolic links"));
         }
     }
     Ok(())
 }
 
-fn copy(source: &Path, target: &Path) -> Result<(), String> {
+fn copy(source: &Path, target: &Path) -> Result<()> {
     if target.starts_with(source) {
-        return Err("cannot copy a directory into itself".into());
+        return Err(anyhow!("cannot copy a directory into itself"));
     }
-    let metadata = fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+    let metadata = fs::symlink_metadata(source)?;
     if let Some(parent) = target.parent() {
         for ancestor in parent.ancestors() {
             if let Ok(meta) = fs::symlink_metadata(ancestor)
                 && meta.file_type().is_symlink()
             {
-                return Err("copy destination contains a symbolic link".into());
+                return Err(anyhow!("copy destination contains a symbolic link"));
             }
         }
     }
     if metadata.is_dir() {
         match fs::symlink_metadata(target) {
-            Ok(meta) if !meta.is_dir() => return Err("copy destination is not a directory".into()),
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(target).map_err(|e| e.to_string())?
+            Ok(meta) if !meta.is_dir() => {
+                return Err(anyhow!("copy destination is not a directory"));
             }
-            Err(e) => return Err(e.to_string()),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir_all(target)?,
+            Err(e) => return Err(e.into()),
         }
-        for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
             if entry.file_name() == ".git" {
-                return Err("cannot copy Git metadata".into());
+                return Err(anyhow!("cannot copy Git metadata"));
             }
             copy(&entry.path(), &target.join(entry.file_name()))?;
         }
     } else if metadata.is_file() {
-        let parent = target.parent().ok_or("copy destination has no parent")?;
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let parent = target.parent().context("copy destination has no parent")?;
+        fs::create_dir_all(parent)?;
         match fs::symlink_metadata(target) {
             Ok(meta) if !meta.is_file() => {
-                return Err("copy destination is not a regular file".into());
+                return Err(anyhow!("copy destination is not a regular file"));
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e.into()),
         }
         // Configured files may replace HEAD's version in this fresh checkout.
         // An atomic replacement also avoids exposing partially copied secrets.
-        let mut output = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-        std::io::copy(
-            &mut fs::File::open(source).map_err(|e| e.to_string())?,
-            &mut output,
-        )
-        .map_err(|e| e.to_string())?;
-        output
-            .as_file()
-            .set_permissions(metadata.permissions())
-            .map_err(|e| e.to_string())?;
-        output.persist(target).map_err(|e| e.error.to_string())?;
+        let mut output = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::copy(&mut fs::File::open(source)?, &mut output)?;
+        output.as_file().set_permissions(metadata.permissions())?;
+        output.persist(target)?;
     } else {
-        return Err("only regular files and directories can be copied".into());
+        return Err(anyhow!("only regular files and directories can be copied"));
     }
     Ok(())
 }
@@ -488,12 +483,9 @@ mod tests {
     use super::*;
     use serde_json::Value;
     impl Worktrees {
-        async fn configure(&self, update: Option<Value>) -> Result<Value, String> {
-            let update = update
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| error.to_string())?;
-            serde_json::to_value(self.settings(update).await?).map_err(|error| error.to_string())
+        async fn configure(&self, update: Option<Value>) -> Result<Value> {
+            let update = update.map(serde_json::from_value).transpose()?;
+            serde_json::to_value(self.settings(update).await?).map_err(Into::into)
         }
     }
 
@@ -535,6 +527,15 @@ mod tests {
         )
         .unwrap();
         directory
+    }
+
+    #[tokio::test]
+    async fn invalid_saved_settings_keep_the_json_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let worktrees = Worktrees::new(&directory.path().join("projects.json"));
+        fs::write(&worktrees.path, "invalid json").unwrap();
+        let error = worktrees.list().await.unwrap_err();
+        assert!(error.downcast_ref::<serde_json::Error>().is_some());
     }
 
     #[tokio::test]

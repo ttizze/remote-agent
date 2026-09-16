@@ -346,23 +346,10 @@ mod tests {
             panic!("table flattened into prose")
         };
         assert_eq!(columns, &[MarkdownAlignment::Left; 3]);
-        assert_eq!(
+        insta::assert_json_snapshot!(
             rows.iter()
                 .map(|row| row.iter().map(cell_text).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
-            [
-                vec!["構成", "利点", "負担"],
-                vec![
-                    "Codexハーネス＋Claude接続",
-                    "ツール実行・承認・履歴・委譲を一本化できる",
-                    "通信変換、モデルの挙動、サブスク認証との適合を検証する必要"
-                ],
-                vec![
-                    "Codex／Claude Codeを並列接続",
-                    "それぞれの標準機能・認証を使える",
-                    "両者の機能差をBexが吸収する必要"
-                ],
-            ]
         );
     }
 
@@ -381,17 +368,10 @@ mod tests {
                 MarkdownAlignment::Right
             ]
         );
-        assert_eq!(
+        insta::assert_json_snapshot!(
             rows.iter()
                 .map(|row| row.iter().map(cell_text).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
-            [
-                vec!["Left", "Center", "Right"],
-                vec!["bold and link", "", "code"],
-                vec!["", "", ""],
-                vec!["last", "escaped | pipe", "gone"],
-                vec!["", "", ""],
-            ]
         );
         assert!(rows[1][0].runs[0].strong);
         assert!(

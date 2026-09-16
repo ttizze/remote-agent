@@ -1138,7 +1138,6 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         store::Store,
     };
     tokio::time::timeout(Duration::from_secs(45), async {
-        for legacy_cache in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let turns = (0..12).map(|turn| json!({"id":format!("turn-{turn}"),"status":"completed",
             "items":(0..if turn == 11 { 620 } else { 1 }).map(|item| json!({
@@ -1150,26 +1149,13 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         }])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        let mut previous: agent_core::models::Thread = serde_json::from_value(json!({"id":"history","historyCursor":null,
+        let previous: agent_core::models::Thread = serde_json::from_value(json!({"id":"history","historyCursor":null,
             "turns":[turns[0], {"id":"turn-11","status":"completed","items":[turns[11]["items"][0]],
                 "itemsHasMore":false,"itemsNextCursor":null}]})).unwrap();
-        if legacy_cache {
-            // The latest boundary overlaps, hiding a gap already saved by the old merge.
-            previous.turns.as_mut().unwrap().splice(1..1,
-                turns[7..11].iter().map(|turn| Arc::new(serde_json::from_value(turn.clone()).unwrap())));
-        }
-        let mut initial = Snapshot {
+        let initial = Snapshot {
             conversations: Arc::new(std::collections::BTreeMap::from([("history".into(), Arc::new(previous))])),
             ..Default::default()
         };
-        if legacy_cache {
-            let mut saved = serde_json::to_value(&initial).unwrap();
-            saved.as_object_mut().unwrap().remove("conversations_v2");
-            saved["conversations"] = serde_json::to_value(&initial.conversations).unwrap();
-            let path = directory.path().join("snapshot.json");
-            std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
-            initial = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        }
         let store = Store::new(local.peer, initial);
         store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
         store.dispatch(Intent::ReadThread(op::ReadThread::new("history".into()))).await.unwrap();
@@ -1205,7 +1191,6 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         store.close().await.unwrap();
         local.endpoint.close().await;
         fixture.close().await.unwrap();
-        }
     }).await.expect("history refresh and recovery exceeded deadline");
 }
 
@@ -1908,7 +1893,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
             // Restore the stale interrupted status from the formerly separate
             // desktop Host. Reconnecting must replace it with the owner's live turn.
             let mut saved = serde_json::to_value(desktop.snapshot()).unwrap();
-            saved["conversations_v2"][&id]["turns"][index]["status"] = "interrupted".into();
+            saved["conversations"][&id]["turns"][index]["status"] = "interrupted".into();
             desktop.close().await.unwrap();
             let registry = LocalHostRegistry::new(desktop_state.clone());
             let location = registry.resolve(&desktop_state).unwrap();

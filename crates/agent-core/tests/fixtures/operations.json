@@ -1384,7 +1384,7 @@
         }
       }
     ],
-    "errorContains": "モデル一覧の続きを取得できませんでした",
+    "errorContains": "model cursor did not advance",
     "errorRaw": null
   },
   {
@@ -1615,7 +1615,7 @@
         }
       }
     ],
-    "errorContains": "音声を認識できませんでした",
+    "errorContains": "host/dictation/transcribe",
     "errorRaw": null
   },
   {
@@ -1658,7 +1658,7 @@
         }
       }
     ],
-    "errorContains": "音声を認識できませんでした",
+    "errorContains": "host/dictation/transcribe",
     "errorRaw": null
   },
   {
@@ -1804,7 +1804,7 @@
       }
     },
     "exchanges": [],
-    "errorContains": "承認の選択肢が無効です",
+    "errorContains": "invalid approval choice",
     "errorRaw": null
   },
   {
@@ -1987,7 +1987,7 @@
       }
     },
     "exchanges": [],
-    "errorContains": "すべての質問に回答してください",
+    "errorContains": "every question requires an answer",
     "errorRaw": null
   },
   {
@@ -2019,7 +2019,7 @@
       }
     },
     "exchanges": [],
-    "errorContains": "すべての質問に回答してください",
+    "errorContains": "every question requires an answer",
     "errorRaw": null
   },
   {

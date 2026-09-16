@@ -854,42 +854,13 @@ async fn run(
             }
         }
     };
+    // The Host owns connection-scoped PTYs and grants, including starts in flight.
+    // Replacement must not wait for delivery acknowledgments from the old peer.
     let replacing = disconnected.is_some() && session.is_some();
     if replacing {
-        // The Host owns connection-scoped PTYs and grants. Do not wait for an
-        // unreachable old peer before opening its replacement.
         session.as_ref().unwrap().close();
     }
-    if !replacing {
-        // Let an already issued PTY command finish before killing its process.
-        // In particular, a spawn must register its handle before cleanup can kill it.
-        // The peer's request deadline also bounds this wait.
-        while terminal_running {
-            let Some(completed) = jobs.next().await else {
-                break;
-            };
-            if completed.terminal.is_some() {
-                terminal_running = false;
-            }
-        }
-        drop(jobs);
-        // Preserve explicit PTY cleanup for normal shutdown and peers without
-        // a connection-scoped iroh session.
-        let terminals = updates.borrow().terminals.clone();
-        for (handle, terminal) in terminals.iter() {
-            if !matches!(terminal.phase, crate::state::TerminalPhase::Exited(_)) {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    client.call(&op::CloseTerminal {
-                        handle: handle.clone(),
-                    }),
-                )
-                .await;
-            }
-        }
-    } else {
-        drop(jobs);
-    }
+    drop(jobs);
     let closed = peer.close().await;
     let result = if replacing { Ok(()) } else { closed };
     drop(connection);

@@ -22,7 +22,7 @@ async fn rotation_failure_does_not_deadlock_and_logging_recovers() {
             fs::read_dir(&logs).is_err(),
             "fixture requires an unprivileged user"
         );
-        diagnostics::error("without-listing", "rotation still succeeds");
+        tracing::error!(target: "bex", operation = "without-listing", message = "rotation still succeeds");
         let record: serde_json::Value =
             serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
         assert_eq!(record["operation"], "without-listing");
@@ -30,10 +30,10 @@ async fn rotation_failure_does_not_deadlock_and_logging_recovers() {
         // Denying directory writes now exercises a real rename failure while
         // the existing log and lock files remain writable.
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o500)).unwrap();
-        diagnostics::error("rotation-failure", "must not hang the application");
+        tracing::error!(target: "bex", operation = "rotation-failure", message = "must not hang the application");
         assert!(fs::metadata(&path).unwrap().len() > 5 * 1024 * 1024);
         fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
-        diagnostics::error("recovered", "logging resumed");
+        tracing::error!(target: "bex", operation = "recovered", message = "logging resumed");
         let record: serde_json::Value =
             serde_json::from_str(fs::read_to_string(path).unwrap().trim()).unwrap();
         assert_eq!(record["operation"], "recovered");
@@ -84,9 +84,9 @@ async fn closed_stderr_does_not_turn_a_log_failure_into_a_panic() {
         let path = directory.join("logs/desktop.jsonl");
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        diagnostics::error("write-failure", "stderr is unavailable too");
+        tracing::error!(target: "bex", operation = "write-failure", message = "stderr is unavailable too");
         fs::remove_dir(&path).unwrap();
-        diagnostics::error("recovered", "logging resumed");
+        tracing::error!(target: "bex", operation = "recovered", message = "logging resumed");
         let record: serde_json::Value =
             serde_json::from_str(fs::read_to_string(path).unwrap().trim()).unwrap();
         assert_eq!(record["operation"], "recovered");

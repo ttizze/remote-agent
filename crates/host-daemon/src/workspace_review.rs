@@ -1,3 +1,4 @@
+use anyhow::{Context as _, Result, anyhow};
 use std::{collections::HashMap, path::PathBuf, process::Command};
 
 use serde::Serialize;
@@ -21,25 +22,25 @@ struct WorkspaceFileChange {
     deletions: Option<u64>,
 }
 
-pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview, String> {
+pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview> {
     tokio::task::spawn_blocking(move || collect_workspace_review(PathBuf::from(cwd)))
         .await
-        .map_err(|error| format!("failed to inspect workspace: {error}"))?
+        .context("failed to inspect workspace")?
 }
 
-fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
+fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
     let cwd = cwd
         .canonicalize()
-        .map_err(|error| format!("working directory is unavailable: {error}"))?;
+        .context("working directory is unavailable")?;
     if !cwd.is_dir() {
-        return Err("working directory is not a directory".to_owned());
+        return Err(anyhow!("working directory is not a directory"));
     }
     let membership = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .env("LC_ALL", "C")
         .current_dir(&cwd)
         .output()
-        .map_err(|error| format!("failed to run git: {error}"))?;
+        .context("failed to run git")?;
     // Git has no distinct exit code for discovery failure. Recognize only its
     // ordinary parent-directory/mount-boundary result in a fixed locale;
     // broken metadata, permissions and ownership errors must still surface.
@@ -48,7 +49,7 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
             .stderr
             .starts_with(b"fatal: not a git repository (or any ");
     if !membership.status.success() && !no_repository {
-        return Err(crate::git::failure(&membership));
+        return Err(anyhow!(crate::git::failure(&membership)));
     }
     if no_repository || membership.stdout.trim_ascii() == b"false" {
         return Ok(WorkspaceReview {
@@ -102,10 +103,9 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
                 &file.path,
             ])
             .current_dir(&cwd)
-            .output()
-            .map_err(|error| error.to_string())?;
+            .output()?;
         if !matches!(output.status.code(), Some(0 | 1)) {
-            return Err("cannot read untracked file diff".into());
+            return Err(anyhow!("cannot read untracked file diff"));
         }
         let output = String::from_utf8_lossy(&output.stdout);
         let patch_start = output.find("diff --git ").unwrap_or(output.len());
@@ -118,9 +118,9 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview, String> {
         deletions += deleted;
         diff.push_str(&output[patch_start..]);
         if diff.len() > 8 * 1024 * 1024 {
-            return Err(
-                "working-tree diff exceeds 8 MiB; select a smaller working directory".into(),
-            );
+            return Err(anyhow!(
+                "working-tree diff exceeds 8 MiB; select a smaller working directory"
+            ));
         }
     }
     Ok(WorkspaceReview {

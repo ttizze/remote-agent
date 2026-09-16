@@ -160,39 +160,37 @@ mod tests {
         assert!(!worktree_branch_merged("work", None, true));
     }
 
-    #[test]
-    fn list_preserves_merge_status_alongside_activity_after_serialization_and_refresh() {
-        for active in [false, true] {
-            for unread in [false, true] {
-                for merged in [None, Some(false), Some(true)] {
-                    let mut snapshot = Snapshot::default();
-                    std::sync::Arc::make_mut(&mut snapshot.activity)
-                        .active
-                        .insert("task".into(), active);
-                    if unread {
-                        std::sync::Arc::make_mut(&mut snapshot.activity)
-                            .unread
-                            .insert("task".into());
-                    }
-                    let mut thread = json!({"id":"task","name":"Worktree task",
-                        "status":{"type":if active { "active" } else { "idle" }}});
-                    if let Some(merged) = merged {
-                        thread["worktreeMerged"] = json!(merged);
-                    }
-                    let page: models::ThreadList = serde_json::from_value(json!({
-                        "data":[thread], "projects":[], "moreProjectIds":[],
-                        "hasMoreChats":false, "hasMoreProjects":false
-                    }))
-                    .unwrap();
-                    ListThreads::new(Default::default()).apply(&mut snapshot, page);
-                    let restored: Snapshot =
-                        serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
-                    let rows = restored.thread_list().unwrap();
-                    assert_eq!(rows.threads[0].worktree_merged, merged.unwrap_or(false));
-                    assert_eq!(rows.threads[0].active, active);
-                    assert_eq!(rows.threads[0].unread, unread);
-                }
-            }
+    #[rstest::rstest]
+    fn list_preserves_merge_status_alongside_activity_after_serialization_and_refresh(
+        #[values(false, true)] active: bool,
+        #[values(false, true)] unread: bool,
+        #[values(None, Some(false), Some(true))] merged: Option<bool>,
+    ) {
+        let mut snapshot = Snapshot::default();
+        std::sync::Arc::make_mut(&mut snapshot.activity)
+            .active
+            .insert("task".into(), active);
+        if unread {
+            std::sync::Arc::make_mut(&mut snapshot.activity)
+                .unread
+                .insert("task".into());
         }
+        let mut thread = json!({"id":"task","name":"Worktree task",
+            "status":{"type":if active { "active" } else { "idle" }}});
+        if let Some(merged) = merged {
+            thread["worktreeMerged"] = json!(merged);
+        }
+        let page: models::ThreadList = serde_json::from_value(json!({
+            "data":[thread], "projects":[], "moreProjectIds":[],
+            "hasMoreChats":false, "hasMoreProjects":false
+        }))
+        .unwrap();
+        ListThreads::new(Default::default()).apply(&mut snapshot, page);
+        let restored: Snapshot =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let rows = restored.thread_list().unwrap();
+        assert_eq!(rows.threads[0].worktree_merged, merged.unwrap_or(false));
+        assert_eq!(rows.threads[0].active, active);
+        assert_eq!(rows.threads[0].unread, unread);
     }
 }

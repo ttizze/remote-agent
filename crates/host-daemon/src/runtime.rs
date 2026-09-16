@@ -1,5 +1,6 @@
 use crate::command_line::StartupConfig;
 use agent_core::transport::{Endpoint, Relays};
+use anyhow::{Context, Result};
 use host_daemon::{
     DesktopProjectStore, HostCredentials, HostRpcService, HostRuntime,
     local_host::{HostLease, LocalHostRegistry},
@@ -7,7 +8,7 @@ use host_daemon::{
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
+pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     // Reserve the shared instance before provisioning keys or launching Codex.
     let lease = tokio::task::spawn_blocking(move || {
         if config.isolated {
@@ -15,7 +16,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
                 config
                     .state_dir
                     .as_deref()
-                    .ok_or("--isolated requires --state-dir")?,
+                    .context("--isolated requires --state-dir")?,
                 config.key_storage,
             )
         } else {
@@ -28,16 +29,24 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         }
     })
     .await
-    .map_err(|error| error.to_string())??;
+    .context("Host lease worker failed")?
+    .context("cannot acquire Host lease")?;
     let directory = lease.directory().to_owned();
     agent_core::diagnostics::initialize(
         &directory,
         agent_core::diagnostics::Component::Host,
         env!("CARGO_PKG_VERSION"),
     )
-    .map_err(|error| format!("cannot initialize Host error log: {error}"))?;
-    let store = lease.key_storage().open(&directory)?;
-    let credentials = Arc::new(HostCredentials::load(store, directory.clone()).await?);
+    .context("cannot initialize Host error log")?;
+    let store = lease
+        .key_storage()
+        .open(&directory)
+        .context("cannot open Host key storage")?;
+    let credentials = Arc::new(
+        HostCredentials::load(store, directory.clone())
+            .await
+            .context("cannot load Host credentials")?,
+    );
     let relays = if config.no_relay {
         Relays::Disabled
     } else if config.relay_url.is_empty() {
@@ -47,7 +56,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     };
     let endpoint = Endpoint::bind(credentials.host_identity().await, relays)
         .await
-        .map_err(|e| e.to_string())?;
+        .context("cannot bind Host endpoint")?;
     let app_server_config = codex_app_server::AppServerConfig {
         program: config.codex,
         codex_home: config.codex_home,
@@ -55,33 +64,37 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     };
     let projects = match &app_server_config.codex_home {
         Some(home) => DesktopProjectStore::new(home.join(".codex-global-state.json")),
-        None => DesktopProjectStore::from_environment().map_err(|error| error.to_string())?,
+        None => DesktopProjectStore::from_environment().context("cannot locate project state")?,
     };
     let app_server = codex_app_server::CodexAppServer::spawn(app_server_config.clone())
         .await
         .map(Arc::new)
         .map_err(|error| error.to_string());
     if let Err(error) = &app_server {
-        agent_core::diagnostics::error("host.codex", error);
+        tracing::error!(target: "bex", operation = "host.codex", message = %error);
     }
     let service = HostRpcService::new(app_server.clone(), projects);
     service
         .enable_claude(config.claude, directory.join("claude"), config.claude_home)
-        .await?;
+        .await
+        .context("cannot enable Claude")?;
     if app_server.is_ok() {
         service
             .enable_accounts(directory.join("codex-accounts"), app_server_config)
-            .await?;
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("cannot enable Codex accounts")?;
     }
     service.start();
     let runtime = Arc::new(HostRuntime::new(service, endpoint, credentials, config.name).await);
     let ticket = runtime.ticket();
     let lease = tokio::task::spawn_blocking(move || {
         lease.publish(&ticket)?;
-        Ok::<_, String>(lease)
+        Ok::<_, anyhow::Error>(lease)
     })
     .await
-    .map_err(|error| error.to_string())??;
+    .context("Host publication worker failed")?
+    .context("cannot publish Host ticket")?;
     let shutdown = CancellationToken::new();
     let result = {
         let run = runtime.clone().run(shutdown.clone());
@@ -91,7 +104,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
             signal = tokio::signal::ctrl_c() => {
                 shutdown.cancel();
                 let result = run.await;
-                signal.map_err(|e| e.to_string()).and(result)
+                signal.context("cannot receive shutdown signal").and(result)
             }
         }
     };
@@ -100,7 +113,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
         app_server
             .shutdown()
             .await
-            .map_err(|error| error.to_string())?;
+            .context("cannot shut down Codex app server")?;
     }
     drop(lease);
     result

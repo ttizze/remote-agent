@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tracing.workspace = true
 bex-process = { path = "../bex-process" }
 agent-core = { path = "../agent-core" }
 keyring = "4.2"
@@ -29,6 +30,7 @@ zeroize.workspace = true
 tempfile = "3"
 scopeguard = "1.2"
 atomicwrites = "0.4.4"
+anyhow.workspace = true
 
 [dev-dependencies]
 # Match desktop builds even when CI tests only the headless packages. With both

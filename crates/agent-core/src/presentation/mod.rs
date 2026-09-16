@@ -448,21 +448,21 @@ mod presentation_tests {
         ($($value:tt)*) => { serde_json::from_value::<Turn>(json!($($value)*)).unwrap() };
     }
 
-    #[test]
-    fn generated_images_remain_visible_outside_completed_work() {
-        for status in ["inProgress", "completed", "failed"] {
-            let turn = turn!({"id":"turn","status":"completed","items":[
-                {"id":"work","type":"reasoning"},
-                {"id":"image","type":"imageGeneration","status":status},
-                {"id":"answer","type":"agentMessage","phase":"final_answer","text":"Here is the image"}
-            ]});
-            let segment = project(&turn).next().unwrap();
-            assert_eq!(
-                segment.role(1, turn.items.as_ref().unwrap()[1].as_ref().into()),
-                Role::Response
-            );
-            assert!(!item_presentation(turn.items.as_ref().unwrap()[1].as_ref()).collapsible);
-        }
+    #[rstest::rstest]
+    fn generated_images_remain_visible_outside_completed_work(
+        #[values("inProgress", "completed", "failed")] status: &str,
+    ) {
+        let turn = turn!({"id":"turn","status":"completed","items":[
+            {"id":"work","type":"reasoning"},
+            {"id":"image","type":"imageGeneration","status":status},
+            {"id":"answer","type":"agentMessage","phase":"final_answer","text":"Here is the image"}
+        ]});
+        let segment = project(&turn).next().unwrap();
+        assert_eq!(
+            segment.role(1, turn.items.as_ref().unwrap()[1].as_ref().into()),
+            Role::Response
+        );
+        assert!(!item_presentation(turn.items.as_ref().unwrap()[1].as_ref()).collapsible);
     }
 
     fn rows<'a>(part: &'a Segment, turn: &'a Turn, role: Role) -> impl Iterator<Item = &'a Item> {
@@ -504,30 +504,30 @@ mod presentation_tests {
             })
             .collect()
     }
-    #[test]
-    fn command_groups_start_collapsed_for_live_and_restored_turns() {
-        for (status, command_status) in [
-            ("inProgress", "inProgress"),
-            ("inProgress", "completed"),
-            ("inProgress", "failed"),
-            ("completed", "completed"),
-            ("failed", "failed"),
-            ("interrupted", "inProgress"),
-            ("", "completed"),
-        ] {
-            let turn = turn!({"id":"turn","status":status,"items":[
-                {"id":"u","type":"userMessage","text":"Inspect"},
-                {"id":"c","type":"commandExecution","command":"pwd","status":command_status},
-                {"id":"a","type":"agentMessage","text":"Result"}
-            ]});
-            let group = project(&turn).find(|part| part.collapsible).unwrap();
-            assert!(
-                !group.initially_expanded,
-                "command group opened without a user action: turn={status}, command={command_status}"
-            );
-            assert_eq!(rows(&group, &turn, Role::Activity).next().unwrap().id, "c");
-            assert!(group.label.is_some());
-        }
+    #[rstest::rstest]
+    #[case::live("inProgress", "inProgress")]
+    #[case::live_completed_command("inProgress", "completed")]
+    #[case::live_failed_command("inProgress", "failed")]
+    #[case::completed("completed", "completed")]
+    #[case::failed("failed", "failed")]
+    #[case::interrupted("interrupted", "inProgress")]
+    #[case::missing_status("", "completed")]
+    fn command_groups_start_collapsed_for_live_and_restored_turns(
+        #[case] status: &str,
+        #[case] command_status: &str,
+    ) {
+        let turn = turn!({"id":"turn","status":status,"items":[
+            {"id":"u","type":"userMessage","text":"Inspect"},
+            {"id":"c","type":"commandExecution","command":"pwd","status":command_status},
+            {"id":"a","type":"agentMessage","text":"Result"}
+        ]});
+        let group = project(&turn).find(|part| part.collapsible).unwrap();
+        assert!(
+            !group.initially_expanded,
+            "command group opened without a user action: turn={status}, command={command_status}"
+        );
+        assert_eq!(rows(&group, &turn, Role::Activity).next().unwrap().id, "c");
+        assert!(group.label.is_some());
     }
 
     #[test]
@@ -553,31 +553,31 @@ mod presentation_tests {
             .collect();
         assert_eq!(labels, ["コマンドを実行しました", "ツールを使用しました"]);
     }
-    #[test]
-    fn completed_exchanges_keep_each_answer_beside_its_question() {
-        for phase in [Value::Null, json!("final_answer")] {
-            let turn = turn!({"id":"turn","status":"completed","durationMs":1459000,"items":[
-                {"id":"u1","type":"userMessage"},
-                {"id":"progress","type":"agentMessage","phase":"commentary"},
-                {"id":"f1","type":"agentMessage","phase":phase},
-                {"id":"u2","type":"userMessage"},
-                {"id":"c","type":"commandExecution"},
-                {"id":"f2","type":"agentMessage","phase":phase}
-            ]});
-            assert_eq!(order(&turn), ["u1", "progress", "f1", "u2", "c", "f2"]);
-            let parts: Vec<_> = project(&turn).collect();
-            assert_eq!(parts.len(), 2);
-            assert_eq!(
-                rows(&parts[0], &turn, Role::Response).next().unwrap().id,
-                "f1"
-            );
-            assert_eq!(
-                rows(&parts[1], &turn, Role::Response).next().unwrap().id,
-                "f2"
-            );
-            assert_eq!(parts[0].label.as_deref(), Some("1件の過去のメッセージ"));
-            assert_eq!(parts[1].label.as_deref(), Some("1件の過去のメッセージ"));
-        }
+    #[rstest::rstest]
+    fn completed_exchanges_keep_each_answer_beside_its_question(
+        #[values(Value::Null, json!("final_answer"))] phase: Value,
+    ) {
+        let turn = turn!({"id":"turn","status":"completed","durationMs":1459000,"items":[
+            {"id":"u1","type":"userMessage"},
+            {"id":"progress","type":"agentMessage","phase":"commentary"},
+            {"id":"f1","type":"agentMessage","phase":phase},
+            {"id":"u2","type":"userMessage"},
+            {"id":"c","type":"commandExecution"},
+            {"id":"f2","type":"agentMessage","phase":phase}
+        ]});
+        assert_eq!(order(&turn), ["u1", "progress", "f1", "u2", "c", "f2"]);
+        let parts: Vec<_> = project(&turn).collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            rows(&parts[0], &turn, Role::Response).next().unwrap().id,
+            "f1"
+        );
+        assert_eq!(
+            rows(&parts[1], &turn, Role::Response).next().unwrap().id,
+            "f2"
+        );
+        assert_eq!(parts[0].label.as_deref(), Some("1件の過去のメッセージ"));
+        assert_eq!(parts[1].label.as_deref(), Some("1件の過去のメッセージ"));
     }
     #[test]
     fn later_answer_does_not_hide_earlier_unanswered_commentary() {
