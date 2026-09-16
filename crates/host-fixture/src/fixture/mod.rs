@@ -46,15 +46,10 @@ impl Config {
         fs::create_dir_all(directory)?;
         let directory = directory.canonicalize()?;
         let program = directory.join(format!("bex-codex-fixture{}", std::env::consts::EXE_SUFFIX));
-        // A symlink would be canonicalized by the real Codex launcher and lose
-        // this directory. A hard link keeps isolation without copying a binary.
-        match fs::hard_link(executable, &program) {
-            Ok(()) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-                fs::copy(executable, &program)?;
-            }
-            Err(error) => return Err(error.into()),
-        }
+        // The launcher resolves symlinks, so use a private executable copy.
+        // A hard link would share an inode with mutable Cargo outputs while
+        // native UI and Rust tests build different feature combinations.
+        fs::copy(executable, &program)?;
         fs::write(
             directory.join("fixture-config.json"),
             serde_json::to_vec(self)?,

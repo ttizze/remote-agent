@@ -4,10 +4,11 @@ use agent_core::peer::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use tokio::{
     io::AsyncReadExt,
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStdin, ChildStdout},
 };
 
 pub(super) struct Process {
+    capacity: Option<tokio::sync::OwnedSemaphorePermit>,
     child: Child,
     input: Option<JsonlWriter<ChildStdin>>,
     output: JsonlReader<ChildStdout>,
@@ -17,23 +18,28 @@ pub(super) struct Process {
 impl Process {
     pub(super) async fn start(
         program: &Path,
+        native_home: &Path,
         cwd: &Path,
         session: Option<(&str, bool)>,
         model: Option<&str>,
         effort: Option<&str>,
     ) -> Result<(Self, Value), String> {
-        let mut command = Command::new(program);
-        command.current_dir(cwd).args([
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--permission-prompt-tool",
-            "stdio",
-        ]);
+        let mut command =
+            codex_app_server::owned_process::command(program).map_err(|error| error.to_string())?;
+        command
+            .env("CLAUDE_CONFIG_DIR", native_home)
+            .current_dir(cwd)
+            .args([
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--permission-prompt-tool",
+                "stdio",
+            ]);
         if let Some((session, resume)) = session {
             command
                 .arg(if resume { "--resume" } else { "--session-id" })
@@ -45,18 +51,16 @@ impl Process {
         if let Some(effort) = effort {
             command.arg("--effort").arg(effort);
         }
-        let mut child = command
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "Claude Codeを起動できません（{}）: {error}",
-                    program.display()
-                )
-            })?;
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|error| {
+            format!(
+                "Claude Codeを起動できません（{}）: {error}",
+                program.display()
+            )
+        })?;
         let mut stderr = child.stderr.take().ok_or("Claude Code stderr is missing")?;
         let stderr = tokio::spawn(async move {
             let mut tail = Vec::new();
@@ -73,6 +77,7 @@ impl Process {
             String::from_utf8_lossy(&tail).into_owned()
         });
         let mut process = Self {
+            capacity: None,
             input: Some(JsonlWriter::new(
                 child.stdin.take().ok_or("Claude Code stdin is missing")?,
             )),
@@ -101,6 +106,10 @@ impl Process {
         }
     }
 
+    pub(super) fn retain_capacity(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
+        self.capacity = Some(permit);
+    }
+
     pub(super) async fn write(&mut self, value: &Value) -> Result<(), String> {
         self.input
             .as_mut()
@@ -124,6 +133,7 @@ impl Process {
 
     pub(super) async fn finish(self) -> Result<(), String> {
         let Self {
+            capacity: _capacity,
             mut child,
             input,
             mut output,
@@ -149,7 +159,7 @@ impl Process {
         let (status, (), stderr_text) = match finished {
             Ok(result) => result?,
             Err(_) => {
-                let _ = child.kill().await;
+                let _ = child.wait().await;
                 stderr.abort();
                 return Err("Claude Code did not exit after closing its input".into());
             }

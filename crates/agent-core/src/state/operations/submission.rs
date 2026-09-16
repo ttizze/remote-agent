@@ -89,7 +89,8 @@ impl Operation for Respond {
         context.client.respond(request, &self.answer).await
     }
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.requests).remove(&self.request_id.to_string());
+        // The Host owns delivery and resolution; transport enqueue is not an approval acknowledgement.
+        let _ = snapshot;
         Vec::new()
     }
 }
@@ -167,7 +168,7 @@ impl StartSubmission {
         {
             Arc::make_mut(pending).draft_key = id.clone();
         }
-        effects.push(Effect::execute(SendSubmission {
+        effects.push(Effect::execute(SubscribeSubmission {
             thread_id: id,
             client_user_message_id,
             draft,
@@ -178,6 +179,37 @@ impl StartSubmission {
             )));
         }
         effects
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeSubmission {
+    pub thread_id: String,
+    pub client_user_message_id: String,
+    pub draft: Arc<Draft>,
+}
+impl Operation for SubscribeSubmission {
+    type Output = crate::session::OpenedSession;
+    const ORDERED: bool = true;
+    fn submission_id(&self) -> Option<&str> {
+        Some(&self.client_user_message_id)
+    }
+    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        let mut open = ReadThread::new(self.thread_id.clone());
+        open.prepare(&mut context.snapshot.clone())
+            .map_err(PeerError::InvalidMessage)?;
+        context.call(&open).await
+    }
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let mut effects = ReadThread::new(self.thread_id.clone()).apply(snapshot, output);
+        effects.push(Effect::execute(SendSubmission {
+            thread_id: self.thread_id,
+            client_user_message_id: self.client_user_message_id,
+            draft: self.draft,
+        }));
+        effects
+    }
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        self.apply(snapshot, output)
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

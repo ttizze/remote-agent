@@ -11,6 +11,7 @@ pub struct ThreadSummary {
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadList {
+    pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<Project>,
     pub more_project_ids: Vec<String>,
@@ -39,7 +40,19 @@ impl Snapshot {
 
     pub fn thread_list(&self) -> Option<ThreadList> {
         let list = self.threads.as_ref()?;
+        let mut notices = Vec::new();
+        if let Some(errors) = list
+            .extra
+            .get("providerErrors")
+            .and_then(serde_json::Value::as_object)
+        {
+            notices.push(format!("会話一覧は部分結果です（{}）。取得できない提供元の保存済み表示は最新とは限りません。", errors.keys().cloned().collect::<Vec<_>>().join("、")));
+        }
+        if !self.archived_scopes.is_empty() {
+            notices.push("保存領域が変更されています。以前の下書き・未保存編集は保持しています。Hostの保存先設定を元に戻すと再び表示できます。".into());
+        }
         Some(ThreadList {
+            notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: list
                 .data
                 .iter()
@@ -65,7 +78,14 @@ impl Snapshot {
                                     .filter(|preview| !preview.is_empty())
                             })
                             .unwrap_or("無題のタスク")
-                            .to_owned(),
+                            .to_owned()
+                            + if thread.extra.get("listStale")
+                                == Some(&serde_json::Value::Bool(true))
+                            {
+                                "（保存済み・未確認）"
+                            } else {
+                                ""
+                            },
                         project_id: thread
                             .project_id
                             .clone()
@@ -100,6 +120,39 @@ mod tests {
     };
     use serde_json::json;
 
+    #[test]
+    fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
+        let mut snapshot = Snapshot::default();
+        let page = |data, errors| {
+            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
+        };
+        ListThreads::new(Default::default()).apply(
+            &mut snapshot,
+            page(
+                serde_json::json!([{"id":"native","name":"Cached"}]),
+                serde_json::json!({}),
+            ),
+        );
+        ListThreads::new(Default::default()).apply(
+            &mut snapshot,
+            page(
+                serde_json::json!([{"id":"claude:uuid","name":"Available"}]),
+                serde_json::json!({"codex":{"message":"offline"}}),
+            ),
+        );
+        let list = snapshot.thread_list().unwrap();
+        assert_eq!(list.threads.len(), 2);
+        assert!(list.notice.unwrap().contains("部分結果"));
+        assert!(
+            list.threads
+                .iter()
+                .find(|thread| thread.id == "native")
+                .unwrap()
+                .title
+                .contains("未確認")
+        );
+        assert!(snapshot.error.is_none());
+    }
     #[test]
     fn merged_work_requires_a_changed_tip_contained_in_main() {
         assert!(!worktree_branch_merged("base", Some("base"), true));

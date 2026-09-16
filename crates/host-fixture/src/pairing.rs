@@ -204,6 +204,28 @@ fn route(
                     .write_all(b"external reply persisted\n")?;
             }
         }
+        "/client-reply" => runtime.block_on(async {
+            let connection =
+                Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
+            let result: Result<()> = async {
+                connection.peer.request::<_, Value>(
+                    "host/session/open",
+                    &json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5}),
+                ).await?;
+                connection.peer.request::<_, Value>(
+                    "turn/start",
+                    &json!({"threadId":"fixture-external-thread","clientUserMessageId":"fixture-other-client",
+                        "input":[{"type":"text","text":"[success] Reply from another Bex client"}]}),
+                ).await?;
+                Ok(())
+            }.await;
+            let closed = connection.close().await;
+            result?;
+            closed
+        })?,
+        "/fail-next-thread-start" => {
+            fs::write(root.join("fail-next-thread-start"), "")?;
+        }
         "/fail-next-history-read" => {
             fs::write(root.join("fail-next-history-read"), "")?;
         }

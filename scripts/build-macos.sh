@@ -24,7 +24,9 @@ if ! git diff --quiet HEAD --; then BEX_BUILD_REVISION+=-dirty; fi
 sign() { /usr/bin/codesign --force --sign "$identity" --timestamp=none "$@"; }
 verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
 if [[ $product == host ]]; then
-    cargo build --locked --package host-daemon --release
+    cargo build --locked --package host-daemon --package codex-app-server --release
+    sign --identifier app.bex.provider-supervisor "$target/release/bex-provider-supervisor"
+    verify "$target/release/bex-provider-supervisor"
     sign --identifier app.bex.host "$target/release/host-daemon"
     verify "$target/release/host-daemon"
     echo "$target/release/host-daemon"
@@ -32,7 +34,7 @@ if [[ $product == host ]]; then
 fi
 [[ $(uname -m) == arm64 ]] || { echo 'The GPUI Mac bundle requires Apple Silicon.' >&2; exit 2; }
 npm --prefix apps/desktop/web ci --ignore-scripts --no-audit --no-fund
-cargo build --locked --package host-daemon --package bex-desktop --release
+cargo build --locked --package host-daemon --package codex-app-server --package bex-desktop --release
 staging=$(mktemp -d "$target/.Bex-build.XXXXXX")
 destination="$target/Bex.app"
 cleanup() {
@@ -56,6 +58,7 @@ mkdir -p "$executables" "$resources/terminal"
 cp apps/desktop/assets/icon.icns "$resources/Bex.icns"
 cp "$target/release/bex-desktop" "$executables/Bex"
 cp "$target/release/host-daemon" "$executables/host-daemon"
+cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
 modules=apps/desktop/web/node_modules/@xterm
 cp "$modules/xterm/lib/xterm.js" "$modules/xterm/css/xterm.css" "$modules/addon-fit/lib/addon-fit.js" "$resources/terminal/"
 cp "$modules/xterm/LICENSE" "$resources/terminal/LICENSE-xterm"
@@ -67,6 +70,7 @@ cp apps/desktop/macos/Dictation-Info.plist "$dictation/Contents/Info.plist"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
 sign "$dictation"
 sign "$executables/Bex"
+sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"
 sign "$bundle"
 verify "$bundle"

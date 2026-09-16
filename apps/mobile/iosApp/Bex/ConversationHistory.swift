@@ -11,6 +11,7 @@ extension ThreadScreen {
     @ViewBuilder
     func conversationRow(_ row: ThreadConversationRow) -> some View {
         switch row.content {
+        case let .historyNotice(message): Text(message).font(.caption).foregroundStyle(.secondary)
         case .olderTurns: historyBoundary(nil)
         case let .native(content, item): nativeConversationRow(content, item: item)
         case let .queued(item):

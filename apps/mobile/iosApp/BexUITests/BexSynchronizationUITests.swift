@@ -132,17 +132,17 @@ extension BexLaunchUITests {
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["item.answer-fixture-external-thread"].waitForExistence(timeout: 15),
-            "The external paginated conversation must open without taking its writer lock"
+            "The native paginated conversation must open before another Bex client sends input"
         )
         let composer = app.textFields["task.message"]
         XCTAssertTrue(composer.waitForExistence(timeout: 10)); composer.tap()
         composer.typeText("Keep this unsent draft")
-        try simulatorFixture("background-reply")
-        XCTAssertTrue(app.descendants(matching: .any)["item.fixture-external-final"].waitForExistence(timeout: 20),
-                      "The open conversation did not update after another process persisted its reply")
+        try simulatorFixture("client-reply")
+        XCTAssertTrue(app.textViews["シミュレータで完了しました。"].waitForExistence(timeout: 30),
+                      "The open conversation did not receive the other Bex client's live reply")
         XCTAssertEqual(composer.value as? String, "Keep this unsent draft")
         XCTAssertFalse(app.staticTexts["notice"].exists)
-        captureScreen(app, named: "External conversation updates with draft retained")
+        captureScreen(app, named: "Another Bex client updates the conversation with draft retained")
     }
 
     func testSimulatorKeepsOpenTaskAndFetchesLatestReplyAfterForeground() throws {

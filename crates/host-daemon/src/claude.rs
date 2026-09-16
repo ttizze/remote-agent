@@ -1,5 +1,6 @@
 //! Claude Code owns inference, credentials and its transcript. The Host owns
 //! the client-facing conversation and adapts the CLI's streaming protocol.
+mod history;
 mod process;
 
 use std::{
@@ -14,13 +15,11 @@ use agent_core::{
     peer::RpcMessage,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, OnceCell, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{Provider, catalog::updated_at};
 use crate::host_rpc::routing::SessionRouter;
 use process::Process;
 
@@ -29,47 +28,48 @@ pub(crate) const MODEL_PREFIX: &str = "claude:";
 pub(crate) struct Claude {
     program: PathBuf,
     directory: PathBuf,
+    native_home: PathBuf,
     records: AsyncMutex<HashMap<String, Arc<AsyncMutex<Record>>>>,
     models: OnceCell<Vec<Model>>,
+    processes: Arc<Semaphore>,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
     router: SessionRouter,
     stop: CancellationToken,
     workers: AsyncMutex<tokio::task::JoinSet<()>>,
 }
 
-#[derive(Serialize, Deserialize)]
 struct Record {
-    response: ThreadResponse,
+    cwd: String,
+    model: String,
     session_id: Uuid,
     resumable: bool,
-    #[serde(skip)]
     running: Option<Running>,
+    idle: Option<Idle>,
 }
 
-impl Record {
-    fn turn_mut(&mut self) -> &mut Turn {
-        Arc::make_mut(
-            self.response
-                .thread
-                .turns
-                .as_mut()
-                .and_then(|turns| turns.last_mut())
-                .expect("a running Claude conversation has a turn"),
-        )
-    }
+struct Idle {
+    process: Process,
+    model: String,
+    effort: Option<String>,
+    released: CancellationToken,
 }
 
 struct Running {
     turn_id: String,
-    input: mpsc::Sender<Value>,
+    input: mpsc::Sender<Command>,
     interrupt: watch::Receiver<Option<Result<(), String>>>,
+}
+
+struct Command {
+    value: Value,
+    delivered: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
 struct Pending {
     thread_id: String,
     request_id: String,
     input: Value,
-    sender: mpsc::Sender<Value>,
+    sender: mpsc::Sender<Command>,
 }
 
 impl Drop for Claude {
@@ -82,60 +82,18 @@ impl Claude {
     pub(crate) async fn load(
         program: PathBuf,
         directory: PathBuf,
+        native_home: Option<PathBuf>,
         router: SessionRouter,
     ) -> Result<Self, String> {
         crate::platform::create_state_directory(&directory).map_err(|error| error.to_string())?;
-        let mut records = HashMap::new();
-        let mut files = tokio::fs::read_dir(&directory)
-            .await
-            .map_err(|error| error.to_string())?;
-        while let Some(file) = files
-            .next_entry()
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            let path = file.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
-                continue;
-            }
-            let bytes = tokio::fs::read(&path)
-                .await
-                .map_err(|error| error.to_string())?;
-            let mut record: Record = serde_json::from_slice(&bytes).map_err(|error| {
-                format!("invalid Claude conversation {}: {error}", path.display())
-            })?;
-            let id = format!("claude:{}", record.session_id);
-            if record.response.thread.id.as_deref() != Some(&id)
-                || path.file_stem().and_then(|s| s.to_str())
-                    != Some(record.session_id.to_string().as_str())
-            {
-                return Err(format!(
-                    "Claude conversation identity mismatch: {}",
-                    path.display()
-                ));
-            }
-            let mut interrupted = false;
-            for turn in record.response.thread.turns.iter_mut().flatten() {
-                if turn.status.as_deref() == Some("inProgress") {
-                    let turn = Arc::make_mut(turn);
-                    turn.status = Some("interrupted".into());
-                    turn.error = Some(
-                        json!({"message":"Hostが終了したためClaudeの実行が中断されました。もう一度送信してください。"}),
-                    );
-                    interrupted = true;
-                }
-            }
-            record.response.thread.status = Some(status("idle"));
-            if interrupted {
-                save(&directory, &record)?;
-            }
-            records.insert(id, Arc::new(AsyncMutex::new(record)));
-        }
+        let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
         Ok(Self {
             program,
             directory,
-            records: AsyncMutex::new(records),
+            native_home,
+            records: AsyncMutex::new(HashMap::new()),
             models: OnceCell::new(),
+            processes: Arc::new(Semaphore::new(8)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             router,
             stop: CancellationToken::new(),
@@ -169,8 +127,15 @@ impl Claude {
             .get_or_try_init(|| async {
                 let cwd =
                     tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-                let (process, initialized) =
-                    Process::start(&self.program, cwd.path(), None, None, None).await?;
+                let (process, initialized) = Process::start(
+                    &self.program,
+                    &self.native_home,
+                    cwd.path(),
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
                 process.finish().await?;
                 let entries = initialized["models"]
                     .as_array()
@@ -246,93 +211,320 @@ impl Claude {
         }
         let session_id = Uuid::new_v4();
         let id = format!("claude:{session_id}");
-        let record = Record {
-            response: ThreadResponse {
-                thread: Thread {
-                    id: Some(id.clone()),
-                    cwd: Some(cwd.to_string_lossy().into_owned()),
-                    status: Some(status("idle")),
-                    turns: Some(Vec::new()),
-                    created_at: Some(now().into()),
-                    updated_at: Some(now().into()),
-                    history_cursor: Some(None),
-                    ..Default::default()
-                },
-                model: Some(model.into()),
-                extra: Default::default(),
+        let response = ThreadResponse {
+            thread: Thread {
+                id: Some(id.clone()),
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                status: Some(status("idle")),
+                turns: Some(Vec::new()),
+                created_at: Some(now().into()),
+                updated_at: Some(now().into()),
+                ..Default::default()
             },
+            model: Some(model.into()),
+            extra: Default::default(),
+        };
+        let record = Record {
+            cwd: cwd.to_string_lossy().into_owned(),
+            model: model.into(),
             session_id,
             resumable: false,
             running: None,
+            idle: None,
         };
-        save(&self.directory, &record)?;
-        let response = record.response.clone();
-        self.records
-            .lock()
-            .await
-            .insert(id, Arc::new(AsyncMutex::new(record)));
+        self.retain_record(id, Arc::new(AsyncMutex::new(record)))
+            .await?;
+        self.router.created_session(response.clone());
         Ok(response)
     }
 
     async fn record(&self, id: &str) -> Result<Arc<AsyncMutex<Record>>, String> {
-        self.records
-            .lock()
-            .await
-            .get(id)
-            .cloned()
-            .ok_or_else(|| "Claudeの会話が見つかりません。".into())
+        if let Some(record) = self.records.lock().await.get(id).cloned() {
+            return Ok(record);
+        }
+        let native_id = Uuid::parse_str(
+            id.strip_prefix(MODEL_PREFIX)
+                .ok_or("invalid Claude session ID")?,
+        )
+        .map_err(|_| "invalid Claude session ID")?;
+        let home = self.native_home.clone();
+        let summary = tokio::task::spawn_blocking(move || {
+            let path = history::resolve(&home, native_id)?;
+            history::summary(&path)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let record = Arc::new(AsyncMutex::new(Record {
+            cwd: summary
+                .cwd
+                .ok_or("Claude working directory is unavailable")?,
+            model: "claude:default".into(),
+            session_id: native_id,
+            resumable: true,
+            running: None,
+            idle: None,
+        }));
+        self.retain_record(id.into(), record).await
     }
 
-    pub(crate) async fn list(&self, search: &str) -> Vec<Thread> {
+    async fn retain_record(
+        &self,
+        id: String,
+        record: Arc<AsyncMutex<Record>>,
+    ) -> Result<Arc<AsyncMutex<Record>>, String> {
+        let mut records = self.records.lock().await;
+        if let Some(existing) = records.get(&id) {
+            return Ok(existing.clone());
+        }
+        if records.len() >= 128 {
+            records.retain(|_, record| {
+                Arc::strong_count(record) > 1
+                    || record.try_lock().map_or(true, |record| {
+                        record.running.is_some() || record.idle.is_some()
+                    })
+            });
+        }
+        if records.len() >= 128 {
+            return Err(
+                "Claude session capacity reached; wait for an active task to finish".into(),
+            );
+        }
+        records.insert(id, record.clone());
+        Ok(record)
+    }
+
+    pub(crate) fn storage_directory(&self) -> &Path {
+        &self.native_home
+    }
+
+    pub(crate) async fn list(&self, search: &str) -> Result<Vec<Thread>, String> {
+        let home = self.native_home.clone();
+        let mut threads = tokio::task::spawn_blocking(move || {
+            history::files(&home)?
+                .into_iter()
+                .map(|path| {
+                    Ok(history::summary(&path).unwrap_or_else(|error| {
+                        let mut thread = Thread {
+                            id: path
+                                .file_stem()
+                                .and_then(|id| id.to_str())
+                                .map(|id| format!("claude:{id}")),
+                            name: Some("Claude履歴を読み取れません".into()),
+                            status: Some(status("notLoaded")),
+                            ..Default::default()
+                        };
+                        thread.extra.insert(
+                            "historyReadState".into(),
+                            json!({"type":"unavailable","issues":[error]}),
+                        );
+                        thread
+                    }))
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         let records: Vec<_> = self.records.lock().await.values().cloned().collect();
-        let mut threads = Vec::new();
-        let search = search.trim().to_lowercase();
         for record in records {
             let record = record.lock().await;
-            let thread = &record.response.thread;
-            if !search.is_empty()
-                && !thread
+            let id = format!("claude:{}", record.session_id);
+            let Some(mut thread) = self
+                .router
+                .current_session(&id)
+                .map(|response| response.thread)
+            else {
+                continue;
+            };
+            thread.turns = None;
+            if let Some(current) = threads.iter_mut().find(|current| current.id == thread.id) {
+                *current = thread;
+            } else if record.running.is_some() {
+                threads.push(thread);
+            }
+        }
+        let search = search.trim().to_lowercase();
+        threads.retain(|thread| {
+            search.is_empty()
+                || thread
                     .name
                     .as_deref()
                     .unwrap_or_default()
                     .to_lowercase()
                     .contains(&search)
-                && !thread
+                || thread
                     .preview
                     .as_deref()
                     .unwrap_or_default()
                     .to_lowercase()
                     .contains(&search)
-            {
-                continue;
-            }
-            let mut thread = thread.clone();
-            thread.turns = None;
-            threads.push(thread);
-        }
+        });
         threads.sort_by(|left, right| {
             updated_at(right)
                 .cmp(&updated_at(left))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        threads
+        Ok(threads)
     }
 
     pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = params["threadId"].as_str().ok_or("threadId is required")?;
+        if matches!(
+            method,
+            "host/thread/read"
+                | "thread/read"
+                | "thread/resume"
+                | "host/thread/resume"
+                | "host/thread/item/read"
+        ) {
+            let current = self.router.current_session(id);
+            let requested = params["historyLimit"].as_u64().unwrap_or(1000) as usize;
+            let use_current = method != "host/thread/item/read"
+                && current.as_ref().is_some_and(|response| {
+                    response.thread.extra.get("historyHasMore") != Some(&Value::Bool(true))
+                        || response
+                            .thread
+                            .extra
+                            .get("historyLimit")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0) as usize
+                            >= requested
+                });
+            let mut response = if use_current {
+                current.clone().unwrap()
+            } else {
+                let native = Uuid::parse_str(
+                    id.strip_prefix(MODEL_PREFIX)
+                        .ok_or("invalid Claude session ID")?,
+                )
+                .map_err(|e| e.to_string())?;
+                let home = self.native_home.clone();
+                let native: Result<ThreadResponse, String> =
+                    tokio::task::spawn_blocking(move || {
+                        let path = history::resolve(&home, native)?;
+                        match history::read(&path, requested) {
+                            Ok(response) => Ok(response),
+                            Err(error) => {
+                                let mut thread = history::summary(&path)?;
+                                thread.extra.insert(
+                                    "historyReadState".into(),
+                                    json!({"type":"unavailable","issues":[error]}),
+                                );
+                                Ok(ThreadResponse {
+                                    thread,
+                                    model: None,
+                                    extra: Default::default(),
+                                })
+                            }
+                        }
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                match native {
+                    Ok(mut response) => {
+                        if let Some(current) = &current {
+                            for turn in current
+                                .thread
+                                .turns
+                                .iter()
+                                .flatten()
+                                .filter(|turn| turn.status.as_deref() == Some("inProgress"))
+                            {
+                                response.thread = agent_core::session::SessionChange::Turn {
+                                    turn: (**turn).clone(),
+                                    completed: false,
+                                }
+                                .apply(&response.thread)
+                                .map_err(str::to_owned)?;
+                            }
+                        }
+                        response
+                    }
+                    Err(error) => current
+                        .clone()
+                        .filter(|response| {
+                            response
+                                .thread
+                                .turns
+                                .iter()
+                                .flatten()
+                                .any(|turn| turn.status.as_deref() == Some("inProgress"))
+                        })
+                        .ok_or(error)?,
+                }
+            };
+            if method == "host/thread/item/read" {
+                let item = response
+                    .thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .find(|turn| Some(turn.id.as_str()) == params["turnId"].as_str())
+                    .and_then(|turn| turn.items.as_ref())
+                    .into_iter()
+                    .flatten()
+                    .find(|item| Some(item.id.as_str()) == params["itemId"].as_str())
+                    .ok_or("Claude native history item is unavailable")?;
+                let mut item = (**item).clone();
+                if item.extra.get("detailDeferred") == Some(&Value::Bool(true)) {
+                    return Err(
+                        "full native item is not yet available; retry after provider persistence"
+                            .into(),
+                    );
+                }
+                if let Some(path) = item.extra.get("detailFile").and_then(Value::as_str) {
+                    use tokio::io::AsyncReadExt;
+                    let file = tokio::fs::File::open(path)
+                        .await
+                        .map_err(|error| format!("native tool output is unavailable: {error}"))?;
+                    let mut bytes = Vec::new();
+                    file.take(4 * 1024 * 1024 + 1)
+                        .read_to_end(&mut bytes)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if bytes.len() > 4 * 1024 * 1024 {
+                        return Err("native tool output exceeds detail byte limit".into());
+                    }
+                    item.result = Some(Value::String(
+                        String::from_utf8(bytes).map_err(|_| "native tool output is not UTF-8")?,
+                    ));
+                }
+                if let Some(agent_id) = item.extra.get("agentId").and_then(Value::as_str) {
+                    let home = self.native_home.clone();
+                    let session_id =
+                        Uuid::parse_str(id.strip_prefix(MODEL_PREFIX).ok_or("invalid Claude ID")?)
+                            .map_err(|_| "invalid Claude ID")?;
+                    let agent_id = agent_id.to_owned();
+                    let related = tokio::task::spawn_blocking(move || {
+                        history::read_related(&home, session_id, &agent_id, 1000)
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    item.result = Some(match related {
+                        Ok(response) => json!({"output":item.result,"subagent":response.thread}),
+                        Err(error) => {
+                            json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":error}})
+                        }
+                    });
+                }
+                if serde_json::to_vec(&item)
+                    .map_err(|error| error.to_string())?
+                    .len()
+                    > 4 * 1024 * 1024
+                {
+                    return Err("native item exceeds detail byte limit".into());
+                }
+                return Ok(json!({"item": item}));
+            }
+            if params["includeTurns"] == false {
+                response.thread.turns = None;
+            }
+            if params["deferItemDetails"] == true {
+                response.thread.defer_item_details();
+            }
+            return serde_json::to_value(response).map_err(|e| e.to_string());
+        }
         let record = self.record(id).await?;
         match method {
-            "host/thread/read" | "thread/read" | "thread/resume" | "host/thread/resume" => {
-                let record = record.lock().await;
-                let mut response = record.response.clone();
-                if params["includeTurns"] == false {
-                    response.thread.turns = None;
-                }
-                if params["deferItemDetails"] == true {
-                    response.thread.defer_item_details();
-                }
-                serde_json::to_value(response).map_err(|error| error.to_string())
-            }
             "turn/start" => self.start_turn(id, record, &params).await,
             "turn/interrupt" => {
                 let (input, mut interrupt) = {
@@ -349,7 +541,7 @@ impl Claude {
                     (running.input.clone(), running.interrupt.clone())
                 };
                 if interrupt.borrow().is_none() {
-                    input.send(json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}})).await.map_err(|_| "Claude Code input is closed")?;
+                    input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
                 }
                 tokio::time::timeout(std::time::Duration::from_secs(15), async {
                     loop {
@@ -365,22 +557,6 @@ impl Claude {
                 .await
                 .map_err(|_| "Claude Codeの停止要求がタイムアウトしました。")??;
                 Ok(json!({}))
-            }
-            "host/thread/item/read" => {
-                let record = record.lock().await;
-                let item = record
-                    .response
-                    .thread
-                    .turns
-                    .iter()
-                    .flatten()
-                    .find(|turn| Some(turn.id.as_str()) == params["turnId"].as_str())
-                    .and_then(|turn| turn.items.as_ref())
-                    .into_iter()
-                    .flatten()
-                    .find(|item| Some(item.id.as_str()) == params["itemId"].as_str())
-                    .ok_or("Claudeの履歴項目が見つかりません。")?;
-                Ok(json!({"item":item}))
             }
             "turn/steer" | "thread/queue/add" => Err(
                 "Claudeの実行中は追加送信できません。完了を待つか、停止してから送信してください。"
@@ -416,7 +592,7 @@ impl Claude {
         }
         let model = params["model"]
             .as_str()
-            .or(state.response.model.as_deref())
+            .or(Some(state.model.as_str()))
             .ok_or("Claude model is required")?;
         let model_name = model
             .strip_prefix(MODEL_PREFIX)
@@ -446,27 +622,41 @@ impl Claude {
             return Err("ClaudeではCodexのサービス階層を指定できません。".into());
         }
         let session = state.session_id.to_string();
-        let cwd = state
-            .response
-            .thread
-            .cwd
-            .as_deref()
-            .ok_or("Claude working directory is missing")?;
-        let (mut process, initialized) = Process::start(
-            &self.program,
-            Path::new(cwd),
-            Some((&session, state.resumable)),
-            Some(&model_name),
-            effort,
-        )
-        .await?;
-        if !initialized["account"]["subscriptionType"]
-            .as_str()
-            .is_some_and(|plan| !plan.is_empty())
+        let cwd = state.cwd.clone();
+        let idle = state.idle.take();
+        let mut process = if idle
+            .as_ref()
+            .is_some_and(|idle| idle.model == model && idle.effort.as_deref() == effort)
         {
-            process.finish().await?;
-            return Err("Claudeのサブスク認証がありません。Hostの端末で claude auth login を実行し、APIキーではなくClaudeアカウントでログインしてください。".into());
-        }
+            let idle = idle.unwrap();
+            idle.released.cancel();
+            idle.process
+        } else {
+            if let Some(idle) = idle {
+                idle.released.cancel();
+                idle.process.finish().await?;
+            }
+            let permit = self.processes.clone().try_acquire_owned()
+                .map_err(|_| "Claude process capacity reached (8); wait for an active or retained session to finish")?;
+            let (mut process, initialized) = Process::start(
+                &self.program,
+                &self.native_home,
+                Path::new(&cwd),
+                Some((&session, state.resumable)),
+                Some(&model_name),
+                effort,
+            )
+            .await?;
+            process.retain_capacity(permit);
+            if !initialized["account"]["subscriptionType"]
+                .as_str()
+                .is_some_and(|plan| !plan.is_empty())
+            {
+                process.finish().await?;
+                return Err("Claudeのサブスク認証がありません。Hostの端末で claude auth login を実行してください。".into());
+            }
+            process
+        };
         let turn_id = Uuid::new_v4().to_string();
         let user: Item = serde_json::from_value(json!({"id":Uuid::new_v4().to_string(),"type":"userMessage","content":params["input"],"clientId":params["clientUserMessageId"]})).map_err(|error| error.to_string())?;
         let turn = Turn {
@@ -476,39 +666,10 @@ impl Claude {
             started_at: Some(Some(now().into())),
             ..Default::default()
         };
-        let previous = state.response.clone();
-        state.response.model = Some(model);
-        state.response.thread.status = Some(status("active"));
-        state.response.thread.updated_at = Some(now().into());
-        if state.response.thread.preview.is_none() {
-            state.response.thread.preview = Some(
-                params["input"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|input| input["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .chars()
-                    .take(120)
-                    .collect(),
-            );
+        if let Err(error) = process.write(&json!({"type":"user","uuid":turn_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
+            return Err(format!("submission outcome unknown: {error}"));
         }
-        state
-            .response
-            .thread
-            .turns
-            .get_or_insert_default()
-            .push(Arc::new(turn.clone()));
-        if let Err(error) = save(&self.directory, &state) {
-            state.response = previous;
-            return Err(error);
-        }
-        if let Err(error) = process.write(&json!({"type":"user","session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
-            state.response = previous;
-            save(&self.directory, &state)?;
-            return Err(error);
-        }
+        state.model = model.clone();
         let (input, receiver) = mpsc::channel(32);
         let (interrupt, interrupted) = watch::channel(None);
         state.running = Some(Running {
@@ -529,15 +690,16 @@ impl Claude {
         );
         let worker = Worker {
             record,
-            directory: self.directory.clone(),
             router: self.router.clone(),
             pending: self.pending.clone(),
             thread_id: id.into(),
             turn_id: turn_id.clone(),
             input,
             stop: self.stop.child_token(),
-            stream: None,
+            stream: HashMap::new(),
             interrupt,
+            model,
+            effort: effort.map(str::to_owned),
         };
         let mut workers = self.workers.lock().await;
         while let Some(result) = workers.try_join_next() {
@@ -590,7 +752,12 @@ impl Claude {
         } else {
             json!({"behavior":"deny","message":"ユーザーがこの操作を拒否しました。"})
         };
-        pending.sender.send(json!({"type":"control_response","response":{"subtype":"success","request_id":pending.request_id,"response":response}})).await.map_err(|_| "Claude Code input is closed")?;
+        let (delivered, receipt) = tokio::sync::oneshot::channel();
+        pending.sender.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":pending.request_id,"response":response}}), delivered: Some(delivered) }).await.map_err(|_| "Claude Code input is closed")?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
+            .await
+            .map_err(|_| "Claude answer delivery is unknown")?
+            .map_err(|_| "Claude exited before confirming the answer write")??;
         emit(
             &self.router,
             "serverRequest/resolved",
@@ -602,19 +769,30 @@ impl Claude {
 
 struct Worker {
     record: Arc<AsyncMutex<Record>>,
-    directory: PathBuf,
     router: SessionRouter,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
     thread_id: String,
     turn_id: String,
-    input: mpsc::Sender<Value>,
+    input: mpsc::Sender<Command>,
     stop: CancellationToken,
-    stream: Option<(String, usize)>,
+    stream: HashMap<String, (String, usize)>,
     interrupt: watch::Sender<Option<Result<(), String>>>,
+    model: String,
+    effort: Option<String>,
 }
 
 impl Worker {
-    async fn run(mut self, mut process: Process, mut input: mpsc::Receiver<Value>) {
+    fn current_turn(&self) -> Option<Turn> {
+        self.router
+            .current_session(&self.thread_id)?
+            .thread
+            .turns?
+            .iter()
+            .rfind(|turn| turn.id == self.turn_id)
+            .map(|turn| (**turn).clone())
+    }
+
+    async fn run(mut self, mut process: Process, mut input: mpsc::Receiver<Command>) {
         let mut interrupted = false;
         let outcome = async {
             loop {
@@ -626,7 +804,9 @@ impl Worker {
                     }
                     command = input.recv() => {
                         let command = command.ok_or("Claude input queue is closed")?;
-                        process.write(&command).await?;
+                        let result = process.write(&command.value).await;
+                        if let Some(delivered) = command.delivered { let _ = delivered.send(result.clone()); }
+                        result?;
                     }
                     message = process.read() => {
                         let message = message?.ok_or("Claude Code exited without a result")?;
@@ -656,8 +836,14 @@ impl Worker {
                 }
             }
         }.await;
-        let exited = process.finish().await;
-        let outcome = outcome.and(exited);
+        let mut retained = None;
+        let outcome = if outcome.is_ok() && !self.stop.is_cancelled() {
+            retained = Some(process);
+            outcome
+        } else {
+            let exited = process.finish().await;
+            outcome.and(exited)
+        };
         let pending: Vec<_> = {
             let mut pending = self.pending.lock().unwrap();
             let ids: Vec<_> = pending
@@ -678,7 +864,19 @@ impl Worker {
             );
         }
         let mut record = self.record.lock().await;
-        let turn = record.turn_mut();
+        let Some(mut turn) = self.current_turn() else {
+            record.running = None;
+            drop(record);
+            if let Some(process) = retained {
+                let _ = process.finish().await;
+            }
+            emit(
+                &self.router,
+                "thread/status/changed",
+                json!({"threadId":self.thread_id,"status":{"type":"notLoaded"}}),
+            );
+            return;
+        };
         turn.status = Some(
             if interrupted {
                 "interrupted"
@@ -702,22 +900,16 @@ impl Worker {
         if let Err(error) = outcome {
             turn.error = Some(json!({"message":error}));
         }
-        record.response.thread.status = Some(status("idle"));
-        record.response.thread.updated_at = Some(now().into());
-        if let Err(error) = save(&self.directory, &record) {
-            let turn = record.turn_mut();
-            turn.status = Some("failed".into());
-            turn.error = Some(json!({"message":format!("Claudeの会話を保存できません: {error}")}));
-        }
         record.running = None;
-        let turn = record
-            .response
-            .thread
-            .turns
-            .as_ref()
-            .unwrap()
-            .last()
-            .unwrap();
+        let released = CancellationToken::new();
+        if let Some(process) = retained {
+            record.idle = Some(Idle {
+                process,
+                model: self.model,
+                effort: self.effort,
+                released: released.clone(),
+            });
+        }
         emit(
             &self.router,
             "turn/completed",
@@ -728,9 +920,32 @@ impl Worker {
             "thread/status/changed",
             json!({"threadId":self.thread_id,"status":{"type":"idle"}}),
         );
+        let retained = record.idle.is_some();
+        drop(record);
+        if retained {
+            tokio::select! {
+                _ = released.cancelled() => return,
+                _ = self.stop.cancelled() => {},
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
+            }
+            let idle = {
+                let mut record = self.record.lock().await;
+                if released.is_cancelled() {
+                    None
+                } else {
+                    record.idle.take()
+                }
+            };
+            if let Some(idle) = idle {
+                let _ = idle.process.finish().await;
+            }
+        }
     }
 
     fn permission(&self, message: &Value) -> Result<(), String> {
+        if message.to_string().len() > 32 * 1024 {
+            return Err("Claude control request exceeds its size limit".into());
+        }
         let request = &message["request"];
         if request["subtype"] != "can_use_tool" {
             return Err(format!(
@@ -771,6 +986,8 @@ impl Worker {
             }
         };
         let line = json!({"id":id,"method":method,"params":params}).to_string();
+        let message = RpcMessage::parse(&line).map_err(|error| error.to_string())?;
+        self.router.request_admission(&message)?;
         self.pending.lock().unwrap().insert(
             id,
             Pending {
@@ -780,23 +997,22 @@ impl Worker {
                 sender: self.input.clone(),
             },
         );
-        self.router.handle_server_message(
-            Provider::Claude,
-            &RpcMessage::parse(&line).map_err(|error| error.to_string())?,
-        );
+        self.router
+            .handle_server_message(agent_core::session::ProviderKind::Claude, &message);
         Ok(())
     }
 
     fn approval_id(&self, request_id: &str) -> String {
-        format!("claude-permission:{}:{request_id}", self.thread_id)
+        format!(
+            "claude-permission:{}:{}:{request_id}",
+            self.thread_id, self.turn_id
+        )
     }
 
     async fn message(&mut self, message: Value) -> Result<(), String> {
-        if !message["parent_tool_use_id"].is_null() {
-            return Ok(());
-        }
+        let scope = message["parent_tool_use_id"].as_str().unwrap_or_default();
         if message["type"] == "stream_event" {
-            return self.stream_event(&message["event"]).await;
+            return self.stream_event(&message["event"], scope).await;
         }
         let mut record = self.record.lock().await;
         let kind = message["type"].as_str().unwrap_or_default();
@@ -805,7 +1021,6 @@ impl Worker {
                 return Err("Claude session identity changed".into());
             }
             record.resumable = true;
-            save(&self.directory, &record)?;
         }
         if kind != "assistant" && kind != "user" {
             return Ok(());
@@ -814,12 +1029,15 @@ impl Worker {
             .as_array()
             .ok_or("Claude message content is missing")?;
         let message_id = message["message"]["id"].as_str();
-        let turn = record.turn_mut();
+        drop(record);
+        let mut turn = self
+            .current_turn()
+            .ok_or("Claude execution state is unavailable")?;
         let items = turn.items.get_or_insert_default();
         for (index, block) in blocks.iter().enumerate() {
             // Claude emits one assistant envelope per completed block, often
             // with the same message ID. Preserve the stream's block index.
-            let id = if let Some((stream_id, block)) = &self.stream
+            let id = if let Some((stream_id, block)) = self.stream.get(scope)
                 && Some(stream_id.as_str()) == message_id
                 && blocks.len() == 1
             {
@@ -865,7 +1083,11 @@ impl Worker {
                 }
                 _ => continue,
             };
-            let item: Item = serde_json::from_value(value).map_err(|error| error.to_string())?;
+            let mut item: Item =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            if let Some(parent) = message["parent_tool_use_id"].as_str() {
+                item.extra.insert("parentToolUseId".into(), parent.into());
+            }
             let method = if item.status.as_deref() == Some("inProgress") {
                 "item/started"
             } else {
@@ -882,24 +1104,27 @@ impl Worker {
                 items.push(Arc::new(item));
             }
         }
-        save(&self.directory, &record)
+        Ok(())
     }
 
-    async fn stream_event(&mut self, event: &Value) -> Result<(), String> {
+    async fn stream_event(&mut self, event: &Value, scope: &str) -> Result<(), String> {
         match event["type"].as_str() {
             Some("message_start") => {
-                self.stream = Some((
-                    event["message"]["id"]
-                        .as_str()
-                        .ok_or("Claude stream message ID is missing")?
-                        .into(),
-                    0,
-                ));
+                self.stream.insert(
+                    scope.into(),
+                    (
+                        event["message"]["id"]
+                            .as_str()
+                            .ok_or("Claude stream message ID is missing")?
+                            .into(),
+                        0,
+                    ),
+                );
             }
             Some("content_block_start") => {
                 let (message, index) = self
                     .stream
-                    .as_mut()
+                    .get_mut(scope)
                     .ok_or("Claude stream started a block without a message")?;
                 *index = event["index"]
                     .as_u64()
@@ -909,20 +1134,20 @@ impl Worker {
                     Some("thinking") => "reasoning",
                     _ => return Ok(()),
                 };
-                let item = Item {
+                let mut item = Item {
                     id: format!("{message}:{index}"),
                     kind: Some(kind.into()),
                     text: Some(String::new()),
                     ..Default::default()
                 };
-                let mut record = self.record.lock().await;
-                let turn = record.turn_mut();
+                if !scope.is_empty() {
+                    item.extra.insert("parentToolUseId".into(), scope.into());
+                }
                 emit(
                     &self.router,
                     "item/started",
                     json!({"threadId":self.thread_id,"turnId":self.turn_id,"item":item}),
                 );
-                turn.items.get_or_insert_default().push(Arc::new(item));
             }
             Some("content_block_delta") => {
                 let (method, field) = match event["delta"]["type"].as_str() {
@@ -932,7 +1157,7 @@ impl Worker {
                 };
                 let (message, _) = self
                     .stream
-                    .as_ref()
+                    .get(scope)
                     .ok_or("Claude stream delta has no message")?;
                 let index = event["index"]
                     .as_u64()
@@ -941,17 +1166,6 @@ impl Worker {
                 let delta = event["delta"][field]
                     .as_str()
                     .ok_or("Claude stream text is missing")?;
-                let mut record = self.record.lock().await;
-                let turn = record.turn_mut();
-                let item = turn
-                    .items
-                    .as_mut()
-                    .and_then(|items| items.iter_mut().find(|item| item.id == id))
-                    .ok_or("Claude stream delta has no block")?;
-                Arc::make_mut(item)
-                    .text
-                    .get_or_insert_default()
-                    .push_str(delta);
                 emit(
                     &self.router,
                     method,
@@ -996,22 +1210,23 @@ fn status(kind: &str) -> ThreadStatus {
         extra: Default::default(),
     }
 }
+pub(crate) fn updated_at(thread: &Thread) -> u64 {
+    thread
+        .updated_at
+        .as_ref()
+        .and_then(|number| number.as_u64())
+        .unwrap_or_default()
+}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
-fn save(directory: &Path, record: &Record) -> Result<(), String> {
-    crate::platform::save_private_json(
-        &directory.join(format!("{}.json", record.session_id)),
-        record,
-    )
-}
 fn emit(router: &SessionRouter, method: &str, params: Value) {
     let line = json!({"method":method,"params":params}).to_string();
     router.handle_server_message(
-        Provider::Claude,
+        agent_core::session::ProviderKind::Claude,
         &RpcMessage::parse(&line).expect("serialized notification"),
     );
 }

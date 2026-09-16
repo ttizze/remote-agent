@@ -1,3 +1,4 @@
+mod claude;
 mod codex_accounts;
 mod desktop_projects;
 mod dictation;
@@ -20,7 +21,7 @@ pub use host_identity::{
 };
 
 pub use desktop_projects::{
-    DesktopProjectError, DesktopProjectStore, HOST_THREAD_LIST_METHOD, HOST_THREAD_READ_METHOD,
-    HOST_THREAD_START_METHOD, ThreadPage,
+    DesktopProjectError, DesktopProjectStore, HOST_THREAD_LIST_METHOD, HOST_THREAD_START_METHOD,
+    ThreadPage,
 };
 pub use host_rpc::{HostRpcService, HostSession, SessionId};

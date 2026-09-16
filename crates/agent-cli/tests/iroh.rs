@@ -32,9 +32,6 @@ async fn exercise(command: &[&str], expected: Value) {
         assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
         let approval =
             (mode == "approve").then(|| serde_json::from_str::<Value>(command[1]).unwrap());
-        if let Some(request_id) = &approval {
-            writer.write_line(&json!({"id":request_id,"method":"item/commandExecution/requestApproval","params":{"threadId":"fixture-thread"}}).to_string()).await.unwrap();
-        }
         let mut handled = false;
         let mut reads = 0;
         let mut lists = 0;
@@ -42,14 +39,20 @@ async fn exercise(command: &[&str], expected: Value) {
         while let Ok(Some(line)) = reader.read_line().await {
             let request: Value = serde_json::from_str(&line).unwrap();
             let result = match request["method"].as_str() {
-                None => {
+                Some("host/session/scope") => json!("fixture-storage"),
+                Some("host/session/request") => {
+                    assert_eq!(request["params"]["requestId"], *approval.as_ref().unwrap());
+                    json!({"provider":"codex","id":"fixture-thread"})
+                }
+                Some("host/session/close") => json!({}),
+                Some("host/session/answer") => {
                     assert_eq!(
-                        request,
-                        json!({"id":approval.as_ref().unwrap(),"result":{"decision":"decline"}})
+                        request["params"],
+                        json!({"requestId":approval.as_ref().unwrap(),"result":{"decision":"decline"}})
                     );
                     assert!(!handled);
                     handled = true;
-                    continue;
+                    json!({})
                 }
                 Some("model/list") => json!({"data":[],"nextCursor":null}),
                 Some("host/thread/list") => {
@@ -69,14 +72,17 @@ async fn exercise(command: &[&str], expected: Value) {
                     }
                     json!({"data":[{"id":"fixture-thread","name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                 }
-                Some("host/thread/read") => {
+                Some("host/session/open") => {
                     reads += 1;
-                    assert_eq!(mode, "send");
                     assert_eq!(
                         request["params"],
-                        json!({"threadId":"fixture-thread","includeTurns":true,"paginateHistory":true,"deferItemDetails":true})
+                        json!({"session":{"provider":"codex","id":"fixture-thread"},"limit":5})
                     );
-                    json!({"thread":{"id":"fixture-thread","cwd":"/fixture","status":{"type":"idle"},"turns":[]}})
+                    let mut thread = json!({"id":"fixture-thread","cwd":"/fixture","status":{"type":"idle"},"turns":[]});
+                    if let Some(id) = &approval {
+                        thread["requests"] = json!({id.to_string():{"id":id,"method":"item/commandExecution/requestApproval","params":{"threadId":"fixture-thread"}}});
+                    }
+                    json!({"session":request["params"]["session"],"subscriptionId":"00000000-0000-0000-0000-000000000001","revision":0,"response":{"thread":thread}})
                 }
                 Some("host/workspace/review") => {
                     assert_eq!(request["params"], json!({"cwd":"/fixture"}));
@@ -93,6 +99,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     json!({"turn":{"id":"fixture-turn"}})
                 }
                 Some(method) => panic!("unexpected command RPC: {method}"),
+                None => panic!("unframed approval response is retired"),
             };
             // Keep QUIC alive until the command consumes its reply and closes.
             writer
@@ -101,7 +108,7 @@ async fn exercise(command: &[&str], expected: Value) {
                 .unwrap();
         }
         assert!(handled);
-        assert_eq!(reads, usize::from(mode == "send"));
+        assert_eq!(reads, usize::from(mode == "send" || mode == "approve"));
         if mode == "list" {
             assert_eq!(lists, 1);
         }

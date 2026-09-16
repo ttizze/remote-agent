@@ -40,6 +40,7 @@ enum Command {
     Attach {
         connection: Connection,
         attempt: CancellationToken,
+        storage_scope: String,
         complete: oneshot::Sender<Result<(), PeerError>>,
     },
 }
@@ -66,6 +67,7 @@ struct Applied {
     outcome: Outcome,
 }
 struct Completed {
+    delivery_attempted: bool,
     epoch: u64,
     result: Result<Applied, PeerError>,
     request_id: Option<u64>,
@@ -187,6 +189,15 @@ impl Store {
                 peer.request::<_, <Pair as RpcMethod>::Output>(Pair::METHOD, &Pair { invitation })
                     .await?;
             }
+            let scope = peer
+                .request::<_, String>("host/session/scope", &serde_json::json!({}))
+                .await?
+                .value;
+            if scope.is_empty() || scope.len() > 256 {
+                return Err(
+                    PeerError::InvalidMessage("invalid provider storage scope".into()).into(),
+                );
+            }
             let (complete, result) = oneshot::channel();
             let command = Command::Attach {
                 connection: Connection {
@@ -194,6 +205,7 @@ impl Store {
                     session: Some(scopeguard::ScopeGuard::into_inner(session)),
                 },
                 attempt: attempt.clone(),
+                storage_scope: format!("{}:{scope}", ticket.node_id()),
                 complete,
             };
             self.commands
@@ -323,6 +335,8 @@ fn publish_locked(
 ) -> (Vec<Effect>, bool) {
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
+        storage_scope,
+        archived_scopes,
         account,
         terminals,
         conversations,
@@ -340,6 +354,7 @@ fn publish_locked(
         list_query,
         epoch,
         connected,
+        subscriptions,
         error,
     } = &next;
     let same_threads = match (&current.threads, threads) {
@@ -347,7 +362,10 @@ fn publish_locked(
         (None, None) => true,
         _ => false,
     };
-    if Arc::ptr_eq(&current.terminals, terminals)
+    if current.storage_scope == *storage_scope
+        && Arc::ptr_eq(&current.archived_scopes, archived_scopes)
+        && Arc::ptr_eq(&current.terminals, terminals)
+        && Arc::ptr_eq(&current.subscriptions, subscriptions)
         && Arc::ptr_eq(&current.account, account)
         && Arc::ptr_eq(&current.conversations, conversations)
         && same_threads
@@ -414,7 +432,9 @@ fn finish(
                     .0;
                 }
                 if let Some(id) = completed.failed_submission {
-                    next = reduce(&next, Event::SubmissionFailed(id)).0;
+                    let unknown = completed.delivery_attempted && (matches!(&error, PeerError::ConnectionClosed(_) | PeerError::RequestTimeout { .. } | PeerError::InvalidResponse { .. })
+                        || matches!(&error, PeerError::Remote { error, .. } if error.contains("unknown")));
+                    next = reduce(&next, if unknown { Event::SubmissionUnknown(id) } else { Event::SubmissionFailed(id) }).0;
                 }
                 if current {
                     next.error = Some(error.to_string());
@@ -451,9 +471,9 @@ fn decode_message(line: &str) -> Result<Event, PeerError> {
     let message =
         RpcMessage::parse(line).map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
     if message.kind() == RpcMessageKind::Request {
-        return serde_json::from_str(line)
-            .map(Event::ServerRequest)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()));
+        return Err(PeerError::InvalidMessage(
+            "provider requests must arrive as session updates".into(),
+        ));
     }
     #[derive(serde::Deserialize)]
     struct Notification {
@@ -652,6 +672,7 @@ async fn run_offline(
                 connection,
                 attempt,
                 complete,
+                storage_scope,
             } => {
                 if attempt.is_cancelled() {
                     drop(connection);
@@ -660,6 +681,7 @@ async fn run_offline(
                     )));
                     continue;
                 }
+                apply(updates, Event::StorageScope(storage_scope));
                 let effects = apply(updates, Event::Connected);
                 let _ = complete.send(Ok(()));
                 return Some((connection, effects));
@@ -720,6 +742,7 @@ async fn perform(
     }
     .await;
     Completed {
+        delivery_attempted: client.is_some() && peer.is_some(),
         epoch: snapshot.epoch,
         result,
         request_id,

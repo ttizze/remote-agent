@@ -3,14 +3,14 @@ use crate::{
     client::{Answer, ServerRequest},
     models::{
         FileContent, FileList, HostStatus, Invitation, Item, ListQuery, Model, RemoteHost, Thread,
-        ThreadList, ThreadStatus, Turn, WorkspaceReview, WorktreeSettings,
+        ThreadList, WorkspaceReview, WorktreeSettings,
     },
 };
 use operations as op;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
 
@@ -53,10 +53,6 @@ pub struct Navigation {
     pub thread_id: Option<String>,
     pub cwd: String,
     pub draft_key: String,
-    #[serde(skip)]
-    pub watch_id: Option<u64>,
-    #[serde(skip)]
-    pub watch_thread_id: Option<String>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Activity {
@@ -86,6 +82,8 @@ pub struct PendingSubmission {
     pub turn_id: Option<String>,
     pub after_item_id: Option<String>,
     pub accepted: bool,
+    #[serde(default)]
+    pub delivery_unknown: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +111,10 @@ pub struct Terminal {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    #[serde(default)]
+    pub storage_scope: String,
+    #[serde(default)]
+    pub archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(default)]
     pub account: Arc<AccountState>,
     #[serde(skip)]
@@ -146,6 +148,8 @@ pub struct Snapshot {
     #[serde(skip)]
     pub connected: bool,
     #[serde(skip)]
+    pub subscriptions: Arc<BTreeMap<String, (uuid::Uuid, u64)>>,
+    #[serde(skip)]
     pub error: Option<String>,
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
@@ -171,14 +175,27 @@ pub mod operations;
 pub use operations::Intent;
 use operations::add_attachment;
 
+/// Client-owned data from a previously configured Host storage area. Keeping
+/// it separate prevents cache migrations from deleting or mixing user drafts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScopedData {
+    pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
+    pub threads: Option<Arc<ThreadList>>,
+    pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
+    pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
+    pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
+    pub navigation: Arc<Navigation>,
+    pub activity: Arc<Activity>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
+    StorageScope(String),
     TerminalFailed { handle: String, reason: String },
     Intent(Intent),
     SubmissionFailed(String),
+    SubmissionUnknown(String),
 
-    ServerRequest(ServerRequest),
-    RequestResolved(Value),
     Notification { method: String, params: Value },
     Connected,
     Disconnected(String),
@@ -221,8 +238,8 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, StartThread,
-        ReadThread, ReadItem, ResizeTerminal,
-        Interrupt, Watch, Unwatch,
+        ReadThread, OpenRequest, ReadItem, ResizeTerminal,
+        Interrupt, CloseSubscription,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
         LoadHostManagement, ReadOlder, LoadModels,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
@@ -410,7 +427,17 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     (next, Vec::new())
 }
 fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
-    let watch = snapshot.navigation.watch_id;
+    let previous_id = snapshot.navigation.thread_id.clone();
+    let close = previous_id
+        .filter(|id| navigation.thread_id.as_ref() != Some(id))
+        .filter(|id| {
+            snapshot.activity.active.get(id) != Some(&true)
+                && snapshot
+                    .conversations
+                    .get(id)
+                    .is_none_or(|thread| thread.requests.is_empty())
+        })
+        .and_then(|id| Arc::make_mut(&mut snapshot.subscriptions).remove(&id));
     if snapshot.navigation.cwd != navigation.cwd || navigation.draft_key.is_empty() {
         clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
     }
@@ -420,12 +447,11 @@ fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.activity).unread.remove(id);
     }
     snapshot.navigation = Arc::new(navigation);
-    watch
+    close
         .into_iter()
-        .map(|watch_id| {
-            Effect::execute(op::Unwatch {
-                watch_key: 1,
-                watch_id,
+        .map(|(id, _)| {
+            Effect::execute(op::CloseSubscription {
+                subscription_id: id.to_string(),
             })
         })
         .collect()
@@ -453,6 +479,44 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
         }
 
+        Event::StorageScope(scope) => {
+            if next.storage_scope == scope {
+                return (next, Vec::new());
+            }
+            if !next.storage_scope.is_empty() {
+                let archived = ScopedData {
+                    conversations: std::mem::take(&mut next.conversations),
+                    threads: next.threads.take(),
+                    drafts: std::mem::take(&mut next.drafts),
+                    pending_submissions: std::mem::take(&mut next.pending_submissions),
+                    file_drafts: std::mem::take(&mut next.file_drafts),
+                    navigation: std::mem::take(&mut next.navigation),
+                    activity: std::mem::take(&mut next.activity),
+                };
+                Arc::make_mut(&mut next.archived_scopes)
+                    .insert(next.storage_scope.clone(), Arc::new(archived));
+                if let Some(saved) = Arc::make_mut(&mut next.archived_scopes).remove(&scope) {
+                    next.conversations = saved.conversations.clone();
+                    next.threads = saved.threads.clone();
+                    next.drafts = saved.drafts.clone();
+                    next.pending_submissions = saved.pending_submissions.clone();
+                    next.file_drafts = saved.file_drafts.clone();
+                    next.navigation = saved.navigation.clone();
+                    next.activity = saved.activity.clone();
+                }
+                next.workspace = Arc::default();
+                next.account = Arc::default();
+                next.models = Arc::default();
+                next.model_errors = Arc::default();
+                reset_session(&mut next);
+            }
+            next.storage_scope = scope;
+        }
+        Event::SubmissionUnknown(id) => {
+            if let Some(pending) = shared_mut(&mut next.pending_submissions, &id) {
+                pending.delivery_unknown = true;
+            }
+        }
         Event::SubmissionFailed(id) => {
             if let Some(pending) = Arc::make_mut(&mut next.pending_submissions).remove(&id)
                 && let Some(text) = &pending.recovery_text
@@ -464,12 +528,6 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 );
                 append_transcript(&mut draft.text, text);
             }
-        }
-        Event::ServerRequest(request) => {
-            Arc::make_mut(&mut next.requests).insert(request.id.to_string(), Arc::new(request));
-        }
-        Event::RequestResolved(id) => {
-            Arc::make_mut(&mut next.requests).remove(&id.to_string());
         }
         Event::Connected => {
             reset_session(&mut next);
@@ -496,6 +554,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Event::Disconnected(reason) => {
             reset_session(&mut next);
             next.connected = false;
+            next.requests = Arc::default();
             for terminal in Arc::make_mut(&mut next.terminals).values_mut() {
                 if matches!(
                     terminal.phase,
@@ -517,30 +576,21 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
 /// Cached history and drafts survive; IDs and activity belong to one connection.
 /// Pending submissions are persisted only to recover dictation after a crash.
 fn reset_session(snapshot: &mut Snapshot) {
+    snapshot.subscriptions = Arc::default();
+    for thread in Arc::make_mut(&mut snapshot.conversations).values_mut() {
+        if !thread.requests.is_empty() {
+            Arc::make_mut(thread).requests.clear();
+        }
+    }
     if !snapshot.requests.is_empty() {
         snapshot.requests = Arc::default();
     }
     if !snapshot.activity.active.is_empty() {
         Arc::make_mut(&mut snapshot.activity).active.clear();
     }
-    let navigation = Arc::make_mut(&mut snapshot.navigation);
-    navigation.watch_id = None;
-    navigation.watch_thread_id = None;
     snapshot.epoch += 1;
-    if !snapshot.pending_submissions.is_empty() {
-        for pending in snapshot.pending_submissions.values() {
-            if !pending.accepted
-                && let Some(text) = &pending.recovery_text
-            {
-                let draft = Arc::make_mut(
-                    Arc::make_mut(&mut snapshot.drafts)
-                        .entry(pending.draft_key.clone())
-                        .or_default(),
-                );
-                append_transcript(&mut draft.text, text);
-            }
-        }
-        snapshot.pending_submissions = Arc::default();
+    for pending in Arc::make_mut(&mut snapshot.pending_submissions).values_mut() {
+        Arc::make_mut(pending).delivery_unknown = true;
     }
     if snapshot
         .conversations
@@ -652,240 +702,22 @@ fn supported_settings<'a>(
     )
 }
 
-fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
-    let mut merged = previous.clone();
-    macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
-    field!(
-        status,
-        items_view,
-        items_has_more,
-        items_next_cursor,
-        deferred_item_ids,
-        opening_user_message,
-        started_at,
-        completed_at,
-        duration_ms,
-        error
-    );
-    merged.extra.extend(incoming.extra.clone());
-    merged
-}
-
-fn append_items(previous: &[Arc<Item>], incoming: &[Arc<Item>]) -> Vec<Arc<Item>> {
-    let mut merged = previous.to_vec();
-    for item in incoming {
-        if let Some(index) = merged.iter().position(|current| current.id == item.id) {
-            merged[index] = item.clone();
-        } else {
-            merged.push(item.clone());
-        }
-    }
-    merged
-}
-
-/// Prepend older occurrences, matching overlap from the newest end exactly once.
-fn prepend<T>(older: &[Arc<T>], newer: &[Arc<T>], id: impl Fn(&T) -> &str) -> Vec<Arc<T>> {
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for value in newer {
-        *counts.entry(id(value)).or_default() += 1;
-    }
-    let mut prefix = Vec::with_capacity(older.len());
-    for value in older.iter().rev() {
-        if let Some(count) = counts.get_mut(id(value)).filter(|count| **count > 0) {
-            *count -= 1;
-        } else {
-            prefix.push(value.clone());
-        }
-    }
-    prefix.reverse();
-    prefix.extend_from_slice(newer);
-    prefix
-}
-
-pub(crate) fn older(
-    previous: &Thread,
-    incoming: &Thread,
-    turn_id: Option<&str>,
-    cursor: Option<&str>,
-) -> Result<Thread, String> {
-    if previous.id != incoming.id {
-        return Err("thread ID does not match".into());
-    }
-    let mut merged = previous.clone();
-    if let Some(turn_id) = turn_id {
-        let Some(index) = previous
-            .turns
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .rposition(|turn| turn.id == turn_id)
-        else {
-            return Ok(merged);
-        };
-        let current = &previous.turns.as_ref().unwrap()[index];
-        if current
-            .items_next_cursor
-            .as_ref()
-            .and_then(|cursor| cursor.as_deref())
-            != cursor
-        {
-            return Ok(merged);
-        }
-        let page = incoming
-            .turns
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .rfind(|turn| turn.id == turn_id)
-            .ok_or("history page is missing the requested turn")?;
-        let next_cursor = page
-            .items_next_cursor
-            .as_ref()
-            .and_then(|cursor| cursor.as_deref());
-        if next_cursor == cursor && (cursor.is_some() || page.items_has_more == Some(true)) {
-            return Err("history cursor did not advance".into());
-        }
-        let mut turn = current.as_ref().clone();
-        turn.items = Some(prepend(
-            page.items.as_deref().unwrap_or_default(),
-            current.items.as_deref().unwrap_or_default(),
-            |item| &item.id,
-        ));
-        turn.items_has_more = Some(page.items_has_more.unwrap_or(false));
-        turn.items_next_cursor = Some(next_cursor.map(str::to_owned));
-        let mut deferred = page.deferred_item_ids.clone().unwrap_or_default();
-        deferred.extend(current.deferred_item_ids.iter().flatten().cloned());
-        deferred.retain(|id| {
-            let loaded_in = |turn: &Turn| {
-                turn.items
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|item| &item.id == id)
-                    && !turn
-                        .deferred_item_ids
-                        .as_deref()
-                        .unwrap_or_default()
-                        .contains(id)
-            };
-            !loaded_in(current) && !loaded_in(page)
-        });
-        deferred.sort();
-        deferred.dedup();
-        turn.deferred_item_ids = Some(deferred);
-        merged.turns.as_mut().unwrap()[index] = Arc::new(turn);
-    } else {
-        if previous
-            .history_cursor
-            .as_ref()
-            .and_then(|cursor| cursor.as_deref())
-            != cursor
-        {
-            return Ok(merged);
-        }
-        let next_cursor = incoming
-            .history_cursor
-            .as_ref()
-            .and_then(|cursor| cursor.as_deref());
-        if next_cursor == cursor && cursor.is_some() {
-            return Err("history cursor did not advance".into());
-        }
-        merged.turns = Some(prepend(
-            incoming.turns.as_deref().unwrap_or_default(),
-            previous.turns.as_deref().unwrap_or_default(),
-            |turn| &turn.id,
-        ));
-        merged.history_cursor = Some(next_cursor.map(str::to_owned));
-    }
-    Ok(merged)
-}
-
-// A cached suffix must equal the new page's prefix, including repeated IDs.
-// Matching one ID anywhere in each page does not establish continuity.
-fn overlap_start<T>(
-    previous: &[Arc<T>],
-    incoming: &[Arc<T>],
-    id: impl Fn(&T) -> &str,
-) -> Option<usize> {
-    let first = incoming.first()?;
-    let start = (previous.len().saturating_sub(incoming.len())..previous.len()).find(|&start| {
-        id(&previous[start]) == id(first)
-            && previous[start..]
+/// Immutable lookup projection for native panels. Session.requests owns the
+/// state; this index only shares its request Arcs and is never persisted.
+fn project_requests(snapshot: &mut Snapshot) {
+    let requests: BTreeMap<_, _> = snapshot
+        .conversations
+        .values()
+        .flat_map(|thread| {
+            thread
+                .requests
                 .iter()
-                .zip(incoming)
-                .all(|(old, new)| id(old) == id(new))
-    })?;
-    (start == 0
-        || (previous.iter().filter(|item| id(item) == id(first)).count() == 1
-            && incoming.iter().filter(|item| id(item) == id(first)).count() == 1))
-        .then_some(start)
-}
-
-pub(crate) fn refresh(previous: &Thread, incoming: &Thread) -> Thread {
-    if incoming.history_cursor.is_none() {
-        return incoming.clone();
+                .map(|(id, request)| (id.clone(), request.clone()))
+        })
+        .collect();
+    if *snapshot.requests != requests {
+        snapshot.requests = Arc::new(requests);
     }
-    let current = previous.turns.as_deref().unwrap_or_default();
-    let page = incoming.turns.as_deref().unwrap_or_default();
-    let start = overlap_start(current, page, |turn| &turn.id);
-    let prefix = &current[..start.unwrap_or(0)];
-    let mut turns = Vec::with_capacity(prefix.len() + page.len());
-    turns.extend_from_slice(prefix);
-    turns.extend(page.iter().enumerate().map(|(offset, turn)| {
-        match start.and_then(|start| current.get(start + offset)) {
-            Some(old) => Arc::new(refresh_turn(old, turn)),
-            None => turn.clone(),
-        }
-    }));
-    let mut merged = incoming.clone();
-    merged.turns = Some(turns);
-    if !prefix.is_empty() {
-        merged.history_cursor = previous.history_cursor.clone();
-    }
-    merged
-}
-fn refresh_turn(previous: &Turn, incoming: &Turn) -> Turn {
-    let current = previous.items.as_deref().unwrap_or_default();
-    let page = incoming.items.as_deref().unwrap_or_default();
-    let unloaded = incoming.items_view.as_deref() == Some("notLoaded");
-    let Some(start) = (if unloaded && !current.is_empty() {
-        Some(current.len())
-    } else {
-        overlap_start(current, page, |item| &item.id)
-    }) else {
-        return incoming.clone();
-    };
-    let mut merged = merge_fields(previous, incoming);
-    let deferred = incoming.deferred_item_ids.as_deref().unwrap_or_default();
-    let old_deferred = previous.deferred_item_ids.as_deref().unwrap_or_default();
-    let mut items = Vec::with_capacity(start + page.len());
-    items.extend_from_slice(&current[..start]);
-    let mut remaining = old_deferred
-        .iter()
-        .filter(|id| current[..start].iter().any(|item| &item.id == *id))
-        .cloned()
-        .collect::<Vec<_>>();
-    for (offset, item) in page.iter().enumerate() {
-        if deferred.contains(&item.id) {
-            if let Some(old) = current.get(start + offset)
-                && !old_deferred.contains(&old.id)
-            {
-                items.push(old.clone());
-                continue;
-            }
-            remaining.push(item.id.clone());
-        }
-        items.push(item.clone());
-    }
-    merged.items = Some(items);
-    merged.deferred_item_ids = Some(remaining);
-    let boundary = if start == 0 { incoming } else { previous };
-    merged.items_has_more = Some(boundary.items_has_more.unwrap_or(false));
-    merged.items_next_cursor = Some(boundary.items_next_cursor.clone().flatten());
-    if unloaded {
-        merged.items_view = previous.items_view.clone();
-    }
-    merged
 }
 
 fn shared_mut<'a, T: Clone>(
@@ -898,43 +730,20 @@ fn shared_mut<'a, T: Clone>(
     Arc::make_mut(values).get_mut(key).map(Arc::make_mut)
 }
 
-fn mutable_turn<'a>(
-    snapshot: &'a mut Snapshot,
-    thread_id: &str,
-    index: usize,
-) -> Option<&'a mut Turn> {
-    shared_mut(&mut snapshot.conversations, thread_id)?
-        .turns
-        .as_mut()?
-        .get_mut(index)
-        .map(Arc::make_mut)
-}
-
 fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) -> Snapshot {
-    let Some(thread) = previous.conversations.get(thread_id) else {
-        return previous.clone();
-    };
-    let Some(index) = thread
-        .turns
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .rposition(|turn| turn.id == turn_id)
-    else {
-        return previous.clone();
-    };
     let mut next = previous.clone();
-    let Some(turn) = mutable_turn(&mut next, thread_id, index) else {
-        return next;
-    };
-    if let Some(deferred) = &mut turn.deferred_item_ids {
-        deferred.retain(|id| id != &item.id);
-    }
-    let items = turn.items.get_or_insert_with(Vec::new);
-    if let Some(index) = items.iter().position(|old| old.id == item.id) {
-        items[index] = Arc::new(item);
-    } else {
-        items.push(Arc::new(item));
+    if let Some(thread) = previous.conversations.get(thread_id) {
+        match (crate::session::SessionChange::Item {
+            turn_id: turn_id.into(),
+            item,
+        })
+        .apply(thread)
+        {
+            Ok(thread) => {
+                Arc::make_mut(&mut next.conversations).insert(thread_id.into(), Arc::new(thread));
+            }
+            Err(error) => next.error = Some(error.into()),
+        }
     }
     next
 }
@@ -950,6 +759,14 @@ fn submission(
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     next.error = None;
+    if let Some(reason) = thread_id
+        .as_ref()
+        .and_then(|id| previous.conversations.get(id))
+        .and_then(|thread| crate::session::input_unavailable_reason(thread))
+    {
+        next.error = Some(reason);
+        return (next, Vec::new());
+    }
     let active = thread_id
         .as_ref()
         .and_then(|id| previous.conversations.get(id))
@@ -971,12 +788,20 @@ fn submission(
                 .and_then(|items| items.last())
                 .map(|item| item.id.clone()),
             accepted: false,
+            delivery_unknown: false,
             recovery_text,
             clear_draft,
         }),
     );
     let effect = match thread_id {
-        Some(thread_id) => Effect::execute(op::SendSubmission {
+        Some(thread_id) if previous.subscriptions.contains_key(&thread_id) => {
+            Effect::execute(op::SendSubmission {
+                thread_id,
+                client_user_message_id,
+                draft,
+            })
+        }
+        Some(thread_id) => Effect::execute(op::SubscribeSubmission {
             thread_id,
             client_user_message_id,
             draft,
@@ -1005,7 +830,7 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &str) {
         return;
     };
     let echoed = |id: &String, pending: &Arc<PendingSubmission>| {
-        pending.accepted
+        (pending.accepted || pending.delivery_unknown)
             && pending.draft_key == thread_id
             && thread
                 .turns

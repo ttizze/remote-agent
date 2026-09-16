@@ -29,7 +29,6 @@ struct ThreadRequestRow: View {
     @State private var rawResponse = "{}"
     @State private var busy = false
     @State private var error: String?
-    @State private var resolved = false
 
     private var params: [String: JsonValue] {
         request.params
@@ -40,56 +39,54 @@ struct ThreadRequestRow: View {
     }
 
     var body: some View {
-        if !resolved {
-            VStack(alignment: .leading, spacing: 10) {
-                Text(request.title).font(.subheadline.weight(.semibold))
-                    .accessibilityIdentifier("request.\(request.key)")
-                Text(request.body).textSelection(.enabled)
-                DisclosureGroup("詳細") {
-                    Text(request.paramsJson).font(.caption.monospaced()).textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 10) {
+            Text(request.title).font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("request.\(request.key)")
+            Text(request.body).textSelection(.enabled)
+            DisclosureGroup("詳細") {
+                Text(request.paramsJson).font(.caption.monospaced()).textSelection(.enabled)
+            }
+            if request.kind == .questions {
+                ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
+                    questionView(question)
                 }
-                if request.kind == .questions {
-                    ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
-                        questionView(question)
-                    }
-                    Button("回答を送信") {
-                        submit(.questions(answers: answers))
-                    }.disabled(questions.contains { (answers[$0["id"]?.string ?? ""] ?? "").isEmpty })
-                } else if request.kind == .permissions {
-                    HStack {
-                        Button("このターンで許可") { submit(.permissions(allow: true)) }
-                        Button("拒否") { submit(.permissions(allow: false)) }
-                    }
-                } else if request.kind == .commandApproval || request.kind == .fileApproval {
-                    ForEach(Array(request.decisions.enumerated()), id: \.offset) { index, decision in
-                        Button(request.decisionLabels[index]) { submit(.decision(index: UInt32(index))) }
-                            .accessibilityIdentifier(decision
-                                .string == "accept" ? "request.accept" : "request.decision.\(index)")
-                    }
-                } else {
-                    Text("応答 JSON").font(.caption)
-                    TextEditor(text: $rawResponse).font(.body.monospaced()).frame(minHeight: 100)
-                    Button("応答を送信") {
-                        do {
-                            let value = try parseJsonValue(text: rawResponse)
-                            guard case .object = value else { error = "JSON オブジェクトを入力してください"; return }
-                            submit(.raw(value: value))
-                        } catch { self.error = error.localizedDescription }
-                    }
+                Button("回答を送信") {
+                    submit(.questions(answers: answers))
+                }.disabled(questions.contains { (answers[$0["id"]?.string ?? ""] ?? "").isEmpty })
+            } else if request.kind == .permissions {
+                HStack {
+                    Button("このターンで許可") { submit(.permissions(allow: true)) }
+                    Button("拒否") { submit(.permissions(allow: false)) }
                 }
-                if busy {
-                    ProgressView()
+            } else if request.kind == .commandApproval || request.kind == .fileApproval {
+                ForEach(Array(request.decisions.enumerated()), id: \.offset) { index, decision in
+                    Button(request.decisionLabels[index]) { submit(.decision(index: UInt32(index))) }
+                        .accessibilityIdentifier(decision
+                            .string == "accept" ? "request.accept" : "request.decision.\(index)")
                 }
-                if let error {
-                    Text(error).foregroundColor(.red)
+            } else {
+                Text("応答 JSON").font(.caption)
+                TextEditor(text: $rawResponse).font(.body.monospaced()).frame(minHeight: 100)
+                Button("応答を送信") {
+                    do {
+                        let value = try parseJsonValue(text: rawResponse)
+                        guard case .object = value else { error = "JSON オブジェクトを入力してください"; return }
+                        submit(.raw(value: value))
+                    } catch { self.error = error.localizedDescription }
                 }
             }
-            .disabled(busy)
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.14))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
+            if busy {
+                ProgressView()
+            }
+            if let error {
+                Text(error).foregroundColor(.red)
+            }
         }
+        .disabled(busy || !request.canRespond)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.14))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
     @ViewBuilder private func questionView(_ question: JsonValue) -> some View {
@@ -113,7 +110,7 @@ struct ThreadRequestRow: View {
         busy = true
         error = nil
         respond(answer) { message in
-            busy = false; error = message; resolved = message == nil
+            busy = false; error = message
         }
     }
 }

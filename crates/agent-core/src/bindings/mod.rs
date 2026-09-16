@@ -169,6 +169,41 @@ impl Receipt {
 mod tests {
     use super::*;
     use std::time::Duration;
+    async fn scoped_incoming(
+        host: &Endpoint,
+        trust: &crate::transport::Trust,
+    ) -> (
+        crate::transport::Session,
+        impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + use<>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let session = host
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .authorize(trust)
+            .unwrap();
+        let mut stream = session.accept_stream().await.unwrap();
+        let request = {
+            let mut reader = crate::peer::JsonlReader::new(&mut stream);
+            assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+            serde_json::from_str::<serde_json::Value>(&reader.read_line().await.unwrap().unwrap())
+                .unwrap()
+        };
+        assert_eq!(request["method"], "host/session/scope");
+        stream
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::json!({"id":request["id"],"result":"fixture-storage"})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        (session, stream)
+    }
 
     #[tokio::test]
     async fn shutdown_releases_a_native_snapshot_waiter() {
@@ -216,13 +251,11 @@ mod tests {
             assert_eq!(*restored.snapshot().list_query, crate::models::ListQuery::default());
             restored.shutdown().await.unwrap();
             let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached) });
-            let (connected, incoming) = tokio::join!(store.reconnect(connection()), host.accept());
+            let (connected, (session, stream)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
             connected.unwrap();
-            let first = incoming.unwrap().unwrap().authorize(&trust).unwrap();
-            let stream = first.accept_stream().await.unwrap();
+            let first = session;
             let (read, _write) = tokio::io::split(stream);
             let mut old = JsonlReader::new(read);
-            assert_eq!(old.read_line().await.unwrap().as_deref(), Some(""));
             assert!(store.snapshot().connected());
             store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "preserved".into() })
                 .unwrap().wait().await.unwrap();
@@ -234,15 +267,14 @@ mod tests {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 methods.insert(request["method"].as_str().unwrap().to_owned());
             }
-            assert_eq!(methods, ["host/thread/list", "host/thread/read", "model/list"].map(str::to_owned).into());
+            assert_eq!(methods, ["host/thread/list", "host/session/open", "model/list"].map(str::to_owned).into());
             let server = async {
                 assert!(!matches!(old.read_line().await, Ok(Some(_))),
                     "reconnect must close the old stream without probing it with list/history reads");
-                let next = host.accept().await.unwrap().unwrap().authorize(&trust).unwrap();
-                let (read, write) = tokio::io::split(next.accept_stream().await.unwrap());
+                let (next, stream) = scoped_incoming(&host, &trust).await;
+                let (read, write) = tokio::io::split(stream);
                 let mut reader = JsonlReader::new(read);
                 let mut writer = JsonlWriter::new(write);
-                assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
                 let mut requests = std::collections::BTreeMap::new();
                 for _ in 0..3 {
                     let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
@@ -253,10 +285,10 @@ mod tests {
                 assert_eq!(list["params"]["chatLimit"], 25);
                 assert_eq!(list["params"]["projectThreadLimits"]["project"], 35);
                 assert_eq!(list["params"]["searchTerm"], "retained search");
-                let open = &requests["host/thread/read"];
-                assert_eq!(open["params"]["threadId"], "thread");
+                let open = &requests["host/session/open"];
+                assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
-                writer.write_line(&json!({"id":open["id"], "result":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":"after reconnect"}]}]}}}).to_string()).await.unwrap();
+                writer.write_line(&json!({"id":open["id"], "result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":"after reconnect"}]}]}}}}).to_string()).await.unwrap();
                 writer.write_line(&json!({"id":requests["model/list"]["id"], "result":{"data":[{"id":"fresh-model","model":"fresh-model","displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}}).to_string()).await.unwrap();
                 writer.write_line(&json!({"id":list["id"], "result":{"data":[{"id":"thread","name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
                 assert!(!matches!(reader.read_line().await, Ok(Some(_))));
@@ -307,34 +339,39 @@ mod tests {
                     ..Default::default()
                 };
                 let store = AgentStore::offline(serde_json::to_vec(&cached).unwrap()).await.unwrap();
-                let (connected, incoming) = tokio::join!(store.reconnect(connection()), host.accept());
+                let (connected, (session, stream)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
                 connected.unwrap();
-                let session = incoming.unwrap().unwrap().authorize(&trust).unwrap();
-                let (read, write) = tokio::io::split(session.accept_stream().await.unwrap());
+                let (read, write) = tokio::io::split(stream);
                 let mut reader = JsonlReader::new(read);
                 let mut writer = JsonlWriter::new(write);
-                assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
                 let server = async {
                     for round in 0..(3 + usize::from(selected)) {
                         let mut requests = Vec::new();
-                        for _ in 0..(1 + usize::from(selected) + usize::from(round == 0)) {
-                            requests.push(serde_json::from_str::<Value>(&reader.read_line().await.unwrap().expect("refresh must retain the existing stream")).unwrap());
+                        while requests.len() < (1 + usize::from(selected) + usize::from(round == 0)) {
+                            let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().expect("refresh must retain the existing stream")).unwrap();
+                            if request["method"] == "host/session/close" {
+                                writer.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
+                            } else { requests.push(request); }
                         }
                         for request in requests {
                             let result = match request["method"].as_str().unwrap() {
                                 "host/thread/list" => json!({"data":[{"id":"thread","name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                                "host/thread/read" => json!({"thread":{"id":"thread","turns":[]}}),
+                                "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[]}}}),
                                 "model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
-                            if round == 2 && selected && request["method"] == "host/thread/read" { continue; }
+                            if round == 2 && selected && request["method"] == "host/session/open" { continue; }
                             let response = if round == 1 && request["method"] == "host/thread/list" {
                                 json!({"id":request["id"],"error":{"code":-32000,"message":"temporary read error"}})
                             } else { json!({"id":request["id"],"result":result}) };
                             writer.write_line(&response.to_string()).await.unwrap();
                         }
                     }
-                    assert!(!matches!(reader.read_line().await, Ok(Some(_))));
+                    while let Ok(Some(line)) = reader.read_line().await {
+                        let request: Value = serde_json::from_str(&line).unwrap();
+                        assert_eq!(request["method"], "host/session/close");
+                        let _ = writer.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await;
+                    }
                 };
                 let client = async {
                     let mut updates = store.store.subscribe();

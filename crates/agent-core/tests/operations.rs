@@ -1,9 +1,8 @@
 use agent_core::peer::{JsonlReader, JsonlWriter};
 use agent_core::state::operations::{
     CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
-    ReadAccountLogin, ReadFile, ReadItem, ReadOlder, ReadThread, ReadWorktreeSettings,
-    ReviewWorkspace, SelectAccount, StartAccountLogin, StartThread, Unwatch,
-    UpdateWorktreeSettings, Watch,
+    ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings, ReviewWorkspace,
+    SelectAccount, StartAccountLogin, StartThread, UpdateWorktreeSettings,
 };
 use agent_core::{
     client::*,
@@ -34,19 +33,21 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             cwd: optional(command, "cwd").map(str::to_owned),
             model: optional(command, "model").map(str::to_owned)
         }),
-        "readThread" => call!(ReadThread {
-            thread_id: text(command, "threadId").to_owned(),
-            include_turns: true,
-            paginate_history: true,
-            defer_item_details: command["deferItemDetails"].as_bool().unwrap(),
-            open: false
-        }),
-        "readOlder" => call!(ReadOlder {
-            thread_id: text(command, "threadId").to_owned(),
-            turn_id: optional(command, "turnId").map(str::to_owned),
-            cursor: optional(command, "cursor").map(str::to_owned),
-            defer_item_details: true,
-        }),
+        "readThread" | "readOlder" => serde_json::to_value(
+            client
+                .call(&ReadThread {
+                    limit: if command["type"] == "readOlder" {
+                        10
+                    } else {
+                        5
+                    },
+                    ..ReadThread::new(text(command, "threadId").to_owned())
+                })
+                .await?
+                .value
+                .response,
+        )
+        .unwrap(),
         "readItem" => call!(ReadItem {
             thread_id: text(command, "threadId").to_owned(),
             turn_id: text(command, "turnId").to_owned(),
@@ -101,22 +102,6 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         }
         "models" => json!(client.models().await?.data),
         "sessionImages" => json!(client.session_images(text(command, "threadId")).await?),
-        "watchThread" => {
-            call!(Watch {
-                thread_id: text(command, "threadId").to_owned(),
-                watch_key: command["watchKey"].as_u64().unwrap(),
-                watch_id: command["watchId"].as_u64().unwrap(),
-                path: optional(command, "path").map(str::to_owned)
-            });
-            Value::Null
-        }
-        "unwatchThread" => {
-            call!(Unwatch {
-                watch_key: command["watchKey"].as_u64().unwrap(),
-                watch_id: command["watchId"].as_u64().unwrap()
-            });
-            Value::Null
-        }
         "transcribe" => json!(
             client
                 .call(&Transcribe {

@@ -634,7 +634,7 @@ impl Desktop {
                 )
                 .selectable(true),
             );
-        if inputs.sent {
+        if inputs.sent || !request.can_respond {
             return body
                 .child("回答を送信しました。Host の確認を待っています。")
                 .into_any_element();
@@ -1206,6 +1206,7 @@ mod rendering_tests {
                             turn_id: Some("turn".into()),
                             after_item_id: None,
                             accepted: true,
+                            delivery_unknown: false,
                             recovery_text: None,
                             clear_draft: None,
                         }),

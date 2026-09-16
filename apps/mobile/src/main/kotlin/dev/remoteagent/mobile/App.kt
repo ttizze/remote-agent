@@ -402,10 +402,10 @@ internal fun AndroidAppModel.showHosts() {
     perform(Intent.ShowThreadList)
 }
 
-internal fun AndroidAppModel.older(turnId: String?) {
+internal fun AndroidAppModel.older() {
     val id = snapshot.navigation().threadId ?: return
     loadingHistory = true
-    perform(Intent.ReadOlder(ReadOlder(id, turnId))) { loadingHistory = false }
+    perform(Intent.ReadOlder(ReadOlder(id))) { loadingHistory = false }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

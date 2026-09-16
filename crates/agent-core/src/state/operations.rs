@@ -52,11 +52,11 @@ pub enum Intent {
     },
     StartThread(StartThread),
     ReadThread(ReadThread),
+    OpenRequest(OpenRequest),
     ReadItem(ReadItem),
     ResizeTerminal(ResizeTerminal),
     Interrupt(Interrupt),
-    Watch(Watch),
-    Unwatch(Unwatch),
+    CloseSubscription(CloseSubscription),
     ShowThreadList,
     WriteTerminal(WriteTerminal),
     AcknowledgeTerminal {

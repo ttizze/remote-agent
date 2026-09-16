@@ -1,5 +1,11 @@
 # Adapt to the installed Codex schema
 
+Status: the provider forwarding layer, client history reconciliation, external
+rollout watches, per-client approval aliases and Host-persisted Claude records
+described below are superseded by [the Session runtime](../SESSION_RUNTIME_MIGRATION.md).
+Those sections document the previous design; current clients use typed
+`session/open` / `session/update` and provider-native history.
+
 The Host starts the installed Codex App Server and completes its initialize handshake before readiness. It no longer generates a schema at startup: the extracted method list had no consumers, and method presence did not validate parameter shapes or runtime behavior. Unsupported methods are handled through their RPC errors.
 
 Codex-native RPC payloads pass through without a second stable RPC schema. The mobile adapter projects known response and notification shapes; unknown item payloads remain visible. Unsupported requests return explicit errors. Installed-Codex runtime checks remain necessary: for example, lifecycle notifications with `itemsView: summary` contain only a subset of items and must preserve previously streamed history.

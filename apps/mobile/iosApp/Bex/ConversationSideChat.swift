@@ -91,7 +91,7 @@ struct ConversationSideChat: View {
                   model.sideChatRequest?.id == request.id, let threadId else { return }
             // A newly started thread has no persisted turns to hydrate yet.
             _ = try await run(.readThread(ReadThread(
-                threadId: threadId, includeTurns: false, paginateHistory: false, open: true
+                threadId: threadId, open: true
             )))
             if Task.isCancelled || model.sideChatRequest?.id != request.id {
                 restoreOriginal(); return

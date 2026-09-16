@@ -79,7 +79,11 @@ impl HostFixture {
         );
         if let Some(program) = claude {
             service
-                .enable_claude(program.to_owned(), directory.join("claude"))
+                .enable_claude(
+                    program.to_owned(),
+                    directory.join("claude"),
+                    Some(directory.join("claude-native")),
+                )
                 .await?;
         }
         if accounts && server.is_ok() {

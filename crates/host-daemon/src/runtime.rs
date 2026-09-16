@@ -66,7 +66,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<(), String> {
     }
     let service = HostRpcService::new(app_server.clone(), projects);
     service
-        .enable_claude(config.claude, directory.join("claude"))
+        .enable_claude(config.claude, directory.join("claude"), config.claude_home)
         .await?;
     if app_server.is_ok() {
         service

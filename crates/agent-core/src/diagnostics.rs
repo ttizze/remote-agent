@@ -122,15 +122,9 @@ pub(crate) fn notification(message: &crate::peer::RpcMessage<'_>) {
     if LOG.get().is_none() {
         return;
     }
-    let Some(method @ ("error" | "turn/completed" | "host/thread/watchFailed")) = message.method()
-    else {
+    let Some(method @ ("error" | "turn/completed")) = message.method() else {
         return;
     };
-    // This notification deliberately carries only watch/thread identity.
-    if method == "host/thread/watchFailed" {
-        error(method, "thread watch failed");
-        return;
-    }
     #[derive(Deserialize)]
     struct ErrorFields {
         error: Option<Box<RawValue>>,

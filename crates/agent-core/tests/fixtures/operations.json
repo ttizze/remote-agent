@@ -253,40 +253,49 @@
     },
     "exchanges": [
       {
-        "method": "host/thread/read",
+        "method": "host/session/open",
         "params": {
-          "threadId": "thread-1",
-          "includeTurns": true,
-          "paginateHistory": true,
-          "deferItemDetails": true
+          "session": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
+          "limit": 5
         },
         "response": {
           "result": {
-            "thread": {
-              "id": "thread-1",
-              "cwd": "/workspace",
-              "turns": [
-                {
-                  "id": "turn-1",
-                  "status": "completed",
-                  "deferredItemIds": [
-                    "item-1"
-                  ],
-                  "items": [
-                    {
-                      "id": "item-1",
-                      "type": "commandExecution",
-                      "command": "cat log",
-                      "status": "completed"
-                    }
-                  ]
-                }
-              ],
-              "future": {
-                "opaque": 42
-              }
+            "session": {
+              "provider": "codex",
+              "id": "thread-1"
             },
-            "model": "model-b"
+            "subscriptionId": "00000000-0000-0000-0000-000000000000",
+            "revision": 0,
+            "response": {
+              "thread": {
+                "id": "thread-1",
+                "cwd": "/workspace",
+                "turns": [
+                  {
+                    "id": "turn-1",
+                    "status": "completed",
+                    "deferredItemIds": [
+                      "item-1"
+                    ],
+                    "items": [
+                      {
+                        "id": "item-1",
+                        "type": "commandExecution",
+                        "command": "cat log",
+                        "status": "completed"
+                      }
+                    ]
+                  }
+                ],
+                "future": {
+                  "opaque": 42
+                }
+              },
+              "model": "model-b"
+            }
           }
         }
       }
@@ -328,39 +337,56 @@
     },
     "exchanges": [
       {
-        "method": "host/thread/read",
+        "method": "host/session/open",
         "params": {
-          "threadId": "thread-1",
-          "includeTurns": true,
-          "paginateHistory": true,
-          "deferItemDetails": true
+          "session": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
+          "limit": 5
         },
         "response": {
           "result": {
-            "thread": {
-              "id": "other",
-              "cwd": "/workspace",
-              "turns": [],
-              "future": {
-                "opaque": 42
-              }
+            "session": {
+              "provider": "codex",
+              "id": "thread-1"
             },
-            "model": "model-b"
+            "subscriptionId": "00000000-0000-0000-0000-000000000000",
+            "revision": 0,
+            "response": {
+              "thread": {
+                "id": "other",
+                "cwd": "/workspace",
+                "turns": [],
+                "future": {
+                  "opaque": 42
+                }
+              },
+              "model": "model-b"
+            }
           }
         }
       }
     ],
     "errorContains": "thread ID does not match",
     "errorRaw": {
-      "thread": {
-        "id": "other",
-        "cwd": "/workspace",
-        "turns": [],
-        "future": {
-          "opaque": 42
-        }
+      "session": {
+        "provider": "codex",
+        "id": "thread-1"
       },
-      "model": "model-b"
+      "subscriptionId": "00000000-0000-0000-0000-000000000000",
+      "revision": 0,
+      "response": {
+        "thread": {
+          "id": "other",
+          "cwd": "/workspace",
+          "turns": [],
+          "future": {
+            "opaque": 42
+          }
+        },
+        "model": "model-b"
+      }
     }
   },
   {
@@ -372,26 +398,43 @@
     },
     "exchanges": [
       {
-        "method": "host/thread/read",
+        "method": "host/session/open",
         "params": {
-          "threadId": "thread-1",
-          "includeTurns": true,
-          "paginateHistory": true,
-          "deferItemDetails": true
+          "session": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
+          "limit": 5
         },
         "response": {
           "result": {
-            "thread": {
-              "cwd": "/workspace"
+            "session": {
+              "provider": "codex",
+              "id": "thread-1"
+            },
+            "subscriptionId": "00000000-0000-0000-0000-000000000000",
+            "revision": 0,
+            "response": {
+              "thread": {
+                "cwd": "/workspace"
+              }
             }
           }
         }
       }
     ],
-    "errorContains": "Invalid host/thread/read response",
+    "errorContains": "Invalid host/session/open response",
     "errorRaw": {
-      "thread": {
-        "cwd": "/workspace"
+      "session": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
+      "subscriptionId": "00000000-0000-0000-0000-000000000000",
+      "revision": 0,
+      "response": {
+        "thread": {
+          "cwd": "/workspace"
+        }
       }
     }
   },
@@ -406,37 +449,46 @@
     },
     "exchanges": [
       {
-        "method": "host/thread/turns/list",
+        "method": "host/session/open",
         "params": {
-          "threadId": "thread-1",
-          "cursor": "turns:1",
-          "turnId": null,
-          "deferItemDetails": true
+          "session": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
+          "limit": 10
         },
         "response": {
           "result": {
-            "thread": {
-              "id": "thread-1",
-              "cwd": "/workspace",
-              "turns": [
-                {
-                  "id": "turn-1",
-                  "items": [
-                    {
-                      "id": "item-1",
-                      "type": "agentMessage",
-                      "text": "older",
-                      "future": 17
-                    }
-                  ]
-                }
-              ],
-              "future": {
-                "opaque": 42
-              },
-              "historyCursor": null
+            "session": {
+              "provider": "codex",
+              "id": "thread-1"
             },
-            "model": "model-b"
+            "subscriptionId": "00000000-0000-0000-0000-000000000000",
+            "revision": 0,
+            "response": {
+              "thread": {
+                "id": "thread-1",
+                "cwd": "/workspace",
+                "turns": [
+                  {
+                    "id": "turn-1",
+                    "items": [
+                      {
+                        "id": "item-1",
+                        "type": "agentMessage",
+                        "text": "older",
+                        "future": 17
+                      }
+                    ]
+                  }
+                ],
+                "future": {
+                  "opaque": 42
+                },
+                "historyCursor": null
+              },
+              "model": "model-b"
+            }
           }
         }
       }
@@ -477,37 +529,46 @@
     },
     "exchanges": [
       {
-        "method": "host/thread/items/list",
+        "method": "host/session/open",
         "params": {
-          "threadId": "thread-1",
-          "cursor": "items:1",
-          "turnId": "turn-1",
-          "deferItemDetails": true
+          "session": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
+          "limit": 10
         },
         "response": {
           "result": {
-            "thread": {
-              "id": "thread-1",
-              "cwd": "/workspace",
-              "turns": [
-                {
-                  "id": "turn-1",
-                  "items": [
-                    {
-                      "id": "item-1",
-                      "type": "agentMessage",
-                      "text": "older",
-                      "future": 17
-                    }
-                  ]
-                }
-              ],
-              "future": {
-                "opaque": 42
-              },
-              "historyCursor": null
+            "session": {
+              "provider": "codex",
+              "id": "thread-1"
             },
-            "model": "model-b"
+            "subscriptionId": "00000000-0000-0000-0000-000000000000",
+            "revision": 0,
+            "response": {
+              "thread": {
+                "id": "thread-1",
+                "cwd": "/workspace",
+                "turns": [
+                  {
+                    "id": "turn-1",
+                    "items": [
+                      {
+                        "id": "item-1",
+                        "type": "agentMessage",
+                        "text": "older",
+                        "future": 17
+                      }
+                    ]
+                  }
+                ],
+                "future": {
+                  "opaque": 42
+                },
+                "historyCursor": null
+              },
+              "model": "model-b"
+            }
           }
         }
       }
@@ -1401,195 +1462,84 @@
     }
   },
   {
-    "name": "watchThread sends explicit watch identity",
-    "command": {
-      "type": "watchThread",
-      "threadId": "thread",
-      "watchKey": 3,
-      "watchId": 17,
-      "path": "/fixture/rollout.jsonl"
-    },
-    "exchanges": [
-      {
-        "method": "host/thread/watch",
-        "params": {
-          "threadId": "thread",
-          "watchKey": 3,
-          "watchId": 17,
-          "path": "/fixture/rollout.jsonl"
-        },
-        "response": {
-          "result": {
-            "watchKey": 3,
-            "watchId": 17
-          }
-        }
-      }
-    ],
-    "result": null
-  },
-  {
-    "name": "unwatchThread sends explicit watch identity",
-    "command": {
-      "type": "unwatchThread",
-      "watchKey": 3,
-      "watchId": 17
-    },
-    "exchanges": [
-      {
-        "method": "host/thread/unwatch",
-        "params": {
-          "watchKey": 3,
-          "watchId": 17
-        },
-        "response": {
-          "result": {
-            "watchKey": 3,
-            "watchId": 17
-          }
-        }
-      }
-    ],
-    "result": null
-  },
-  {
-    "name": "session gallery traverses both cursors and deduplicates latest sources",
+    "name": "session gallery uses bounded native snapshot and deduplicates latest sources",
     "command": {
       "type": "sessionImages",
       "threadId": "thread"
     },
     "exchanges": [
       {
-        "method": "host/thread/read",
+        "method": "host/session/open",
         "params": {
-          "threadId": "thread",
-          "includeTurns": true,
-          "paginateHistory": true,
-          "deferItemDetails": true
+          "session": {
+            "provider": "codex",
+            "id": "thread"
+          },
+          "limit": 1000
         },
         "response": {
           "result": {
-            "thread": {
-              "id": "thread",
-              "turns": [
-                {
-                  "id": "new",
-                  "status": "completed",
-                  "items": [
-                    {
-                      "id": "n",
-                      "type": "imageGeneration",
-                      "savedPath": "/new.png",
-                      "result": "discarded"
-                    }
-                  ],
-                  "itemsHasMore": true,
-                  "itemsNextCursor": "items-c"
-                }
-              ],
-              "historyCursor": "turns-c"
+            "session": {
+              "provider": "codex",
+              "id": "thread"
+            },
+            "subscriptionId": "00000000-0000-0000-0000-000000000000",
+            "revision": 0,
+            "response": {
+              "thread": {
+                "id": "thread",
+                "turns": [
+                  {
+                    "id": "old",
+                    "status": "completed",
+                    "items": [
+                      {
+                        "id": "oldest",
+                        "type": "imageGeneration",
+                        "savedPath": "/old.png"
+                      },
+                      {
+                        "id": "duplicate",
+                        "type": "imageGeneration",
+                        "savedPath": "/new.png"
+                      }
+                    ]
+                  },
+                  {
+                    "id": "new",
+                    "status": "completed",
+                    "items": [
+                      {
+                        "id": "inline",
+                        "type": "imageGeneration",
+                        "result": "AQID"
+                      },
+                      {
+                        "id": "n",
+                        "type": "imageGeneration",
+                        "savedPath": "/stale.png"
+                      },
+                      {
+                        "id": "n",
+                        "type": "imageGeneration",
+                        "savedPath": "/new.png",
+                        "result": "discarded"
+                      }
+                    ]
+                  }
+                ]
+              }
             }
           }
         }
       },
       {
-        "method": "host/thread/items/list",
+        "method": "host/session/close",
         "params": {
-          "threadId": "thread",
-          "turnId": "new",
-          "cursor": "items-c",
-          "deferItemDetails": true
+          "subscriptionId": "00000000-0000-0000-0000-000000000000"
         },
         "response": {
-          "result": {
-            "thread": {
-              "id": "thread",
-              "turns": [
-                {
-                  "id": "new",
-                  "status": "completed",
-                  "items": [
-                    {
-                      "id": "inline",
-                      "type": "imageGeneration",
-                      "result": "AQID"
-                    },
-                    {
-                      "id": "n",
-                      "type": "imageGeneration",
-                      "savedPath": "/stale.png"
-                    }
-                  ],
-                  "itemsHasMore": false,
-                  "itemsNextCursor": null
-                }
-              ],
-              "historyCursor": null
-            }
-          }
-        }
-      },
-      {
-        "method": "host/thread/turns/list",
-        "params": {
-          "threadId": "thread",
-          "turnId": null,
-          "cursor": "turns-c",
-          "deferItemDetails": true
-        },
-        "response": {
-          "result": {
-            "thread": {
-              "id": "thread",
-              "turns": [
-                {
-                  "id": "old",
-                  "status": "completed",
-                  "items": [],
-                  "itemsHasMore": true,
-                  "itemsNextCursor": null
-                }
-              ],
-              "historyCursor": null
-            }
-          }
-        }
-      },
-      {
-        "method": "host/thread/items/list",
-        "params": {
-          "threadId": "thread",
-          "turnId": "old",
-          "cursor": null,
-          "deferItemDetails": true
-        },
-        "response": {
-          "result": {
-            "thread": {
-              "id": "thread",
-              "turns": [
-                {
-                  "id": "old",
-                  "status": "completed",
-                  "items": [
-                    {
-                      "id": "oldest",
-                      "type": "imageGeneration",
-                      "savedPath": "/old.png"
-                    },
-                    {
-                      "id": "duplicate",
-                      "type": "imageGeneration",
-                      "savedPath": "/new.png"
-                    }
-                  ],
-                  "itemsHasMore": false,
-                  "itemsNextCursor": null
-                }
-              ],
-              "historyCursor": null
-            }
-          }
+          "result": {}
         }
       }
     ],
@@ -1609,73 +1559,30 @@
     ]
   },
   {
-    "name": "session gallery rejects nonadvancing page",
+    "name": "session gallery preserves provider read failure",
     "command": {
       "type": "sessionImages",
       "threadId": "thread"
     },
     "exchanges": [
       {
-        "method": "host/thread/read",
+        "method": "host/session/open",
         "params": {
-          "threadId": "thread",
-          "includeTurns": true,
-          "paginateHistory": true,
-          "deferItemDetails": true
+          "session": {
+            "provider": "codex",
+            "id": "thread"
+          },
+          "limit": 1000
         },
         "response": {
-          "result": {
-            "thread": {
-              "id": "thread",
-              "turns": [
-                {
-                  "id": "new",
-                  "status": "completed",
-                  "items": [
-                    {
-                      "id": "n",
-                      "type": "imageGeneration",
-                      "savedPath": "/new.png",
-                      "result": "discarded"
-                    }
-                  ],
-                  "itemsHasMore": true,
-                  "itemsNextCursor": "items-c"
-                }
-              ],
-              "historyCursor": "turns-c"
-            }
-          }
-        }
-      },
-      {
-        "method": "host/thread/items/list",
-        "params": {
-          "threadId": "thread",
-          "turnId": "new",
-          "cursor": "items-c",
-          "deferItemDetails": true
-        },
-        "response": {
-          "result": {
-            "thread": {
-              "id": "thread",
-              "turns": [
-                {
-                  "id": "new",
-                  "status": "completed",
-                  "items": [],
-                  "itemsHasMore": true,
-                  "itemsNextCursor": "items-c"
-                }
-              ],
-              "historyCursor": null
-            }
+          "error": {
+            "code": "history_unavailable",
+            "message": "incomplete native history"
           }
         }
       }
     ],
-    "errorContains": "カーソル",
+    "errorContains": "incomplete",
     "errorRaw": null
   },
   {
@@ -1806,11 +1713,15 @@
     },
     "exchanges": [
       {
-        "reply": {
-          "id": 7,
+        "method": "host/session/answer",
+        "params": {
+          "requestId": 7,
           "result": {
             "decision": "decline"
           }
+        },
+        "response": {
+          "result": {}
         }
       }
     ],
@@ -1847,8 +1758,9 @@
     },
     "exchanges": [
       {
-        "reply": {
-          "id": "approval",
+        "method": "host/session/answer",
+        "params": {
+          "requestId": "approval",
           "result": {
             "decision": {
               "acceptWithExecpolicyAmendment": {
@@ -1862,6 +1774,9 @@
               }
             }
           }
+        },
+        "response": {
+          "result": {}
         }
       }
     ],
@@ -1928,8 +1843,9 @@
     },
     "exchanges": [
       {
-        "reply": {
-          "id": "permissions",
+        "method": "host/session/answer",
+        "params": {
+          "requestId": "permissions",
           "result": {
             "permissions": {
               "filesystem": {
@@ -1944,6 +1860,9 @@
             },
             "scope": "turn"
           }
+        },
+        "response": {
+          "result": {}
         }
       }
     ],
@@ -1977,12 +1896,16 @@
     },
     "exchanges": [
       {
-        "reply": {
-          "id": "permissions",
+        "method": "host/session/answer",
+        "params": {
+          "requestId": "permissions",
           "result": {
             "permissions": {},
             "scope": "turn"
           }
+        },
+        "response": {
+          "result": {}
         }
       }
     ],
@@ -2019,8 +1942,9 @@
     },
     "exchanges": [
       {
-        "reply": {
-          "id": "questions",
+        "method": "host/session/answer",
+        "params": {
+          "requestId": "questions",
           "result": {
             "answers": {
               "first": {
@@ -2035,6 +1959,9 @@
               }
             }
           }
+        },
+        "response": {
+          "result": {}
         }
       }
     ],
@@ -2104,7 +2031,7 @@
     "errorRaw": null
   },
   {
-    "name": "raw-future-response",
+    "name": "unknown provider request cannot be approved",
     "command": {
       "type": "respond",
       "request": {
@@ -2119,22 +2046,7 @@
         "json": "{\"future\":[1,null,{\"ok\":true}]}"
       }
     },
-    "exchanges": [
-      {
-        "reply": {
-          "id": "future",
-          "result": {
-            "future": [
-              1,
-              null,
-              {
-                "ok": true
-              }
-            ]
-          }
-        }
-      }
-    ],
-    "result": null
+    "exchanges": [],
+    "errorContains": "unsupported provider request"
   }
 ]

@@ -195,7 +195,12 @@ impl RenderedItem {
                 id: id.into(),
                 native_id: None,
                 kind: "user".into(),
-                title: "You".into(),
+                title: if pending.delivery_unknown {
+                    "送信結果不明（自動再送しません）"
+                } else {
+                    "You"
+                }
+                .into(),
                 collapsible: false,
                 visible: true,
                 body: body.text,
@@ -270,6 +275,7 @@ pub fn project_conversation(
                 return old.clone();
             }
             render_turn(
+                crate::session::capabilities(&source).fork,
                 turn.clone(),
                 pending.cloned().collect(),
                 requests.cloned().collect(),
@@ -309,6 +315,7 @@ pub fn project_conversation(
 }
 
 fn render_turn(
+    supports_fork: bool,
     source: Arc<models::Turn>,
     pending: PendingItems,
     requests: Vec<Arc<ServerRequest>>,
@@ -353,7 +360,8 @@ fn render_turn(
     let render_native = |item: &Arc<models::Item>| {
         RenderedItem::native(
             item,
-            deferred.contains(item.id.as_str()),
+            deferred.contains(item.id.as_str())
+                || item.extra.get("detailDeferred") == Some(&Value::Bool(true)),
             cached.get(&(None, Arc::as_ptr(item).cast())).copied(),
         )
     };
@@ -414,7 +422,14 @@ fn render_turn(
         };
         let in_progress = segment.last && source.status.as_deref() == Some("inProgress");
         for item in group(Role::User) {
-            push(User { item });
+            if item.data.deferred {
+                push(Activity {
+                    item,
+                    turn_id: source.id.clone(),
+                });
+            } else {
+                push(User { item });
+            }
         }
         if let Some(summary) = &segment.label {
             push(ActivityHeader {
@@ -448,11 +463,19 @@ fn render_turn(
         }
         let mut responses = group(Role::Response).peekable();
         while let Some(item) = responses.next() {
-            let can_fork = !in_progress && segment.last && responses.peek().is_none();
-            push(Response {
-                item,
-                fork_turn_id: can_fork.then(|| source.id.clone()),
-            });
+            let can_fork =
+                supports_fork && !in_progress && segment.last && responses.peek().is_none();
+            if item.data.deferred {
+                push(Activity {
+                    item,
+                    turn_id: source.id.clone(),
+                });
+            } else {
+                push(Response {
+                    item,
+                    fork_turn_id: can_fork.then(|| source.id.clone()),
+                });
+            }
         }
         if in_progress {
             push(InProgress {
@@ -508,8 +531,17 @@ pub fn request(key: &str, source: &ServerRequest) -> Request {
         key: key.into(),
         method: source.method.clone(),
         kind,
-        title: title.into(),
+        title: match source.extra.get("deliveryState").and_then(Value::as_str) {
+            Some("sending") => "回答を送信中",
+            Some("unknown") => "回答の配送結果が不明です",
+            _ => title,
+        }
+        .into(),
         body,
+        can_respond: source
+            .extra
+            .get("deliveryState")
+            .is_none_or(|state| state == "awaiting"),
         decision_labels,
         decisions: decisions.to_vec(),
         params: params.clone(),
@@ -592,6 +624,7 @@ pub struct Request {
     pub kind: RequestKind,
     pub title: String,
     pub body: String,
+    pub can_respond: bool,
     pub decision_labels: Vec<String>,
     pub decisions: Vec<Value>,
     pub params: serde_json::Map<String, Value>,
@@ -611,7 +644,7 @@ pub enum RequestKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Draft, Event, Snapshot, reduce};
+    use crate::state::{Draft, Snapshot};
     use serde_json::json;
 
     fn fixture() -> Snapshot {
@@ -782,6 +815,7 @@ mod tests {
                 turn_id: Some("unloaded".into()),
                 after_item_id: None,
                 accepted: true,
+                delivery_unknown: false,
                 recovery_text: None,
                 clear_draft: None,
             }),
@@ -811,13 +845,16 @@ mod tests {
         let first = project_snapshot(snapshot.clone(), None);
         let same = project_snapshot(snapshot.clone(), Some(&first));
         assert!(Arc::ptr_eq(&first, &same));
-        let (updated, _) = reduce(
-            &snapshot,
-            Event::Notification {
-                method: "item/agentMessage/delta".into(),
-                params: json!({"threadId":"thread","turnId":"live","itemId":"stream","delta":" world"}),
-            },
-        );
+        let mut updated = snapshot.clone();
+        let thread = crate::session::SessionChange::Text {
+            turn_id: "live".into(),
+            item_id: "stream".into(),
+            field: crate::session::TextField::Message,
+            delta: " world".into(),
+        }
+        .apply(&snapshot.conversations["thread"])
+        .unwrap();
+        Arc::make_mut(&mut updated.conversations).insert("thread".into(), Arc::new(thread));
         let second = project_snapshot(updated.clone(), Some(&first));
         assert!(Arc::ptr_eq(&first.turns[0], &second.turns[0]));
         assert!(!Arc::ptr_eq(&first.turns[1], &second.turns[1]));
@@ -872,6 +909,7 @@ mod tests {
                 turn_id,
                 after_item_id: None,
                 accepted: true,
+                delivery_unknown: false,
                 recovery_text: None,
                 clear_draft: None,
             })
@@ -972,4 +1010,31 @@ mod progress_tests {
             "作業中…"
         );
     }
+}
+
+/// Shared read-state wording; native views only render this projection.
+pub fn history_notice(thread: &models::Thread) -> Option<String> {
+    let state = thread.extra.get("historyReadState")?;
+    let heading = match state["type"].as_str()? {
+        "partial" => "履歴の一部を表示しています。",
+        "incomplete" => "履歴の一部を読み取れませんでした。",
+        "unavailable" => "履歴を取得できません。保存済みの表示は最新とは限りません。",
+        _ => return None,
+    };
+    let issues = state["issues"]
+        .as_array()
+        .map(|issues| {
+            issues
+                .iter()
+                .filter_map(Value::as_str)
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    Some(if issues.is_empty() {
+        heading.into()
+    } else {
+        format!("{heading}\n{issues}")
+    })
 }

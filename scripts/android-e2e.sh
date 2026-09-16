@@ -116,7 +116,11 @@ adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/
     -e class dev.remoteagent.mobile.VisualizationTest \
     dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.visualize.log"
 adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.visualize-final.png"
-grep -qx 'OK (1 test)' "$log.visualize.log"
+if ! grep -qx 'OK (1 test)' "$log.visualize.log"; then
+    adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-failure.png "$log.visualize-failure.png" || true
+    adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-failure.xml "$log.visualize-failure.xml" || true
+    exit 1
+fi
 echo "Android API 37: 10 tests passed; $log.network.log, $log.store.log and $log.visualize.log"
 
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-selected.png "$log.visualize-selected.png"

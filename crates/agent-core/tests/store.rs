@@ -1,4 +1,42 @@
-use agent_core::peer::{JsonlReader, JsonlWriter};
+async fn scoped_incoming(
+    host: &agent_core::transport::Endpoint,
+    trust: &agent_core::transport::Trust,
+) -> (
+    agent_core::transport::Session,
+    impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + use<>,
+) {
+    use tokio::io::AsyncWriteExt;
+    let session = host
+        .accept()
+        .await
+        .unwrap()
+        .unwrap()
+        .authorize(trust)
+        .unwrap();
+    let mut stream = session.accept_stream().await.unwrap();
+    let request = {
+        let mut reader = agent_core::peer::JsonlReader::new(&mut stream);
+        assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+        serde_json::from_str::<serde_json::Value>(&reader.read_line().await.unwrap().unwrap())
+            .unwrap()
+    };
+    assert_eq!(request["method"], "host/session/scope");
+    stream
+        .write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({"id":request["id"],"result":"fixture-storage"})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    (session, stream)
+}
+
+#[path = "support/session_wire.rs"]
+mod session_wire;
+use agent_core::peer::JsonlReader;
 use agent_core::state::operations as op;
 use agent_core::{
     client::Answer,
@@ -10,13 +48,7 @@ use agent_core::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-fn connected(
-    snapshot: Snapshot,
-) -> (
-    Arc<Store>,
-    JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
-    JsonlWriter<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
-) {
+fn connected(snapshot: Snapshot) -> (Arc<Store>, session_wire::Reader, session_wire::Writer) {
     let (client, server) = tokio::io::duplex(65536);
     let (read, write) = tokio::io::split(client);
     let peer = RpcPeer::open(
@@ -26,20 +58,10 @@ fn connected(
         16,
     )
     .unwrap();
-    let (read, write) = tokio::io::split(server);
-    (
-        Arc::new(Store::new(peer, snapshot)),
-        JsonlReader::new(read),
-        JsonlWriter::new(write),
-    )
+    let (reader, writer) = session_wire::pair(server, &snapshot);
+    (Arc::new(Store::new(peer, snapshot)), reader, writer)
 }
-async fn setup(
-    snapshot: Snapshot,
-) -> (
-    Arc<Store>,
-    JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
-    JsonlWriter<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
-) {
+async fn setup(snapshot: Snapshot) -> (Arc<Store>, session_wire::Reader, session_wire::Writer) {
     let (store, mut reader, mut writer) = connected(snapshot.clone());
     let selected = snapshot
         .navigation
@@ -49,28 +71,33 @@ async fn setup(
     let cwd = selected.map_or(snapshot.navigation.cwd.as_str(), |thread| {
         thread.cwd.as_deref().unwrap_or_default()
     });
-    let watches = usize::from(selected.is_some_and(|thread| {
-        thread.path.is_some()
-            && thread
-                .status
-                .as_ref()
-                .is_some_and(|status| status.kind == "notLoaded")
-    }));
-    for _ in 0..2 + usize::from(selected.is_some()) + usize::from(!cwd.is_empty()) + watches {
+    for _ in 0..2 + usize::from(selected.is_some()) + usize::from(!cwd.is_empty()) {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/thread/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
                 .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
             "model/list" => json!({"data":snapshot.models,"nextCursor":null}),
-            "host/thread/read" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
+            "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
             "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
-            "host/thread/watch" => json!({}),
             method => panic!("unexpected connection request: {method}"),
         };
         writer
             .write_line(&json!({"id":request["id"], "result":result}).to_string())
             .await
             .unwrap();
+    }
+    for (id, thread) in snapshot.conversations.iter() {
+        if snapshot.navigation.thread_id.as_ref() == Some(id) {
+            continue;
+        }
+        let opening = store.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone())));
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/session/open");
+        writer
+            .write_line(&json!({"id":request["id"],"result":{"thread":thread}}).to_string())
+            .await
+            .unwrap();
+        opening.await.unwrap();
     }
     wait_for(&store, |current| {
         current.threads.is_some()
@@ -80,7 +107,7 @@ async fn setup(
     .await;
     (store, reader, writer)
 }
-async fn read(reader: &mut JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>) -> Value {
+async fn read(reader: &mut session_wire::Reader) -> Value {
     let line = tokio::time::timeout(Duration::from_secs(2), reader.read_line())
         .await
         .unwrap()
@@ -93,8 +120,8 @@ fn review() -> Value {
 }
 async fn new_chat(
     store: &Store,
-    reader: &mut JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
-    writer: &mut JsonlWriter<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+    reader: &mut session_wire::Reader,
+    writer: &mut session_wire::Writer,
     cwd: &str,
 ) {
     let navigation = store.dispatch(Intent::NewChat { cwd: cwd.into() });
@@ -108,11 +135,24 @@ async fn new_chat(
     navigation.await.unwrap();
 }
 async fn read_after_reviews(
-    reader: &mut JsonlReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
-    writer: &mut JsonlWriter<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+    reader: &mut session_wire::Reader,
+    writer: &mut session_wire::Writer,
 ) -> Value {
     loop {
         let request = read(reader).await;
+        if request["method"] == "host/session/open" {
+            let id = request["params"]["session"]["id"].as_str().unwrap();
+            let response = writer.current(id);
+            writer
+                .write_line(&json!({"id":request["id"], "result":response}).to_string())
+                .await
+                .unwrap();
+            continue;
+        }
+        if request["method"] == "host/thread/list" {
+            writer.write_line(&json!({"id":request["id"],"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
+            continue;
+        }
         if request["method"] != "host/workspace/review" {
             return request;
         }
@@ -274,10 +314,15 @@ async fn approval_can_complete_while_another_request_is_waiting() {
         let pending = read(&mut reader).await;
         writer.write_line(&json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"thread"}}).to_string()).await.unwrap();
         let answer = read(&mut reader).await;
+        assert_eq!(answer["method"], "host/session/answer");
         assert_eq!(
-            answer,
-            json!({"id":"approval","result":{"decision":"decline"}})
+            answer["params"],
+            json!({"requestId":"approval","result":{"decision":"decline"}})
         );
+        writer
+            .write_line(&json!({"id":answer["id"],"result":{}}).to_string())
+            .await
+            .unwrap();
         writer
             .write_line(
                 &json!({"id":pending["id"],"result":{"thread":thread("approved path")}})
@@ -465,7 +510,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
             thread_id: Some("thread".into()),
             client_user_message_id: "fixture-message".into(),
         });
-        let request = read(&mut reader).await;
+        let request = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(request["method"], "turn/start");
         assert_eq!(request["params"]["input"][0]["text"], "sent");
         assert_eq!(request["params"]["serviceTierForTurn"], "priority");
@@ -626,11 +671,6 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
         let state = store.snapshot();
         assert!(state.pending_submissions.is_empty());
         assert_eq!(state.drafts[&state.navigation.draft_key].text, "retry me");
-        if !fail_creation {
-            let list = read_after_reviews(&mut reader, &mut writer).await;
-            assert_eq!(list["method"], "host/thread/list");
-            writer.write_line(&json!({"id":list["id"],"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
-        }
         let retry = tokio::spawn({
             let store = store.clone();
             async move {
@@ -731,7 +771,7 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
             .write_line(&json!({"id":request["id"],"result":{"text":"spoken"}}).to_string())
             .await
             .unwrap();
-        let submit = read(&mut reader).await;
+        let submit = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(submit["method"], "turn/start");
         assert_eq!(submit["params"]["input"][0]["text"], "original\nspoken");
         assert!(!transcribing.is_finished());
@@ -1096,7 +1136,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         assert_eq!(selected.drafts["thread"].text, "Keep this draft");
         assert_eq!(loaded_text(&selected), cached.then_some("old"));
         let request = read(&mut reader).await;
-        assert_eq!(request["method"], "host/thread/read");
+        assert_eq!(request["method"], "host/session/open");
         writer
             .write_line(
                 &json!({"id":request["id"],"result":{"thread":thread("latest")}}).to_string(),
@@ -1240,7 +1280,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
                 .await
         }
     });
-    let request = read(&mut reader).await;
+    let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "turn/start");
     writer
         .write_line(&json!({"id":request["id"],"result":{"turn":{"id":"new-turn"}}}).to_string())
@@ -1307,10 +1347,10 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
     let (store, mut reader, mut writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
-        assert_eq!(request["method"], "host/thread/read");
+        assert_eq!(request["method"], "host/session/open");
         writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"gallery","turns":[{"id":"image-turn","items":[{"id":"image","type":"imageGeneration","savedPath":"/image.png"}]}]}}}).to_string()).await.unwrap();
         writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" continued"}}).to_string()).await.unwrap();
-        writer
+        (reader, writer)
     });
     let result = store
         .dispatch(Intent::LoadSessionImages(op::LoadSessionImages {
@@ -1458,6 +1498,9 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
                 "host/thread/start" => {
                     json!({"thread":{"id":"created","name":"created chat","cwd":"/fixture","turns":[],"status":{"type":"idle"}}})
                 }
+                "host/session/open" => {
+                    writer.current(request["params"]["session"]["id"].as_str().unwrap())
+                }
                 "turn/start" => json!({"turn":{"id":"turn"}}),
                 "host/thread/list" => {
                     let data = if request["params"]["searchTerm"] == "created" {
@@ -1524,7 +1567,7 @@ async fn malformed_file_change_delta_does_not_poison_store() {
             serde_json::from_value(json!({"id":"file", "type":"fileChange", "changes":[7]}))
                 .unwrap(),
         ));
-    let (store, _reader, mut writer) = setup(previous).await;
+    let (store, mut reader, mut writer) = setup(previous).await;
     for (method, item) in [
         ("item/fileChange/outputDelta", "file"),
         ("item/agentMessage/delta", "item"),
@@ -1539,6 +1582,12 @@ async fn malformed_file_change_delta_does_not_poison_store() {
             .await
             .unwrap();
     }
+    let reopening = read(&mut reader).await;
+    assert_eq!(reopening["method"], "host/session/open");
+    writer
+        .write_line(&json!({"id":reopening["id"],"result":writer.current("thread")}).to_string())
+        .await
+        .unwrap();
     wait_for(&store, |snapshot| {
         loaded_text(snapshot) == Some("old continues")
     })
@@ -1572,70 +1621,42 @@ async fn malformed_file_change_delta_does_not_poison_store() {
 }
 
 #[tokio::test]
-async fn refresh_gap_recovers_missing_history_through_store_after_retry() {
-    let previous = serde_json::from_value(json!({"id":"thread","historyCursor":null,
-        "turns":[{"id":"old","items":[]}]}))
-    .unwrap();
+async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_window() {
+    let initial: Thread = serde_json::from_value(json!({"id":"thread","historyLimit":5,"historyHasMore":true,"turns":[{"id":"latest","items":[]}]})).unwrap();
     let (store, mut reader, mut writer) = setup(Snapshot {
-        conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(previous))])),
+        conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(initial))])),
         ..Default::default()
     })
     .await;
+    let cached = store.snapshot().conversations.clone();
     let server = tokio::spawn(async move {
-        let request = read(&mut reader).await;
-        assert_eq!(request["method"], "host/thread/read");
-        writer.write_line(&json!({"id":request["id"],"result":{"thread":{
-            "id":"thread","historyCursor":"missing-page","turns":[{"id":"latest","items":[]}]}
-        }}).to_string()).await.unwrap();
         for failed in [true, false] {
             let request = read(&mut reader).await;
-            assert_eq!(request["method"], "host/thread/turns/list");
-            assert_eq!(request["params"]["cursor"], "missing-page");
+            assert_eq!(request["method"], "host/session/open");
+            assert_eq!(
+                request["params"],
+                json!({"session":{"provider":"codex","id":"thread"},"limit":10})
+            );
             let response = if failed {
                 json!({"id":request["id"],"error":{"code":-32000,"message":"temporary history failure"}})
             } else {
-                json!({"id":request["id"],"result":{"thread":{"id":"thread","historyCursor":null,
+                json!({"id":request["id"],"result":{"thread":{"id":"thread","historyLimit":10,"historyHasMore":false,
                     "turns":[{"id":"old","items":[]},{"id":"missing","items":[
-                        {"id":"question","type":"userMessage","content":[{"type":"text","text":"pi comparison"}]}]}]}}})
+                        {"id":"question","type":"userMessage","content":[{"type":"text","text":"comparison"}]}]},{"id":"latest","items":[]}]}}})
             };
             writer.write_line(&response.to_string()).await.unwrap();
         }
-        writer
+        (reader, writer)
     });
-    store
-        .dispatch(Intent::ReadThread(op::ReadThread::new("thread".into())))
-        .await
-        .unwrap();
-    let refreshed = store.snapshot();
-    let thread = &refreshed.conversations["thread"];
-    assert_eq!(
-        thread
-            .turns
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|t| t.id.as_str())
-            .collect::<Vec<_>>(),
-        ["latest"]
-    );
-    assert_eq!(thread.history_cursor, Some(Some("missing-page".into())));
     assert!(
         store
-            .dispatch(Intent::ReadOlder(op::ReadOlder::new(
-                "thread".into(),
-                None,
-                None
-            )))
+            .dispatch(Intent::ReadOlder(op::ReadOlder::new("thread".into())))
             .await
             .is_err()
     );
-    assert_eq!(store.snapshot().conversations, refreshed.conversations);
+    assert_eq!(store.snapshot().conversations, cached);
     store
-        .dispatch(Intent::ReadOlder(op::ReadOlder::new(
-            "thread".into(),
-            None,
-            None,
-        )))
+        .dispatch(Intent::ReadOlder(op::ReadOlder::new("thread".into())))
         .await
         .unwrap();
     let recovered = store.snapshot();
@@ -1654,51 +1675,43 @@ async fn refresh_gap_recovers_missing_history_through_store_after_retry() {
         thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap()[0].id,
         "question"
     );
-    assert_eq!(thread.history_cursor, Some(None));
+    assert_eq!(thread.extra["historyHasMore"], false);
     assert_eq!(recovered.error, None);
-    let _writer = server.await.unwrap();
+    let _server = server.await.unwrap();
     store.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_content() {
-    let previous: Thread = serde_json::from_value(json!({"id":"thread","historyCursor":"turn-page",
+async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
+    let initial: Thread = serde_json::from_value(json!({"id":"thread","historyLimit":5,"historyHasMore":true,
         "turns":[{"id":"new","status":"completed","items":[{"id":"new-item","type":"agentMessage","text":"new"}]}]})).unwrap();
     let (store, mut reader, mut writer) = setup(Snapshot {
-        conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(previous))])),
+        conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(initial))])),
         ..Default::default()
     })
     .await;
     let server = tokio::spawn(async move {
-        let request = read(&mut reader).await;
-        assert_eq!(request["method"], "host/thread/turns/list");
-        assert_eq!(request["params"]["cursor"], "turn-page");
-        writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"thread","historyCursor":null,
-            "turns":[{"id":"old","itemsHasMore":true,"itemsNextCursor":"item-page","items":[{"id":"last-old","text":"tail"}]}]}}}).to_string()).await.unwrap();
-        let request = read(&mut reader).await;
-        assert_eq!(request["method"], "host/thread/items/list");
-        assert_eq!(request["params"]["turnId"], "old");
-        assert_eq!(request["params"]["cursor"], "item-page");
-        writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"thread",
-            "turns":[{"id":"old","itemsHasMore":false,"itemsNextCursor":null,"items":[{"id":"first-old","text":"head"}]}]}}}).to_string()).await.unwrap();
-        writer
+        for (limit, complete) in [(10, false), (15, true)] {
+            let request = read(&mut reader).await;
+            assert_eq!(request["method"], "host/session/open");
+            assert_eq!(request["params"]["limit"], limit);
+            let items = if complete {
+                json!([{"id":"first-old","text":"head"},{"id":"last-old","text":"tail"}])
+            } else {
+                json!([{"id":"last-old","text":"tail"}])
+            };
+            writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"thread","historyLimit":limit,"historyHasMore":!complete,
+                "turns":[{"id":"old","itemsHasMore":!complete,"items":items},
+                {"id":"new","status":"completed","items":[{"id":"new-item","type":"agentMessage","text":"new"}]}]}}}).to_string()).await.unwrap();
+        }
+        (reader, writer)
     });
-    store
-        .dispatch(Intent::ReadOlder(op::ReadOlder::new(
-            "thread".into(),
-            None,
-            None,
-        )))
-        .await
-        .unwrap();
-    store
-        .dispatch(Intent::ReadOlder(op::ReadOlder::new(
-            "thread".into(),
-            Some("old".into()),
-            None,
-        )))
-        .await
-        .unwrap();
+    for _ in 0..2 {
+        store
+            .dispatch(Intent::ReadOlder(op::ReadOlder::new("thread".into())))
+            .await
+            .unwrap();
+    }
     let snapshot = store.snapshot();
     let thread = &snapshot.conversations["thread"];
     let turns = thread.turns.as_ref().unwrap();
@@ -1724,8 +1737,8 @@ async fn read_older_through_store_prepends_turns_and_items_and_preserves_newer_c
         Some("new")
     );
     assert_eq!(turns[0].items_has_more, Some(false));
-    assert_eq!(thread.history_cursor, Some(None));
-    let _writer = server.await.unwrap();
+    assert_eq!(thread.extra["historyHasMore"], false);
+    let _server = server.await.unwrap();
     store.close().await.unwrap();
 }
 
@@ -1744,7 +1757,31 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
             new_chat(&store, &mut reader, &mut writer, "/new").await;
         }
         writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"forked","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","type":"agentMessage","text":"copied"}]}]}}}).to_string()).await.unwrap();
-        writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}}).to_string()).await.unwrap();
+        if !navigate {
+            loop {
+                let opening = read(&mut reader).await;
+                if opening["method"] == "host/session/open" {
+                    writer
+                        .write_line(
+                            &json!({"id":opening["id"],"result":writer.current("forked")})
+                                .to_string(),
+                        )
+                        .await
+                        .unwrap();
+                    break;
+                }
+                let result = if opening["method"] == "host/workspace/review" {
+                    review()
+                } else {
+                    json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
+                };
+                writer
+                    .write_line(&json!({"id":opening["id"],"result":result}).to_string())
+                    .await
+                    .unwrap();
+            }
+            writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}}).to_string()).await.unwrap();
+        }
         assert_eq!(
             fork.await.unwrap(),
             Outcome::StartedThread {
@@ -1756,7 +1793,8 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
                 .get("forked")
                 .and_then(|t| t.turns.as_ref())
                 .is_some_and(|turns| {
-                    turns[0].items.as_ref().unwrap()[0].text.as_deref() == Some("copied later")
+                    turns[0].items.as_ref().unwrap()[0].text.as_deref()
+                        == Some(if navigate { "copied" } else { "copied later" })
                 })
         })
         .await;
@@ -1970,7 +2008,18 @@ async fn reconnect_preserves_edits_made_during_pairing() {
             .await
             .unwrap();
         let drafts = store.snapshot().drafts.clone();
-        let (session, peer, _events) = pairing.authorize(&trust).await.unwrap();
+        let (session, peer, mut events) = pairing.authorize(&trust).await.unwrap();
+        loop {
+            if let agent_core::peer::PeerEvent::Message(message) = events.recv().await.unwrap() {
+                let request: Value = serde_json::from_str(&message.value).unwrap();
+                if request["method"] == "host/session/scope" {
+                    peer.respond_raw(&request["id"].to_string(), "result", "\"fixture-storage\"")
+                        .await
+                        .unwrap();
+                    break;
+                }
+            }
+        }
         connecting.await.unwrap().unwrap();
         wait_for(&store, |state| state.connected).await;
         assert!(Arc::ptr_eq(&drafts, &store.snapshot().drafts));
@@ -2011,9 +2060,9 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
             let replacement = match action {
                 "reconnect" => {
                     let ticket = host.ticket();
-                    let (result, incoming) = tokio::join!(store.reconnect(&client, &ticket, None), host.accept());
+                    let (result, incoming) = tokio::join!(store.reconnect(&client, &ticket, None), scoped_incoming(&host, &trust));
                     result.unwrap();
-                    Some(incoming.unwrap().unwrap().authorize(&trust).unwrap())
+                    Some(incoming)
                 }
                 "disconnect" => { store.disconnect().await.unwrap(); None }
                 "close" => { store.close().await.unwrap(); None }
@@ -2030,11 +2079,10 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 let _ = peer.close().await;
                 session.close();
             }
-            if let Some(session) = replacement {
-                let (read, write) = tokio::io::split(session.accept_stream().await.unwrap());
+            if let Some((session, stream)) = replacement {
+                let (read, write) = tokio::io::split(stream);
                 let mut reader = JsonlReader::new(read);
-                let mut writer = JsonlWriter::new(write);
-                assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+                let mut writer = agent_core::peer::JsonlWriter::new(write);
                 for _ in 0..2 {
                     let request = serde_json::from_str::<Value>(&reader.read_line().await.unwrap().unwrap()).unwrap();
                     let result = match request["method"].as_str().unwrap() {
@@ -2105,7 +2153,7 @@ async fn close_ends_subscriptions_while_store_is_retained() {
 }
 
 #[tokio::test]
-async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation() {
+async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dictation() {
     use agent_core::client::{SubmissionTarget, submission_target};
     use agent_core::state::{Activity, Navigation, PendingSubmission};
     let draft = Arc::new(Draft {
@@ -2117,8 +2165,6 @@ async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation(
     saved.navigation = Arc::new(Navigation {
         thread_id: Some("thread".into()),
         draft_key: "thread".into(),
-        watch_id: Some(1),
-        watch_thread_id: Some("thread".into()),
         ..Default::default()
     });
     saved.activity = Arc::new(Activity {
@@ -2134,6 +2180,7 @@ async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation(
             turn_id: None,
             after_item_id: None,
             accepted: false,
+            delivery_unknown: false,
             recovery_text: Some("spoken".into()),
             clear_draft: None,
         }),
@@ -2147,9 +2194,15 @@ async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation(
     let current = store.snapshot();
     assert!(current.requests.is_empty());
     assert!(current.activity.active.is_empty());
-    assert!(current.navigation.watch_id.is_none());
-    assert!(current.pending_submissions.is_empty());
-    assert_eq!(current.drafts["thread"].text, "typed\nspoken");
+    assert!(current.subscriptions.is_empty());
+    assert!(current.pending_submissions["unsent"].delivery_unknown);
+    assert_eq!(
+        current.pending_submissions["unsent"]
+            .recovery_text
+            .as_deref(),
+        Some("spoken")
+    );
+    assert_eq!(current.drafts["thread"].text, "typed");
     assert!(matches!(
         submission_target(Some(&current.conversations["thread"]), None, None).unwrap(),
         SubmissionTarget::Start { .. }
@@ -2158,7 +2211,7 @@ async fn restored_snapshot_discards_session_state_and_recovers_unsent_dictation(
 }
 
 #[tokio::test]
-async fn close_keeps_the_last_enqueued_draft_and_removes_unaccepted_send() {
+async fn close_keeps_the_last_enqueued_draft_and_unconfirmed_send() {
     let (store, mut reader, _writer) = setup(snapshot()).await;
     store
         .dispatch(Intent::SetDraftText {
@@ -2179,7 +2232,8 @@ async fn close_keeps_the_last_enqueued_draft_and_removes_unaccepted_send() {
     }));
     store.close().await.unwrap();
     let current = store.snapshot();
-    assert!(current.pending_submissions.is_empty());
+    assert!(current.pending_submissions["unsent"].delivery_unknown);
+    assert_eq!(current.pending_submissions["unsent"].draft.text, "unsent");
     assert_eq!(current.drafts["thread"].text, "newest edit");
 }
 
@@ -2203,23 +2257,23 @@ async fn stores_share_an_endpoint_without_closing_each_others_transport() {
         for _ in 0..2 {
             let (store, incoming) = tokio::join!(
                 Store::connect(&client, &ticket, Snapshot::default(), None),
-                host.accept()
+                scoped_incoming(&host, &trust)
             );
             stores.push(store.unwrap());
-            sessions.push(incoming.unwrap().unwrap().authorize(&trust).unwrap());
+            sessions.push(incoming);
         }
         stores[0].close().await.unwrap();
         // A new session proves the shared endpoint survived closing the first view.
         let (third, incoming) = tokio::join!(
             Store::connect(&client, &ticket, Snapshot::default(), None),
-            host.accept()
+            scoped_incoming(&host, &trust)
         );
         let third = third.unwrap();
-        let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+        let (incoming, _stream) = incoming;
         assert!(stores[1].snapshot().connected);
         stores[1].close().await.unwrap();
         third.close().await.unwrap();
-        for session in sessions {
+        for (session, _stream) in sessions {
             session.close();
         }
         incoming.close();

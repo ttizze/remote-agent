@@ -190,20 +190,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             request_id,
             decision,
         } => {
-            let mut updates = store.subscribe();
-            tokio::time::timeout(Duration::from_secs(30), async {
-                loop {
-                    if updates
-                        .borrow_and_update()
-                        .requests
-                        .contains_key(&request_id.to_string())
-                    {
-                        return Ok::<_, Box<dyn std::error::Error>>(());
-                    }
-                    updates.changed().await?;
-                }
-            })
-            .await??;
+            store
+                .dispatch(Intent::OpenRequest(op::OpenRequest {
+                    request_id: request_id.clone(),
+                }))
+                .await?;
             store
                 .dispatch(Intent::Respond(op::Respond {
                     request_id,

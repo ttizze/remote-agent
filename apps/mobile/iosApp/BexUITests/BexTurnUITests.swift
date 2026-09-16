@@ -60,7 +60,7 @@ extension BexLaunchUITests {
         text.tap()
         text.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 25, dy: 10)).press(forDuration: 1.2)
         if retryRead {
-            _ = try simulatorFixture("fail-next-history-read")
+            _ = try simulatorFixture("fail-next-thread-start")
         }
         openAssistantSelectionSideChat(app)
         if retryRead {

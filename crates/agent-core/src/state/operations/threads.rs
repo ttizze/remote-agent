@@ -25,7 +25,47 @@ impl Operation for ListThreads {
         Ok(())
     }
     const ORDERED: bool = true;
-    fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
+    fn apply(self, snapshot: &mut Snapshot, mut threads: Self::Output) -> Vec<Effect> {
+        if let Some(errors) = threads
+            .extra
+            .get("providerErrors")
+            .and_then(Value::as_object)
+            && let Some(previous) = &snapshot.threads
+        {
+            for cached in &previous.data {
+                let Some(id) = cached.id.as_ref() else {
+                    continue;
+                };
+                let provider = if id.starts_with("claude:") {
+                    "claude"
+                } else {
+                    "codex"
+                };
+                if errors.contains_key(provider)
+                    && !threads
+                        .data
+                        .iter()
+                        .any(|thread| thread.id.as_ref() == Some(id))
+                {
+                    let mut cached = cached.clone();
+                    cached.extra.insert("listStale".into(), true.into());
+                    cached.status = None;
+                    threads.data.push(cached);
+                }
+            }
+            for project in &previous.projects {
+                if !threads
+                    .projects
+                    .iter()
+                    .any(|current| current.id == project.id)
+                    && threads.data.iter().any(|thread| {
+                        thread.project_id.as_ref().and_then(Option::as_ref) == Some(&project.id)
+                    })
+                {
+                    threads.projects.push(project.clone());
+                }
+            }
+        }
         for summary in &threads.data {
             if let Some(id) = &summary.id
                 && snapshot
@@ -81,23 +121,18 @@ impl Operation for ReadItem {
 #[serde(rename_all = "camelCase")]
 pub struct ReadThread {
     pub thread_id: String,
-    #[cfg_attr(feature = "bindings", uniffi(default = true))]
-    pub include_turns: bool,
-    #[cfg_attr(feature = "bindings", uniffi(default = true))]
-    pub paginate_history: bool,
-    #[cfg_attr(feature = "bindings", uniffi(default = true))]
-    pub defer_item_details: bool,
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub open: bool,
+    #[serde(default)]
+    #[cfg_attr(feature = "bindings", uniffi(default = 5))]
+    pub limit: u32,
 }
 impl ReadThread {
     pub fn new(thread_id: String) -> Self {
         Self {
             thread_id,
-            include_turns: true,
-            paginate_history: true,
-            defer_item_details: true,
             open: false,
+            limit: 5,
         }
     }
     pub fn open(thread_id: String) -> Self {
@@ -108,19 +143,21 @@ impl ReadThread {
     }
 }
 impl rpc::RpcMethod for ReadThread {
-    type Output = crate::models::ThreadResponse;
-    const METHOD: &'static str = "host/thread/read";
+    type Output = crate::session::OpenedSession;
+    const METHOD: &'static str = "host/session/open";
     fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut params = serializer.serialize_struct("ReadThread", 4)?;
-        params.serialize_field("threadId", &self.thread_id)?;
-        params.serialize_field("includeTurns", &self.include_turns)?;
-        params.serialize_field("paginateHistory", &self.paginate_history)?;
-        params.serialize_field("deferItemDetails", &self.defer_item_details)?;
-        params.end()
+        crate::session::OpenSession {
+            session: crate::session::SessionRef::from_thread_id(&self.thread_id)
+                .map_err(serde::ser::Error::custom)?,
+            limit: self.limit as usize,
+        }
+        .serialize(serializer)
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        rpc::validate_thread(output, Some(self.thread_id.as_str()))
+        if output.session.thread_id() != self.thread_id {
+            return Err("session identity does not match");
+        }
+        rpc::validate_thread(&output.response, Some(&self.thread_id))
     }
 }
 
@@ -130,6 +167,23 @@ impl Operation for ReadThread {
         self.open
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        self.limit = self
+            .limit
+            .max(
+                snapshot
+                    .conversations
+                    .get(&self.thread_id)
+                    .map_or(5, |thread| {
+                        let requested = thread
+                            .extra
+                            .get("historyLimit")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(5)
+                            .min(1000) as u32;
+                        requested.max(thread.turns.as_ref().map_or(0, |turns| turns.len() as u32))
+                    }),
+            )
+            .max(5);
         if self.open {
             let cwd = snapshot
                 .conversations
@@ -153,19 +207,40 @@ impl Operation for ReadThread {
         Ok(())
     }
     const ORDERED: bool = true;
-    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        if self.open {
-            open_thread(snapshot, output.thread, output.model)
-        } else {
-            refresh_thread(snapshot, output.thread)
+    fn apply(self, snapshot: &mut Snapshot, mut output: Self::Output) -> Vec<Effect> {
+        if output
+            .response
+            .thread
+            .extra
+            .get("historyReadState")
+            .is_some_and(|state| state["type"] == "unavailable")
+            && let Some(cached) = snapshot.conversations.get(&self.thread_id)
+        {
+            output.response.thread.turns = cached.turns.clone();
         }
+        let mut effects = if self.open {
+            open_thread(snapshot, output.response.thread, output.response.model)
+        } else {
+            refresh_thread(snapshot, output.response.thread)
+        };
+        if let Some((old, _)) = Arc::make_mut(&mut snapshot.subscriptions)
+            .insert(self.thread_id, (output.subscription_id, output.revision))
+        {
+            effects.push(Effect::execute(CloseSubscription {
+                subscription_id: old.to_string(),
+            }));
+        }
+        effects
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        if self.open {
-            refresh_thread(snapshot, output.thread)
-        } else {
-            Vec::new()
+        // A late navigation result can warm the cache, but must never replace
+        // an already subscribed, more recent view or change the selected draft.
+        if !snapshot.subscriptions.contains_key(&self.thread_id) {
+            refresh_thread(snapshot, output.response.thread);
         }
+        vec![Effect::execute(CloseSubscription {
+            subscription_id: output.subscription_id.to_string(),
+        })]
     }
 }
 
@@ -186,11 +261,6 @@ pub(super) fn open_thread(
 ) -> Vec<Effect> {
     let id = thread.id.clone();
     let cwd = thread.cwd.clone().unwrap_or_default();
-    let path = thread.path.clone();
-    let external = thread
-        .status
-        .as_ref()
-        .is_some_and(|status| status.kind == "notLoaded");
     let mut effects = refresh_thread(snapshot, thread);
     if let Some(id) = id {
         effects.extend(navigate(
@@ -199,22 +269,8 @@ pub(super) fn open_thread(
                 thread_id: Some(id.clone()),
                 draft_key: id.clone(),
                 cwd,
-                ..Default::default()
             },
         ));
-        // Loaded threads stream native events. Their advertised rollout may
-        // not be materialized yet, so file changes must not trigger hydration.
-        if external && path.is_some() {
-            let navigation = Arc::make_mut(&mut snapshot.navigation);
-            navigation.watch_id = Some(snapshot.epoch);
-            navigation.watch_thread_id = Some(id.clone());
-            effects.push(Effect::execute(Watch {
-                thread_id: id.clone(),
-                watch_key: 1,
-                watch_id: snapshot.epoch,
-                path,
-            }));
-        }
         if let Some(model) = model {
             let (updated, _) = reduce(
                 snapshot,
@@ -235,11 +291,9 @@ pub(super) fn refresh_thread(snapshot: &mut Snapshot, incoming: Thread) -> Vec<E
         snapshot.error = Some("thread ID is missing".into());
         return Vec::new();
     };
-    let thread = match snapshot.conversations.get(&id) {
-        Some(current) => refresh(current, &incoming),
-        None => incoming,
-    };
+    let thread = incoming;
     Arc::make_mut(&mut snapshot.conversations).insert(id.clone(), Arc::new(thread));
+    project_requests(snapshot);
     reconcile_pending(snapshot, &id);
 
     Vec::new()
@@ -276,7 +330,9 @@ impl Operation for ForkThread {
     const INVALIDATES: bool = true;
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let id = output.thread.id.clone().expect("validated thread ID");
         let mut effects = open_thread(snapshot, output.thread, output.model);
+        effects.push(Effect::execute(ReadThread::new(id)));
         if snapshot.threads.is_some() {
             effects.push(Effect::execute(ListThreads::new(
                 (*snapshot.list_query).clone(),
@@ -339,46 +395,14 @@ impl Operation for Interrupt {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Watch {
-    pub thread_id: String,
-    pub watch_key: u64,
-    pub watch_id: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
+pub struct CloseSubscription {
+    pub subscription_id: String,
 }
-rpc::rpc_method!(Watch, Map<String, Value>, "host/thread/watch");
-
-impl Operation for Watch {
-    rpc_operation!();
-    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        let navigation = Arc::make_mut(&mut snapshot.navigation);
-        navigation.watch_id = Some(self.watch_id);
-        navigation.watch_thread_id = Some(self.thread_id.clone());
-        Ok(())
-    }
-}
-
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Unwatch {
-    pub watch_key: u64,
-    pub watch_id: u64,
-}
-rpc::rpc_method!(Unwatch, Map<String, Value>, "host/thread/unwatch");
-
-impl Operation for Unwatch {
+rpc::rpc_method!(CloseSubscription, Map<String, Value>, "host/session/close");
+impl Operation for CloseSubscription {
     rpc_operation!();
     fn disconnected_is_complete(&self) -> bool {
         true
-    }
-    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        if snapshot.navigation.watch_id == Some(self.watch_id) {
-            let navigation = Arc::make_mut(&mut snapshot.navigation);
-            navigation.watch_id = None;
-            navigation.watch_thread_id = None;
-        }
-        Ok(())
     }
 }
 
@@ -387,82 +411,52 @@ impl Operation for Unwatch {
 #[serde(rename_all = "camelCase")]
 pub struct ReadOlder {
     pub thread_id: String,
-    pub turn_id: Option<String>,
-    #[cfg_attr(feature = "bindings", uniffi(default = None))]
-    pub cursor: Option<String>,
     #[serde(default)]
-    #[cfg_attr(feature = "bindings", uniffi(default = true))]
-    pub defer_item_details: bool,
+    #[cfg_attr(feature = "bindings", uniffi(default = 5))]
+    pub limit: u32,
 }
 impl ReadOlder {
-    pub fn new(thread_id: String, turn_id: Option<String>, cursor: Option<String>) -> Self {
+    pub fn new(thread_id: String) -> Self {
         Self {
             thread_id,
-            turn_id,
-            cursor,
-            defer_item_details: true,
+            limit: 5,
         }
     }
 }
-impl rpc::RpcMethod for ReadOlder {
-    type Output = crate::models::ThreadResponse;
-    const METHOD: &'static str = "host/thread/turns/list";
-    fn method(&self) -> &'static str {
-        if self.turn_id.is_some() {
-            "host/thread/items/list"
-        } else {
-            Self::METHOD
-        }
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        rpc::validate_thread(output, Some(self.thread_id.as_str()))
-    }
-}
-
 impl Operation for ReadOlder {
-    rpc_operation!();
+    type Output = crate::session::OpenedSession;
+    const ORDERED: bool = true;
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        self.limit = snapshot
+            .conversations
+            .get(&self.thread_id)
+            .and_then(|thread| thread.extra.get("historyLimit"))
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| {
+                snapshot
+                    .conversations
+                    .get(&self.thread_id)
+                    .and_then(|thread| thread.turns.as_ref())
+                    .map_or(5, |turns| turns.len() as u64)
+            })
+            .saturating_add(5)
+            .min(1000) as u32;
         snapshot.error = None;
-        if self.cursor.is_none() {
-            self.cursor = snapshot
-                .conversations
-                .get(&self.thread_id)
-                .and_then(|thread| {
-                    if let Some(id) = &self.turn_id {
-                        thread
-                            .turns
-                            .as_ref()?
-                            .iter()
-                            .find(|turn| &turn.id == id)?
-                            .items_next_cursor
-                            .clone()
-                            .flatten()
-                    } else {
-                        thread.history_cursor.clone().flatten()
-                    }
-                });
-        }
         Ok(())
     }
-    const ORDERED: bool = true;
+    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        context
+            .call(&ReadThread {
+                limit: self.limit,
+                ..ReadThread::new(self.thread_id.clone())
+            })
+            .await
+    }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        let id = &self.thread_id;
-        if let Some(current) = snapshot.conversations.get(id) {
-            match older(
-                current,
-                &output.thread,
-                self.turn_id.as_deref(),
-                self.cursor.as_deref(),
-            ) {
-                Ok(merged) => {
-                    Arc::make_mut(&mut snapshot.conversations).insert(id.clone(), Arc::new(merged));
-                    reconcile_pending(snapshot, id);
-                }
-                Err(error) => snapshot.error = Some(error),
-            }
-        }
-
-        Vec::new()
+        ReadThread::new(self.thread_id).apply(snapshot, output)
+    }
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        ReadThread::new(self.thread_id).stale(snapshot, output)
     }
 }
 
@@ -502,5 +496,34 @@ impl Operation for LoadModels {
         snapshot.models = Arc::new(models);
         snapshot.model_errors = Arc::new(errors);
         Vec::new()
+    }
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRequest {
+    pub request_id: Value,
+}
+impl rpc::RpcMethod for OpenRequest {
+    type Output = crate::session::SessionRef;
+    const METHOD: &'static str = "host/session/request";
+}
+impl Operation for OpenRequest {
+    type Output = crate::session::OpenedSession;
+    const ORDERED: bool = true;
+    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        let session = context.client.call(self).await?.value;
+        let mut open = ReadThread::new(session.thread_id());
+        let mut snapshot = context.snapshot.clone();
+        open.prepare(&mut snapshot)
+            .map_err(PeerError::InvalidMessage)?;
+        context.call(&open).await
+    }
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        ReadThread::new(output.session.thread_id()).apply(snapshot, output)
+    }
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        ReadThread::new(output.session.thread_id()).stale(snapshot, output)
     }
 }

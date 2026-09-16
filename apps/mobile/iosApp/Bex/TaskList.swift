@@ -12,6 +12,9 @@ struct ThreadsScreen: View {
         let projects = model.list?.projects ?? []
         let chats = groupedThreads[nil] ?? []
         List {
+            if let notice = model.list?.notice {
+                BexNotice(text: notice).taskListRowStyle()
+            }
             if model.threadLoadState == .failed {
                 Section {
                     if let error = model.notice {

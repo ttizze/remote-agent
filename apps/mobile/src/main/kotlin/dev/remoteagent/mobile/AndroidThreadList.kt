@@ -66,6 +66,7 @@ internal fun ThreadListScreen(
             OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
             Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
         }
+        list?.notice?.let { notice -> item { Text(notice) } }
         projectThreads(list, openConversation, perform)
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

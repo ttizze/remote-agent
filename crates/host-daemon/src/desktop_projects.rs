@@ -14,7 +14,6 @@ pub(crate) mod state;
 pub(crate) mod titles;
 
 pub const HOST_THREAD_LIST_METHOD: &str = "host/thread/list";
-pub const HOST_THREAD_READ_METHOD: &str = "host/thread/read";
 pub const HOST_THREAD_START_METHOD: &str = "host/thread/start";
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

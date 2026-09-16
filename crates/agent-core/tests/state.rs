@@ -3,11 +3,48 @@ use agent_core::{
     state::{
         Effect, Event, Snapshot,
         operations::{self as op, Operation},
-        reduce,
     },
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
+
+// Recorded provider events are adapted at the Host boundary before reaching
+// the Store. The separate session tests exercise wire subscription identities.
+#[path = "../../host-daemon/src/host_rpc/provider_events.rs"]
+mod provider_events;
+fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
+    if let Event::Notification { method, params } = &event
+        && let Ok(Some((id, change))) = provider_events::notification_change(method, params.clone())
+    {
+        if !previous.conversations.contains_key(&id) {
+            let active = match &change {
+                agent_core::session::SessionChange::Status { status } => status.kind == "active",
+                agent_core::session::SessionChange::Turn { completed, .. } => !completed,
+                _ => return (previous.clone(), Vec::new()),
+            };
+            return agent_core::state::reduce(
+                previous,
+                Event::Notification {
+                    method: "host/session/activity".into(),
+                    params: json!({"session":{"provider":"codex","id":id},"active":active,"finished":matches!(&change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed"))}),
+                },
+            );
+        }
+        let mut source = previous.clone();
+        let subscription = uuid::Uuid::nil();
+        Arc::make_mut(&mut source.subscriptions).insert(id.clone(), (subscription, 0));
+        let (mut next, effects) = agent_core::state::reduce(
+            &source,
+            Event::Notification {
+                method: "host/session/update".into(),
+                params: json!({"subscriptionId":subscription,"revision":1,"change":change}),
+            },
+        );
+        next.subscriptions = previous.subscriptions.clone();
+        return (next, effects);
+    }
+    agent_core::state::reduce(previous, event)
+}
 
 fn initial(thread: Thread) -> Snapshot {
     Snapshot {
@@ -28,11 +65,17 @@ fn applied<O: Operation>(
     let effects = operation.apply(&mut next, output);
     (next, effects)
 }
-fn reply(thread: Thread) -> ThreadResponse {
-    ThreadResponse {
-        thread,
-        model: None,
-        extra: Default::default(),
+fn reply(thread: Thread) -> agent_core::session::OpenedSession {
+    agent_core::session::OpenedSession {
+        session: agent_core::session::SessionRef::from_thread_id(thread.id.as_deref().unwrap())
+            .unwrap(),
+        subscription_id: uuid::Uuid::nil(),
+        revision: 0,
+        response: ThreadResponse {
+            thread,
+            model: None,
+            extra: Default::default(),
+        },
     }
 }
 
@@ -56,7 +99,6 @@ fn legacy_history_cache_is_discarded_without_losing_drafts_or_navigation() {
         thread_id: Some("thread".into()),
         cwd: "/fixture".into(),
         draft_key: "thread".into(),
-        ..Default::default()
     });
     snapshot.pending_submissions = Arc::new(BTreeMap::from([(
         "sent".into(),
@@ -66,6 +108,7 @@ fn legacy_history_cache_is_discarded_without_losing_drafts_or_navigation() {
             turn_id: Some("latest".into()),
             after_item_id: None,
             accepted: true,
+            delivery_unknown: false,
             recovery_text: None,
             clear_draft: None,
         }),
@@ -203,189 +246,6 @@ fn model_settings_corpus() {
     }
 }
 #[test]
-fn refresh_keeps_only_contiguous_history_and_its_cursor() {
-    for item_page in [false, true] {
-        for old_cursor in [Value::Null, json!("old-page")] {
-            for (old, new, expected, cursor) in [
-                (
-                    vec!["a", "b"],
-                    vec!["d", "e"],
-                    vec!["d", "e"],
-                    json!("new-page"),
-                ),
-                (
-                    vec!["a", "b"],
-                    vec!["b", "c"],
-                    vec!["a", "b", "c"],
-                    old_cursor.clone(),
-                ),
-                (
-                    vec!["a", "b", "c"],
-                    vec!["b", "d", "e"],
-                    vec!["b", "d", "e"],
-                    json!("new-page"),
-                ),
-                (
-                    vec!["b", "c"],
-                    vec!["a", "b", "c"],
-                    vec!["a", "b", "c"],
-                    json!("new-page"),
-                ),
-                (vec!["a", "b"], vec![], vec![], json!("new-page")),
-                (
-                    vec!["a", "b"],
-                    vec!["a", "b", "c"],
-                    vec!["a", "b", "c"],
-                    json!("new-page"),
-                ),
-                (vec![], vec!["a"], vec!["a"], json!("new-page")),
-                (
-                    vec!["same", "same"],
-                    vec!["same"],
-                    vec!["same"],
-                    json!("new-page"),
-                ),
-            ] {
-                let thread = |ids: Vec<&str>, cursor: Value| {
-                    let values = ids
-                        .into_iter()
-                        .map(|id| json!({"id":id}))
-                        .collect::<Vec<_>>();
-                    serde_json::from_value(if item_page {
-                        json!({"id":"thread","historyCursor":null,"turns":[{"id":"turn",
-                            "items":values,"itemsHasMore":!cursor.is_null(),"itemsNextCursor":cursor}]})
-                    } else {
-                        json!({"id":"thread","historyCursor":cursor,"turns":values})
-                    }).unwrap()
-                };
-                let previous = initial(thread(old, old_cursor.clone()));
-                let (next, _) = applied(
-                    &previous,
-                    op::ReadThread::new("thread".into()),
-                    reply(thread(new, json!("new-page"))),
-                );
-                let result = serde_json::to_value(&next.conversations["thread"]).unwrap();
-                let (values, actual_cursor) = if item_page {
-                    assert_eq!(result["turns"][0]["itemsHasMore"], !cursor.is_null());
-                    (
-                        &result["turns"][0]["items"],
-                        &result["turns"][0]["itemsNextCursor"],
-                    )
-                } else {
-                    (&result["turns"], &result["historyCursor"])
-                };
-                assert_eq!(
-                    values
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|value| value["id"].as_str().unwrap())
-                        .collect::<Vec<_>>(),
-                    expected
-                );
-                assert_eq!(*actual_cursor, cursor);
-                assert_eq!(next.error, None);
-                if old_cursor.is_string() && cursor != old_cursor {
-                    let (late, _) = applied(
-                        &next,
-                        op::ReadOlder::new(
-                            "thread".into(),
-                            item_page.then(|| "turn".into()),
-                            old_cursor.as_str().map(str::to_owned),
-                        ),
-                        reply(thread(vec!["obsolete"], Value::Null)),
-                    );
-                    assert_eq!(
-                        late.conversations, next.conversations,
-                        "late page must not reconnect a discarded window"
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn refresh_preserves_deferred_prefix_and_explicitly_unloaded_items() {
-    for unloaded in [false, true] {
-        let previous = serde_json::from_value(json!({"id":"thread","historyCursor":null,"turns":[{
-            "id":"turn","itemsView":"summary","itemsHasMore":true,"itemsNextCursor":"older",
-            "deferredItemIds":["a"],"items":[{"id":"a","text":"summary"},{"id":"b","text":"full body"}]
-        }]})).unwrap();
-        let incoming = serde_json::from_value(json!({"id":"thread","historyCursor":null,"turns":[{
-            "id":"turn","itemsView":if unloaded {"notLoaded"} else {"summary"},
-            "itemsHasMore":true,"itemsNextCursor":null,
-            "deferredItemIds":if unloaded {json!([])} else {json!(["b","c"])},
-            "items":if unloaded {json!([])} else {json!([{"id":"b","text":"summary"},{"id":"c","text":"summary"}])}
-        }]})).unwrap();
-        let (next, _) = applied(
-            &initial(previous),
-            op::ReadThread::new("thread".into()),
-            reply(incoming),
-        );
-        let turn = &next.conversations["thread"].turns.as_ref().unwrap()[0];
-        assert_eq!(
-            turn.items.as_ref().unwrap()[1].text.as_deref(),
-            Some("full body")
-        );
-        assert_eq!(
-            serde_json::to_value(&turn.deferred_item_ids).unwrap(),
-            if unloaded {
-                json!(["a"])
-            } else {
-                json!(["a", "c"])
-            }
-        );
-        assert_eq!(turn.items_next_cursor, Some(Some("older".into())));
-        assert_eq!(turn.items_has_more, Some(true));
-        assert_eq!(turn.items_view.as_deref(), Some("summary"));
-    }
-}
-
-#[test]
-fn history_corpus() {
-    let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/history.json")).unwrap();
-    assert_eq!(cases.len(), 8);
-    for case in cases {
-        let previous: Thread = serde_json::from_value(case["previous"].clone()).unwrap();
-        let id = previous.id.clone().unwrap();
-        let incoming = serde_json::from_value(case["incoming"].clone()).unwrap();
-        let previous = initial(previous);
-        let (next, effects) = if case["operation"] == "refresh" {
-            applied(&previous, op::ReadThread::new(id.clone()), reply(incoming))
-        } else {
-            applied(
-                &previous,
-                op::ReadOlder {
-                    thread_id: id.clone(),
-                    turn_id: case["turnId"].as_str().map(str::to_owned),
-                    cursor: case["cursor"].as_str().map(str::to_owned),
-                    defer_item_details: true,
-                },
-                reply(incoming),
-            )
-        };
-        assert!(effects.is_empty());
-        if let Some(expected) = case.get("expected") {
-            assert_eq!(next.error, None, "{}", case["name"]);
-            assert_eq!(
-                serde_json::to_value(&next.conversations[&id]).unwrap(),
-                *expected,
-                "{}",
-                case["name"]
-            );
-        } else {
-            let expected = match case["errorContains"].as_str().unwrap() {
-                "会話ID" => "thread ID",
-                "カーソル" => "cursor",
-                other => panic!("unknown error {other}"),
-            };
-            assert!(next.error.unwrap().contains(expected), "{}", case["name"]);
-            assert_eq!(next.conversations, previous.conversations);
-        }
-    }
-}
-#[test]
 fn event_corpus() {
     let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/events.json")).unwrap();
     assert_eq!(cases.len(), 7);
@@ -512,94 +372,6 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
 }
 
 #[test]
-fn only_external_conversations_watch_persisted_history() {
-    for status in ["idle", "active", "notLoaded"] {
-        let thread: Thread = serde_json::from_value(json!({
-            "id":"thread", "path":"/isolated/rollout.jsonl",
-            "status":{"type":status}, "turns":[]
-        }))
-        .unwrap();
-        let (snapshot, effects) = applied(
-            &Snapshot::default(),
-            op::ReadThread::open("thread".into()),
-            reply(thread),
-        );
-        assert_eq!(
-            snapshot.navigation.watch_id.is_some(),
-            status == "notLoaded",
-            "{status}"
-        );
-        assert_eq!(
-            effects.len(),
-            usize::from(status == "notLoaded"),
-            "{status}"
-        );
-    }
-}
-
-#[test]
-fn resuming_an_external_conversation_stops_rollout_refreshes() {
-    let thread = serde_json::from_value(json!({
-        "id":"thread", "path":"/isolated/rollout.jsonl", "status":{"type":"notLoaded"}
-    }))
-    .unwrap();
-    let (watching, _) = applied(
-        &Snapshot::default(),
-        op::ReadThread::open("thread".into()),
-        reply(thread),
-    );
-    let watch_id = watching.navigation.watch_id;
-    let (loaded, effects) = reduce(
-        &watching,
-        Event::Notification {
-            method: "thread/status/changed".into(),
-            params: json!({"threadId":"thread", "status":{"type":"active", "activeFlags":[]}}),
-        },
-    );
-    assert!(loaded.navigation.watch_id.is_none());
-    assert!(loaded.navigation.watch_thread_id.is_none());
-    assert_eq!(effects.len(), 1);
-    assert!(
-        reduce(
-            &loaded,
-            Event::Notification {
-                method: "host/thread/changed".into(),
-                params: json!({"threadId":"thread", "watchId":watch_id}),
-            }
-        )
-        .1
-        .is_empty()
-    );
-}
-
-#[test]
-fn stopped_history_watch_cannot_reload_a_conversation() {
-    use agent_core::state::Intent;
-    let (watching, _) = reduce(
-        &Snapshot::default(),
-        Event::Intent(Intent::Watch(op::Watch {
-            thread_id: "thread".into(),
-            watch_key: 1,
-            watch_id: 3,
-            path: Some("/rollout".into()),
-        })),
-    );
-    let changed = || Event::Notification {
-        method: "host/thread/changed".into(),
-        params: json!({"threadId":"thread","watchId":3}),
-    };
-    assert_eq!(reduce(&watching, changed()).1.len(), 1);
-    let (stopped, _) = reduce(
-        &watching,
-        Event::Intent(Intent::Unwatch(op::Unwatch {
-            watch_key: 1,
-            watch_id: 3,
-        })),
-    );
-    assert!(reduce(&stopped, changed()).1.is_empty());
-}
-
-#[test]
 fn new_chat_selects_catalog_defaults_in_either_load_order() {
     use agent_core::state::Intent;
     let models = serde_json::from_value::<Vec<agent_core::models::Model>>(json!([{
@@ -698,7 +470,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
                 let mut next = previous.clone();
                 op::ReadThread::open("thread".into()).apply(
                     &mut next,
-                    serde_json::from_value(json!({"thread":{"id":"thread", "cwd":cwd}})).unwrap(),
+                    reply(serde_json::from_value(json!({"id":"thread", "cwd":cwd})).unwrap()),
                 );
                 next
             } else {
@@ -732,7 +504,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
         .insert("chat".into(), Arc::new(chat.thread.clone()));
     let mut unassigned: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(&unassigned).unwrap()).unwrap();
-    op::ReadThread::open("chat".into()).apply(&mut unassigned, chat);
+    op::ReadThread::open("chat".into()).apply(&mut unassigned, reply(chat.thread));
     assert!(unassigned.workspace.review.is_none());
     assert!(unassigned.workspace.review_cwd.is_none());
     assert_eq!(previous.file_drafts, unassigned.file_drafts);
@@ -764,9 +536,9 @@ fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
         );
         assert_eq!(
             next.error.as_deref(),
-            Some("invalid file change delta target")
+            Some("会話の更新を適用できないため再取得しています: invalid file change delta target")
         );
-        assert!(effects.is_empty());
+        assert_eq!(effects.len(), 2, "invalidate and reopen malformed updates");
         assert!(Arc::ptr_eq(&previous.conversations, &next.conversations));
     }
     for changes in [json!([]), json!([{}]), json!([{"diff":"prefix"}])] {
@@ -819,8 +591,6 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
         navigation: Arc::new(Navigation {
             thread_id: Some("thread".into()),
             draft_key: "thread".into(),
-            watch_id: Some(7),
-            watch_thread_id: Some("thread".into()),
             ..Default::default()
         }),
         ..Default::default()
@@ -829,9 +599,8 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
     assert!(listed.navigation.thread_id.is_none());
     assert_eq!(listed.epoch, previous.epoch + 1);
     assert!(Arc::ptr_eq(&listed.drafts, &previous.drafts));
-    assert!(listed.navigation.watch_id.is_none());
-    assert!(listed.navigation.watch_thread_id.is_none());
-    assert_eq!(effects.len(), 1);
+    assert!(listed.subscriptions.is_empty());
+    assert!(effects.is_empty());
     let (completed, _) = reduce(
         &listed,
         Event::Notification {
@@ -847,11 +616,23 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
 fn serialized_events_preserve_operation_inputs_and_replay_state() {
     let events = vec![
         Event::Connected,
-        Event::Intent(op::Intent::NewChat { cwd: "/fixture".into() }),
-        Event::Intent(op::Intent::SetDraftText { thread_id: "new:/fixture".into(), text: "再生する下書き".into() }),
-        Event::Intent(op::Intent::ReadFile(op::ReadFile { path: "/fixture/file".into(), discard_draft: true })),
-        Event::ServerRequest(serde_json::from_value(json!({"id":"request","method":"item/commandExecution/requestApproval","params":{"futureField":[1,2]},"unknown":true})).unwrap()),
-        Event::Intent(op::Intent::Respond(op::Respond { request_id: json!("request"), answer: agent_core::client::Answer::Raw { value: json!({"decision":"accept","futureField":true}) } })),
+        Event::Intent(op::Intent::NewChat {
+            cwd: "/fixture".into(),
+        }),
+        Event::Intent(op::Intent::SetDraftText {
+            thread_id: "new:/fixture".into(),
+            text: "再生する下書き".into(),
+        }),
+        Event::Intent(op::Intent::ReadFile(op::ReadFile {
+            path: "/fixture/file".into(),
+            discard_draft: true,
+        })),
+        Event::Intent(op::Intent::Respond(op::Respond {
+            request_id: json!("request"),
+            answer: agent_core::client::Answer::Raw {
+                value: json!({"decision":"accept","futureField":true}),
+            },
+        })),
         Event::Disconnected("fixture disconnect".into()),
     ];
     let encoded = serde_json::to_vec(&events).unwrap();

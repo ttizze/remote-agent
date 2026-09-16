@@ -39,7 +39,6 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
                 for notification in [
                     json!({"method":"error","params":{"error":{"message":"object error","data":{"text":"PRIVATE_ERROR"}}}}),
                     json!({"method":"error","params":{"error":"stream disconnected"}}),
-                    json!({"method":"host/thread/watchFailed","params":{"watchId":1,"threadId":"fixture"}}),
                 ] {
                     writer
                         .write_all(format!("{notification}\n").as_bytes())
@@ -94,16 +93,8 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
         .collect();
     let causes: Vec<_> = records
         .iter()
-        .filter(|record| {
-            matches!(
-                record["operation"].as_str(),
-                Some("error" | "host/thread/watchFailed")
-            )
-        })
+        .filter(|record| record["operation"] == "error")
         .map(|record| record["message"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        causes,
-        ["object error", "stream disconnected", "thread watch failed"]
-    );
+    assert_eq!(causes, ["object error", "stream disconnected"]);
 }

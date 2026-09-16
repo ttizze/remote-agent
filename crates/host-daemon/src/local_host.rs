@@ -475,6 +475,7 @@ mod tests {
                 .contains("Multiple local Hosts")
         );
         assert!(!registry.directory.join("host-instance.json").exists());
+        other.unlock().unwrap();
         drop(other);
         let location = registry.resolve(registry.directory()).unwrap();
         assert_eq!(location.directory, legacy.canonicalize().unwrap());
@@ -483,6 +484,7 @@ mod tests {
         );
         assert!(registry.acquire(registry.directory(), None).is_err());
         assert_eq!(fs::read(legacy.join("identity.keys")).unwrap(), keys);
+        legacy_lock.unlock().unwrap();
         drop(legacy_lock);
         let location = registry.resolve(registry.directory()).unwrap();
         assert_eq!(location.directory, legacy.canonicalize().unwrap());

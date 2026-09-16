@@ -86,8 +86,21 @@ async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snap
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "Claude state did not settle: error={:?}",
-            store.snapshot().error
+            "Claude state did not settle: error={:?}, turns={:?}, requests={:?}",
+            store.snapshot().error,
+            store
+                .snapshot()
+                .conversations
+                .values()
+                .flat_map(|thread| thread.turns.iter().flatten())
+                .map(|turn| (&turn.id, &turn.status, &turn.error))
+                .collect::<Vec<_>>(),
+            store
+                .snapshot()
+                .requests
+                .values()
+                .map(|request| (&request.id, &request.extra))
+                .collect::<Vec<_>>()
         )
     })
 }
@@ -217,7 +230,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claude_approval_replays_after_disconnect_denial_is_effective_and_interrupt_recovers() {
+async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_interrupt_recovers() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let root = tempfile::tempdir().unwrap();
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
@@ -316,16 +329,46 @@ async fn claude_approval_replays_after_disconnect_denial_is_effective_and_interr
             .id
             .clone();
         draft(&store, "retain while busy").await;
+        store
+            .dispatch(Intent::Submit {
+                thread_id: Some(id.clone()),
+                client_user_message_id: "busy".into(),
+            })
+            .await
+            .unwrap();
         assert!(
             store
-                .dispatch(Intent::Submit {
-                    thread_id: Some(id.clone()),
-                    client_user_message_id: "busy".into()
-                })
-                .await
-                .is_err()
+                .snapshot()
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("追加"))
         );
+        assert!(!store.snapshot().pending_submissions.contains_key("busy"));
         assert_eq!(store.snapshot().drafts[&id].text, "retain while busy");
+        let local = fixture.local().await.unwrap();
+        let previous_turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[2].id;
+        assert!(
+            local
+                .peer
+                .request::<_, Value>(
+                    "turn/interrupt",
+                    &json!({"threadId": id, "turnId": previous_turn}),
+                )
+                .await
+                .is_err(),
+            "a delayed stop must not interrupt the next native turn"
+        );
+        assert_eq!(
+            store.snapshot().conversations[&id]
+                .turns
+                .as_ref()
+                .unwrap()
+                .last()
+                .unwrap()
+                .status
+                .as_deref(),
+            Some("inProgress")
+        );
         store
             .dispatch(Intent::Interrupt(op::Interrupt {
                 thread_id: id.clone(),
@@ -794,4 +837,42 @@ async fn live_claude_subscription_completes_and_resumes_through_store_and_host()
         endpoint.close().await;
         fixture.close().await.unwrap();
     }).await.expect("live Claude subscription deadline");
+}
+
+#[tokio::test]
+async fn consecutive_claude_inputs_reuse_one_native_process() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+    let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+    store
+        .dispatch(Intent::NewChat { cwd: String::new() })
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::SelectModel {
+            thread_id: store.snapshot().navigation.draft_key.clone(),
+            model: "claude:default".into(),
+        })
+        .await
+        .unwrap();
+    let id = send(&store, "first", "reuse-1").await;
+    completed(&store, &id, 1, "completed").await;
+    send(&store, "second", "reuse-2").await;
+    let snapshot = completed(&store, &id, 2, "completed").await;
+    let native = id.strip_prefix("claude:").unwrap();
+    let inputs: Value = serde_json::from_slice(
+        &std::fs::read(
+            Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(inputs[0]["pid"].is_u64());
+    assert_eq!(
+        inputs[0]["pid"], inputs[1]["pid"],
+        "consecutive inputs must use the same CLI process"
+    );
+    store.close().await.unwrap();
+    endpoint.close().await;
+    fixture.close().await.unwrap();
 }

@@ -1,14 +1,12 @@
 mod executable;
+pub mod owned_process;
 mod platform;
 
 use std::{env, io, path::PathBuf, process::Stdio, time::Duration};
 
 use agent_core::peer::{PeerError, PeerEvent, RpcMessage, RpcPeer, RpcResponse};
 use serde::{Deserialize, Serialize};
-use tokio::{
-    process::{Child, Command},
-    sync::broadcast,
-};
+use tokio::{process::Child, sync::broadcast};
 
 #[derive(Debug, Clone)]
 pub struct AppServerConfig {
@@ -86,7 +84,7 @@ pub struct CodexAppServer {
 impl CodexAppServer {
     pub async fn spawn(config: AppServerConfig) -> Result<Self, Error> {
         let executable = executable::resolve(&config.program)?;
-        let mut command = Command::new(&executable);
+        let mut command = owned_process::command(&executable).map_err(Error::Spawn)?;
         if let Some(home) = &config.codex_home {
             command.env("CODEX_HOME", home);
         }
@@ -100,7 +98,6 @@ impl CodexAppServer {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
             .spawn()
             .map_err(Error::Spawn)?;
 
@@ -146,12 +143,20 @@ impl CodexAppServer {
     /// Sends one raw JSON-RPC request to Codex. The request's original id is
     /// restored on the raw response returned to the caller.
     pub async fn request_raw(&self, line: &str) -> Result<String, Error> {
+        Ok(self.request_raw_sequenced(line).await?.value)
+    }
+
+    /// Retain the receive position so Host hydration can await its event pump.
+    pub async fn request_raw_sequenced(
+        &self,
+        line: &str,
+    ) -> Result<agent_core::peer::Reply<String>, Error> {
         let message = RpcMessage::parse(line)
             .map_err(|error| Error::Peer(PeerError::InvalidMessage(error.to_string())))?;
         if let Some(method) = message.method() {
             ensure_public_method(method)?;
         }
-        Ok(self.peer.request_raw(line).await?.value)
+        Ok(self.peer.request_raw(line).await?)
     }
 
     /// Shared peer correlation and typed payloads; preserve upstream extensions.
@@ -175,9 +180,7 @@ impl CodexAppServer {
     /// Stop this backend without consuming other Host services that share it.
     pub async fn shutdown(&self) -> Result<(), Error> {
         let mut child = self.child.lock().await;
-        if child.try_wait()?.is_none() {
-            child.start_kill()?;
-        }
+        self.peer.close().await?;
         child.wait().await?;
         Ok(())
     }

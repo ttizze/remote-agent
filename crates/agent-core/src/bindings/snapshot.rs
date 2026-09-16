@@ -121,8 +121,14 @@ impl Thread {
     pub fn title(&self) -> String {
         self.name.clone().unwrap_or_default()
     }
-    pub fn history_cursor(&self) -> Option<String> {
-        self.history_cursor.clone().flatten()
+    pub fn input_unavailable_reason(&self) -> Option<String> {
+        crate::session::input_unavailable_reason(self)
+    }
+    pub fn history_notice(&self) -> Option<String> {
+        crate::presentation::conversation::history_notice(self)
+    }
+    pub fn has_more_history(&self) -> bool {
+        self.extra.get("historyHasMore") == Some(&serde_json::Value::Bool(true))
     }
     pub fn turn_count(&self) -> u64 {
         self.turns.as_ref().map_or(0, |turns| turns.len() as u64)

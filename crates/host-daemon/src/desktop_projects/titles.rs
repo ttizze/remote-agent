@@ -93,7 +93,6 @@ impl<'a> TitleList<'a> {
             thread.name = (!title.is_empty()).then_some(title);
         }
         thread.turns = None;
-        thread.history_cursor = None;
         thread.path = None;
         thread.preview = None;
         thread.history_mode = None;

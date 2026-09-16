@@ -4,10 +4,31 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use super::providers::Provider;
+use super::provider_events::notification_change;
+use super::session_runtime::{ReadToken, SessionRuntime};
 use agent_core::peer::{RpcMessage, RpcMessageKind};
+use agent_core::{
+    models::ThreadResponse,
+    session::{OpenSession, ProviderKind, SessionRef},
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
+
+pub(super) struct SessionRead {
+    router: SessionRouter,
+    token: Option<ReadToken>,
+    pub(super) cached: Option<ThreadResponse>,
+    pub(super) limit: usize,
+}
+impl Drop for SessionRead {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            lock_state(&self.router.state)
+                .conversations
+                .cancel_read(token);
+        }
+    }
+}
 
 /// An identifier allocated by the daemon for one authenticated mobile
 /// session. It is never put on the wire.
@@ -15,21 +36,15 @@ pub type SessionId = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ResponseRoute {
-    Forward(UpstreamRequest),
+    Forward { provider: ProviderKind, id: String },
     Unknown,
-}
-
-/// Provider-owned request identity; never inferred from the wire ID's spelling.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct UpstreamRequest {
-    pub provider: Provider,
-    pub id: String,
 }
 
 /// A live authenticated session's bounded outbound queue.
 pub struct HostSession {
     id: SessionId,
     receiver: mpsc::Receiver<String>,
+    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
     state: Weak<Mutex<State>>,
 }
 
@@ -39,7 +54,10 @@ impl HostSession {
     }
 
     pub async fn recv(&mut self) -> Option<String> {
-        self.receiver.recv().await
+        let line = self.receiver.recv().await?;
+        self.queued_bytes
+            .fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+        Some(line)
     }
 }
 
@@ -58,35 +76,43 @@ impl Drop for HostSession {
     }
 }
 
-/// Owns bounded session queues and aliases used for backend server requests.
+/// Owns bounded connection queues and the shared current session state.
 #[derive(Clone)]
 pub(crate) struct SessionRouter {
     state: Arc<Mutex<State>>,
 }
 
+const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+#[derive(Clone)]
+struct Outbound {
+    sender: mpsc::Sender<String>,
+    bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl Outbound {
+    fn try_send(&self, line: String) -> Result<(), mpsc::error::TrySendError<String>> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let length = line.len();
+        if self
+            .bytes
+            .fetch_update(Relaxed, Relaxed, |bytes| {
+                bytes
+                    .checked_add(length)
+                    .filter(|bytes| *bytes <= MAX_QUEUED_BYTES)
+            })
+            .is_err()
+        {
+            return Err(mpsc::error::TrySendError::Full(line));
+        }
+        self.sender.try_send(line).inspect_err(|_| {
+            self.bytes.fetch_sub(length, Relaxed);
+        })
+    }
+}
+
 struct State {
     next_session_id: SessionId,
-    sessions: HashMap<SessionId, mpsc::Sender<String>>,
-    routing: Routing,
-}
-
-/// Owned protocol data. Transitions neither lock nor send to client queues.
-struct Routing {
-    next_proxy_id: u64,
-    pending: HashMap<UpstreamRequest, PendingServerRequest>,
-    proxy_to_upstream: HashMap<ProxyKey, UpstreamRequest>,
-}
-
-struct PendingServerRequest {
-    response_claimed: bool,
-    line: String,
-    proxies: HashMap<SessionId, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProxyKey {
-    session: SessionId,
-    id: String,
+    sessions: HashMap<SessionId, Outbound>,
+    conversations: SessionRuntime,
 }
 
 impl Default for State {
@@ -94,17 +120,7 @@ impl Default for State {
         Self {
             next_session_id: 1,
             sessions: HashMap::new(),
-            routing: Routing::default(),
-        }
-    }
-}
-
-impl Default for Routing {
-    fn default() -> Self {
-        Self {
-            next_proxy_id: 1,
-            pending: HashMap::new(),
-            proxy_to_upstream: HashMap::new(),
+            conversations: SessionRuntime::default(),
         }
     }
 }
@@ -112,7 +128,6 @@ impl Default for Routing {
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum Delivery {
     Send(SessionId, String),
-    Close(SessionId),
 }
 
 impl SessionRouter {
@@ -127,47 +142,112 @@ impl SessionRouter {
         let (sender, receiver) = mpsc::channel(capacity);
         let mut state = lock_state(&self.state);
         let id = allocate_session_id(&mut state);
-        state.sessions.insert(id, sender.clone());
-
-        // A request that was sent while no phone was connected remains
-        // pending. Replay it to this new session with a fresh proxy id.
-        let pending = state
-            .routing
-            .pending
-            .iter()
-            .filter(|(_, request)| !request.response_claimed)
-            .map(|(upstream_id, request)| (upstream_id.clone(), request.line.clone()))
-            .collect::<Vec<_>>();
-        for (upstream_id, line) in pending {
-            let (routing, line) = std::mem::take(&mut state.routing).replay(id, upstream_id, &line);
-            state.routing = routing;
-            if let Some(line) = line
-                && sender.try_send(line).is_err()
-            {
-                remove_session_locked(&mut state, id);
-                break;
-            }
-        }
+        let queued_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state.sessions.insert(
+            id,
+            Outbound {
+                sender,
+                bytes: queued_bytes.clone(),
+            },
+        );
 
         HostSession {
             id,
             receiver,
+            queued_bytes,
             state: Arc::downgrade(&self.state),
         }
+    }
+
+    pub(super) fn submission(
+        &self,
+        target: &SessionRef,
+        id: &str,
+        pending: bool,
+    ) -> Result<(), String> {
+        lock_state(&self.state)
+            .conversations
+            .submission(target, id, pending)
+            .map_err(str::to_owned)
+    }
+
+    pub(crate) fn current_session(&self, id: &str) -> Option<ThreadResponse> {
+        lock_state(&self.state)
+            .conversations
+            .current(&SessionRef::from_thread_id(id).ok()?)
+    }
+
+    pub(crate) fn created_session(&self, response: ThreadResponse) {
+        // Preserve the native ID in the creation response even when capacity
+        // is exhausted. Never turn an accepted creation into a retryable send.
+        let _ = lock_state(&self.state).conversations.created(response);
+    }
+
+    pub(super) fn begin_session_read(&self, params: OpenSession) -> Result<SessionRead, String> {
+        let mut state = lock_state(&self.state);
+        let token = state
+            .conversations
+            .begin_read(params.session, params.limit)?;
+        let cached = state.conversations.cached(&token);
+        Ok(SessionRead {
+            router: self.clone(),
+            limit: token.limit,
+            token: Some(token),
+            cached,
+        })
+    }
+
+    pub(super) fn finish_session_read(
+        &self,
+        mut read: SessionRead,
+        session: SessionId,
+        request: &RpcMessage<'_>,
+        response: ThreadResponse,
+    ) -> Result<(), String> {
+        let mut state = lock_state(&self.state);
+        if !state.sessions.contains_key(&session) {
+            return Err("connection closed during session open".into());
+        }
+        let result = state.conversations.finish_read(
+            read.token.take().expect("open read"),
+            session,
+            response,
+        );
+        let line = match result {
+            Ok(opened) => request.response::<_, ()>(Ok(opened)),
+            Err(error) => request.error("session_open_failed", &error),
+        }
+        .map_err(|error| error.to_string())?;
+        deliver_locked(&mut state, vec![Delivery::Send(session, line)]);
+        Ok(())
+    }
+
+    pub(super) fn close_subscription(&self, session: SessionId, subscription: uuid::Uuid) {
+        lock_state(&self.state)
+            .conversations
+            .close(session, subscription);
     }
 
     pub(crate) fn close_session(&self, session: SessionId) {
         remove_session_locked(&mut lock_state(&self.state), session);
     }
 
-    /// Resolve only requests belonging to the stopped provider. Other
+    /// Resolve only requests belonging to the stopped Codex backend. Claude
     /// approvals and authenticated client connections remain live.
-    pub(crate) fn resolve_provider_requests(&self, provider: Provider) {
+    pub(crate) fn resolve_codex_requests(&self) {
         let mut state = lock_state(&self.state);
-        let (routing, deliveries) =
-            std::mem::take(&mut state.routing).resolve_provider_requests(provider);
-        state.routing = routing;
-        deliver_locked(&mut state, deliveries);
+        let ids = state.conversations.pending_ids();
+        for id in ids {
+            if let Some((target, _)) = state.conversations.pending_request(&id)
+                && target.provider == agent_core::session::ProviderKind::Codex
+            {
+                change_locked(
+                    &mut state,
+                    &target,
+                    &agent_core::session::SessionChange::ResolveRequest { request_id: id },
+                );
+            }
+        }
     }
 
     pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), String> {
@@ -198,134 +278,237 @@ impl SessionRouter {
         }
     }
 
-    /// Fan out a backend notification or server request. Notifications are
-    /// sent unchanged; server requests get one unique id per phone.
-    pub(crate) fn handle_server_message(&self, provider: Provider, message: &RpcMessage<'_>) {
+    /// Normalize provider output once; every client receives the same request
+    /// identity and reads unresolved requests from its current session snapshot.
+    pub(crate) fn request_admission(&self, message: &RpcMessage<'_>) -> Result<(), String> {
+        if message.line().len() > 64 * 1024 {
+            return Err("provider request exceeds 64 KiB; execution cannot be approved".into());
+        }
+        let params: Value = message.params().map_err(|error| error.to_string())?;
+        let target = SessionRef::from_thread_id(
+            params["threadId"]
+                .as_str()
+                .ok_or("request session ID is missing")?,
+        )
+        .map_err(str::to_owned)?;
+        let state = lock_state(&self.state);
+        let current = state
+            .conversations
+            .current(&target)
+            .ok_or("request has no owned current session")?;
+        if current.thread.requests.len() >= 32 {
+            return Err("session pending request capacity reached".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_server_message(&self, provider: ProviderKind, message: &RpcMessage<'_>) {
         let mut state = lock_state(&self.state);
-        let (routing, deliveries) = std::mem::take(&mut state.routing).message(
-            provider,
-            message,
-            state.sessions.keys().copied(),
-        );
-        state.routing = routing;
+        let params = message.params::<Value>().unwrap_or(Value::Null);
+        if message.kind() == RpcMessageKind::Request {
+            let Some(target) = params["threadId"]
+                .as_str()
+                .and_then(|id| SessionRef::from_thread_id(id).ok())
+            else {
+                return;
+            };
+            if target.provider != provider {
+                return;
+            }
+            let Ok(mut request) =
+                serde_json::from_str::<agent_core::client::ServerRequest>(message.line())
+            else {
+                return;
+            };
+            if state
+                .conversations
+                .pending_native(provider, &request.id)
+                .is_some()
+            {
+                return;
+            }
+            request
+                .extra
+                .insert("nativeRequestId".into(), request.id.clone());
+            request.id = Value::String(format!("request:{}", uuid::Uuid::new_v4()));
+            change_locked(
+                &mut state,
+                &target,
+                &agent_core::session::SessionChange::Request { request },
+            );
+            return;
+        }
+        if message.method() == Some("serverRequest/resolved") {
+            if let Some((target, request)) = state
+                .conversations
+                .pending_native(provider, &params["requestId"])
+            {
+                change_locked(
+                    &mut state,
+                    &target,
+                    &agent_core::session::SessionChange::ResolveRequest {
+                        request_id: request.id.to_string(),
+                    },
+                );
+            }
+            return;
+        }
+        if message.kind() == RpcMessageKind::Notification {
+            let target = params["threadId"]
+                .as_str()
+                .and_then(|id| SessionRef::from_thread_id(id).ok());
+            match notification_change(message.method().unwrap_or_default(), params) {
+                Ok(Some((id, change))) => {
+                    if let Ok(target) = SessionRef::from_thread_id(&id)
+                        && target.provider == provider
+                    {
+                        change_locked(&mut state, &target, &change);
+                        // Background navigation needs activity, not copies of
+                        // provider turn/item payloads outside a subscription.
+                        let active =
+                            match &change {
+                                agent_core::session::SessionChange::Status { status } => {
+                                    Some(status.kind == "active")
+                                }
+                                agent_core::session::SessionChange::Turn { .. } => {
+                                    state.conversations.current(&target).map(|response| {
+                                        response.thread.turns.iter().flatten().any(|turn| {
+                                            turn.status.as_deref() == Some("inProgress")
+                                        })
+                                    })
+                                }
+                                _ => None,
+                            };
+                        if let Some(active) = active {
+                            let line = serde_json::json!({"method":"host/session/activity", "params":{"session":target,"active":active,"finished":!active && matches!(&change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed"))}}).to_string();
+                            let deliveries = state
+                                .sessions
+                                .keys()
+                                .map(|id| Delivery::Send(*id, line.clone()))
+                                .collect();
+                            deliver_locked(&mut state, deliveries);
+                        }
+                    }
+                    return;
+                }
+                Err(_) => {
+                    for connection in state.conversations.invalidate(target.as_ref(), true) {
+                        remove_session_locked(&mut state, connection);
+                    }
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
+        let deliveries = state
+            .sessions
+            .keys()
+            .map(|id| Delivery::Send(*id, message.line().to_owned()))
+            .collect();
         deliver_locked(&mut state, deliveries);
     }
 
-    /// First valid response wins. Retain aliases until the backend resolves the request
-    /// so every device receives its own proxy id, but stop accepting/replaying it.
-    pub(crate) fn resolve_response(&self, session: SessionId, id: &str) -> ResponseRoute {
+    pub(super) fn request_session(&self, id: &str) -> Option<SessionRef> {
+        lock_state(&self.state)
+            .conversations
+            .pending_request(id)
+            .map(|(session, _)| session)
+    }
+
+    pub(crate) fn claim_response(
+        &self,
+        session: SessionId,
+        id: &str,
+        result: &Value,
+    ) -> Result<ResponseRoute, String> {
         let mut state = lock_state(&self.state);
-        let (routing, route) = std::mem::take(&mut state.routing).respond(session, id);
-        state.routing = routing;
-        route
+        if !state.sessions.contains_key(&session) {
+            return Err("connection is closed".into());
+        }
+        let Some((target, request)) = state.conversations.pending_request(id) else {
+            return Ok(ResponseRoute::Unknown);
+        };
+        if request
+            .extra
+            .get("deliveryState")
+            .is_some_and(|state| state != "awaiting")
+        {
+            return Ok(ResponseRoute::Unknown);
+        }
+        let current = state
+            .conversations
+            .current(&target)
+            .ok_or("request execution is unavailable")?;
+        let live_turn = current.thread.turns.iter().flatten().any(|turn| {
+            turn.status.as_deref() == Some("inProgress")
+                && request
+                    .params
+                    .get("turnId")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| id == turn.id)
+        });
+        if !live_turn {
+            return Err("request execution has ended".into());
+        }
+        agent_core::client::validate_answer(&request, result)?;
+        let native = request
+            .extra
+            .get("nativeRequestId")
+            .ok_or("request execution is unavailable")?
+            .to_string();
+        change_locked(
+            &mut state,
+            &target,
+            &agent_core::session::SessionChange::RequestDelivery {
+                request_id: id.into(),
+                state: agent_core::session::RequestDelivery::Sending,
+            },
+        );
+        Ok(ResponseRoute::Forward {
+            provider: target.provider,
+            id: native,
+        })
+    }
+
+    pub(crate) fn response_unknown(&self, id: &str) {
+        let mut state = lock_state(&self.state);
+        if let Some((target, _)) = state.conversations.pending_request(id) {
+            change_locked(
+                &mut state,
+                &target,
+                &agent_core::session::SessionChange::RequestDelivery {
+                    request_id: id.into(),
+                    state: agent_core::session::RequestDelivery::Unknown,
+                },
+            );
+        }
     }
 }
 
-impl Routing {
-    fn resolve_provider_requests(mut self, provider: Provider) -> (Self, Vec<Delivery>) {
-        let ids: Vec<_> = self
-            .pending
-            .keys()
-            .filter(|request| request.provider == provider)
-            .cloned()
-            .collect();
-        let mut deliveries = Vec::new();
-        for upstream in ids {
-            let id = &upstream.id;
-            let notification =
-                format!(r#"{{"method":"serverRequest/resolved","params":{{"requestId":{id}}}}}"#);
-            resolve_request(&mut self, &upstream, &notification, &mut deliveries);
-        }
-        (self, deliveries)
-    }
-
-    fn replay(
-        mut self,
-        session: SessionId,
-        upstream: UpstreamRequest,
-        line: &str,
-    ) -> (Self, Option<String>) {
-        let line = RpcMessage::parse(line)
-            .ok()
-            .and_then(|message| self.alias(session, upstream, &message));
-        (self, line)
-    }
-
-    fn alias(
-        &mut self,
-        session: SessionId,
-        upstream: UpstreamRequest,
-        message: &RpcMessage<'_>,
-    ) -> Option<String> {
-        let proxy = allocate_proxy_id(self);
-        let line = message.rewrite_id(&proxy).ok()?;
-        self.pending
-            .get_mut(&upstream)?
-            .proxies
-            .insert(session, proxy.clone());
-        self.proxy_to_upstream
-            .insert(ProxyKey { session, id: proxy }, upstream);
-        Some(line)
-    }
-
-    fn message(
-        mut self,
-        provider: Provider,
-        message: &RpcMessage<'_>,
-        sessions: impl Iterator<Item = SessionId>,
-    ) -> (Self, Vec<Delivery>) {
-        let mut deliveries = Vec::new();
-        match message.kind() {
-            RpcMessageKind::Notification => {
-                let resolved = resolved_server_request_id(message).is_some_and(|id| {
-                    resolve_request(
-                        &mut self,
-                        &UpstreamRequest { provider, id },
-                        message.line(),
-                        &mut deliveries,
+fn change_locked(
+    state: &mut State,
+    target: &SessionRef,
+    change: &agent_core::session::SessionChange,
+) {
+    match state.conversations.update(target, change) {
+        Ok(updates) => {
+            let deliveries = updates
+                .into_iter()
+                .map(|(session, update)| {
+                    Delivery::Send(
+                        session,
+                        serde_json::json!({"method":"host/session/update", "params":update})
+                            .to_string(),
                     )
-                });
-                if !resolved {
-                    deliveries.extend(
-                        sessions.map(|session| Delivery::Send(session, message.line().to_owned())),
-                    );
-                }
+                })
+                .collect();
+            deliver_locked(state, deliveries);
+        }
+        Err(_) => {
+            for connection in state.conversations.invalidate(Some(target), false) {
+                remove_session_locked(state, connection);
             }
-            RpcMessageKind::Request => {
-                route_request(&mut self, provider, message, sessions, &mut deliveries)
-            }
-            RpcMessageKind::Response => {}
         }
-        (self, deliveries)
-    }
-
-    fn respond(mut self, session: SessionId, id: &str) -> (Self, ResponseRoute) {
-        let Some(upstream) = self.proxy_to_upstream.remove(&ProxyKey {
-            session,
-            id: id.to_owned(),
-        }) else {
-            return (self, ResponseRoute::Unknown);
-        };
-        let Some(request) = self.pending.get_mut(&upstream) else {
-            return (self, ResponseRoute::Unknown);
-        };
-        request.response_claimed = true;
-        for (session, id) in &request.proxies {
-            self.proxy_to_upstream.remove(&ProxyKey {
-                session: *session,
-                id: id.clone(),
-            });
-        }
-        (self, ResponseRoute::Forward(upstream))
-    }
-
-    fn close(mut self, session: SessionId) -> Self {
-        for pending in self.pending.values_mut() {
-            pending.proxies.remove(&session);
-        }
-        self.proxy_to_upstream
-            .retain(|key, _| key.session != session);
-        self
     }
 }
 
@@ -340,95 +523,11 @@ fn deliver_locked(state: &mut State, deliveries: Vec<Delivery>) {
                 .map(|sender| sender.try_send(line).is_err())
                 .unwrap_or(true)
                 .then_some(session),
-            Delivery::Close(session) => Some(session),
         };
         if let Some(session) = failed {
             remove_session_locked(state, session);
         }
     }
-}
-
-fn route_request(
-    state: &mut Routing,
-    provider: Provider,
-    message: &RpcMessage<'_>,
-    sessions: impl Iterator<Item = SessionId>,
-    deliveries: &mut Vec<Delivery>,
-) {
-    let upstream_id = UpstreamRequest {
-        provider,
-        id: message
-            .raw_id()
-            .expect("classified request has an ID")
-            .to_owned(),
-    };
-    if state.pending.contains_key(&upstream_id) {
-        return;
-    }
-    state.pending.insert(
-        upstream_id.to_owned(),
-        PendingServerRequest {
-            response_claimed: false,
-            line: message.line().to_owned(),
-            proxies: HashMap::new(),
-        },
-    );
-    deliveries.extend(sessions.map(|session| {
-        match state.alias(session, upstream_id.to_owned(), message) {
-            Some(line) => Delivery::Send(session, line),
-            None => Delivery::Close(session),
-        }
-    }));
-}
-
-fn resolved_server_request_id(message: &RpcMessage<'_>) -> Option<String> {
-    if message.method()? != "serverRequest/resolved" {
-        return None;
-    }
-    serde_json::to_string(message.params::<Value>().ok()?.get("requestId")?).ok()
-}
-
-/// A backend identifies a resolved request with its upstream id. Each phone only
-/// knows its session-local proxy id, so fan out one correlated notification
-/// per session and retire the replayable pending request atomically.
-fn resolve_request(
-    state: &mut Routing,
-    upstream_id: &UpstreamRequest,
-    line: &str,
-    deliveries: &mut Vec<Delivery>,
-) -> bool {
-    let Some(pending) = state.pending.remove(upstream_id) else {
-        return false;
-    };
-    let Ok(mut notification) = serde_json::from_str::<Value>(line) else {
-        state.pending.insert(upstream_id.to_owned(), pending);
-        return false;
-    };
-    for (session, proxy_id) in pending.proxies {
-        state.proxy_to_upstream.remove(&ProxyKey {
-            session,
-            id: proxy_id.clone(),
-        });
-        let Ok(proxy_value) = serde_json::from_str::<Value>(&proxy_id) else {
-            deliveries.push(Delivery::Close(session));
-            continue;
-        };
-        let Some(request_id) = notification
-            .get_mut("params")
-            .and_then(Value::as_object_mut)
-            .and_then(|params| params.get_mut("requestId"))
-        else {
-            deliveries.push(Delivery::Close(session));
-            continue;
-        };
-        *request_id = proxy_value;
-        let Ok(proxy_line) = serde_json::to_string(&notification) else {
-            deliveries.push(Delivery::Close(session));
-            continue;
-        };
-        deliveries.push(Delivery::Send(session, proxy_line));
-    }
-    true
 }
 
 fn allocate_session_id(state: &mut State) -> SessionId {
@@ -437,23 +536,6 @@ fn allocate_session_id(state: &mut State) -> SessionId {
         state.next_session_id = state.next_session_id.checked_add(1).unwrap_or(1);
         if !state.sessions.contains_key(&id) {
             return id;
-        }
-    }
-}
-
-/// Return a JSON value, not a bare string, because it is inserted into the
-/// top-level JSON-RPC id field.
-fn allocate_proxy_id(state: &mut Routing) -> String {
-    loop {
-        let id = state.next_proxy_id;
-        state.next_proxy_id = state.next_proxy_id.checked_add(1).unwrap_or(1);
-        let candidate = format!(r#""host-proxy-{id}""#);
-        if !state
-            .proxy_to_upstream
-            .keys()
-            .any(|key| key.id == candidate)
-        {
-            return candidate;
         }
     }
 }
@@ -472,290 +554,149 @@ fn close_session_state(state: &Weak<Mutex<State>>, session: SessionId) {
 
 fn remove_session_locked(state: &mut State, session: SessionId) {
     state.sessions.remove(&session);
-    state.routing = std::mem::take(&mut state.routing).close(session);
+    state.conversations.disconnect(session);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::peer::raw_object;
-
-    #[test]
-    fn routing_decisions_are_reproducible_without_queues_or_a_runtime() {
-        let request =
-            RpcMessage::parse(r#"{"id":17,"method":"request","params":{"future":true}}"#).unwrap();
-        let (routing, deliveries) =
-            Routing::default().message(Provider::Codex, &request, [3, 9].into_iter());
-        let (_, repeated) =
-            Routing::default().message(Provider::Codex, &request, [3, 9].into_iter());
-        assert_eq!(deliveries, repeated);
-        assert_eq!(deliveries.len(), 2);
-        let ids: Vec<_> = deliveries
-            .iter()
-            .map(|delivery| {
-                let Delivery::Send(session, line) = delivery else {
-                    panic!("valid request closes no session")
-                };
-                (
-                    *session,
-                    RpcMessage::parse(line)
-                        .unwrap()
-                        .raw_id()
-                        .unwrap()
-                        .to_owned(),
-                )
-            })
-            .collect();
-        let (routing, first) = routing.respond(ids[0].0, &ids[0].1);
-        assert_eq!(
-            first,
-            ResponseRoute::Forward(UpstreamRequest {
-                provider: Provider::Codex,
-                id: "17".into()
-            })
-        );
-        let (routing, second) = routing.respond(ids[1].0, &ids[1].1);
-        assert_eq!(second, ResponseRoute::Unknown);
-        assert!(
-            routing.pending[&UpstreamRequest {
-                provider: Provider::Codex,
-                id: "17".into()
-            }]
-                .response_claimed
-        );
-        assert_eq!(
-            routing.pending[&UpstreamRequest {
-                provider: Provider::Codex,
-                id: "17".into()
-            }]
-                .proxies
-                .len(),
-            2
-        );
-        let resolved =
-            RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"requestId":17}}"#)
-                .unwrap();
-        let (routing, deliveries) = routing.message(Provider::Codex, &resolved, [3, 9].into_iter());
-        assert!(routing.pending.is_empty());
-        assert!(routing.proxy_to_upstream.is_empty());
-        assert_eq!(deliveries.len(), 2);
-        for delivery in deliveries {
-            let Delivery::Send(session, line) = delivery else {
-                panic!("resolution must be delivered")
-            };
-            let notification: Value = serde_json::from_str(&line).unwrap();
-            let id = &ids.iter().find(|(id, _)| *id == session).unwrap().1;
-            assert_eq!(
-                notification["params"]["requestId"],
-                serde_json::from_str::<Value>(id).unwrap()
-            );
-        }
-    }
-
-    #[test]
-    fn colliding_provider_ids_keep_responses_replay_and_shutdown_independent() {
+    #[tokio::test]
+    async fn byte_budget_disconnects_only_the_slow_connection() {
         let router = SessionRouter::new();
-        let mut first = router.open_session(8);
-        let line = r#"{"id":"claude-permission:shared","method":"request","params":{}}"#;
-        let request = RpcMessage::parse(line).unwrap();
-        router.handle_server_message(Provider::Codex, &request);
-        router.handle_server_message(Provider::Claude, &request);
-        let codex = first.receiver.try_recv().unwrap();
-        let claude = first.receiver.try_recv().unwrap();
-        let id = |line: &str| {
-            RpcMessage::parse(line)
-                .unwrap()
-                .raw_id()
-                .unwrap()
-                .to_owned()
-        };
-        assert_ne!(id(&codex), id(&claude));
-        assert_eq!(
-            router.resolve_response(first.id(), &id(&codex)),
-            ResponseRoute::Forward(UpstreamRequest {
-                provider: Provider::Codex,
-                id: request.raw_id().unwrap().into(),
-            })
-        );
-        // Stopping Codex retires even an ID spelled like a Claude approval.
-        router.resolve_provider_requests(Provider::Codex);
-        let resolved: Value = serde_json::from_str(&first.receiver.try_recv().unwrap()).unwrap();
-        assert_eq!(
-            resolved["params"]["requestId"],
-            serde_json::from_str::<Value>(&id(&codex)).unwrap()
-        );
-        assert!(first.receiver.try_recv().is_err());
-        drop(first);
-        let mut reconnected = router.open_session(8);
-        let replay = reconnected.receiver.try_recv().unwrap();
-        assert!(reconnected.receiver.try_recv().is_err());
-        assert_eq!(
-            router.resolve_response(reconnected.id(), &id(&replay)),
-            ResponseRoute::Forward(UpstreamRequest {
-                provider: Provider::Claude,
-                id: request.raw_id().unwrap().into(),
-            })
-        );
-        let resolved = RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"requestId":"claude-permission:shared"}}"#).unwrap();
-        router.handle_server_message(Provider::Claude, &resolved);
-        let resolution: Value =
-            serde_json::from_str(&reconnected.receiver.try_recv().unwrap()).unwrap();
-        assert_eq!(
-            resolution["params"]["requestId"],
-            serde_json::from_str::<Value>(&id(&replay)).unwrap()
-        );
-        assert!(router.open_session(8).receiver.try_recv().is_err());
+        let slow = router.open_session(100);
+        let mut healthy = router.open_session(100);
+        router
+            .send_line(slow.id(), "x".repeat(MAX_QUEUED_BYTES))
+            .unwrap();
+        assert!(router.send_line(slow.id(), "overflow".into()).is_err());
+        router.send_line(healthy.id(), "current".into()).unwrap();
+        assert_eq!(healthy.recv().await.as_deref(), Some("current"));
     }
 
     #[test]
-    fn failed_delivery_removes_aliases_and_retains_requests_for_reconnect() {
+    fn slow_session_subscribers_do_not_block_other_devices_or_destroy_current_state() {
         let router = SessionRouter::new();
         let mut slow = router.open_session(1);
-        let mut healthy = router.open_session(4);
-        let notification = r#"{"method":"event","params":{}}"#;
-        router.handle_server_message(Provider::Codex, &RpcMessage::parse(notification).unwrap());
-        router.handle_server_message(
-            Provider::Codex,
-            &RpcMessage::parse(r#"{"id":8,"method":"request","params":{}}"#).unwrap(),
-        );
+        let mut healthy = router.open_session(8);
+        let response: ThreadResponse =
+            serde_json::from_value(serde_json::json!({"thread":{"id":"native","turns":[]}}))
+                .unwrap();
+        let request =
+            RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
+        for connection in [slow.id(), healthy.id()] {
+            let read = router
+                .begin_session_read(OpenSession {
+                    session: SessionRef::from_thread_id("native").unwrap(),
+                    limit: 5,
+                })
+                .unwrap();
+            router
+                .finish_session_read(read, connection, &request, response.clone())
+                .unwrap();
+        }
+        let notification = RpcMessage::parse(r#"{"method":"thread/status/changed","params":{"threadId":"native","status":{"type":"active"}}}"#).unwrap();
+        router.handle_server_message(ProviderKind::Codex, &notification);
         assert!(router.ensure_session(slow.id()).is_err());
         assert!(router.ensure_session(healthy.id()).is_ok());
-        assert_eq!(slow.receiver.try_recv().unwrap(), notification);
+        let initial: Value = serde_json::from_str(&healthy.receiver.try_recv().unwrap()).unwrap();
+        let update: Value = serde_json::from_str(&healthy.receiver.try_recv().unwrap()).unwrap();
+        assert_eq!(initial["id"], 1);
+        assert_eq!(update["method"], "host/session/update");
+        assert_eq!(
+            update["params"]["subscriptionId"],
+            initial["result"]["subscriptionId"]
+        );
+        assert!(slow.receiver.try_recv().is_ok());
         assert!(matches!(
             slow.receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
-        assert_eq!(healthy.receiver.try_recv().unwrap(), notification);
-        let delivered = healthy.receiver.try_recv().unwrap();
-        let old_id = RpcMessage::parse(&delivered)
-            .unwrap()
-            .raw_id()
-            .unwrap()
-            .to_owned();
-        let mut reconnected = router.open_session(4);
-        let replay = reconnected.receiver.try_recv().unwrap();
-        let replay_id = RpcMessage::parse(&replay)
-            .unwrap()
-            .raw_id()
-            .unwrap()
-            .to_owned();
-        assert_ne!(old_id, replay_id);
-        assert!(
-            !lock_state(&router.state).routing.pending[&UpstreamRequest {
-                provider: Provider::Codex,
-                id: "8".into()
-            }]
-                .proxies
-                .contains_key(&slow.id())
-        );
-        assert_eq!(
-            router.resolve_response(reconnected.id(), &replay_id),
-            ResponseRoute::Forward(UpstreamRequest {
-                provider: Provider::Codex,
-                id: "8".into()
+        let mut read = router
+            .begin_session_read(OpenSession {
+                session: SessionRef::from_thread_id("native").unwrap(),
+                limit: 5,
             })
-        );
+            .unwrap();
         assert_eq!(
-            router.resolve_response(healthy.id(), &old_id),
-            ResponseRoute::Unknown
+            read.cached.take().unwrap().thread.status.unwrap().kind,
+            "active"
         );
-        assert!(router.open_session(4).receiver.try_recv().is_err());
     }
 
-    #[tokio::test]
-    async fn notifications_are_forwarded_byte_for_byte() {
+    #[test]
+    fn cancellation_and_disconnect_release_an_unfinished_open() {
         let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        let mut second = router.open_session(4);
-        let line = r#" {"method":"future/event","params":{"unknown":[1,{"id":2}]} } "#;
-        router.handle_server_message(Provider::Codex, &RpcMessage::parse(line).unwrap());
-        assert_eq!(first.recv().await.unwrap(), line);
-        assert_eq!(second.recv().await.unwrap(), line);
-    }
-
-    #[tokio::test]
-    async fn resolved_requests_use_each_phone_proxy_id_and_are_not_replayed() {
-        let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        let mut second = router.open_session(4);
-        router.handle_server_message(Provider::Codex, &RpcMessage::parse(r#"{"id":"codex-1","method":"item/tool/requestUserInput","params":{"threadId":"thread-1","future":{"id":7}},"unknown":{"keep":true}}"#).unwrap());
-        let first_request = first.recv().await.unwrap();
-        let second_request = second.recv().await.unwrap();
-        let first_id = RpcMessage::parse(&first_request)
-            .unwrap()
-            .raw_id()
-            .unwrap()
-            .to_owned();
-        let second_id = RpcMessage::parse(&second_request)
-            .unwrap()
-            .raw_id()
-            .unwrap()
-            .to_owned();
-
-        assert_ne!(first_id, second_id);
-        let object = raw_object(&first_request).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(object["params"].get()).unwrap(),
-            serde_json::json!({"threadId":"thread-1","future":{"id":7}})
-        );
-        assert_eq!(object["unknown"].get(), r#"{"keep":true}"#);
-        assert_eq!(
-            router.resolve_response(first.id(), &first_id),
-            ResponseRoute::Forward(UpstreamRequest {
-                provider: Provider::Codex,
-                id: r#""codex-1""#.to_owned()
+        let connection = router.open_session(4);
+        let read = router
+            .begin_session_read(OpenSession {
+                session: SessionRef::from_thread_id("native").unwrap(),
+                limit: 5,
             })
-        );
+            .unwrap();
+        drop(connection);
+        drop(read);
+        // Fill and evict idle entries: leaked readers would eventually prevent admission.
+        for id in 0..200 {
+            let read = router
+                .begin_session_read(OpenSession {
+                    session: SessionRef::from_thread_id(&id.to_string()).unwrap(),
+                    limit: 5,
+                })
+                .unwrap();
+            drop(read);
+        }
+    }
+}
+#[test]
+fn identical_native_request_ids_keep_their_provider_owner() {
+    let router = SessionRouter::new();
+    let connection = router.open_session(32);
+    let open = RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
+    let native = serde_json::json!("claude-permission:shared-native-id");
+    let mut ids = Vec::new();
+    for thread in ["codex-native", "claude:claude-native"] {
+        let target = SessionRef::from_thread_id(thread).unwrap();
+        let read = router
+            .begin_session_read(OpenSession {
+                session: target.clone(),
+                limit: 5,
+            })
+            .unwrap();
+        let response = serde_json::from_value(serde_json::json!({"thread":{"id":thread,
+                "turns":[{"id":"turn","status":"inProgress","items":[]}]}}))
+        .unwrap();
+        router
+            .finish_session_read(read, connection.id(), &open, response)
+            .unwrap();
+        let line = serde_json::json!({"id":native,"method":"item/commandExecution/requestApproval",
+                "params":{"threadId":thread,"turnId":"turn","availableDecisions":["accept","decline"]}}).to_string();
+        router.handle_server_message(target.provider, &RpcMessage::parse(&line).unwrap());
+        let (_, request) = lock_state(&router.state)
+            .conversations
+            .pending_native(target.provider, &native)
+            .unwrap();
+        ids.push(request.id.to_string());
         assert_eq!(
-            router.resolve_response(second.id(), &second_id),
-            ResponseRoute::Unknown
-        );
-        let mut after_answer = router.open_session(4);
-        assert!(
-            after_answer.receiver.try_recv().is_err(),
-            "an answered request must not be replayed while Codex resolves it"
-        );
-
-        router.handle_server_message(Provider::Codex, &RpcMessage::parse(r#"{"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":"codex-1"}}"#).unwrap());
-
-        let first_resolved: Value = serde_json::from_str(&first.recv().await.unwrap()).unwrap();
-        let second_resolved: Value = serde_json::from_str(&second.recv().await.unwrap()).unwrap();
-        assert_eq!(
-            first_resolved["params"]["requestId"],
-            serde_json::from_str::<Value>(&first_id).unwrap(),
-        );
-        assert_eq!(
-            second_resolved["params"]["requestId"],
-            serde_json::from_str::<Value>(&second_id).unwrap(),
-        );
-        assert_eq!(
-            router.resolve_response(1, &first_id),
-            ResponseRoute::Unknown
-        );
-
-        let mut later = router.open_session(4);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), later.recv())
-                .await
-                .is_err(),
+            router
+                .claim_response(
+                    connection.id(),
+                    ids.last().unwrap(),
+                    &serde_json::json!({"decision":"accept"})
+                )
+                .unwrap(),
+            ResponseRoute::Forward {
+                provider: target.provider,
+                id: native.to_string()
+            }
         );
     }
-
-    #[tokio::test]
-    async fn unresolved_requests_are_replayed_to_later_sessions() {
-        let router = SessionRouter::new();
-        let mut first = router.open_session(4);
-        router.handle_server_message(
-            Provider::Codex,
-            &RpcMessage::parse(r#"{"id":1,"method":"request","params":{}}"#).unwrap(),
-        );
-        let _ = first.recv().await.unwrap();
-        drop(first);
-
-        let mut later = router.open_session(4);
-        let replay = later.recv().await.unwrap();
-        let replay_message = RpcMessage::parse(&replay).unwrap();
-        assert_eq!(replay_message.method(), Some("request"));
-        assert_ne!(replay_message.raw_id(), Some("1"));
-    }
+    let resolved =
+        serde_json::json!({"method":"serverRequest/resolved","params":{"requestId":native}})
+            .to_string();
+    router.handle_server_message(ProviderKind::Codex, &RpcMessage::parse(&resolved).unwrap());
+    assert!(router.request_session(&ids[0]).is_none());
+    assert_eq!(
+        router.request_session(&ids[1]).unwrap().provider,
+        ProviderKind::Claude
+    );
 }
