@@ -460,6 +460,12 @@ impl HostRpcService {
         }
         let target = request.params::<Target>().unwrap_or_default();
         let claude_thread = target.thread_id.is_some_and(|id| id.starts_with("claude:"));
+        if !claude_thread
+            && matches!(method, "turn/start" | "turn/steer" | "thread/queue/add")
+            && let Err(error) = self.inner.codex.server()
+        {
+            return request.response::<(), _>(Err(error));
+        }
         if method == "turn/start"
             && !claude_thread
             && let Some(error) = self.inner.restoration_error.borrow().as_ref()
@@ -1213,6 +1219,27 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn unavailable_provider_does_not_retain_a_submission_as_in_flight() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("unavailable".into()),
+            DesktopProjectStore::new(root.path().join("projects.json")),
+        );
+        let mut session = service.open_session(16);
+        let line = serde_json::json!({"id":1,"method":"turn/start","params":{"threadId":"native","clientUserMessageId":"input","input":[]}}).to_string();
+        for _ in 0..2 {
+            service
+                .dispatch(session.id(), &RpcMessage::parse(&line).unwrap())
+                .await
+                .unwrap();
+            let response: serde_json::Value =
+                serde_json::from_str(&session.recv().await.unwrap()).unwrap();
+            assert_eq!(response["error"]["code"], "codex_unavailable");
+        }
+    }
+
     #[tokio::test]
     async fn opening_claude_history_reads_native_files_without_starting_a_cli() {
         use super::*;

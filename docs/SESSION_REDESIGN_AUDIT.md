@@ -8,7 +8,7 @@
 
 今回、会話キャッシュと15分receipt cacheを削除した。`session/open` と再接続は毎回native historyを読む。Hostは所有中の実行、未解決の要求、実行中の入力IDと接続の購読だけを保持する。
 
-本体は再修正前から **772行削減**。PR全体は **+911行**となった。元の500〜2,500行純減の見込みも、今回提示された±0〜+800行という目安も達成していない。ファイルの移動、テストへの区分変更、整形を削減成果に含めない。
+本体は再修正前から **766行削減**。PR全体は **+917行**となった。元の500〜2,500行純減の見込みも、今回提示された±0〜+800行という目安も達成していない。ファイルの移動、テストへの区分変更、整形を削減成果に含めない。
 
 ## 行数と比較基準
 
@@ -16,12 +16,12 @@
 
 | 区分 | 再修正前 `759258a` 対main | 今回の増減 | 修正後 対main |
 |---|---:|---:|---:|
-| Host/provider | +1,551 | -705 | +846 |
+| Host/provider | +1,551 | -699 | +852 |
 | core会話処理 | −27 | -64 | -91 |
 | Store・その他Operation・配線・画面 | +159 | -3 | +156 |
-| 合計 | **+1,683** | **−772** | **+911** |
+| 合計 | **+1,683** | **−766** | **+917** |
 
-指示書基準からは **+1,184行**。うち+273行は再設計以外のmain更新。最初のPR実装 `14c1261` からの本体削減は857行。以前混入していた53行の単独テストを除いた集計訂正は、この削減数に含めていない。
+指示書基準からは **+1,190行**。うち+273行は再設計以外のmain更新。最初のPR実装 `14c1261` からの本体削減は851行。以前混入していた53行の単独テストを除いた集計訂正は、この削減数に含めていない。
 
 Host/providerは `host-daemon` と `codex-app-server`。core会話処理は `state.rs`、`state/notifications.rs`、`state/operations/threads.rs`、`models.rs`、`client.rs`、`session.rs`。`state/operations/submission.rs` はその他Operationの区分で、今回も区分を変更していない。
 
@@ -43,7 +43,7 @@ Host/providerは `host-daemon` と `codex-app-server`。core会話処理は `sta
 | `crates/host-daemon/src/host_rpc/codex.rs` | +96 |
 | `crates/host-daemon/src/host_rpc/provider_events.rs` | -138 |
 | `crates/host-daemon/src/host_rpc/routing.rs` | +40 |
-| `crates/host-daemon/src/host_rpc/service.rs` | -107 |
+| `crates/host-daemon/src/host_rpc/service.rs` | -101 |
 | `crates/host-daemon/src/host_rpc/session_actor.rs` | +66 |
 | `crates/host-daemon/src/host_rpc/session_runtime.rs` | -541 |
 | `crates/host-daemon/src/host_rpc/submissions.rs` | -93 |
@@ -87,4 +87,4 @@ Host/providerは `host-daemon` と `codex-app-server`。core会話処理は `sta
 
 検証コマンド、最終commitの必須quality結果とCI状況はPRに記載する。既存のDesktop/iOS/Android表示の合格条件は変更しない。削除したrevisionとnativeページングの明示的なfull/完了フラグのワイヤーfixture、およびキャッシュそのものを前提とした内部テストだけを新しい契約へ移行する。
 
-追加の確認対象：nativeファイルを外部変更して再open、読取中の実行完了、購読中でも終了本文を解放、4 MiB超・1,000 turn超の要求を切り詰めないこと、実行中入力の重複拒否、provider間の承認ID衝突。実認証を使う推論・実機・稼働中の利用者Hostの置換は行わない。
+追加の確認対象：nativeファイルを外部変更して再open、読取中の実行完了、購読中でも終了本文を解放、4 MiB超・1,000 turn超の要求を切り詰めないこと、実行中入力の重複拒否、停止済みproviderへの送信IDを保持しないこと、provider間の承認ID衝突。実認証を使う推論・実機・稼働中の利用者Hostの置換は行わない。
