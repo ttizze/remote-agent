@@ -6,30 +6,31 @@ are the supported providers. No additional provider scaffolding is introduced.
 
 ## Ownership and protocol
 
-- Provider native history is the only persistent conversation source. Host
-  keeps current `Thread`/`Turn`/`Item` values in memory, using the same pure
-  `SessionChange` reducer as the clients. It has no conversation database,
-  event log, history index, or persistent native-ID map.
+- Provider native history is the only persistent conversation source. The Host
+  stores only owned execution turns, unresolved requests and in-flight input IDs.
+  `SessionActor` never adopts a native history response. Completed turns are
+  released, even while clients remain subscribed.
 - `SessionRef { provider, id }` preserves the complete native ID. The existing
   `claude:` string representation is a compatibility boundary, not a Host ID.
-- `host/session/open` returns the requested current window, subscription UUID
-  and revision. Snapshot adoption, subscription registration and response
-  enqueue happen under the same router lock. A concurrent native update makes
-  a hydration result retryable; it cannot overwrite a newer current state.
-- `host/session/update` sends typed changes. `host/session/close` removes one
-  subscription. Disconnects invalidate its authority without stopping execution.
-  Reconnect uses open again, preserving the previously requested window.
-- Missing revisions invalidate the subscription and trigger a fresh open.
-  Slow connections are closed when their bounded queues fill. Other clients
-  and provider execution continue. There is no reconnect replay log.
-- Unresolved requests live in the common session. The first valid answer is
-  claimed after checking connection, execution and response content. Delivery
-  states are awaiting, sending and unknown; resolution follows delivery.
-  Unknown delivery is never automatically answered again.
-- Input receipts are bounded and memory-only. A client ID cannot be reused
-  for different input. Confirmation uses IDs, never similar message text.
-  Unconfirmed inputs retain their text/attachments and are not automatically
-  resent after reconnect or Host restart. Stop includes the native turn ID.
+- `host/session/open` reads native history on every call, including reconnect.
+  At response enqueue, the router overlays owned execution and registers the
+  subscription under one lock. An execution that completes during a read is
+  retained only until those readers finish; cancellation releases the reader.
+- `host/session/update` sends typed changes with a subscription UUID. The ordered
+  transport carries the response before subsequent updates. There are no history
+  hydration revisions, cached snapshots, replay logs or gap-repair protocol.
+  Obsolete subscription UUIDs are ignored; queue overflow closes that connection.
+- Unresolved requests belong to the execution. Provider/session/turn/native request
+  identity is shared by every client, with no per-device alias map. The first valid
+  answer is claimed after checking connection, execution and content. Delivery can
+  be awaiting, sending or unknown; unknown delivery is not automatically retried.
+- Input IDs prevent duplicate admission only while their execution is in flight.
+  There is no completed receipt, fingerprint, 15-minute retention or repeated
+  response delivery. After completion/restart, the Host does not guarantee input
+  deduplication. Clients preserve uncertain drafts and never automatically resend.
+- `SubscribeSubmission` is folded into `SendSubmission`: open is applied to the
+  Store before sending. Native-history selection takes immutable values instead
+  of mutating a cloned Snapshot. Navigation epochs and draft protection remain.
 
 ## Provider boundaries
 
@@ -67,22 +68,21 @@ lifetime management, not an OS sandbox against deliberately detached processes.
 
 | Resource | Bound / behavior |
 | --- | --- |
-| Host current sessions | 128; active execution, pending requests, unconfirmed sends, reads and subscriptions retain state |
-| Requested turn window | 1–1000; previously retained larger windows survive reopen |
-| Snapshot | 4 MiB; defer large bodies first, then explicitly mark a reduced window partial |
-| Per-item inline text / image | 128 KiB / 2 MiB; full text uses detail reads |
+| Requested turn range | Positive client-supplied range; no Host 1,000-turn ceiling or retained window |
+| History response | No Host snapshot cache or 4 MiB truncation; transmission is bounded by the connection queue |
+| Activity details | Existing 4 KiB inline check; visible messages and generated images remain complete |
 | Outbound connection queue | Both item count and 16 MiB; overflow closes that connection |
 | Unresolved requests | 32 per session, 64 KiB each; oversized requests cannot be approved |
-| Send receipts | 1024, 15 minutes minimum; unresolved delivery retained, admission fails at capacity |
+| In-flight input IDs | At most 128 per executing session; released when execution completes |
 | Claude live/idle processes | 8; idle retention 60 seconds, record capacity 128 |
-| Claude transcript read | Latest 64 MiB, maximum row 8 MiB; incomplete range is explicit |
+| Claude native reads | Transcript/output-file read budget 64 MiB, maximum JSONL row 8 MiB; incomplete range is explicit |
 | Claude native listing | 20,000 files; scan failure is a provider-specific partial result |
-| Claude detail / image gallery | 4 MiB detail; 16 MiB gallery transfer |
+| Detail / image transfer | Outbound connection queue; gallery also has its existing 16 MiB client limit |
 
 Lists obtain provider metadata concurrently. Provider failure preserves the
 other provider and cached summaries, labelled saved/unconfirmed. Search and
 history display expose partial/unavailable results rather than implying absence.
-Large inline images use item details without truncating base64. A gallery that
+Generated images retain complete base64, and item detail reads remain available. A gallery that
 cannot be completed reports its limit and leaves individual conversation images
 accessible.
 
@@ -122,38 +122,16 @@ prefixes; identical native IDs in different providers remain independent.
 
 ## Verification
 
-Verified on macOS on September 16, 2026, using the Nix development environment:
+The PR records the exact commit, workspace tests, Clippy, mandatory quality result
+and CI results. Regression coverage includes native file changes between opens,
+completion during read, live approvals after reconnect, cancellation cleanup,
+release of finished execution while subscribed, untrimmed responses above the old
+limits, duplicate in-flight input, and provider-scoped approval identity.
+Existing Desktop/iOS/Android display acceptance assertions are preserved.
 
-- `cargo fmt --all`, workspace Clippy with `-D warnings`, and
-  `cargo test --locked --workspace`: **291 passed, 0 failed, 2 ignored** (after main integration and cleanup).
-- The final Host regression run includes the eight-image gallery RPC regression,
-  provider-scoped request-ID collision test, and account logout/relogin coverage.
-- `just conversation-ui`: 19 of 21 passed initially. The failed side-chat
-  preparation test and image-gallery test both passed after fixes, with their
-  acceptance assertions preserved.
-- Five additional iOS tests passed for approval editing across reconnect,
-  unresolved questions, failed-read recovery, account switching/forking, and
-  live updates from another Bex connection. The last fixture now sends through
-  `session/open` and `turn/start`; it no longer expects the retired external
-  file watcher to deliver updates.
-- The isolated `--without-codex` iOS test passed: Claude creates a conversation,
-  restores it after app relaunch, and accepts a follow-up in the same session.
-- `just android-e2e`: **10 passed**, including selection and reopening in the
-  native WebView. Kotlin formatting and Detekt also passed.
-- Swift formatting/lint, `just ios-markdown`, and the Python script suite
-  (**10 tests**) passed.
-- The additional stale-Claude-stop regression passed: a stop targeting the
-  previous native turn is rejected while the current turn continues.
-- Three diagnostic tests passed after removing the obsolete watch-failure
-  notification branch.
-
-Automated coverage includes native transcripts/subagents, current-state races, delivery
-uncertainty, simultaneous approvals, stale subscriptions/stops, scoped drafts,
-large history/details, process reuse, and an isolated Host SIGKILL test.
-
-Real authenticated provider inference, physical devices, TestFlight, Linux and
-Windows process-lifetime execution have not been run in this macOS workspace.
-Production Host and installed apps have not been restarted or replaced.
+Build Host and affected clients from the same revision: the session wire contract
+has changed. Production Host and installed apps have not been replaced. Real
+provider inference, physical devices and TestFlight are outside this verification.
 
 Protocol references: [Codex app-server](https://developers.openai.com/codex/app-server/),
 [Claude sessions](https://code.claude.com/docs/en/sessions),

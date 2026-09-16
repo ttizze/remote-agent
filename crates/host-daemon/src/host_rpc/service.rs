@@ -23,7 +23,7 @@ struct ThreadParams {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-use super::routing::{HostSession, ResponseRoute, SessionId, SessionRouter};
+use super::routing::{HostSession, SessionId, SessionRouter};
 use crate::{DesktopProjectStore, HOST_THREAD_LIST_METHOD, HOST_THREAD_START_METHOD};
 
 #[derive(Debug, Serialize, thiserror::Error)]
@@ -97,7 +97,6 @@ pub struct HostRpcService {
 
 struct ServiceInner {
     claude: OnceLock<crate::claude::Claude>,
-    submissions: super::submissions::Submissions,
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
     codex: super::codex::Codex,
@@ -121,7 +120,6 @@ impl HostRpcService {
         Self {
             inner: Arc::new(ServiceInner {
                 claude: OnceLock::new(),
-                submissions: Default::default(),
                 accounts: tokio::sync::Mutex::new(None),
                 restoration_error: tokio::sync::watch::channel(None).0,
                 codex: super::codex::Codex::new(codex),
@@ -209,22 +207,21 @@ impl HostRpcService {
                 if message.method() == Some("host/session/open") {
                     return self.session_open(session, message).await;
                 }
-                let admission = if matches!(
+                let input = if matches!(
                     message.method(),
                     Some("turn/start" | "turn/steer" | "thread/queue/add")
                 ) {
                     let params: serde_json::Value = message.params().map_err(invalid_message)?;
-                    match self
-                        .inner
-                        .submissions
-                        .begin(message.method().unwrap(), &params)
-                    {
-                        Ok(admission) => Some(admission),
+                    match self.inner.router.begin_submission(&params) {
+                        Ok(target) => Some((
+                            target,
+                            params["clientUserMessageId"].as_str().unwrap().to_owned(),
+                        )),
                         Err(error) => {
                             return self.inner.router.send_line(
                                 session,
                                 message
-                                    .error("submission_rejected", &error)
+                                    .error("submission_outcome_unknown", &error)
                                     .map_err(invalid_message)?,
                             );
                         }
@@ -232,69 +229,19 @@ impl HostRpcService {
                 } else {
                     None
                 };
-                use super::submissions::Admission;
-                let result = match admission {
-                    Some(Admission::Existing(receiver)) => Admission::previous(receiver).await,
-                    admission => {
-                        let pending = if matches!(&admission, Some(Admission::New(_))) {
-                            let params: serde_json::Value =
-                                message.params().map_err(invalid_message)?;
-                            let target = agent_core::session::SessionRef::from_thread_id(
-                                params["threadId"].as_str().unwrap(),
-                            )
-                            .map_err(str::to_owned)?;
-                            let id = params["clientUserMessageId"].as_str().unwrap().to_owned();
-                            if let Err(error) = self.inner.router.submission(&target, &id, true) {
-                                let line = message
-                                    .error("submission_rejected", &error)
-                                    .map_err(invalid_message)?;
-                                if let Some(Admission::New(receipt)) = admission {
-                                    receipt.finish(Ok(line.clone()));
-                                }
-                                return self.inner.router.send_line(session, line);
-                            }
-                            Some((target, id))
-                        } else {
-                            None
-                        };
-                        let result = self
-                            .request(session, message)
-                            .await
-                            .map_err(invalid_message);
-                        if let Some((target, id)) = pending {
-                            let confirmed = result
-                                .as_ref()
-                                .ok()
-                                .and_then(|line| {
-                                    serde_json::from_str::<serde_json::Value>(line).ok()
-                                })
-                                .is_some_and(|value| {
-                                    !value["error"]["code"]
-                                        .as_str()
-                                        .is_some_and(|code| code.contains("unknown"))
-                                        && !value["error"]["message"]
-                                            .as_str()
-                                            .is_some_and(|message| message.contains("unknown"))
-                                });
-                            if confirmed {
-                                let _ = self.inner.router.submission(&target, &id, false);
-                            }
-                        }
-                        if let Some(Admission::New(receipt)) = admission {
-                            receipt.finish(result.clone());
-                        }
-                        result
+                let response = self
+                    .request(session, message)
+                    .await
+                    .map_err(invalid_message)?;
+                if let Some((target, id)) = input {
+                    let envelope: serde_json::Value =
+                        serde_json::from_str(&response).map_err(invalid_message)?;
+                    if !envelope["error"].is_null()
+                        && envelope["error"]["code"] != "submission_outcome_unknown"
+                    {
+                        self.inner.router.reject_submission(&target, &id);
                     }
-                };
-                let response = match result {
-                    Ok(line) => RpcMessage::parse(&line)
-                        .map_err(invalid_message)?
-                        .rewrite_id(message.raw_id().unwrap())
-                        .map_err(invalid_message)?,
-                    Err(error) => message
-                        .error("submission_outcome_unknown", &error)
-                        .map_err(invalid_message)?,
-                };
+                }
                 return self.inner.router.send_line(session, response);
             }
             RpcMessageKind::Notification => {
@@ -330,22 +277,12 @@ impl HostRpcService {
         result: serde_json::Value,
     ) -> Result<agent_core::models::Empty, Failure> {
         let id = id.to_string();
-        let route = self
+        let (provider, native) = self
             .inner
             .router
             .claim_response(session, &id, &result)
             .map_err(|error| Failure::new("invalid_answer", error))?;
-        let ResponseRoute::Forward {
-            provider,
-            id: native,
-        } = route
-        else {
-            return Err(Failure::new(
-                "request_unavailable",
-                "request was already answered or its execution has ended",
-            ));
-        };
-        let line = format!("{{\"id\":{native},\"result\":{result}}}");
+        let line = serde_json::json!({"id":native,"result":result}).to_string();
         let sent = if provider == agent_core::session::ProviderKind::Claude {
             match self.inner.claude.get() {
                 Some(claude) => claude
@@ -382,51 +319,35 @@ impl HostRpcService {
                     .server()
                     .map_err(|error| error.to_string())?;
             }
-            let mut read = self.inner.router.begin_session_read(params)?;
-            let limit = read.limit;
-            let response = match read.cached.take() {
-                Some(response) => response,
-                None => {
-                    let id = target.thread_id();
-                    let mut response = match target.provider {
-                        agent_core::session::ProviderKind::Claude => {
-                            self.inner
-                                .claude
-                                .get()
-                                .ok_or("Claude is unavailable")?
-                                .read(&id, limit)
-                                .await?
-                        }
-                        agent_core::session::ProviderKind::Codex => self
-                            .inner
-                            .codex
-                            .read(&id, limit)
-                            .await
-                            .map_err(|error| error.to_string())?,
-                    };
-                    response.thread.defer_item_details();
+            let limit = params.limit;
+            let read = self.inner.router.begin_session_read(params)?;
+            let id = target.thread_id();
+            let mut response = match target.provider {
+                agent_core::session::ProviderKind::Claude => {
                     self.inner
-                        .desktop_projects
-                        .enrich_threads(std::slice::from_mut(&mut response.thread))
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    response
+                        .claude
+                        .get()
+                        .ok_or("Claude is unavailable")?
+                        .read(&id, limit)
+                        .await?
                 }
+                agent_core::session::ProviderKind::Codex => self
+                    .inner
+                    .codex
+                    .read(&id, limit)
+                    .await
+                    .map_err(|error| error.to_string())?,
             };
-            let mut response: ThreadResponse = response;
+            response.thread.defer_item_details();
+            self.inner
+                .desktop_projects
+                .enrich_threads(std::slice::from_mut(&mut response.thread))
+                .await
+                .map_err(|error| error.to_string())?;
             response.thread.extra.insert(
                 "capabilities".into(),
                 serde_json::to_value(target.capabilities()).map_err(|error| error.to_string())?,
             );
-            if let Some(turns) = &mut response.thread.turns
-                && turns.len() > limit
-            {
-                turns.drain(..turns.len() - limit);
-                response
-                    .thread
-                    .extra
-                    .insert("historyHasMore".into(), true.into());
-            }
             let more = response.thread.extra.get("historyHasMore")
                 == Some(&serde_json::Value::Bool(true))
                 || response
@@ -551,7 +472,14 @@ impl HostRpcService {
                     Some(claude) => claude
                         .request(method, request.params()?)
                         .await
-                        .map_err(|error| Failure::new("claude_failed", error)),
+                        .map_err(|error| {
+                            let code = if error.starts_with("submission outcome unknown:") {
+                                "submission_outcome_unknown"
+                            } else {
+                                "claude_failed"
+                            };
+                            Failure::new(code, error)
+                        }),
                     None => Err(Failure::new(
                         "claude_unavailable",
                         "このHostではClaude Codeが有効になっていません。",
@@ -819,12 +747,6 @@ impl HostRpcService {
                 request.raw_id().and_then(|id| id.parse().ok()),
                 error,
             );
-        }
-        if matches!(method, HOST_THREAD_START_METHOD | "thread/start")
-            && let Ok(envelope) = RpcResponse::<ThreadResponse>::parse(&response)
-            && let Ok(created) = envelope.outcome
-        {
-            self.inner.router.created_session(created);
         }
         Ok(response)
     }
@@ -1159,7 +1081,6 @@ impl HostRpcService {
         let processed = self.inner.codex.processed.clone();
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
-            let mut active_turns = std::collections::HashMap::<String, String>::new();
             loop {
                 match events.recv().await {
                     Ok(PeerEvent::Message(message)) => {
@@ -1171,20 +1092,6 @@ impl HostRpcService {
                         let Ok(request) = RpcMessage::parse(&line) else {
                             continue;
                         };
-                        if matches!(request.method(), Some("turn/started" | "turn/completed"))
-                            && let Ok(params) = request.params::<serde_json::Value>()
-                            && let (Some(thread), Some(turn)) =
-                                (params["threadId"].as_str(), params["turn"]["id"].as_str())
-                        {
-                            if request.method() == Some("turn/started") {
-                                active_turns.insert(thread.into(), turn.into());
-                            } else if active_turns
-                                .get(thread)
-                                .is_some_and(|active| active == turn)
-                            {
-                                active_turns.remove(thread);
-                            }
-                        }
                         if request.method() == Some("process/exited")
                             && let Some(inner) = inner.upgrade()
                         {
@@ -1238,20 +1145,23 @@ impl HostRpcService {
                                     let _ = codex.send_raw(&line).await;
                                 }
                             });
-                        } else if request.kind() == RpcMessageKind::Request
-                            && let Err(error) = router.request_admission(&request)
-                        {
-                            if let Some(inner) = inner.upgrade()
+                        } else if request.kind() == RpcMessageKind::Request {
+                            let admission = serde_json::from_str(&line)
+                                .map_err(|error| error.to_string())
+                                .and_then(|request| {
+                                    router
+                                        .request(agent_core::session::ProviderKind::Codex, request)
+                                });
+                            if let Err(error) = admission
+                                && let Some(inner) = inner.upgrade()
                                 && let Ok(codex) = &inner.codex.process
                                 && let Ok(response) = request.error(-32000, &error)
                             {
                                 let _ = codex.send_raw(&response).await;
                             }
-                        } else {
-                            router.handle_server_message(
-                                agent_core::session::ProviderKind::Codex,
-                                &request,
-                            );
+                        } else if let Err(error) = super::codex::event(&router, &request) {
+                            agent_core::diagnostics::error("host.codex.event", &error.to_string());
+                            break;
                         }
                     }
                     Ok(PeerEvent::Response { sequence, .. }) => {
@@ -1259,43 +1169,26 @@ impl HostRpcService {
                     }
                     Ok(PeerEvent::Closed(_))
                     | Err(broadcast::error::RecvError::Closed)
-                    | Err(broadcast::error::RecvError::Lagged(_)) => {
-                        stopped.cancel();
-                        if let Some(inner) = inner.upgrade() {
-                            if let Ok(codex) = &inner.codex.process
-                                && let Err(error) = codex.shutdown().await
-                            {
-                                agent_core::diagnostics::error(
-                                    "host.codex.shutdown",
-                                    &error.to_string(),
-                                );
-                            }
-                            let processes =
-                                std::mem::take(&mut *inner.process_directories.lock().unwrap());
-                            for handle in processes.into_keys() {
-                                let line = serde_json::json!({"method":"host/terminal/failed","params":{
-                                    "processHandle":handle,"message":"Codexとの接続が終了しました。Hostを再起動してからターミナルを開き直してください。"
-                                }}).to_string();
-                                router.handle_server_message(
-                                    agent_core::session::ProviderKind::Codex,
-                                    &RpcMessage::parse(&line)
-                                        .expect("Host notification serializes"),
-                                );
-                            }
-                        }
-                        router.resolve_codex_requests();
-                        for (thread_id, turn_id) in active_turns {
-                            let line = serde_json::json!({"method":"turn/completed","params":{"threadId":thread_id,
-                                "turn":{"id":turn_id,"status":"failed","error":{"message":"Codexとの接続が終了したため、この実行は継続できません。Hostを再起動してから再送信してください。"}}}}).to_string();
-                            router.handle_server_message(
-                                agent_core::session::ProviderKind::Codex,
-                                &RpcMessage::parse(&line).expect("Host notification serializes"),
-                            );
-                        }
-                        return;
-                    }
+                    | Err(broadcast::error::RecvError::Lagged(_)) => break,
                 }
             }
+            stopped.cancel();
+            if let Some(inner) = inner.upgrade() {
+                if let Ok(codex) = &inner.codex.process
+                    && let Err(error) = codex.shutdown().await
+                {
+                    agent_core::diagnostics::error("host.codex.shutdown", &error.to_string());
+                }
+                let processes = std::mem::take(&mut *inner.process_directories.lock().unwrap());
+                for handle in processes.into_keys() {
+                    let line = serde_json::json!({"method":"host/terminal/failed","params":{
+                                    "processHandle":handle,"message":"Codexとの接続が終了しました。Hostを再起動してからターミナルを開き直してください。"
+                                }}).to_string();
+                    router.broadcast(&line);
+                }
+            }
+            router.fail_provider(agent_core::session::ProviderKind::Codex,
+                            "Codexとの接続が終了したため、この実行は継続できません。Hostを再起動してから再送信してください。");
         });
     }
 }
@@ -1321,7 +1214,7 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
-    async fn opening_unavailable_claude_history_retries_native_read_without_starting_a_cli() {
+    async fn opening_claude_history_reads_native_files_without_starting_a_cli() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let native = root.path().join("native");
@@ -1345,21 +1238,6 @@ mod tests {
             )
             .await
             .unwrap();
-        service.inner.router.created_session(ThreadResponse {
-            thread: Thread {
-                id: Some(format!("claude:{id}")),
-                turns: Some(Vec::new()),
-                extra: [(
-                    "historyReadState".into(),
-                    serde_json::json!({"type":"unavailable"}),
-                )]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            },
-            model: None,
-            extra: Default::default(),
-        });
         let mut session = service.open_session(16);
         let line = serde_json::json!({"id":1,"method":"host/session/open","params":{"session":{"provider":"claude","id":id},"limit":5}}).to_string();
         service
@@ -1372,6 +1250,19 @@ mod tests {
         let thread = &reply["result"]["response"]["thread"];
         assert!(!thread["turns"].as_array().unwrap().is_empty());
         assert_ne!(thread["historyReadState"]["type"], "unavailable");
+        let transcript = project.join(format!("{id}.jsonl"));
+        let changed = std::fs::read_to_string(&transcript)
+            .unwrap()
+            .replace("Fixture user input", "Changed outside Bex");
+        std::fs::write(transcript, changed).unwrap();
+        // Even with the original subscription open, every open reads native data.
+        service
+            .dispatch(session.id(), &RpcMessage::parse(&line).unwrap())
+            .await
+            .unwrap();
+        let reply = session.recv().await.unwrap();
+        assert!(reply.contains("Changed outside Bex"), "{reply}");
+        assert!(!reply.contains("Fixture user input"));
     }
 
     #[test]

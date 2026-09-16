@@ -148,7 +148,7 @@ pub struct Snapshot {
     #[serde(skip)]
     pub connected: bool,
     #[serde(skip)]
-    pub subscriptions: Arc<BTreeMap<String, (uuid::Uuid, u64)>>,
+    pub subscriptions: Arc<BTreeMap<String, uuid::Uuid>>,
     #[serde(skip)]
     pub error: Option<String>,
 }
@@ -245,10 +245,10 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
         Intent::ReadOlder { thread_id } => {
-            let limit = previous.conversations.get(&thread_id).map_or(5, |thread| {
+            let limit = u32::try_from(previous.conversations.get(&thread_id).map_or(5, |thread| {
                 thread.extra.get("historyLimit").and_then(Value::as_u64)
                     .unwrap_or_else(|| thread.turns.as_ref().map_or(5, |turns| turns.len() as u64))
-            }).saturating_add(5).min(1000) as u32;
+            })).unwrap_or(u32::MAX).saturating_add(5);
             return prepare(previous, next, op::ReadThread { limit, ..op::ReadThread::new(thread_id) });
         }
         Intent::AcknowledgeTerminal { handle, sequence } => {
@@ -456,7 +456,7 @@ fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
     snapshot.navigation = Arc::new(navigation);
     close
         .into_iter()
-        .map(|(id, _)| {
+        .map(|id| {
             Effect::execute(op::CloseSubscription {
                 subscription_id: id.to_string(),
             })
@@ -801,14 +801,7 @@ fn submission(
         }),
     );
     let effect = match thread_id {
-        Some(thread_id) if previous.subscriptions.contains_key(&thread_id) => {
-            Effect::execute(op::SendSubmission {
-                thread_id,
-                client_user_message_id,
-                draft,
-            })
-        }
-        Some(thread_id) => Effect::execute(op::SubscribeSubmission {
+        Some(thread_id) => Effect::execute(op::SendSubmission {
             thread_id,
             client_user_message_id,
             draft,

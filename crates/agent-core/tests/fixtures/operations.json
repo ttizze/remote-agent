@@ -268,7 +268,6 @@
               "id": "thread-1"
             },
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
-            "revision": 0,
             "response": {
               "thread": {
                 "id": "thread-1",
@@ -352,7 +351,6 @@
               "id": "thread-1"
             },
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
-            "revision": 0,
             "response": {
               "thread": {
                 "id": "other",
@@ -375,7 +373,6 @@
         "id": "thread-1"
       },
       "subscriptionId": "00000000-0000-0000-0000-000000000000",
-      "revision": 0,
       "response": {
         "thread": {
           "id": "other",
@@ -413,7 +410,6 @@
               "id": "thread-1"
             },
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
-            "revision": 0,
             "response": {
               "thread": {
                 "cwd": "/workspace"
@@ -430,7 +426,6 @@
         "id": "thread-1"
       },
       "subscriptionId": "00000000-0000-0000-0000-000000000000",
-      "revision": 0,
       "response": {
         "thread": {
           "cwd": "/workspace"
@@ -464,7 +459,6 @@
               "id": "thread-1"
             },
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
-            "revision": 0,
             "response": {
               "thread": {
                 "id": "thread-1",
@@ -544,7 +538,6 @@
               "id": "thread-1"
             },
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
-            "revision": 0,
             "response": {
               "thread": {
                 "id": "thread-1",
@@ -1484,7 +1477,6 @@
               "id": "thread"
             },
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
-            "revision": 0,
             "response": {
               "thread": {
                 "id": "thread",

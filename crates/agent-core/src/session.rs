@@ -359,7 +359,6 @@ pub struct OpenSession {
 pub struct OpenedSession {
     pub session: SessionRef,
     pub subscription_id: uuid::Uuid,
-    pub revision: u64,
     pub response: crate::models::ThreadResponse,
 }
 
@@ -367,7 +366,6 @@ pub struct OpenedSession {
 #[serde(rename_all = "camelCase")]
 pub struct SessionUpdate {
     pub subscription_id: uuid::Uuid,
-    pub revision: u64,
     pub change: SessionChange,
 }
 

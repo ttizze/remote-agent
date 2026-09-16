@@ -1,81 +1,90 @@
-# Session再設計：コード増加の検証と修正
+# Session再設計：増加原因とHostの簡素化
 
-確認日：2026-09-16。元の指示書の基準は `4118c9048997bac0409609527ea6767641cf60f8`、PRのmain基準は `e052b01`。
+確認日：2026-09-16。指示書基準は `4118c9048997bac0409609527ea6767641cf60f8`、PRのmain基準は `e052b01`。再修正前は `759258a`。
 
 ## 結論
 
-**指示書の「本体500〜2,500行純減」という見込みは達成していない。** テストが増えただけではなく、本体も増えている。原因は、削除できる責務の量を大きく見積もったこと、新しく必要な処理を小さく見積もったこと、実装に不要な中継と判断の重複を残したことの三つである。
+**会話全体を持つ同期runtimeを作り込みすぎていた。** 保存を廃止しても、新しいHostキャッシュに本文・読取範囲・容量・完了判定・hydration revisionを持たせたため、その管理とCore側の復旧処理が増えていた。「必要な新規責務だから増えた」という前回の説明では、実装方法の過剰さを説明できていなかった。
 
-最後の実装不備は下記のとおり修正した。ただし、その修正をもって元の純減見込みを達成したとはしない。必要な動作や安全処理を削って数値を合わせる変更も行わない。
+今回、会話キャッシュと15分receipt cacheを削除した。`session/open` と再接続は毎回native historyを読む。Hostは所有中の実行、未解決の要求、実行中の入力IDと接続の購読だけを保持する。
 
-## 集計条件と内訳
+本体は再修正前から **772行削減**。PR全体は **+911行**となった。元の500〜2,500行純減の見込みも、今回提示された±0〜+800行という目安も達成していない。ファイルの移動、テストへの区分変更、整形を削減成果に含めない。
 
-`crates/` と `apps/` のRust・Swift・Kotlinの物理行数（空行・コメントを含む）を比較した。独立したテスト、`#[cfg(test)] mod ...` および単独の `#[test]` / `#[tokio::test]` 関数、fixture、文書、生成物、lockfile、vendor、ビルド設定は除外した。同居テストをテキストで分離した集計なので概算である。ファイルの移動は区分内の増減で相殺しており、削減成果として数えない。
+## 行数と比較基準
 
-指示書の区分を再現するため、Host/providerには `host-daemon` と `codex-app-server`、core会話処理には `state.rs`、`state/notifications.rs`、`state/operations/threads.rs`、`models.rs`、`client.rs`、`session.rs` を含めた。残りをStore・その他Operation・bindings・画面等とした。
+`crates/` と `apps/` のRust・Swift・Kotlinの物理行数（空行・コメントを含む）。独立テスト、同居テストmodule・単独テスト関数、fixture、文書、生成物、lockfile、vendor、ビルド設定を除外した概算。同じ区分で比較する。
 
-| 区分 | 指示書の純減見込み | 指示書基準から最初のPR実装 `14c1261` | 調査・修正後 |
+| 区分 | 再修正前 `759258a` 対main | 今回の増減 | 修正後 対main |
 |---|---:|---:|---:|
-| Host/provider | 0〜700行削減 | +1,653 | +1,612 |
-| core会話処理 | 300〜1,000行削減 | +20 | −27 |
-| Store・配線・画面等 | 200〜800行削減 | +368 | +371 |
-| 合計 | 500〜2,500行削減 | **+2,041** | **+1,956** |
+| Host/provider | +1,551 | -705 | +846 |
+| core会話処理 | −27 | -64 | -91 |
+| Store・その他Operation・配線・画面 | +159 | -3 | +156 |
+| 合計 | **+1,683** | **−772** | **+911** |
 
-指示書の基準以降、再設計とは別のmain更新が **+273行**（Host +61、その他 +212）ある。これを除いたPR自体の増加は **+1,683行**。修正による本体削減は最初のPR実装から **85行**であり、増加全体を解消した数字ではない。
+指示書基準からは **+1,184行**。うち+273行は再設計以外のmain更新。最初のPR実装 `14c1261` からの本体削減は857行。以前混入していた53行の単独テストを除いた集計訂正は、この削減数に含めていない。
 
-前回の概算には、テストmoduleの外に置かれていたroutingの単体テスト53行が本体として混入していた。今回これも除外した。この集計訂正はコードの削減成果には含めていない。
+Host/providerは `host-daemon` と `codex-app-server`。core会話処理は `state.rs`、`state/notifications.rs`、`state/operations/threads.rs`、`models.rs`、`client.rs`、`session.rs`。`state/operations/submission.rs` はその他Operationの区分で、今回も区分を変更していない。
 
-## なぜ目論見と違ったか
+### 今回の本体差分
 
-### 1. Host：必要な新規処理だけで置換先の見積もりを超えた
+| ファイル | 増減 |
+|---|---:|
+| `crates/agent-core/src/client.rs` | -18 |
+| `crates/agent-core/src/models.rs` | -24 |
+| `crates/agent-core/src/presentation/conversation.rs` | -1 |
+| `crates/agent-core/src/session.rs` | -2 |
+| `crates/agent-core/src/state.rs` | -7 |
+| `crates/agent-core/src/state/notifications.rs` | -18 |
+| `crates/agent-core/src/state/operations/submission.rs` | -2 |
+| `crates/agent-core/src/state/operations/threads.rs` | +5 |
+| `crates/host-daemon/src/claude.rs` | -26 |
+| `crates/host-daemon/src/claude/history.rs` | +0 |
+| `crates/host-daemon/src/host_rpc.rs` | -2 |
+| `crates/host-daemon/src/host_rpc/codex.rs` | +96 |
+| `crates/host-daemon/src/host_rpc/provider_events.rs` | -138 |
+| `crates/host-daemon/src/host_rpc/routing.rs` | +40 |
+| `crates/host-daemon/src/host_rpc/service.rs` | -107 |
+| `crates/host-daemon/src/host_rpc/session_actor.rs` | +66 |
+| `crates/host-daemon/src/host_rpc/session_runtime.rs` | -541 |
+| `crates/host-daemon/src/host_rpc/submissions.rs` | -93 |
 
-指示書はHost側の置換実装全体を800〜1,000行と見込んだ。修正後の主な実装は以下の規模である。
+`provider_events.rs` の138行全体を削減とは数えていない。Codex通知の変換はCodex adapterへ直接統合され、その追加を相殺した。録画済みテスト入力の旧形式を読む補助はテスト側にあり、製品コードの代わりに呼ばれる経路はない。
 
-| 実装 | テストを除く本体 | 指示書上の必要性 |
-|---|---:|---|
-| [host_rpc/session_runtime.rs](../crates/host-daemon/src/host_rpc/session_runtime.rs) | 541 | 現在状態、初期読取中の更新検知、購読、容量・バイト上限、保留中の操作の保持（6・7・8節） |
-| [claude/history.rs](../crates/host-daemon/src/claude/history.rs) | 461 | native JSONL、分岐、関連tool/subagent出力、部分・破損・不完全の区別（3・4・5節） |
-| [host_rpc/provider_events.rs](../crates/host-daemon/src/host_rpc/provider_events.rs) | 138 | Codex通知を共通更新型へ変換し、クライアントから提供元形式を隔離（4・5節） |
-| [host_rpc/submissions.rs](../crates/host-daemon/src/host_rpc/submissions.rs) | 93 | 上限と保持期間のある送信重複排除、配送結果不明時の再送防止（8節） |
-| `owned_process.rs` とsupervisor | 93 | Host終了と提供元・toolプロセスの終了連動（6節） |
-| 小計 | **1,326** | Codex読取adapterやClaude実行管理の変更を含める前の規模 |
+## 3領域で何を削除・統合したか
 
-これらの責務そのものは指定されており、一括削除はできない。一方で、1,326行すべてが最小実装であると証明したわけではない。下記の重複は実際に削除した。
+### Host全体の会話処理
 
-削除側にも過大評価があった。旧外部監視はテストを除くと160行、旧一覧統合は105行。旧Claudeの1,017行は保存機能だけではなく、モデル、入力、stream、承認を含んでいた。旧Codex providerの789行とprovider管理の251行も、ファイル・terminal・worktreeなど維持すべき機能を含み、多くが `service.rs` に移っている。ファイルが消えたことを、その全量の責務が消えたこととして扱えない。
+- `SessionRuntime` の541行とそのキャッシュ専用テストを削除。`SessionActor` は実行中のturn・未解決要求・入力IDだけを扱い、native履歴を格納しない。
+- 読取範囲の拡大保持、LRU、snapshotの4 MiB上限、1,000 turn上限、hydrated/complete/bytes/revision、更新欠落による再hydrationを削除。
+- native読取中に実行が終了した場合、その読取が返るまで当該実行だけを保持し、最新のturnを返して解放する。読取のキャンセルも解放する。購読だけでは実行本文を保持しない。
+- `Submissions` と15分・1,024件のreceipt、fingerprint、結果待ちchannel、RPC応答IDの再書換を削除。重複入力は実行中のID集合で拒否する。完了後の重複排除は保証せず、端末は配送不明を自動再送しない。
+- Codex/Claudeが共通更新を直接発行する。`provider_events` 中間moduleを削除。Claude承認のRPC文字列生成・再解析も削除し、共通要求の検査と登録を一度に行う。
+- Codex event pumpの別個の実行ID一覧を削除。提供元終了時の失敗処理は共通の実行状態を使う。承認の識別子はprovider・native session・turn・native requestで共通化し、端末別の対応表や再送を持たない。
+- provider固有のプロセス、stdin回答ハンドル、Codexのネイティブページング、Claude parserは各adapterの責任として残す。これらの単なる移動を削除とは扱わない。
 
-### 2. core：旧処理を削除しても共有化した更新処理で相殺された
+### Coreの履歴・更新処理
 
-最初のPR実装では、`state.rs` が175行、`state/notifications.rs` が289行、`models.rs` が55行減った（合計519行）。一方、共通契約と純粋な更新規則の `session.rs` が426行、通信契約の `client.rs` が90行、会話Operationが23行増え、差し引き20行増だった。
+- Coreは共通Sessionの取得結果を採用し、`SessionChange`を適用する。旧older/cursor/overlap/refreshの履歴照合、Codex通知解釈は製品のCoreに残していない。
+- 今回はHost revisionの保持・比較・欠番再取得を削除。購読UUIDは遅い旧購読からの通知を除くために残す。配信順序と切断検知は既存の通信層で保証する。
+- ネイティブ履歴が完了済みに見えても、Host所有の実行中turnを優先する。Claudeの承認待ち再接続で、この区別が必要なことを回帰テストで確認する。
+- snapshot容量制限専用だった画像本文の省略・`detailDeferred`・クライアントの再読取分岐も削除。通常のツール出力の詳細取得は残す。
+- 本文の確定置換、時刻の保持、tool関係、要求の解決など、表示に必要な共通更新規則は残す。これらは履歴キャッシュの照合ではない。
 
-したがって「900〜1,400行削除・置換し、400〜600行で置き換える」という見込みは、実際に不要になった量と一致しなかった。項目の更新、確定本文優先、未確定送信の照合、下書き保持、詳細取得は引き続き必要であり、旧通知処理を共通の純粋関数へ移した分は、機能の削除ではない。
+### Store・Operation・画面への接続
 
-ただし、`ReadOlder` を独立したOperationとして残したのは実装側の整理不足だった。今回削除し、既存の `ReadThread` に統合した。
+- `SubscribeSubmission` を削除し、送信Operationに統合。未購読ならopenし、その結果をStoreに適用してから送信を続ける。先に送って初期通知を失う順序にはしない。
+- 読取パラメータを得るだけのためにSnapshotを複製・変更していた箇所を削除。必要な履歴範囲の計算を共用する。
+- `ReadOlder`は前回削除済みで、3クライアントは取得件数を増やすIntentから同じReadThreadへ接続している。新規の履歴Operationは追加しない。
+- ナビゲーション後の遅い応答、下書き編集、作成・送信の部分成功を扱う既存のStore epochと結果適用は残す。購読の応答より通知が先に適用されないための順序制御も残す。
 
-### 3. Store・画面：見込んだ規模の重複削除は実現していない
+## 当初の説明の訂正
 
-指示書はこの区分で600〜1,100行の削除・置換を見込んだが、基準時点でStoreは共有され、Operationの定型処理にも既存マクロがあった。3画面に独立した会話管理が同量ずつある構造ではなかった。
+指示書は、旧Claudeの1,017行を全量削除に数えないこと、旧provider内の必要機能を残すこと、3画面に同量の重複があると仮定しないことを明記していた。これらを指示書の見落としとして扱った前回の説明は不正確だった。
 
-実装では接続先保存領域によるキャッシュ・下書きの分離、提供元の対応操作表示、読取状態表示などが増えた。これらは指示書の要件だが、対応する大量の不要コードを削除できる根拠にはならない。main由来のアカウント画面更新も混ざるため、PRの増加と分ける必要がある。600〜1,100行という削除見込みを裏付ける具体的な重複箇所の対応表がないまま、削減できる前提にしたことが見積もり上の問題である。
+旧Claudeは既存の表示用会話を丸ごとJSON保存する方式で、保存・復元の中心は約70行、独自一覧・本文・項目参照は約60行。一方、native transcript readerは461行ある。これは増加の一因だが、同期runtimeの過剰な実装まで正当化する理由にはならない。
 
-## 実装上の不備と修正
+## 検証
 
-| 不備 | 修正 |
-|---|---|
-| runtimeが読取不能と判定しても、Claudeが別条件で同じキャッシュを再採用できた | キャッシュ採否をruntimeだけに集約し、Claudeのnative読取はその判断を上書きしない |
-| `session/open` が内部用の旧RPCを組み立て、JSONと型を往復していた | Codex/Claudeの型付き読取を直接呼び出す。旧読取・作成兼用関数と不要な履歴フラグを削除 |
-| runtimeの `active` / `active_turn` が共通Sessionと別に更新され、遅い開始通知で実行状態が食い違い得た | 共通Sessionの更新規則から保持状態を判断する。履歴再取得の必要性と実行状態を分離し、本文の無効化で実行状態を失わない |
-| 容量超過時と切断時に、会話を保持する条件が二重定義されていた | 同じ保持条件を両経路で使う |
-| Claudeのライブ通知がCodex風の生通知へ変換された後、Hostで共通更新型へ再変換されていた | Claudeは `SessionChange` を直接渡す。開始・完了と重複するstatus通知も削除。承認の提供元IDと回答用ハンドルは引き続き必要なため保持 |
-| `ReadOlder` が `ReadThread` へのrun/apply/stale中継を持つ独立Operationとして残っていた | 取得件数を増やすローカルIntentにし、共通の `ReadThread` を発行。Swift/Kotlin/GPUIの呼出元も移行 |
+検証コマンド、最終commitの必須quality結果とCI状況はPRに記載する。既存のDesktop/iOS/Android表示の合格条件は変更しない。削除したrevisionとnativeページングの明示的なfull/完了フラグのワイヤーfixture、およびキャッシュそのものを前提とした内部テストだけを新しい契約へ移行する。
 
-Codexイベント処理の実行ID一覧はプロセス終了時に失敗させる実行を特定するためのもの、Claudeのpendingはnative制御要求に回答するためのハンドルであり、独立した会話本文ストアではない。これらまで単純に消すと終了・回答処理を失うため保持した。
-
-## 検証と未実施事項
-
-- 履歴読取不能のキャッシュからnative履歴を再取得する回帰テストを追加。
-- 完了後に遅れて届く開始通知で会話が保持され続けないこと、履歴無効化後も実行中は保持し完了後に解放することを追加検証。
-- 既存の古い履歴取得、再接続、承認、Claude連続実行、core状態更新の試験を新しい呼出経路で実行し、workspace全体で295件合格・0件失敗・2件明示的未実施。workspace Clippyも警告をエラーとして扱う設定で合格。UIの合格条件は変更していない。
-- Linux CIの既存失敗は終了連動テストが使う `ps` の不足だったため、native Nix shellに `procps` を追加し、Linux用shellの依存に含まれることを評価した。
-- 各コミットの自動検証結果とCI状況はPRに記載する。Windowsの既存CIはGitHubの請求・利用上限による起動制限であり、動作確認済みとはしない。
-- 実認証を使う提供元の推論、実機、稼働中の利用者Hostの置換は行っていない。
+追加の確認対象：nativeファイルを外部変更して再open、読取中の実行完了、購読中でも終了本文を解放、4 MiB超・1,000 turn超の要求を切り詰めないこと、実行中入力の重複拒否、provider間の承認ID衝突。実認証を使う推論・実機・稼働中の利用者Hostの置換は行わない。

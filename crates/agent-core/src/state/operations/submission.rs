@@ -168,7 +168,7 @@ impl StartSubmission {
         {
             Arc::make_mut(pending).draft_key = id.clone();
         }
-        effects.push(Effect::execute(SubscribeSubmission {
+        effects.push(Effect::execute(SendSubmission {
             thread_id: id,
             client_user_message_id,
             draft,
@@ -182,54 +182,45 @@ impl StartSubmission {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeSubmission {
-    pub thread_id: String,
-    pub client_user_message_id: String,
-    pub draft: Arc<Draft>,
-}
-impl Operation for SubscribeSubmission {
-    type Output = crate::session::OpenedSession;
-    const ORDERED: bool = true;
-    fn submission_id(&self) -> Option<&str> {
-        Some(&self.client_user_message_id)
-    }
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let mut open = ReadThread::new(self.thread_id.clone());
-        open.prepare(&mut context.snapshot.clone())
-            .map_err(PeerError::InvalidMessage)?;
-        context.call(&open).await
-    }
-    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        let mut effects = ReadThread::new(self.thread_id.clone()).apply(snapshot, output);
-        effects.push(Effect::execute(SendSubmission {
-            thread_id: self.thread_id,
-            client_user_message_id: self.client_user_message_id,
-            draft: self.draft,
-        }));
-        effects
-    }
-    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        self.apply(snapshot, output)
-    }
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendSubmission {
     pub thread_id: String,
     pub client_user_message_id: String,
     pub draft: Arc<Draft>,
 }
+#[derive(Debug)]
+pub enum SubmissionProgress {
+    Opened(Box<crate::session::OpenedSession>),
+    Sent(Option<String>),
+}
 impl Operation for SendSubmission {
+    const ORDERED: bool = true;
+    const APPLY_WHEN_STALE: bool = true;
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
-    type Output = Option<String>;
-    const APPLY_WHEN_STALE: bool = true;
+    type Output = SubmissionProgress;
     fn outcome(output: &mut Self::Output) -> Outcome {
-        Outcome::Submitted {
-            turn_id: output.clone(),
+        match output {
+            SubmissionProgress::Opened(_) => Outcome::Applied,
+            SubmissionProgress::Sent(turn_id) => Outcome::Submitted {
+                turn_id: turn_id.clone(),
+            },
         }
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        if !context.snapshot.subscriptions.contains_key(&self.thread_id) {
+            let open = ReadThread::new(self.thread_id.clone()).with_history(
+                context
+                    .snapshot
+                    .conversations
+                    .get(&self.thread_id)
+                    .map(Arc::as_ref),
+            );
+            return context
+                .call(&open)
+                .await
+                .map(|opened| SubmissionProgress::Opened(Box::new(opened)));
+        }
         let target = submission_target(
             context
                 .snapshot
@@ -283,15 +274,22 @@ impl Operation for SendSubmission {
                 target,
             )
             .await?;
-        Ok(reply.value)
+        Ok(SubmissionProgress::Sent(reply.value))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let turn_id = match output {
+            SubmissionProgress::Opened(opened) => {
+                let mut effects = ReadThread::new(self.thread_id.clone()).apply(snapshot, *opened);
+                effects.push(Effect::execute(self));
+                return effects;
+            }
+            SubmissionProgress::Sent(turn_id) => turn_id,
+        };
         let Self {
             thread_id,
             client_user_message_id,
             draft,
         } = self;
-        let turn_id = output;
 
         let draft = snapshot
             .pending_submissions

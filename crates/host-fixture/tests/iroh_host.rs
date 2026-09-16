@@ -2412,7 +2412,7 @@ async fn session_open_delivers_a_snapshot_before_updates_and_reopens_current_sta
         )
         .await;
         let mut thread = opened.value.response.thread;
-        let mut revision = opened.value.revision;
+        let mut sequence = opened.sequence;
         loop {
             let message = events.recv().await.unwrap();
             let PeerEvent::Message(message) = message else {
@@ -2426,8 +2426,11 @@ async fn session_open_delivers_a_snapshot_before_updates_and_reopens_current_sta
             let update: agent_core::session::SessionUpdate =
                 serde_json::from_value(notification["params"].clone()).unwrap();
             assert_eq!(update.subscription_id, opened.value.subscription_id);
-            assert_eq!(update.revision, revision + 1);
-            revision = update.revision;
+            assert!(
+                message.sequence > sequence,
+                "transport delivers updates in order"
+            );
+            sequence = message.sequence;
             thread = update.change.apply(&thread).unwrap();
             if matches!(
                 update.change,

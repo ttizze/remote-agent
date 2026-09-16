@@ -177,11 +177,25 @@ fn late_completion_does_not_make_a_newer_execution_idle() {
 }
 
 #[test]
-fn deferred_images_do_not_contain_corrupt_base64_or_truncated_paths() {
+fn native_images_remain_complete_without_the_removed_snapshot_budget() {
     let path = format!("/native/{}/image.png", "a".repeat(300));
-    let mut item: Item = serde_json::from_value(json!({"id":"image","type":"imageGeneration","savedPath":path,"result":"a".repeat(3 * 1024 * 1024)})).unwrap();
-    assert!(item.defer_large_detail());
-    assert!(item.result.is_none());
-    assert_eq!(item.saved_path.as_deref(), Some(path.as_str()));
-    assert_eq!(item.extra["detailDeferred"], true);
+    let item: Item = serde_json::from_value(json!({"id":"image","type":"imageGeneration","savedPath":path,"result":"a".repeat(5 * 1024 * 1024)})).unwrap();
+    let mut thread = Thread {
+        turns: Some(vec![Arc::new(Turn {
+            id: "turn".into(),
+            items: Some(vec![Arc::new(item.clone())]),
+            ..Default::default()
+        })]),
+        ..Default::default()
+    };
+    thread.defer_item_details();
+    assert_eq!(
+        thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].as_ref(),
+        &item
+    );
+    assert!(
+        thread.turns.as_ref().unwrap()[0]
+            .deferred_item_ids
+            .is_none()
+    );
 }

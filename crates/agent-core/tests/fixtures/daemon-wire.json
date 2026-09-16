@@ -23,6 +23,8 @@
           "completedAt": 4,
           "durationMs": 3000,
           "id": "fixture-turn-1-1",
+          "itemsView": "full",
+          "itemsHasMore": false,
           "items": [
             {
               "clientId": "wire-fixture",

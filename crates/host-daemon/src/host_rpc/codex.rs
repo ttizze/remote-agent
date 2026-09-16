@@ -1,14 +1,17 @@
 //! Codex native protocol boundary: one shared process, ordered request
 //! completion, native cursors, deferred item hydration and detail reads.
+use super::routing::SessionRouter;
 use super::service::Failure;
 use crate::desktop_projects::ThreadPage;
 use agent_core::{
     models::{Item, Thread, ThreadResponse, Turn},
-    peer::RpcResponse,
+    peer::{RpcMessage, RpcMessageKind, RpcResponse},
+    session::{ProviderKind, SessionChange, SessionRef, TextField},
     state::operations as op,
 };
 use codex_app_server::CodexAppServer;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -314,16 +317,18 @@ impl Codex {
                 }
             }
             values.reverse();
-            let view = if has_more && values.is_empty() {
-                "notLoaded"
-            } else if has_more {
-                "summary"
-            } else {
-                "full"
-            };
-            turn.items = Some(values);
+            turn.items_view = Some(
+                if !has_more {
+                    "full"
+                } else if values.is_empty() {
+                    "notLoaded"
+                } else {
+                    "summary"
+                }
+                .into(),
+            );
             turn.items_has_more = Some(has_more);
-            turn.items_view = Some(view.into());
+            turn.items = Some(values);
             self.preserve_opening_question(turn, thread_id).await?;
         }
         Ok(())
@@ -418,4 +423,95 @@ impl Codex {
             }
         }
     }
+}
+
+/// Decode only native conversation events. Every other message keeps its owner.
+fn notification_change(
+    method: &str,
+    value: Value,
+) -> Result<Option<(String, SessionChange)>, serde_json::Error> {
+    use serde_json::from_value as decode;
+    let turn_id = value["turnId"].as_str().unwrap_or_default().to_owned();
+    let change = match method {
+        "thread/status/changed" => SessionChange::Status {
+            status: decode(value["status"].clone())?,
+        },
+        "turn/started" | "turn/completed" => {
+            let mut turn: Turn = decode(value["turn"].clone())?;
+            turn.items_view.get_or_insert_with(|| "full".into());
+            turn.items_has_more.get_or_insert(false);
+            SessionChange::Turn {
+                turn,
+                completed: method == "turn/completed",
+            }
+        }
+        "item/started" | "item/completed" => SessionChange::Item {
+            turn_id,
+            item: decode(value["item"].clone())?,
+        },
+        "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+            let id = decode(value["reviewId"].clone())?;
+            if value["review"]["status"] == "approved" {
+                SessionChange::RemoveItem {
+                    turn_id,
+                    item_id: id,
+                }
+            } else {
+                SessionChange::Item {
+                    turn_id,
+                    item: Item {
+                        id,
+                        kind: Some("automaticApprovalReview".into()),
+                        extra: decode(value.clone())?,
+                        ..Default::default()
+                    },
+                }
+            }
+        }
+        "item/agentMessage/delta"
+        | "item/reasoning/textDelta"
+        | "item/reasoning/summaryTextDelta"
+        | "item/commandExecution/outputDelta"
+        | "item/fileChange/outputDelta" => SessionChange::Text {
+            turn_id,
+            item_id: decode(value["itemId"].clone())?,
+            delta: decode(value["delta"].clone())?,
+            field: match method {
+                "item/agentMessage/delta" => TextField::Message,
+                "item/commandExecution/outputDelta" => TextField::CommandOutput,
+                "item/fileChange/outputDelta" => TextField::FileChange,
+                _ => TextField::Reasoning,
+            },
+        },
+        "error" => SessionChange::Error {
+            turn_id,
+            error: value["error"].clone(),
+            will_retry: value["willRetry"] == true,
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some((decode(value["threadId"].clone())?, change)))
+}
+
+/// Provider-specific notifications end at this adapter boundary.
+pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<(), String> {
+    if message.kind() != RpcMessageKind::Notification {
+        return Err("expected Codex notification".into());
+    }
+    let params: Value = message.params().map_err(|error| error.to_string())?;
+    if message.method() == Some("serverRequest/resolved") {
+        router.resolve_native_request(ProviderKind::Codex, &params["requestId"]);
+    } else if let Some((id, change)) =
+        notification_change(message.method().unwrap_or_default(), params)
+            .map_err(|error| error.to_string())?
+    {
+        if SessionRef::from_thread_id(&id)
+            .is_ok_and(|target| target.provider == ProviderKind::Codex)
+        {
+            router.session_change(&id, change);
+        }
+    } else {
+        router.broadcast(message.line());
+    }
+    Ok(())
 }

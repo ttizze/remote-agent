@@ -270,27 +270,6 @@ impl Thread {
     }
 }
 impl Item {
-    /// Keep a bounded preview; the provider remains the only owner of full text.
-    pub fn defer_large_detail(&mut self) -> bool {
-        let budget = if self.kind.as_deref() == Some("imageGeneration") {
-            2 * 1024 * 1024
-        } else {
-            128 * 1024
-        };
-        if fits_budget(self, budget) {
-            return false;
-        }
-        self.defer_detail();
-        true
-    }
-    pub fn defer_detail(&mut self) {
-        self.retain_header();
-        if self.kind.as_deref() == Some("imageGeneration") {
-            self.result = None;
-        }
-        self.extra
-            .insert("detailDeferred".into(), Value::Bool(true));
-    }
     fn retain_header(&mut self) {
         for text in [
             &mut self.text,
@@ -329,9 +308,6 @@ impl Item {
 
 // Stop counting when the budget is exceeded; never allocate another large body.
 fn fits_inline(value: &impl Serialize) -> bool {
-    fits_budget(value, 4096)
-}
-fn fits_budget(value: &impl Serialize, budget: usize) -> bool {
     struct Budget(usize);
     impl std::io::Write for Budget {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -345,7 +321,7 @@ fn fits_budget(value: &impl Serialize, budget: usize) -> bool {
             Ok(())
         }
     }
-    serde_json::to_writer(Budget(budget), value).is_ok()
+    serde_json::to_writer(Budget(4096), value).is_ok()
 }
 fn truncate_detail(text: &mut String) {
     let mut end = text.len().min(256);

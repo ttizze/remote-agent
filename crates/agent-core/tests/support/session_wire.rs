@@ -13,12 +13,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::io::{DuplexStream, WriteHalf};
-#[path = "../../../host-daemon/src/host_rpc/provider_events.rs"]
-mod provider_events;
+#[path = "provider_fixture.rs"]
+mod provider_fixture;
 #[derive(Default)]
 struct State {
     requests: HashMap<String, Value>,
-    sessions: HashMap<String, (uuid::Uuid, u64)>,
+    sessions: HashMap<String, uuid::Uuid>,
     threads: HashMap<String, Value>,
 }
 pub struct Reader {
@@ -109,8 +109,9 @@ impl Writer {
                     let target: SessionRef =
                         serde_json::from_value(request["params"]["session"].clone())?;
                     let subscription = uuid::Uuid::new_v4();
-                    state.sessions.insert(target.thread_id(), (subscription, 0));
-                    value["result"] = json!({"session":target,"subscriptionId":subscription,"revision":0,"response":response});
+                    state.sessions.insert(target.thread_id(), subscription);
+                    value["result"] =
+                        json!({"session":target,"subscriptionId":subscription,"response":response});
                 }
             } else if value.get("method").is_some() {
                 let method = value["method"].as_str().unwrap();
@@ -122,7 +123,7 @@ impl Writer {
                         SessionChange::Request { request },
                     ))
                 } else {
-                    provider_events::notification_change(method, value["params"].clone())?
+                    provider_fixture::notification_change(method, value["params"].clone())?
                 };
                 if let Some((id, change)) = change {
                     if let Some(response) = state.threads.get_mut(&id) {
@@ -132,11 +133,10 @@ impl Writer {
                             *response = json!(decoded);
                         }
                     }
-                    let Some((subscription, revision)) = state.sessions.get_mut(&id) else {
+                    let Some(subscription) = state.sessions.get_mut(&id) else {
                         return Ok(());
                     };
-                    *revision += 1;
-                    value = json!({"method":"host/session/update","params":{"subscriptionId":subscription,"revision":revision,"change":change}});
+                    value = json!({"method":"host/session/update","params":{"subscriptionId":subscription,"change":change}});
                 }
             }
         }

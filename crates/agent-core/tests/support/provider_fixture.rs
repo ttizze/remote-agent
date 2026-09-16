@@ -1,4 +1,4 @@
-//! Provider protocol decoding belongs to the Host boundary, never the Store.
+//! Converts the original recorded test inputs to the common Session contract.
 use agent_core::{
     models::{Item, ThreadStatus, Turn},
     session::{SessionChange, TextField},

@@ -12,7 +12,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
 

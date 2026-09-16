@@ -719,29 +719,11 @@ impl Client {
         let mut native_items = std::collections::HashSet::new();
         let mut bytes = 0usize;
         for turn in thread.turns.as_deref().unwrap_or_default().iter().rev() {
-            for header in turn.items.as_deref().unwrap_or_default().iter().rev() {
-                if header.kind.as_deref() != Some("imageGeneration")
-                    || !native_items.insert(&header.id)
+            for item in turn.items.as_deref().unwrap_or_default().iter().rev() {
+                if item.kind.as_deref() != Some("imageGeneration") || !native_items.insert(&item.id)
                 {
                     continue;
                 }
-                let detail;
-                let item = if header.saved_path.is_none()
-                    && header.extra.get("detailDeferred") == Some(&Value::Bool(true))
-                {
-                    detail = self
-                        .call(&crate::state::operations::ReadItem {
-                            thread_id: thread_id.into(),
-                            turn_id: turn.id.clone(),
-                            item_id: header.id.clone(),
-                        })
-                        .await?
-                        .value
-                        .item;
-                    &detail
-                } else {
-                    header.as_ref()
-                };
                 let image = item
                     .saved_path
                     .as_deref()

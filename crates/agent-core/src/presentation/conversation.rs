@@ -360,8 +360,7 @@ fn render_turn(
     let render_native = |item: &Arc<models::Item>| {
         RenderedItem::native(
             item,
-            deferred.contains(item.id.as_str())
-                || item.extra.get("detailDeferred") == Some(&Value::Bool(true)),
+            deferred.contains(item.id.as_str()),
             cached.get(&(None, Arc::as_ptr(item).cast())).copied(),
         )
     };

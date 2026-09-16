@@ -4,41 +4,33 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use super::provider_events::notification_change;
-use super::session_runtime::{ReadToken, SessionRuntime};
-use agent_core::peer::{RpcMessage, RpcMessageKind};
+use super::session_actor::SessionActor;
+use agent_core::client::ServerRequest;
+use agent_core::peer::RpcMessage;
 use agent_core::{
     models::ThreadResponse,
-    session::{OpenSession, ProviderKind, SessionRef},
+    session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef, SessionUpdate},
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 pub(super) struct SessionRead {
     router: SessionRouter,
-    token: Option<ReadToken>,
-    pub(super) cached: Option<ThreadResponse>,
-    pub(super) limit: usize,
+    target: SessionRef,
 }
 impl Drop for SessionRead {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() {
-            lock_state(&self.router.state)
-                .conversations
-                .cancel_read(token);
+        let mut state = lock_state(&self.router.state);
+        if let Some(actor) = state.executions.get_mut(&self.target) {
+            actor.readers -= 1;
         }
+        state.executions.retain(|_, actor| actor.release());
     }
 }
 
 /// An identifier allocated by the daemon for one authenticated mobile
 /// session. It is never put on the wire.
 pub type SessionId = u64;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ResponseRoute {
-    Forward { provider: ProviderKind, id: String },
-    Unknown,
-}
 
 /// A live authenticated session's bounded outbound queue.
 pub struct HostSession {
@@ -112,7 +104,8 @@ impl Outbound {
 struct State {
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
-    conversations: SessionRuntime,
+    executions: HashMap<SessionRef, SessionActor>,
+    subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId)>,
 }
 
 impl Default for State {
@@ -120,14 +113,39 @@ impl Default for State {
         Self {
             next_session_id: 1,
             sessions: HashMap::new(),
-            conversations: SessionRuntime::default(),
+            executions: HashMap::new(),
+            subscriptions: HashMap::new(),
         }
     }
 }
 
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-enum Delivery {
-    Send(SessionId, String),
+impl State {
+    fn pending_request(&self, id: &str) -> Option<(SessionRef, agent_core::client::ServerRequest)> {
+        self.executions.iter().find_map(|(target, actor)| {
+            actor
+                .live
+                .requests
+                .get(id)
+                .map(|request| (target.clone(), (**request).clone()))
+        })
+    }
+    fn pending_native(
+        &self,
+        provider: ProviderKind,
+        id: &Value,
+    ) -> Option<(SessionRef, agent_core::client::ServerRequest)> {
+        self.executions
+            .iter()
+            .filter(|(target, _)| target.provider == provider)
+            .find_map(|(target, actor)| {
+                actor
+                    .live
+                    .requests
+                    .values()
+                    .find(|request| request.extra.get("nativeRequestId") == Some(id))
+                    .map(|request| (target.clone(), (**request).clone()))
+            })
+    }
 }
 
 impl SessionRouter {
@@ -159,95 +177,153 @@ impl SessionRouter {
         }
     }
 
-    pub(super) fn submission(
-        &self,
-        target: &SessionRef,
-        id: &str,
-        pending: bool,
-    ) -> Result<(), String> {
-        lock_state(&self.state)
-            .conversations
-            .submission(target, id, pending)
-            .map_err(str::to_owned)
+    pub(super) fn begin_submission(&self, params: &Value) -> Result<SessionRef, String> {
+        let target = SessionRef::from_thread_id(
+            params["threadId"]
+                .as_str()
+                .ok_or("session ID is required")?,
+        )?;
+        let id = params["clientUserMessageId"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .ok_or("clientUserMessageId is required")?;
+        let mut state = lock_state(&self.state);
+        let actor = state.executions.entry(target.clone()).or_default();
+        if actor.inputs.len() >= 128 || !actor.inputs.insert(id.into()) {
+            return Err("submission is already in flight or input capacity reached; read the session before sending again".into());
+        }
+        Ok(target)
     }
 
-    pub(crate) fn current_session(&self, id: &str) -> Option<ThreadResponse> {
-        lock_state(&self.state)
-            .conversations
-            .current(&SessionRef::from_thread_id(id).ok()?)
+    pub(super) fn reject_submission(&self, target: &SessionRef, id: &str) {
+        let mut state = lock_state(&self.state);
+        if let Some(actor) = state.executions.get_mut(target) {
+            actor.inputs.remove(id);
+        }
+        state.executions.retain(|_, actor| actor.release());
     }
 
-    pub(crate) fn created_session(&self, response: ThreadResponse) {
-        // Preserve the native ID in the creation response even when capacity
-        // is exhausted. Never turn an accepted creation into a retryable send.
-        let _ = lock_state(&self.state).conversations.created(response);
+    pub(crate) fn current_turn(&self, id: &str, turn_id: &str) -> Option<agent_core::models::Turn> {
+        lock_state(&self.state)
+            .executions
+            .get(&SessionRef::from_thread_id(id).ok()?)
+            .and_then(|actor| {
+                actor
+                    .live
+                    .turns
+                    .as_ref()?
+                    .iter()
+                    .rfind(|turn| turn.id == turn_id)
+            })
+            .map(|turn| (**turn).clone())
     }
 
     pub(super) fn begin_session_read(&self, params: OpenSession) -> Result<SessionRead, String> {
+        if params.limit == 0
+            || SessionRef::from_thread_id(&params.session.thread_id())? != params.session
+        {
+            return Err("invalid session reference or zero history limit".into());
+        }
         let mut state = lock_state(&self.state);
-        let token = state
-            .conversations
-            .begin_read(params.session, params.limit)?;
-        let cached = state.conversations.cached(&token);
+        state
+            .executions
+            .entry(params.session.clone())
+            .or_default()
+            .readers += 1;
         Ok(SessionRead {
             router: self.clone(),
-            limit: token.limit,
-            token: Some(token),
-            cached,
+            target: params.session,
         })
     }
 
     pub(super) fn finish_session_read(
         &self,
-        mut read: SessionRead,
+        read: SessionRead,
         session: SessionId,
         request: &RpcMessage<'_>,
-        response: ThreadResponse,
+        mut response: ThreadResponse,
     ) -> Result<(), String> {
         let mut state = lock_state(&self.state);
         if !state.sessions.contains_key(&session) {
             return Err("connection closed during session open".into());
         }
-        let result = state.conversations.finish_read(
-            read.token.take().expect("open read"),
-            session,
-            response,
-        );
-        let line = match result {
-            Ok(opened) => request.response::<_, ()>(Ok(opened)),
-            Err(error) => request.error("session_open_failed", &error),
+        if response.thread.id.as_deref() != Some(read.target.thread_id().as_str()) {
+            return Err("native session ID does not match".into());
         }
-        .map_err(|error| error.to_string())?;
-        deliver_locked(&mut state, vec![Delivery::Send(session, line)]);
+        if let Some(actor) = state.executions.get(&read.target) {
+            actor.overlay(&mut response);
+        }
+        let subscription_id = uuid::Uuid::new_v4();
+        let line = request
+            .response::<_, ()>(Ok(OpenedSession {
+                session: read.target.clone(),
+                subscription_id,
+                response,
+            }))
+            .map_err(|error| error.to_string())?;
+        state
+            .subscriptions
+            .insert(subscription_id, (read.target.clone(), session));
+        deliver_locked(&mut state, vec![(session, line)]);
         Ok(())
     }
 
     pub(super) fn close_subscription(&self, session: SessionId, subscription: uuid::Uuid) {
-        lock_state(&self.state)
-            .conversations
-            .close(session, subscription);
+        let mut state = lock_state(&self.state);
+        if state
+            .subscriptions
+            .get(&subscription)
+            .is_some_and(|(_, owner)| *owner == session)
+        {
+            state.subscriptions.remove(&subscription);
+        }
     }
 
     pub(crate) fn close_session(&self, session: SessionId) {
         remove_session_locked(&mut lock_state(&self.state), session);
     }
 
-    /// Resolve only requests belonging to the stopped Codex backend. Claude
-    /// approvals and authenticated client connections remain live.
-    pub(crate) fn resolve_codex_requests(&self) {
+    pub(crate) fn fail_provider(&self, provider: ProviderKind, message: &str) {
         let mut state = lock_state(&self.state);
-        let ids = state.conversations.pending_ids();
-        for id in ids {
-            if let Some((target, _)) = state.conversations.pending_request(&id)
-                && target.provider == agent_core::session::ProviderKind::Codex
-            {
+        let live: Vec<_> = state
+            .executions
+            .iter()
+            .filter(|(target, _)| target.provider == provider)
+            .map(|(target, actor)| (target.clone(), actor.live.clone()))
+            .collect();
+        for (target, thread) in live {
+            for id in thread.requests.keys() {
                 change_locked(
                     &mut state,
                     &target,
-                    &agent_core::session::SessionChange::ResolveRequest { request_id: id },
+                    &SessionChange::ResolveRequest {
+                        request_id: id.clone(),
+                    },
                 );
             }
+            for turn in thread
+                .turns
+                .iter()
+                .flatten()
+                .filter(|turn| turn.status.as_deref() == Some("inProgress"))
+            {
+                let mut turn = (**turn).clone();
+                turn.status = Some("failed".into());
+                turn.error = Some(serde_json::json!({"message":message}));
+                change_locked(
+                    &mut state,
+                    &target,
+                    &SessionChange::Turn {
+                        turn,
+                        completed: true,
+                    },
+                );
+            }
+            if let Some(actor) = state.executions.get_mut(&target) {
+                actor.inputs.clear();
+            }
         }
+        state.executions.retain(|_, actor| actor.release());
     }
 
     pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), String> {
@@ -278,27 +354,47 @@ impl SessionRouter {
         }
     }
 
-    /// Normalize provider output once; every client receives the same request
-    /// identity and reads unresolved requests from its current session snapshot.
-    pub(crate) fn request_admission(&self, message: &RpcMessage<'_>) -> Result<(), String> {
-        if message.line().len() > 64 * 1024 {
-            return Err("provider request exceeds 64 KiB; execution cannot be approved".into());
-        }
-        let params: Value = message.params().map_err(|error| error.to_string())?;
+    pub(crate) fn request(
+        &self,
+        provider: ProviderKind,
+        mut request: ServerRequest,
+    ) -> Result<(), String> {
         let target = SessionRef::from_thread_id(
-            params["threadId"]
-                .as_str()
+            request
+                .params
+                .get("threadId")
+                .and_then(Value::as_str)
                 .ok_or("request session ID is missing")?,
-        )
-        .map_err(str::to_owned)?;
-        let state = lock_state(&self.state);
-        let current = state
-            .conversations
-            .current(&target)
-            .ok_or("request has no owned current session")?;
-        if current.thread.requests.len() >= 32 {
-            return Err("session pending request capacity reached".into());
+        )?;
+        if target.provider != provider {
+            return Err("request provider does not match session".into());
         }
+        let mut state = lock_state(&self.state);
+        let actor = state
+            .executions
+            .get(&target)
+            .ok_or("request has no owned execution")?;
+        if actor.live.requests.len() >= 32
+            || serde_json::to_vec(&request)
+                .map_err(|e| e.to_string())?
+                .len()
+                > 64 * 1024
+        {
+            return Err("pending request capacity reached".into());
+        }
+        if state.pending_native(provider, &request.id).is_some() {
+            return Ok(());
+        }
+        request
+            .extra
+            .insert("nativeRequestId".into(), request.id.clone());
+        request.id = serde_json::json!([
+            target.provider,
+            target.id,
+            request.params.get("turnId"),
+            request.id
+        ]);
+        change_locked(&mut state, &target, &SessionChange::Request { request });
         Ok(())
     }
 
@@ -310,7 +406,7 @@ impl SessionRouter {
 
     pub(crate) fn resolve_native_request(&self, provider: ProviderKind, id: &Value) {
         let mut state = lock_state(&self.state);
-        if let Some((target, request)) = state.conversations.pending_native(provider, id) {
+        if let Some((target, request)) = state.pending_native(provider, id) {
             change_locked(
                 &mut state,
                 &target,
@@ -321,81 +417,18 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn handle_server_message(&self, provider: ProviderKind, message: &RpcMessage<'_>) {
-        let params = message.params::<Value>().unwrap_or(Value::Null);
-        if message.kind() == RpcMessageKind::Notification
-            && message.method() == Some("serverRequest/resolved")
-        {
-            self.resolve_native_request(provider, &params["requestId"]);
-            return;
-        }
+    pub(crate) fn broadcast(&self, line: &str) {
         let mut state = lock_state(&self.state);
-        if message.kind() == RpcMessageKind::Request {
-            let Some(target) = params["threadId"]
-                .as_str()
-                .and_then(|id| SessionRef::from_thread_id(id).ok())
-            else {
-                return;
-            };
-            if target.provider != provider {
-                return;
-            }
-            let Ok(mut request) =
-                serde_json::from_str::<agent_core::client::ServerRequest>(message.line())
-            else {
-                return;
-            };
-            if state
-                .conversations
-                .pending_native(provider, &request.id)
-                .is_some()
-            {
-                return;
-            }
-            request
-                .extra
-                .insert("nativeRequestId".into(), request.id.clone());
-            request.id = Value::String(format!("request:{}", uuid::Uuid::new_v4()));
-            change_locked(
-                &mut state,
-                &target,
-                &agent_core::session::SessionChange::Request { request },
-            );
-            return;
-        }
-        if message.kind() == RpcMessageKind::Notification {
-            let target = params["threadId"]
-                .as_str()
-                .and_then(|id| SessionRef::from_thread_id(id).ok());
-            match notification_change(message.method().unwrap_or_default(), params) {
-                Ok(Some((id, change))) => {
-                    if let Ok(target) = SessionRef::from_thread_id(&id)
-                        && target.provider == provider
-                    {
-                        change_locked(&mut state, &target, &change);
-                    }
-                    return;
-                }
-                Err(_) => {
-                    for connection in state.conversations.invalidate(target.as_ref(), true) {
-                        remove_session_locked(&mut state, connection);
-                    }
-                    return;
-                }
-                Ok(None) => {}
-            }
-        }
         let deliveries = state
             .sessions
             .keys()
-            .map(|id| Delivery::Send(*id, message.line().to_owned()))
+            .map(|id| (*id, line.to_owned()))
             .collect();
         deliver_locked(&mut state, deliveries);
     }
 
     pub(super) fn request_session(&self, id: &str) -> Option<SessionRef> {
         lock_state(&self.state)
-            .conversations
             .pending_request(id)
             .map(|(session, _)| session)
     }
@@ -405,26 +438,26 @@ impl SessionRouter {
         session: SessionId,
         id: &str,
         result: &Value,
-    ) -> Result<ResponseRoute, String> {
+    ) -> Result<(ProviderKind, Value), String> {
         let mut state = lock_state(&self.state);
         if !state.sessions.contains_key(&session) {
             return Err("connection is closed".into());
         }
-        let Some((target, request)) = state.conversations.pending_request(id) else {
-            return Ok(ResponseRoute::Unknown);
+        let Some((target, request)) = state.pending_request(id) else {
+            return Err("request was already answered or its execution has ended".into());
         };
         if request
             .extra
             .get("deliveryState")
             .is_some_and(|state| state != "awaiting")
         {
-            return Ok(ResponseRoute::Unknown);
+            return Err("request was already answered or its execution has ended".into());
         }
         let current = state
-            .conversations
-            .current(&target)
+            .executions
+            .get(&target)
             .ok_or("request execution is unavailable")?;
-        let live_turn = current.thread.turns.iter().flatten().any(|turn| {
+        let live_turn = current.live.turns.iter().flatten().any(|turn| {
             turn.status.as_deref() == Some("inProgress")
                 && request
                     .params
@@ -440,7 +473,7 @@ impl SessionRouter {
             .extra
             .get("nativeRequestId")
             .ok_or("request execution is unavailable")?
-            .to_string();
+            .clone();
         change_locked(
             &mut state,
             &target,
@@ -449,15 +482,12 @@ impl SessionRouter {
                 state: agent_core::session::RequestDelivery::Sending,
             },
         );
-        Ok(ResponseRoute::Forward {
-            provider: target.provider,
-            id: native,
-        })
+        Ok((target.provider, native))
     }
 
     pub(crate) fn response_unknown(&self, id: &str) {
         let mut state = lock_state(&self.state);
-        if let Some((target, _)) = state.conversations.pending_request(id) {
+        if let Some((target, _)) = state.pending_request(id) {
             change_locked(
                 &mut state,
                 &target,
@@ -475,34 +505,43 @@ fn change_locked(
     target: &SessionRef,
     change: &agent_core::session::SessionChange,
 ) {
-    match state.conversations.update(target, change) {
-        Ok(updates) => {
-            let deliveries = updates
-                .into_iter()
-                .map(|(session, update)| {
-                    Delivery::Send(
-                        session,
-                        serde_json::json!({"method":"host/session/update", "params":update})
-                            .to_string(),
-                    )
-                })
-                .collect();
-            deliver_locked(state, deliveries);
+    let actor = state.executions.entry(target.clone()).or_default();
+    if actor.update(change).is_err() {
+        let connections: Vec<_> = state
+            .subscriptions
+            .values()
+            .filter(|(id, _)| id == target)
+            .map(|(_, connection)| *connection)
+            .collect();
+        for connection in connections {
+            remove_session_locked(state, connection);
         }
-        Err(_) => {
-            for connection in state.conversations.invalidate(Some(target), false) {
-                remove_session_locked(state, connection);
-            }
-        }
+        state.executions.retain(|_, actor| actor.release());
+        return;
     }
+    let deliveries = state
+        .subscriptions
+        .iter()
+        .filter(|(_, (id, _))| id == target)
+        .map(|(subscription, (_, connection))| {
+            (
+                *connection,
+                serde_json::json!({"method":"host/session/update", "params":SessionUpdate {
+                    subscription_id: *subscription, change: change.clone(),
+                }})
+                .to_string(),
+            )
+        })
+        .collect();
+    deliver_locked(state, deliveries);
     // Background navigation needs activity, not copies of
     // provider turn/item payloads outside a subscription.
     let active = match change {
         agent_core::session::SessionChange::Status { status } => Some(status.kind == "active"),
         agent_core::session::SessionChange::Turn { .. } => {
-            state.conversations.current(target).map(|response| {
-                response
-                    .thread
+            state.executions.get(target).map(|actor| {
+                actor
+                    .live
                     .turns
                     .iter()
                     .flatten()
@@ -516,24 +555,23 @@ fn change_locked(
         let deliveries = state
             .sessions
             .keys()
-            .map(|id| Delivery::Send(*id, line.clone()))
+            .map(|id| (*id, line.clone()))
             .collect();
         deliver_locked(state, deliveries);
     }
+    state.executions.retain(|_, actor| actor.release());
 }
 
-fn deliver_locked(state: &mut State, deliveries: Vec<Delivery>) {
+fn deliver_locked(state: &mut State, deliveries: Vec<(SessionId, String)>) {
     // Keep transitions, delivery, and failure cleanup under the same lock.
     // A concurrent response cannot observe aliases for a failed delivery.
     for delivery in deliveries {
-        let failed = match delivery {
-            Delivery::Send(session, line) => state
-                .sessions
-                .get(&session)
-                .map(|sender| sender.try_send(line).is_err())
-                .unwrap_or(true)
-                .then_some(session),
-        };
+        let (session, line) = delivery;
+        let failed = state
+            .sessions
+            .get(&session)
+            .is_none_or(|sender| sender.try_send(line).is_err())
+            .then_some(session);
         if let Some(session) = failed {
             remove_session_locked(state, session);
         }
@@ -564,12 +602,172 @@ fn close_session_state(state: &Weak<Mutex<State>>, session: SessionId) {
 
 fn remove_session_locked(state: &mut State, session: SessionId) {
     state.sessions.remove(&session);
-    state.conversations.disconnect(session);
+    state
+        .subscriptions
+        .retain(|_, (_, owner)| *owner != session);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_core::models::{Item, Thread, Turn};
+    use agent_core::session::TextField;
+    use serde_json::json;
+
+    fn open(router: &SessionRouter, id: &str, limit: usize) -> SessionRead {
+        router
+            .begin_session_read(OpenSession {
+                session: SessionRef::from_thread_id(id).unwrap(),
+                limit,
+            })
+            .unwrap()
+    }
+
+    fn turn(router: &SessionRouter, completed: bool) {
+        router.session_change(
+            "native",
+            SessionChange::Turn {
+                turn: Turn {
+                    id: "run".into(),
+                    ..Default::default()
+                },
+                completed,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn history_is_not_retained_or_trimmed_and_subscriptions_do_not_pin_execution() {
+        let router = SessionRouter::new();
+        let mut connection = router.open_session(16);
+        let mut turns: Vec<_> = (0..1001)
+            .map(|id| {
+                Arc::new(Turn {
+                    id: id.to_string(),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        turns[0] = Arc::new(
+            serde_json::from_value(json!({"id":"first","items":[{
+                "id":"answer","type":"agentMessage","text":"x".repeat(5 * 1024 * 1024)
+            }]}))
+            .unwrap(),
+        );
+        let response = ThreadResponse {
+            thread: Thread {
+                id: Some("native".into()),
+                turns: Some(turns),
+                ..Default::default()
+            },
+            model: None,
+            extra: Default::default(),
+        };
+        let request =
+            RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
+        router
+            .finish_session_read(
+                open(&router, "native", 1001),
+                connection.id(),
+                &request,
+                response,
+            )
+            .unwrap();
+        let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
+        assert_eq!(
+            reply["result"]["response"]["thread"]["turns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1001
+        );
+        assert_eq!(
+            reply["result"]["response"]["thread"]["turns"][0]["items"][0]["text"]
+                .as_str()
+                .unwrap()
+                .len(),
+            5 * 1024 * 1024
+        );
+        assert!(lock_state(&router.state).executions.is_empty());
+        turn(&router, false);
+        assert_eq!(lock_state(&router.state).executions.len(), 1);
+        turn(&router, true);
+        let state = lock_state(&router.state);
+        assert!(state.executions.is_empty());
+        assert_eq!(state.subscriptions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn completion_during_native_read_is_overlaid_before_live_updates() {
+        let router = SessionRouter::new();
+        let mut connection = router.open_session(16);
+        let read = open(&router, "native", 5);
+        turn(&router, false);
+        router.session_change(
+            "native",
+            SessionChange::Item {
+                turn_id: "run".into(),
+                item: Item {
+                    id: "answer".into(),
+                    kind: Some("agentMessage".into()),
+                    text: Some("start".into()),
+                    ..Default::default()
+                },
+            },
+        );
+        router.session_change(
+            "native",
+            SessionChange::Text {
+                turn_id: "run".into(),
+                item_id: "answer".into(),
+                field: TextField::Message,
+                delta: " final".into(),
+            },
+        );
+        turn(&router, true);
+        let request =
+            RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
+        router
+            .finish_session_read(
+                read,
+                connection.id(),
+                &request,
+                serde_json::from_value(json!({
+                    "thread":{"id":"native","turns":[{"id":"run","status":"inProgress","items":[]}]}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        // Background activity messages can precede the response; subscription updates cannot.
+        let reply = loop {
+            let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
+            assert_ne!(reply["method"], "host/session/update");
+            if reply["id"] == 1 {
+                break reply;
+            }
+        };
+        let current = &reply["result"]["response"]["thread"]["turns"][0];
+        assert_eq!(current["status"], "completed");
+        assert_eq!(current["items"][0]["text"], "start final");
+        assert!(lock_state(&router.state).executions.is_empty());
+    }
+
+    #[test]
+    fn duplicate_input_is_blocked_only_while_execution_is_in_flight() {
+        let router = SessionRouter::new();
+        let input = json!({"threadId":"native","clientUserMessageId":"send"});
+        router.begin_submission(&input).unwrap();
+        assert!(router.begin_submission(&input).is_err());
+        turn(&router, false);
+        assert!(router.begin_submission(&input).is_err());
+        turn(&router, true);
+        assert!(lock_state(&router.state).executions.is_empty());
+        // There is deliberately no completed receipt or time-based cache.
+        let target = router.begin_submission(&input).unwrap();
+        router.reject_submission(&target, "send");
+        assert!(lock_state(&router.state).executions.is_empty());
+    }
+
     #[tokio::test]
     async fn byte_budget_disconnects_only_the_slow_connection() {
         let router = SessionRouter::new();
@@ -605,7 +803,7 @@ mod tests {
                 .unwrap();
         }
         let notification = RpcMessage::parse(r#"{"method":"thread/status/changed","params":{"threadId":"native","status":{"type":"active"}}}"#).unwrap();
-        router.handle_server_message(ProviderKind::Codex, &notification);
+        crate::host_rpc::codex::event(&router, &notification).unwrap();
         assert!(router.ensure_session(slow.id()).is_err());
         assert!(router.ensure_session(healthy.id()).is_ok());
         let initial: Value = serde_json::from_str(&healthy.receiver.try_recv().unwrap()).unwrap();
@@ -621,16 +819,7 @@ mod tests {
             slow.receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
-        let mut read = router
-            .begin_session_read(OpenSession {
-                session: SessionRef::from_thread_id("native").unwrap(),
-                limit: 5,
-            })
-            .unwrap();
-        assert_eq!(
-            read.cached.take().unwrap().thread.status.unwrap().kind,
-            "active"
-        );
+        assert!(lock_state(&router.state).executions.is_empty());
     }
 
     #[test]
@@ -678,11 +867,22 @@ fn identical_native_request_ids_keep_their_provider_owner() {
         router
             .finish_session_read(read, connection.id(), &open, response)
             .unwrap();
+        router.session_change(
+            thread,
+            SessionChange::Turn {
+                turn: agent_core::models::Turn {
+                    id: "turn".into(),
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        );
         let line = serde_json::json!({"id":native,"method":"item/commandExecution/requestApproval",
                 "params":{"threadId":thread,"turnId":"turn","availableDecisions":["accept","decline"]}}).to_string();
-        router.handle_server_message(target.provider, &RpcMessage::parse(&line).unwrap());
+        router
+            .request(target.provider, serde_json::from_str(&line).unwrap())
+            .unwrap();
         let (_, request) = lock_state(&router.state)
-            .conversations
             .pending_native(target.provider, &native)
             .unwrap();
         ids.push(request.id.to_string());
@@ -694,24 +894,22 @@ fn identical_native_request_ids_keep_their_provider_owner() {
                     &serde_json::json!({"decision":"accept"})
                 )
                 .unwrap(),
-            ResponseRoute::Forward {
-                provider: target.provider,
-                id: native.to_string()
-            }
+            (target.provider, native.clone())
         );
     }
     let not_a_notification =
         serde_json::json!({"id":1,"method":"serverRequest/resolved","params":{"requestId":native}})
             .to_string();
-    router.handle_server_message(
-        ProviderKind::Codex,
-        &RpcMessage::parse(&not_a_notification).unwrap(),
+    // The Codex adapter never treats a request-shaped message as resolution.
+    assert!(
+        crate::host_rpc::codex::event(&router, &RpcMessage::parse(&not_a_notification).unwrap())
+            .is_err()
     );
     assert!(router.request_session(&ids[0]).is_some());
     let resolved =
         serde_json::json!({"method":"serverRequest/resolved","params":{"requestId":native}})
             .to_string();
-    router.handle_server_message(ProviderKind::Codex, &RpcMessage::parse(&resolved).unwrap());
+    crate::host_rpc::codex::event(&router, &RpcMessage::parse(&resolved).unwrap()).unwrap();
     assert!(router.request_session(&ids[0]).is_none());
     assert_eq!(
         router.request_session(&ids[1]).unwrap().provider,

@@ -45,30 +45,14 @@ pub(super) fn notification(
                 );
             }
         };
-        let Some((id, (_, revision))) = previous
+        let Some((id, _)) = previous
             .subscriptions
             .iter()
-            .find(|(_, (subscription, _))| *subscription == update.subscription_id)
+            .find(|(_, subscription)| **subscription == update.subscription_id)
         else {
             return (previous.clone(), Vec::new());
         };
-        if update.revision <= *revision {
-            return (previous.clone(), Vec::new());
-        }
         let mut next = previous.clone();
-        if update.revision != revision + 1 {
-            Arc::make_mut(&mut next.subscriptions).remove(id);
-            next.error = Some("会話の更新が途切れたため、現在状態を再取得しています。".into());
-            return (
-                next,
-                vec![
-                    Effect::execute(op::CloseSubscription {
-                        subscription_id: update.subscription_id.to_string(),
-                    }),
-                    Effect::execute(op::ReadThread::new(id.clone())),
-                ],
-            );
-        }
         let Some(current) = previous.conversations.get(id) else {
             return (next, Vec::new());
         };
@@ -122,8 +106,6 @@ pub(super) fn notification(
         let refresh_workspace = (completed || matches!(update.change, SessionChange::Item { .. }))
             && current.cwd.as_deref() == Some(&next.navigation.cwd);
         Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
-        Arc::make_mut(&mut next.subscriptions)
-            .insert(id.clone(), (update.subscription_id, update.revision));
         project_requests(&mut next);
         reconcile_pending(&mut next, id);
         let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if item.kind.as_deref() == Some("userMessage") || (item.kind.as_deref() == Some("commandExecution") && item.status.as_deref() == Some("completed")));
@@ -140,7 +122,7 @@ pub(super) fn notification(
                 .get(id)
                 .is_none_or(|thread| thread.requests.is_empty())
             && next.navigation.thread_id.as_ref() != Some(id)
-            && let Some((subscription, _)) = Arc::make_mut(&mut next.subscriptions).remove(id)
+            && let Some(subscription) = Arc::make_mut(&mut next.subscriptions).remove(id)
         {
             effects.push(Effect::execute(op::CloseSubscription {
                 subscription_id: subscription.to_string(),

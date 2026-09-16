@@ -10,11 +10,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 // Recorded provider events are adapted at the Host boundary before reaching
 // the Store. The separate session tests exercise wire subscription identities.
-#[path = "../../host-daemon/src/host_rpc/provider_events.rs"]
-mod provider_events;
+#[path = "support/provider_fixture.rs"]
+mod provider_fixture;
 fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     if let Event::Notification { method, params } = &event
-        && let Ok(Some((id, change))) = provider_events::notification_change(method, params.clone())
+        && let Ok(Some((id, change))) =
+            provider_fixture::notification_change(method, params.clone())
     {
         if !previous.conversations.contains_key(&id) {
             let active = match &change {
@@ -32,12 +33,12 @@ fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         }
         let mut source = previous.clone();
         let subscription = uuid::Uuid::nil();
-        Arc::make_mut(&mut source.subscriptions).insert(id.clone(), (subscription, 0));
+        Arc::make_mut(&mut source.subscriptions).insert(id.clone(), subscription);
         let (mut next, effects) = agent_core::state::reduce(
             &source,
             Event::Notification {
                 method: "host/session/update".into(),
-                params: json!({"subscriptionId":subscription,"revision":1,"change":change}),
+                params: json!({"subscriptionId":subscription,"change":change}),
             },
         );
         next.subscriptions = previous.subscriptions.clone();
@@ -70,7 +71,6 @@ fn reply(thread: Thread) -> agent_core::session::OpenedSession {
         session: agent_core::session::SessionRef::from_thread_id(thread.id.as_deref().unwrap())
             .unwrap(),
         subscription_id: uuid::Uuid::nil(),
-        revision: 0,
         response: ThreadResponse {
             thread,
             model: None,
@@ -200,7 +200,10 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
                     client_user_message_id: "client".into(),
                     draft: Arc::default(),
                 }
-                .apply(&mut finished, Some("turn".into()));
+                .apply(
+                    &mut finished,
+                    op::SubmissionProgress::Sent(Some("turn".into())),
+                );
             }
             if index == 0 {
                 assert_eq!(finished.pending_submissions.len(), 1);

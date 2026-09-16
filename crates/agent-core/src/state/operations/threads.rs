@@ -135,6 +135,26 @@ impl ReadThread {
             limit: 5,
         }
     }
+    pub(super) fn with_history(mut self, thread: Option<&Thread>) -> Self {
+        if let Some(thread) = thread {
+            let requested = thread
+                .extra
+                .get("historyLimit")
+                .and_then(Value::as_u64)
+                .unwrap_or(5);
+            self.limit = self
+                .limit
+                .max(u32::try_from(requested).unwrap_or(u32::MAX))
+                .max(
+                    thread
+                        .turns
+                        .as_ref()
+                        .map_or(0, |turns| u32::try_from(turns.len()).unwrap_or(u32::MAX)),
+                );
+        }
+        self.limit = self.limit.max(5);
+        self
+    }
     pub fn open(thread_id: String) -> Self {
         Self {
             open: true,
@@ -167,23 +187,9 @@ impl Operation for ReadThread {
         self.open
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        self.limit = self
-            .limit
-            .max(
-                snapshot
-                    .conversations
-                    .get(&self.thread_id)
-                    .map_or(5, |thread| {
-                        let requested = thread
-                            .extra
-                            .get("historyLimit")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(5)
-                            .min(1000) as u32;
-                        requested.max(thread.turns.as_ref().map_or(0, |turns| turns.len() as u32))
-                    }),
-            )
-            .max(5);
+        *self = self
+            .clone()
+            .with_history(snapshot.conversations.get(&self.thread_id).map(Arc::as_ref));
         if self.open {
             let cwd = snapshot
                 .conversations
@@ -223,8 +229,8 @@ impl Operation for ReadThread {
         } else {
             refresh_thread(snapshot, output.response.thread)
         };
-        if let Some((old, _)) = Arc::make_mut(&mut snapshot.subscriptions)
-            .insert(self.thread_id, (output.subscription_id, output.revision))
+        if let Some(old) = Arc::make_mut(&mut snapshot.subscriptions)
+            .insert(self.thread_id, output.subscription_id)
         {
             effects.push(Effect::execute(CloseSubscription {
                 subscription_id: old.to_string(),
@@ -460,10 +466,9 @@ impl Operation for OpenRequest {
     const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let session = context.client.call(self).await?.value;
-        let mut open = ReadThread::new(session.thread_id());
-        let mut snapshot = context.snapshot.clone();
-        open.prepare(&mut snapshot)
-            .map_err(PeerError::InvalidMessage)?;
+        let id = session.thread_id();
+        let open = ReadThread::new(id.clone())
+            .with_history(context.snapshot.conversations.get(&id).map(Arc::as_ref));
         context.call(&open).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {

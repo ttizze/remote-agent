@@ -235,7 +235,6 @@ impl Claude {
         };
         self.retain_record(id, Arc::new(AsyncMutex::new(record)))
             .await?;
-        self.router.created_session(response.clone());
         Ok(response)
     }
 
@@ -328,19 +327,21 @@ impl Claude {
         let records: Vec<_> = self.records.lock().await.values().cloned().collect();
         for record in records {
             let record = record.lock().await;
-            let id = format!("claude:{}", record.session_id);
-            let Some(mut thread) = self
-                .router
-                .current_session(&id)
-                .map(|response| response.thread)
-            else {
-                continue;
-            };
-            thread.turns = None;
-            if let Some(current) = threads.iter_mut().find(|current| current.id == thread.id) {
-                *current = thread;
-            } else if record.running.is_some() {
-                threads.push(thread);
+            if record.running.is_some() {
+                let id = format!("claude:{}", record.session_id);
+                if let Some(thread) = threads
+                    .iter_mut()
+                    .find(|thread| thread.id.as_deref() == Some(&id))
+                {
+                    thread.status = Some(status("active"));
+                } else {
+                    threads.push(Thread {
+                        id: Some(id),
+                        cwd: Some(record.cwd.clone()),
+                        status: Some(status("active")),
+                        ..Default::default()
+                    });
+                }
             }
         }
         let search = search.trim().to_lowercase();
@@ -367,16 +368,15 @@ impl Claude {
         Ok(threads)
     }
 
-    /// Read native history; cache selection belongs to SessionRuntime.
+    /// Read native history on each open; the router overlays only owned execution.
     pub(crate) async fn read(&self, id: &str, requested: usize) -> Result<ThreadResponse, String> {
-        let current = self.router.current_session(id);
         let native = Uuid::parse_str(
             id.strip_prefix(MODEL_PREFIX)
                 .ok_or("invalid Claude session ID")?,
         )
         .map_err(|e| e.to_string())?;
         let home = self.native_home.clone();
-        let native: Result<ThreadResponse, String> = tokio::task::spawn_blocking(move || {
+        let history: Result<ThreadResponse, String> = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
             match history::read(&path, requested) {
                 Ok(response) => Ok(response),
@@ -384,7 +384,7 @@ impl Claude {
                     let mut thread = history::summary(&path)?;
                     thread.extra.insert(
                         "historyReadState".into(),
-                        json!({"type":"unavailable","issues":[error]}),
+                        json!({"type":"unavailable", "issues":[error]}),
                     );
                     Ok(ThreadResponse {
                         thread,
@@ -396,118 +396,94 @@ impl Claude {
         })
         .await
         .map_err(|e| e.to_string())?;
-        Ok(match native {
-            Ok(mut response) => {
-                if let Some(current) = &current {
-                    for turn in current
-                        .thread
-                        .turns
-                        .iter()
-                        .flatten()
-                        .filter(|turn| turn.status.as_deref() == Some("inProgress"))
-                    {
-                        response.thread = agent_core::session::SessionChange::Turn {
-                            turn: (**turn).clone(),
-                            completed: false,
-                        }
-                        .apply(&response.thread)
-                        .map_err(str::to_owned)?;
-                    }
+        match history {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                // A newly created execution can precede its first native write.
+                // Only execution metadata lives here; the router overlays live output.
+                let records = self.records.lock().await;
+                let record = records.get(id).ok_or(error.clone())?.lock().await;
+                let mut thread = Thread {
+                    id: Some(id.into()),
+                    cwd: Some(record.cwd.clone()),
+                    ..Default::default()
+                };
+                if record.resumable {
+                    thread.extra.insert(
+                        "historyReadState".into(),
+                        json!({"type":"unavailable", "issues":[error]}),
+                    );
+                } else {
+                    thread.turns = Some(Vec::new());
                 }
-                response
-            }
-            Err(error) => current
-                .clone()
-                .filter(|response| {
-                    response
-                        .thread
-                        .turns
-                        .iter()
-                        .flatten()
-                        .any(|turn| turn.status.as_deref() == Some("inProgress"))
+                Ok(ThreadResponse {
+                    thread,
+                    model: Some(record.model.clone()),
+                    extra: Default::default(),
                 })
-                .ok_or(error)?,
-        })
+            }
+        }
     }
 
     pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = params["threadId"].as_str().ok_or("threadId is required")?;
-        if matches!(
-            method,
-            "thread/resume" | "host/thread/resume" | "host/thread/item/read"
-        ) {
-            let requested = params["historyLimit"].as_u64().unwrap_or(1000) as usize;
-            let mut response = self.read(id, requested).await?;
-            if method == "host/thread/item/read" {
-                let item = response
-                    .thread
-                    .turns
-                    .iter()
-                    .flatten()
-                    .find(|turn| Some(turn.id.as_str()) == params["turnId"].as_str())
-                    .and_then(|turn| turn.items.as_ref())
-                    .into_iter()
-                    .flatten()
-                    .find(|item| Some(item.id.as_str()) == params["itemId"].as_str())
-                    .ok_or("Claude native history item is unavailable")?;
-                let mut item = (**item).clone();
-                if item.extra.get("detailDeferred") == Some(&Value::Bool(true)) {
-                    return Err(
-                        "full native item is not yet available; retry after provider persistence"
-                            .into(),
-                    );
-                }
-                if let Some(path) = item.extra.get("detailFile").and_then(Value::as_str) {
-                    use tokio::io::AsyncReadExt;
-                    let file = tokio::fs::File::open(path)
-                        .await
-                        .map_err(|error| format!("native tool output is unavailable: {error}"))?;
-                    let mut bytes = Vec::new();
-                    file.take(4 * 1024 * 1024 + 1)
-                        .read_to_end(&mut bytes)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    if bytes.len() > 4 * 1024 * 1024 {
-                        return Err("native tool output exceeds detail byte limit".into());
-                    }
-                    item.result = Some(Value::String(
-                        String::from_utf8(bytes).map_err(|_| "native tool output is not UTF-8")?,
-                    ));
-                }
-                if let Some(agent_id) = item.extra.get("agentId").and_then(Value::as_str) {
-                    let home = self.native_home.clone();
-                    let session_id =
-                        Uuid::parse_str(id.strip_prefix(MODEL_PREFIX).ok_or("invalid Claude ID")?)
-                            .map_err(|_| "invalid Claude ID")?;
-                    let agent_id = agent_id.to_owned();
-                    let related = tokio::task::spawn_blocking(move || {
-                        history::read_related(&home, session_id, &agent_id, 1000)
-                    })
+        if matches!(method, "thread/resume" | "host/thread/resume") {
+            self.record(id).await?;
+            return Ok(json!({}));
+        }
+        if method == "host/thread/item/read" {
+            let requested = params["historyLimit"]
+                .as_u64()
+                .map_or(usize::MAX, |limit| limit as usize);
+            let response = self.read(id, requested).await?;
+            let item = response
+                .thread
+                .turns
+                .iter()
+                .flatten()
+                .find(|turn| Some(turn.id.as_str()) == params["turnId"].as_str())
+                .and_then(|turn| turn.items.as_ref())
+                .into_iter()
+                .flatten()
+                .find(|item| Some(item.id.as_str()) == params["itemId"].as_str())
+                .ok_or("Claude native history item is unavailable")?;
+            let mut item = (**item).clone();
+            if let Some(path) = item.extra.get("detailFile").and_then(Value::as_str) {
+                use tokio::io::AsyncReadExt;
+                let file = tokio::fs::File::open(path)
                     .await
                     .map_err(|error| error.to_string())?;
-                    item.result = Some(match related {
-                        Ok(response) => json!({"output":item.result,"subagent":response.thread}),
-                        Err(error) => {
-                            json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":error}})
-                        }
-                    });
+                let mut bytes = Vec::new();
+                file.take(history::MAX_FILE_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if bytes.len() as u64 > history::MAX_FILE_BYTES {
+                    return Err("native output exceeds parser read budget".into());
                 }
-                if serde_json::to_vec(&item)
-                    .map_err(|error| error.to_string())?
-                    .len()
-                    > 4 * 1024 * 1024
-                {
-                    return Err("native item exceeds detail byte limit".into());
-                }
-                return Ok(json!({"item": item}));
+                item.result = Some(Value::String(
+                    String::from_utf8(bytes).map_err(|error| error.to_string())?,
+                ));
             }
-            if params["includeTurns"] == false {
-                response.thread.turns = None;
+            if let Some(agent_id) = item.extra.get("agentId").and_then(Value::as_str) {
+                let home = self.native_home.clone();
+                let session_id =
+                    Uuid::parse_str(id.strip_prefix(MODEL_PREFIX).ok_or("invalid Claude ID")?)
+                        .map_err(|_| "invalid Claude ID")?;
+                let agent_id = agent_id.to_owned();
+                let related = tokio::task::spawn_blocking(move || {
+                    history::read_related(&home, session_id, &agent_id, usize::MAX)
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+                item.result = Some(match related {
+                    Ok(response) => json!({"output":item.result,"subagent":response.thread}),
+                    Err(error) => {
+                        json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":error}})
+                    }
+                });
             }
-            if params["deferItemDetails"] == true {
-                response.thread.defer_item_details();
-            }
-            return serde_json::to_value(response).map_err(|e| e.to_string());
+            return Ok(json!({"item": item}));
         }
         let record = self.record(id).await?;
         match method {
@@ -762,16 +738,6 @@ struct Worker {
 }
 
 impl Worker {
-    fn current_turn(&self) -> Option<Turn> {
-        self.router
-            .current_session(&self.thread_id)?
-            .thread
-            .turns?
-            .iter()
-            .rfind(|turn| turn.id == self.turn_id)
-            .map(|turn| (**turn).clone())
-    }
-
     async fn run(mut self, mut process: Process, mut input: mpsc::Receiver<Command>) {
         let mut interrupted = false;
         let outcome = async {
@@ -841,7 +807,7 @@ impl Worker {
                 .resolve_native_request(ProviderKind::Claude, &id.into());
         }
         let mut record = self.record.lock().await;
-        let Some(mut turn) = self.current_turn() else {
+        let Some(mut turn) = self.router.current_turn(&self.thread_id, &self.turn_id) else {
             record.running = None;
             drop(record);
             if let Some(process) = retained {
@@ -963,11 +929,8 @@ impl Worker {
                 _ => "claude/tool/requestApproval",
             }
         };
-        let line = json!({"id":id,"method":method,"params":params}).to_string();
-        let message = RpcMessage::parse(&line).map_err(|error| error.to_string())?;
-        self.router.request_admission(&message)?;
         self.pending.lock().unwrap().insert(
-            id,
+            id.clone(),
             Pending {
                 thread_id: self.thread_id.clone(),
                 request_id: request_id.into(),
@@ -975,9 +938,19 @@ impl Worker {
                 sender: self.input.clone(),
             },
         );
-        self.router
-            .handle_server_message(agent_core::session::ProviderKind::Claude, &message);
-        Ok(())
+        let result = self.router.request(
+            ProviderKind::Claude,
+            agent_core::client::ServerRequest {
+                id: id.clone().into(),
+                method: method.into(),
+                params: serde_json::from_value(params).map_err(|error| error.to_string())?,
+                extra: Default::default(),
+            },
+        );
+        if result.is_err() {
+            self.pending.lock().unwrap().remove(&id);
+        }
+        result
     }
 
     fn approval_id(&self, request_id: &str) -> String {
@@ -1009,7 +982,8 @@ impl Worker {
         let message_id = message["message"]["id"].as_str();
         drop(record);
         let mut turn = self
-            .current_turn()
+            .router
+            .current_turn(&self.thread_id, &self.turn_id)
             .ok_or("Claude execution state is unavailable")?;
         let items = turn.items.get_or_insert_default();
         for (index, block) in blocks.iter().enumerate() {
