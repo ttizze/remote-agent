@@ -478,11 +478,10 @@ impl Desktop {
                 },
             ));
         }
-        let running = self.active_turn();
+        let running = self.thread().and_then(|thread| thread.active_turn_id());
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
         let phase = self.dictation.as_ref().map(|d| d.phase);
-        let send = if let Some(turn) = running.filter(|_| empty) {
-            let id = turn.id.clone();
+        let send = if let Some(id) = running.filter(|_| empty) {
             self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
                 s.dispatch(Intent::Interrupt(op::Interrupt {
                     thread_id: s.selected().into(),

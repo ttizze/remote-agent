@@ -6,15 +6,6 @@ struct ConversationPresentation: Sendable {
     let id: String
     let title: String
     let rows: [ThreadConversationRow]
-    var runningTurnId: String? {
-        for row in rows.reversed() {
-            if case let .native(native, _) = row.content, case let .inProgress(turnId) = native.content {
-                return turnId
-            }
-        }
-        return nil
-    }
-
     private struct CachedTurn: Sendable {
         let source: RenderedTurn
         let rows: [ThreadConversationRow]

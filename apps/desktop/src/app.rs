@@ -278,8 +278,8 @@ impl Desktop {
                                 OperationCompletion::AccountLoginStatus,
                             );
                         }
-                        if let Some(turn) = view.active_turn() {
-                            view.remeasure_item(&turn.id);
+                        if let Some(id) = view.thread().and_then(|thread| thread.active_turn_id()) {
+                            view.remeasure_item(&id);
                             cx.notify();
                         }
                     })
@@ -1075,15 +1075,6 @@ impl Desktop {
             .models
             .iter()
             .find(|model| Some(model.model.as_str()) == self.draft().model.as_deref())
-    }
-    fn active_turn(&self) -> Option<&Turn> {
-        self.thread()?
-            .turns
-            .as_ref()?
-            .iter()
-            .rev()
-            .find(|turn| turn.status.as_deref() == Some("inProgress"))
-            .map(Arc::as_ref)
     }
     fn remote_key(&self) -> &str {
         self.remote.as_ref().map_or("local", |remote| &remote.id)

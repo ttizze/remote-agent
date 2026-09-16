@@ -276,6 +276,18 @@ impl ItemChanges {
     }
 }
 
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl Thread {
+    pub fn active_turn_id(&self) -> Option<String> {
+        self.turns
+            .as_ref()?
+            .iter()
+            .rev()
+            .find(|turn| turn.status.as_deref() == Some("inProgress"))
+            .map(|turn| turn.id.clone())
+    }
+}
+
 impl Thread {
     /// Keep RPC snapshots small; item reads recover every deferred body.
     pub fn defer_item_details(&mut self, max_inline_bytes: usize) {
