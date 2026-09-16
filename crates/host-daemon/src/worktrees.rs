@@ -248,31 +248,46 @@ impl Worktrees {
 /// Inspect each visible execution directory once per list request. Git state must
 /// not share the project settings cache: main can move without settings changing.
 pub(crate) async fn merged_directories(directories: HashSet<String>) -> Result<HashSet<String>> {
-    tokio::task::spawn_blocking(move || {
-        directories
-            .into_iter()
-            .filter(|cwd| merged_into_main(Path::new(cwd)).unwrap_or(false))
-            .collect()
-    })
-    .await
-    .map_err(Into::into)
+    use futures_util::{StreamExt, TryStreamExt};
+    // Bound process fan-out while avoiding a serial Git round trip for every
+    // visible conversation. Recompute on every request so new commits stay fresh.
+    let results: Vec<_> = futures_util::stream::iter(directories)
+        .map(|cwd| async move {
+            tokio::task::spawn_blocking(move || {
+                merged_into_main(Path::new(&cwd))
+                    .unwrap_or(false)
+                    .then_some(cwd)
+            })
+            .await
+        })
+        .buffer_unordered(4)
+        .try_collect()
+        .await?;
+    Ok(results.into_iter().flatten().collect())
 }
 
 fn merged_into_main(cwd: &Path) -> Result<bool> {
-    let git_dir = crate::git::text(cwd, &["rev-parse", "--absolute-git-dir"])?;
-    let common_dir = crate::git::text(
+    let identity = crate::git::text(
         cwd,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        &[
+            "rev-parse",
+            "--absolute-git-dir",
+            "--path-format=absolute",
+            "--git-common-dir",
+            "HEAD",
+            "--symbolic-full-name",
+            "HEAD",
+        ],
     )?;
-    if git_dir.trim() == common_dir.trim() {
+    let mut fields = identity.lines();
+    let (Some(git_dir), Some(common_dir), Some(head), Some(branch)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Ok(false);
+    };
+    if git_dir == common_dir || branch == "refs/heads/main" || !branch.starts_with("refs/heads/") {
         return Ok(false);
     }
-    let branch = crate::git::text(cwd, &["symbolic-ref", "--quiet", "HEAD"])?;
-    let branch = branch.trim();
-    if branch == "refs/heads/main" {
-        return Ok(false);
-    }
-    let head = crate::git::text(cwd, &["rev-parse", "--verify", branch])?;
     let history = crate::git::text(cwd, &["reflog", "show", "--format=%H", branch])?;
     let contained = crate::git::output(
         cwd,
