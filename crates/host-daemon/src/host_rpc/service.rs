@@ -338,7 +338,6 @@ impl HostRpcService {
                     .await
                     .map_err(|error| error.to_string())?,
             };
-            response.thread.defer_item_details();
             self.inner
                 .desktop_projects
                 .enrich_threads(std::slice::from_mut(&mut response.thread))
@@ -387,6 +386,58 @@ impl HostRpcService {
         Ok(())
     }
 
+    async fn read_item(
+        &self,
+        session: SessionId,
+        params: op::ReadItem,
+    ) -> Result<agent_core::client::ItemResponse, Failure> {
+        let live = self
+            .inner
+            .router
+            .current_turn(&params.thread_id, &params.turn_id)
+            .and_then(|turn| {
+                turn.items?
+                    .into_iter()
+                    .find(|item| item.id == params.item_id)
+            });
+        let mut response = if let Some(item) = live {
+            agent_core::client::ItemResponse {
+                item: Arc::unwrap_or_clone(item),
+                transfer: None,
+                extra: Default::default(),
+            }
+        } else if params.thread_id.starts_with("claude:") {
+            let claude = self
+                .inner
+                .claude
+                .get()
+                .ok_or_else(|| Failure::new("claude_unavailable", "Claude is unavailable"))?;
+            let value = claude
+                .request(
+                    "host/thread/item/read",
+                    serde_json::to_value(&params).expect("item request serializes"),
+                )
+                .await
+                .map_err(|error| Failure::new("item_read_failed", error))?;
+            serde_json::from_value(value)
+                .map_err(|error| Failure::new("item_read_failed", error))?
+        } else {
+            self.inner.codex.item_read(params).await?
+        };
+        let bytes = serde_json::to_vec(&response.item).expect("item serializes");
+        if bytes.len() > agent_core::models::MAX_INLINE_ITEM_BYTES {
+            response.transfer = Some(
+                self.inner
+                    .files
+                    .download_bytes(session, bytes)
+                    .await
+                    .map_err(|error| Failure::new("item_transfer_failed", error))?,
+            );
+            response.item.retain_header();
+        }
+        Ok(response)
+    }
+
     async fn request(
         &self,
         session: SessionId,
@@ -394,6 +445,9 @@ impl HostRpcService {
     ) -> Result<String, RpcMessageError> {
         let line = request.line();
         let method = request.method().expect("classified request has a method");
+        if method == "host/thread/item/read" {
+            return request.response(self.read_item(session, request.params()?).await);
+        }
         if matches!(
             method,
             "host/thread/read"
@@ -639,9 +693,6 @@ impl HostRpcService {
                 HOST_THREAD_LIST_METHOD => {
                     let params: op::ListThreads = request.params()?;
                     request.response(self.host_title_list(params.query).await)?
-                }
-                "host/thread/item/read" => {
-                    request.response(self.inner.codex.item_read(request.params()?).await)?
                 }
                 "host/worktree/settings/read" | "host/worktree/settings/update" => {
                     let update = if method.ends_with("/update") {

@@ -10,6 +10,71 @@ fn conversation() -> Thread {
 }
 
 #[test]
+fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
+    use agent_core::{
+        session::OpenedSession,
+        state::{
+            Event, Snapshot,
+            operations::{Operation, ReadThread},
+            reduce,
+        },
+    };
+    let cached: Thread = serde_json::from_value(json!({"id":"native","turns":[
+        {"id":"A","status":"completed","items":[{"id":"past","type":"agentMessage","text":"cached history"}]},
+        {"id":"stale","status":"inProgress"}
+    ]})).unwrap();
+    let mut snapshot = Snapshot::default();
+    Arc::make_mut(&mut snapshot.conversations).insert("native".into(), Arc::new(cached));
+    let subscription = uuid::Uuid::new_v4();
+    let response = serde_json::from_value(json!({"thread":{
+        "id":"native", "status":{"type":"active"}, "historyReadState":{"type":"unavailable"},
+        "turns":[{"id":"B","status":"inProgress","items":[{"id":"latest","type":"agentMessage","text":"live"}]}],
+        "requests":{"approval":{"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"native","turnId":"B"}}}
+    }})).unwrap();
+    ReadThread::new("native".into()).apply(
+        &mut snapshot,
+        OpenedSession {
+            session: SessionRef::from_thread_id("native").unwrap(),
+            subscription_id: subscription,
+            response,
+        },
+    );
+    let change = SessionChange::Text {
+        turn_id: "B".into(),
+        item_id: "latest".into(),
+        field: TextField::Message,
+        delta: " updated".into(),
+    };
+    let (snapshot, _) = reduce(
+        &snapshot,
+        Event::Notification {
+            method: "host/session/update".into(),
+            params: json!({"subscriptionId":subscription,"change":change}),
+        },
+    );
+    let thread = &snapshot.conversations["native"];
+    let turns = thread.turns.as_ref().unwrap();
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| turn.id.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "B"]
+    );
+    assert_eq!(
+        turns[0].items.as_ref().unwrap()[0].text.as_deref(),
+        Some("cached history")
+    );
+    assert_eq!(
+        turns[1].items.as_ref().unwrap()[0].text.as_deref(),
+        Some("live updated")
+    );
+    assert_eq!(thread.status.as_ref().unwrap().kind, "active");
+    assert!(thread.requests.contains_key("approval"));
+    assert!(snapshot.requests.contains_key("approval"));
+}
+
+#[test]
 fn provider_identity_keeps_the_complete_native_id() {
     let claude = SessionRef::from_thread_id("claude:01234567-89ab-cdef-0123-456789abcdef").unwrap();
     assert_eq!(claude.provider, ProviderKind::Claude);
@@ -177,7 +242,7 @@ fn late_completion_does_not_make_a_newer_execution_idle() {
 }
 
 #[test]
-fn native_images_remain_complete_without_the_removed_snapshot_budget() {
+fn large_images_are_deferred_without_truncating_base64_or_mutating_native_data() {
     let path = format!("/native/{}/image.png", "a".repeat(300));
     let item: Item = serde_json::from_value(json!({"id":"image","type":"imageGeneration","savedPath":path,"result":"a".repeat(5 * 1024 * 1024)})).unwrap();
     let mut thread = Thread {
@@ -188,14 +253,16 @@ fn native_images_remain_complete_without_the_removed_snapshot_budget() {
         })]),
         ..Default::default()
     };
-    thread.defer_item_details();
+    thread.defer_item_details(agent_core::models::MAX_INLINE_ITEM_BYTES);
+    let turn = &thread.turns.as_ref().unwrap()[0];
     assert_eq!(
-        thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].as_ref(),
-        &item
+        turn.deferred_item_ids.as_deref(),
+        Some(["image".into()].as_slice())
     );
-    assert!(
-        thread.turns.as_ref().unwrap()[0]
-            .deferred_item_ids
-            .is_none()
+    assert_eq!(turn.items.as_ref().unwrap()[0].result, None);
+    assert_eq!(turn.items.as_ref().unwrap()[0].saved_path, item.saved_path);
+    assert_eq!(
+        item.result.as_ref().unwrap().as_str().unwrap().len(),
+        5 * 1024 * 1024
     );
 }

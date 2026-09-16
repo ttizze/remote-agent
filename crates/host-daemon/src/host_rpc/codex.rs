@@ -405,6 +405,7 @@ impl Codex {
             }) {
                 return Ok(agent_core::client::ItemResponse {
                     item: Arc::unwrap_or_clone(entry.item),
+                    transfer: None,
                     extra: Default::default(),
                 });
             }

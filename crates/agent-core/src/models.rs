@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
+pub const MAX_INLINE_ITEM_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -243,19 +245,24 @@ impl ItemChanges {
 }
 
 impl Thread {
-    /// Keep visible messages and generated images complete; mark large activity
-    /// bodies for explicit item reads without copying their serialized output.
-    pub fn defer_item_details(&mut self) {
+    /// Keep RPC snapshots small; item reads recover every deferred body.
+    pub fn defer_item_details(&mut self, max_inline_bytes: usize) {
         for turn in self.turns.iter_mut().flatten() {
             let turn = Arc::make_mut(turn);
             let mut deferred = Vec::new();
             for item in turn.items.iter_mut().flatten() {
                 if item.id.is_empty()
-                    || matches!(
-                        item.kind.as_deref(),
-                        Some("userMessage" | "agentMessage" | "imageGeneration")
+                    || fits_inline(
+                        item,
+                        if matches!(
+                            item.kind.as_deref(),
+                            Some("userMessage" | "agentMessage" | "imageGeneration")
+                        ) {
+                            max_inline_bytes
+                        } else {
+                            4096.min(max_inline_bytes)
+                        },
                     )
-                    || fits_inline(item)
                 {
                     continue;
                 }
@@ -264,13 +271,23 @@ impl Thread {
                 item.retain_header();
             }
             if !deferred.is_empty() {
-                turn.deferred_item_ids = Some(deferred);
+                let ids = turn.deferred_item_ids.get_or_insert_default();
+                for id in deferred {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            if let Some(item) = &mut turn.opening_user_message
+                && !fits_inline(item, max_inline_bytes)
+            {
+                Arc::make_mut(item).retain_header();
             }
         }
     }
 }
 impl Item {
-    fn retain_header(&mut self) {
+    pub fn retain_header(&mut self) {
         for text in [
             &mut self.text,
             &mut self.command,
@@ -280,6 +297,9 @@ impl Item {
         .flatten()
         {
             truncate_detail(text);
+        }
+        if self.kind.as_deref() == Some("imageGeneration") {
+            self.result = None;
         }
         if let Some(result) = &mut self.result
             && !retain_scalar(result)
@@ -307,7 +327,7 @@ impl Item {
 }
 
 // Stop counting when the budget is exceeded; never allocate another large body.
-fn fits_inline(value: &impl Serialize) -> bool {
+fn fits_inline(value: &impl Serialize, limit: usize) -> bool {
     struct Budget(usize);
     impl std::io::Write for Budget {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -321,7 +341,7 @@ fn fits_inline(value: &impl Serialize) -> bool {
             Ok(())
         }
     }
-    serde_json::to_writer(Budget(4096), value).is_ok()
+    serde_json::to_writer(Budget(limit), value).is_ok()
 }
 fn truncate_detail(text: &mut String) {
     let mut end = text.len().min(256);
@@ -565,7 +585,7 @@ mod tests {
             {"id":"small","type":"reasoning","summary":["short"]}
         ]}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
-        typed.thread.defer_item_details();
+        typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
         let result = serde_json::to_value(typed).unwrap();
         let turn = &result["thread"]["turns"][0];
         let items = &turn["items"];
@@ -589,7 +609,7 @@ mod tests {
             "result":"A".repeat(8192),"savedPath":format!("/{} image.png", "directory/".repeat(40))});
         let result = json!({"thread":{"turns":[{"id":"turn","items":[image]}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
-        typed.thread.defer_item_details();
+        typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
         let result = serde_json::to_value(typed).unwrap();
         assert_eq!(result["thread"]["turns"][0]["items"][0], image);
         assert!(result["thread"]["turns"][0]["deferredItemIds"].is_null());

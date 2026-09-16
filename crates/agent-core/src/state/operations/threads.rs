@@ -103,7 +103,10 @@ impl rpc::RpcMethod for ReadItem {
 }
 
 impl Operation for ReadItem {
-    rpc_operation!();
+    type Output = rpc::ItemResponse;
+    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        context.call(self).await?.resolve(context.session).await
+    }
     const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let Self {
@@ -222,13 +225,57 @@ impl Operation for ReadThread {
             .is_some_and(|state| state["type"] == "unavailable")
             && let Some(cached) = snapshot.conversations.get(&self.thread_id)
         {
-            output.response.thread.turns = cached.turns.clone();
+            let live = output.response.thread.turns.get_or_insert_default();
+            let mut turns: Vec<_> = cached
+                .turns
+                .iter()
+                .flatten()
+                .filter(|turn| turn.status.as_deref() != Some("inProgress"))
+                .cloned()
+                .collect();
+            for current in live.drain(..) {
+                if let Some(index) = turns.iter().rposition(|turn| turn.id == current.id) {
+                    turns[index] = current;
+                } else {
+                    turns.push(current);
+                }
+            }
+            *live = turns;
         }
+        let mut details: Vec<_> = output
+            .response
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .flat_map(|turn| {
+                turn.items
+                    .iter()
+                    .flatten()
+                    .filter(|item| {
+                        matches!(
+                            item.kind.as_deref(),
+                            Some("userMessage" | "agentMessage" | "imageGeneration")
+                        ) && turn
+                            .deferred_item_ids
+                            .as_ref()
+                            .is_some_and(|ids| ids.contains(&item.id))
+                    })
+                    .map(|item| {
+                        Effect::execute(ReadItem {
+                            thread_id: self.thread_id.clone(),
+                            turn_id: turn.id.clone(),
+                            item_id: item.id.clone(),
+                        })
+                    })
+            })
+            .collect();
         let mut effects = if self.open {
             open_thread(snapshot, output.response.thread, output.response.model)
         } else {
             refresh_thread(snapshot, output.response.thread)
         };
+        effects.append(&mut details);
         if let Some(old) = Arc::make_mut(&mut snapshot.subscriptions)
             .insert(self.thread_id, output.subscription_id)
         {

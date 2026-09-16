@@ -1214,7 +1214,8 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         assert_eq!(turn["items"][0]["content"][0]["text"], "Read the whole output");
         assert_eq!(turn["items"][2]["text"], "Large history is complete");
         assert_eq!(turn["deferredItemIds"], json!(["large-command"]));
-        let detail = mobile.peer.request::<_, Value>("host/thread/item/read", &json!({"threadId":thread,"turnId":"large-turn","itemId":"large-command"})).await.unwrap().value;
+        let detail = mobile.peer.request::<_, agent_core::client::ItemResponse>("host/thread/item/read", &json!({"threadId":thread,"turnId":"large-turn","itemId":"large-command"})).await.unwrap().value;
+        let detail = serde_json::to_value(detail.resolve(Some(&mobile.session)).await.unwrap()).unwrap();
         assert_eq!(detail["item"]["aggregatedOutput"], format!("{}END_OF_LARGE_OUTPUT", "output line\n".repeat(700000)));
         assert_eq!(detail["item"]["id"], "large-command");
         assert!(mobile.peer.request::<_, Value>("host/thread/item/read", &json!({"threadId":thread,"turnId":"wrong-turn","itemId":"large-command"})).await.is_err());
@@ -1251,9 +1252,10 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         let original = std::fs::read(directory.path().join("fixture image.png")).unwrap();
         for item in images {
             assert_eq!(item["status"], "completed");
-            let full = mobile.peer.request::<_, Value>("host/thread/item/read", &json!({"threadId":image_thread,"turnId":turn["id"],"itemId":item["id"]})).await.unwrap().value;
+            let full = mobile.peer.request::<_, agent_core::client::ItemResponse>("host/thread/item/read", &json!({"threadId":image_thread,"turnId":turn["id"],"itemId":item["id"]})).await.unwrap().value;
+            let full = serde_json::to_value(full.resolve(Some(&mobile.session)).await.unwrap()).unwrap();
             assert!(STANDARD.decode(full["item"]["result"].as_str().unwrap()).unwrap() == original, "native image details must be lossless");
-            if item["detailDeferred"] == true { assert!(item["result"].is_null(), "a truncated base64 value must never be rendered as an image"); }
+            if turn["deferredItemIds"].as_array().is_some_and(|ids| ids.contains(&item["id"])) { assert!(item["result"].is_null(), "a truncated base64 value must never be rendered as an image"); }
             else { assert!(STANDARD.decode(item["result"].as_str().unwrap()).unwrap() == original); }
         }
         mobile.close().await.unwrap();
@@ -2490,7 +2492,7 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
     completed_turn(&mut events).await;
     let peer = Arc::new(mobile.peer);
     let images = agent_core::client::Client::new(peer.clone())
-        .session_images(id.as_str().unwrap())
+        .session_images(id.as_str().unwrap(), Some(&mobile.session))
         .await
         .unwrap();
     assert_eq!(
@@ -2502,4 +2504,131 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
     mobile.session.close();
     mobile.endpoint.close().await;
     fixture.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without_reconnecting() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("oversized-history")).unwrap();
+        let fixture = start_host(directory.path()).await;
+        let mobile = fixture.local().await.unwrap();
+        let started = rpc(
+            &mobile.peer,
+            "host/thread/start",
+            json!({"cwd":directory.path().join("oversized-history")}),
+        )
+        .await;
+        let thread = &started["thread"]["id"];
+        for _ in 0..2 {
+            let opened = open_session(&mobile.peer, thread, 5).await;
+            assert!(serde_json::to_vec(&opened).unwrap().len() < 16 * 1024);
+            let turn = &opened["response"]["thread"]["turns"][0];
+            assert_eq!(
+                turn["deferredItemIds"],
+                json!(["oversized-text", "oversized-image", "oversized-tool"])
+            );
+            assert!(
+                turn["items"][1]["result"].is_null(),
+                "base64 must be absent, never truncated"
+            );
+            rpc(
+                &mobile.peer,
+                "host/session/close",
+                json!({"subscriptionId":opened["subscriptionId"]}),
+            )
+            .await;
+        }
+        for (id, field, byte) in [
+            ("oversized-text", "text", b'x'),
+            ("oversized-image", "result", b'A'),
+            ("oversized-tool", "aggregatedOutput", b'z'),
+        ] {
+            let reply = mobile
+                .peer
+                .request::<_, agent_core::client::ItemResponse>(
+                    "host/thread/item/read",
+                    &json!({"threadId":thread,"turnId":"oversized-turn","itemId":id}),
+                )
+                .await
+                .unwrap()
+                .value;
+            assert!(reply.transfer.as_ref().unwrap().size > 16 * 1024 * 1024);
+            assert!(serde_json::to_vec(&reply).unwrap().len() < 16 * 1024);
+            let item =
+                serde_json::to_value(reply.resolve(Some(&mobile.session)).await.unwrap().item)
+                    .unwrap();
+            let body = item[field].as_str().unwrap();
+            assert_eq!(body.len(), 17 * 1024 * 1024);
+            assert!(body.bytes().all(|value| value == byte));
+        }
+        // Exercise the shared Store path used by all native clients: visible
+        // messages/images load automatically, while tool details are requested.
+        use agent_core::{state::Intent, store::Store};
+        let endpoint = Endpoint::bind(
+            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
+            Relays::Disabled,
+        )
+        .await
+        .unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+            .await
+            .unwrap();
+        let mut updates = store.subscribe();
+        let thread_id = thread.as_str().unwrap();
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(thread_id.into())))
+            .await
+            .unwrap();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            let items = &snapshot.conversations[thread_id].turns.as_ref().unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap();
+            if items[0]
+                .text
+                .as_ref()
+                .is_some_and(|text| text.len() == 17 * 1024 * 1024)
+                && items[1]
+                    .result
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .is_some_and(|data| data.len() == 17 * 1024 * 1024)
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+        store
+            .dispatch(Intent::ReadItem(op::ReadItem {
+                thread_id: thread_id.into(),
+                turn_id: "oversized-turn".into(),
+                item_id: "oversized-tool".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.snapshot().conversations[thread_id]
+                .turns
+                .as_ref()
+                .unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap()[2]
+                .aggregated_output
+                .as_ref()
+                .unwrap()
+                .len(),
+            17 * 1024 * 1024
+        );
+        store.close().await.unwrap();
+        endpoint.close().await;
+        rpc(&mobile.peer, "host/status", json!({})).await;
+        mobile.close().await.unwrap();
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("large item transfers exceeded deadline");
 }

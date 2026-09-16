@@ -31,6 +31,9 @@ are the supported providers. No additional provider scaffolding is introduced.
 - `SubscribeSubmission` is folded into `SendSubmission`: open is applied to the
   Store before sending. Native-history selection takes immutable values instead
   of mutating a cloned Snapshot. Navigation epochs and draft protection remain.
+- If native history is unavailable, the client supplements the response with
+  cached completed turns. The Host's current turns, status and unresolved requests
+  remain authoritative; subsequent text changes still target those current turns.
 
 ## Provider boundaries
 
@@ -69,22 +72,30 @@ lifetime management, not an OS sandbox against deliberately detached processes.
 | Resource | Bound / behavior |
 | --- | --- |
 | Requested turn range | Positive client-supplied range; no Host 1,000-turn ceiling or retained window |
-| History response | No Host snapshot cache or 4 MiB truncation; transmission is bounded by the connection queue |
-| Activity details | Existing 4 KiB inline check; visible messages and generated images remain complete |
-| Outbound connection queue | Both item count and 16 MiB; overflow closes that connection |
+| History response | No Host snapshot cache or 4 MiB history budget; large items have explicit deferred bodies |
+| Inline items | Tool previews use the existing 4 KiB check; messages and images above 1 MiB load through item details |
+| Outbound connection queue | Both item count and 16 MiB; slow queue overflow closes that connection, but an oversized single RPC returns `response_too_large` without disconnecting |
 | Unresolved requests | 32 per session, 64 KiB each; oversized requests cannot be approved |
 | In-flight input IDs | At most 128 per executing session; released when execution completes |
 | Claude live/idle processes | 8; idle retention 60 seconds, record capacity 128 |
 | Claude native reads | Transcript/output-file read budget 64 MiB, maximum JSONL row 8 MiB; incomplete range is explicit |
 | Claude native listing | 20,000 files; scan failure is a provider-specific partial result |
-| Detail / image transfer | Outbound connection queue; gallery also has its existing 16 MiB client limit |
+| Detail / image transfer | Item details above 1 MiB use the existing binary stream: 512 MiB, 8 pending grants per connection / 64 total, 120-second validity, same connection and digest verification; gallery retains its 16 MiB client limit |
 
 Lists obtain provider metadata concurrently. Provider failure preserves the
 other provider and cached summaries, labelled saved/unconfirmed. Search and
 history display expose partial/unavailable results rather than implying absence.
-Generated images retain complete base64, and item detail reads remain available. A gallery that
+Large item details use anonymous temporary transfer files, not persisted history
+or an index. The existing grant owner releases them on consumption/disconnect and
+purges expired grants. Core automatically loads deferred messages and images;
+tool output loads on demand. Base64 is never truncated. A gallery that
 cannot be completed reports its limit and leaves individual conversation images
 accessible.
+
+If the combined item bodies still exceed the physical RPC limit, open defers
+those bodies too, preserving every requested turn and item identity. Only an
+oversized metadata-only response returns `response_too_large`; it does not create
+a subscription or close the connection.
 
 ## Local data and retired paths
 
@@ -128,6 +139,10 @@ completion during read, live approvals after reconnect, cancellation cleanup,
 release of finished execution while subscribed, untrimmed responses above the old
 limits, duplicate in-flight input, and provider-scoped approval identity.
 Existing Desktop/iOS/Android display acceptance assertions are preserved.
+Further regression tests cover unavailable native history with cached turn A and
+live turn B, pending requests and subsequent text updates; repeated opens of a
+history containing 17 MiB text/image/tool items; lossless binary item reads through
+the shared Store; and explicit oversized-RPC errors on a still-usable connection.
 
 Build Host and affected clients from the same revision: the session wire contract
 has changed. Production Host and installed apps have not been replaced. Real

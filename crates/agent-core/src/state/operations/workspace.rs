@@ -207,7 +207,10 @@ impl Operation for LoadSessionImages {
         }
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.client.session_images(&self.thread_id).await
+        context
+            .client
+            .session_images(&self.thread_id, context.session)
+            .await
     }
 }
 

@@ -1,4 +1,4 @@
-//! Typed RPC operations. This module has no transport or UI dependencies.
+//! Typed RPC operations and deferred payload reads. No UI dependencies.
 use crate::state::operations::ReadThread;
 use crate::{
     models::ThreadResponse,
@@ -181,8 +181,36 @@ pub(crate) fn validate_thread(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ItemResponse {
     pub item: crate::models::Item,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<crate::models::TransferGrant>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+impl ItemResponse {
+    pub async fn resolve(
+        mut self,
+        session: Option<&crate::transport::Session>,
+    ) -> Result<Self, PeerError> {
+        if let Some(grant) = self.transfer.take() {
+            let session = session.ok_or_else(|| {
+                PeerError::InvalidMessage("item transfer requires an iroh session".into())
+            })?;
+            let bytes = crate::transfers::download_bytes(grant, || async {
+                session.open_stream().await.map_err(std::io::Error::other)
+            })
+            .await
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            let item: crate::models::Item = serde_json::from_slice(&bytes)
+                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            if item.id != self.item.id {
+                return Err(PeerError::InvalidMessage(
+                    "transferred item ID does not match".into(),
+                ));
+            }
+            self.item = item;
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -699,7 +727,11 @@ pub struct SessionImage {
     pub encoded: bool,
 }
 impl Client {
-    pub async fn session_images(&self, thread_id: &str) -> Result<Vec<SessionImage>, PeerError> {
+    pub async fn session_images(
+        &self,
+        thread_id: &str,
+        session: Option<&crate::transport::Session>,
+    ) -> Result<Vec<SessionImage>, PeerError> {
         // One bounded provider view; close this transient subscription before
         // returning images so it never replaces the Store's visible session.
         let opened = self
@@ -724,6 +756,26 @@ impl Client {
                 {
                     continue;
                 }
+                let detail;
+                let item = if turn
+                    .deferred_item_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(&item.id))
+                {
+                    detail = self
+                        .call(&crate::state::operations::ReadItem {
+                            thread_id: thread_id.into(),
+                            turn_id: turn.id.clone(),
+                            item_id: item.id.clone(),
+                        })
+                        .await?
+                        .value
+                        .resolve(session)
+                        .await?;
+                    &detail.item
+                } else {
+                    item.as_ref()
+                };
                 let image = item
                     .saved_path
                     .as_deref()

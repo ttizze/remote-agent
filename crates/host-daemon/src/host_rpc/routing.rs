@@ -253,14 +253,36 @@ impl SessionRouter {
         if let Some(actor) = state.executions.get(&read.target) {
             actor.overlay(&mut response);
         }
+        response
+            .thread
+            .defer_item_details(agent_core::models::MAX_INLINE_ITEM_BYTES);
         let subscription_id = uuid::Uuid::new_v4();
-        let line = request
-            .response::<_, ()>(Ok(OpenedSession {
-                session: read.target.clone(),
-                subscription_id,
-                response,
-            }))
+        let mut opened = OpenedSession {
+            session: read.target.clone(),
+            subscription_id,
+            response,
+        };
+        let mut line = request
+            .response::<_, ()>(Ok(&opened))
             .map_err(|error| error.to_string())?;
+        if line.len() > MAX_QUEUED_BYTES {
+            // Many individually small items can also exceed one physical RPC.
+            // Defer bodies without discarding turns or keeping a Host snapshot.
+            opened.response.thread.defer_item_details(0);
+            line = request
+                .response::<_, ()>(Ok(&opened))
+                .map_err(|error| error.to_string())?;
+        }
+        if line.len() > MAX_QUEUED_BYTES {
+            let error = request
+                .error(
+                    "response_too_large",
+                    &"Session metadata exceeds the RPC limit; request fewer turns",
+                )
+                .map_err(|error| error.to_string())?;
+            deliver_locked(&mut state, vec![(session, error)]);
+            return Ok(());
+        }
         state
             .subscriptions
             .insert(subscription_id, (read.target.clone(), session));
@@ -334,7 +356,18 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn send_line(&self, session: SessionId, line: String) -> Result<(), String> {
+    pub(crate) fn send_line(&self, session: SessionId, mut line: String) -> Result<(), String> {
+        if line.len() > MAX_QUEUED_BYTES
+            && let Ok(message) = RpcMessage::parse(&line)
+            && message.kind() == agent_core::peer::RpcMessageKind::Response
+        {
+            line = message
+                .error(
+                    "response_too_large",
+                    &"RPC response exceeds the transfer limit",
+                )
+                .map_err(|error| error.to_string())?;
+        }
         let mut state = lock_state(&self.state);
         let sender = state
             .sessions
@@ -686,7 +719,11 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .len(),
-            5 * 1024 * 1024
+            256
+        );
+        assert_eq!(
+            reply["result"]["response"]["thread"]["turns"][0]["deferredItemIds"],
+            json!(["answer"])
         );
         assert!(lock_state(&router.state).executions.is_empty());
         turn(&router, false);
@@ -695,6 +732,76 @@ mod tests {
         let state = lock_state(&router.state);
         assert!(state.executions.is_empty());
         assert_eq!(state.subscriptions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn aggregate_item_bodies_are_deferred_to_fit_one_rpc() {
+        let router = SessionRouter::new();
+        let mut connection = router.open_session(16);
+        let mut items: Vec<_> = (0..40).map(|id| json!({"id":id.to_string(),"type":"agentMessage","text":"x".repeat(512 * 1024)})).collect();
+        items.push(
+            json!({"id":"tool","type":"commandExecution","aggregatedOutput":"z".repeat(8192)}),
+        );
+        let response = serde_json::from_value(
+            json!({"thread":{"id":"native","turns":[{"id":"turn","items":items}]}}),
+        )
+        .unwrap();
+        let request =
+            RpcMessage::parse(r#"{"id":6,"method":"host/session/open","params":{}}"#).unwrap();
+        router
+            .finish_session_read(
+                open(&router, "native", 5),
+                connection.id(),
+                &request,
+                response,
+            )
+            .unwrap();
+        let line = connection.recv().await.unwrap();
+        assert!(line.len() < 64 * 1024);
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        let turn = &reply["result"]["response"]["thread"]["turns"][0];
+        assert_eq!(turn["items"].as_array().unwrap().len(), 41);
+        assert_eq!(turn["deferredItemIds"].as_array().unwrap().len(), 41);
+        router.ensure_session(connection.id()).unwrap();
+        assert!(lock_state(&router.state).executions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_rpc_returns_an_error_without_dropping_the_connection_or_subscribing() {
+        let router = SessionRouter::new();
+        let mut connection = router.open_session(16);
+        let request =
+            RpcMessage::parse(r#"{"id":7,"method":"host/session/open","params":{}}"#).unwrap();
+        for _ in 0..2 {
+            let response = serde_json::from_value(
+                json!({"thread":{"id":"native","metadata":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
+            )
+            .unwrap();
+            router
+                .finish_session_read(
+                    open(&router, "native", 5),
+                    connection.id(),
+                    &request,
+                    response,
+                )
+                .unwrap();
+            let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
+            assert_eq!(reply["id"], 7);
+            assert_eq!(reply["error"]["code"], "response_too_large");
+            router.ensure_session(connection.id()).unwrap();
+        }
+        assert!(lock_state(&router.state).subscriptions.is_empty());
+        assert!(lock_state(&router.state).executions.is_empty());
+        router
+            .send_line(
+                connection.id(),
+                json!({"id":8,"result":"x".repeat(MAX_QUEUED_BYTES + 1)}).to_string(),
+            )
+            .unwrap();
+        let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
+        assert_eq!(reply["error"]["code"], "response_too_large");
+        router.send_line(connection.id(), "healthy".into()).unwrap();
+        assert_eq!(connection.recv().await.as_deref(), Some("healthy"));
     }
 
     #[tokio::test]
