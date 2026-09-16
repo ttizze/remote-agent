@@ -54,19 +54,18 @@ struct HistoryItem {
     pub turn_id: Option<String>,
 }
 
-fn needs_legacy_history(error: &str, thread_id: &str) -> bool {
+fn unmaterialized_history(error: &str, thread_id: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(error) else {
         return false;
     };
-    value["code"] == -32601
-        || (value["code"] == -32600
+    value["code"] == -32600
             && value["message"].as_str()
                 == Some(
                     format!(
                         "thread {thread_id} is not materialized yet; thread/turns/list is unavailable before first user message"
                     )
                     .as_str(),
-                ))
+                )
 }
 
 impl HistoryPage<HistoryItem> {
@@ -193,7 +192,19 @@ impl Codex {
             .await
         {
             Ok(page) => page,
-            Err(error) if needs_legacy_history(&error, id) => {
+            Err(error) if unmaterialized_history(&error, id) => {
+                // Native Codex explicitly confirms there is no persisted first
+                // message. The session router overlays any in-flight live turn.
+                HistoryPage {
+                    data: Vec::new(),
+                    next_cursor: None,
+                }
+            }
+            Err(error)
+                if serde_json::from_str::<Value>(&error)
+                    .ok()
+                    .is_some_and(|value| value["code"] == -32601) =>
+            {
                 // Native servers advertise pagination before materializing a
                 // first turn. Read that same native session without cursors.
                 return match Box::pin(self.history(id, false, limit)).await {
@@ -531,21 +542,18 @@ pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::needs_legacy_history;
+    use super::unmaterialized_history;
     use serde_json::json;
 
     #[test]
-    fn legacy_history_fallback_accepts_only_supported_native_errors() {
+    fn empty_history_requires_the_native_unmaterialized_error_for_this_thread() {
         let message = "thread new-thread is not materialized yet; thread/turns/list is unavailable before first user message";
-        assert!(needs_legacy_history(
+        assert!(unmaterialized_history(
             &json!({"code":-32600,"message":message}).to_string(),
             "new-thread"
         ));
-        assert!(needs_legacy_history(
-            &json!({"code":-32601,"message":"list_turns is not supported yet"}).to_string(),
-            "new-thread"
-        ));
         for error in [
+            json!({"code":-32601,"message":"list_turns is not supported yet"}).to_string(),
             json!({"code":-32600,"message":"invalid request"}).to_string(),
             json!({"code":-32603,"message":message}).to_string(),
             json!({"code":-32600,"message":message.replace("new-thread", "another-thread")})
@@ -553,7 +561,7 @@ mod tests {
             json!({"message":message}).to_string(),
             message.to_owned(),
         ] {
-            assert!(!needs_legacy_history(&error, "new-thread"), "{error}");
+            assert!(!unmaterialized_history(&error, "new-thread"), "{error}");
         }
     }
 }

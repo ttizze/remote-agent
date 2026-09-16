@@ -608,6 +608,10 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
         let client = fixture.local().await.unwrap();
         let current = open_session(&client.peer, &json!(id), 5).await;
         assert_eq!(current["response"]["thread"]["id"], id);
+        assert_eq!(
+            current["response"]["thread"]["historyReadState"]["type"], "complete",
+            "a natively unmaterialized history is empty, not a failed history read"
+        );
         assert!(
             current["response"]["thread"]["turns"]
                 .as_array()
