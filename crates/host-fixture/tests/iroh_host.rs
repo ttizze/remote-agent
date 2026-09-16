@@ -616,6 +616,28 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
                 .any(|turn| turn["status"] == "inProgress"),
             "live state must be available before native history materializes"
         );
+        store.disconnect().await.unwrap();
+        let restored =
+            serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap()).unwrap();
+        store.close().await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, restored, None)
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+            .await
+            .unwrap();
+        assert!(store.snapshot().error.is_none());
+        assert!(store.snapshot().subscriptions.contains_key(&id));
+        assert!(
+            store.snapshot().conversations[&id]
+                .turns
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|turn| turn.status.as_deref() == Some("inProgress")),
+            "reconnecting before the first message is persisted must preserve the active turn"
+        );
         std::fs::write(directory.path().join("release-inputs"), "").unwrap();
         let mut updates = store.subscribe();
         loop {

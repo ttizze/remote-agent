@@ -139,7 +139,14 @@ pub(super) fn page(
             .iter()
             .all(|turn| turn.borrow()["items"].as_array().is_some_and(Vec::is_empty))
     {
-        return context.error(id, -32601, "list_turns is not supported yet");
+        return context.error(
+            id,
+            -32600,
+            &format!(
+                "thread {} is not materialized yet; thread/turns/list is unavailable before first user message",
+                thread.metadata["id"].as_str().unwrap()
+            ),
+        );
     }
     let turns: Vec<_> = thread.turns.iter().map(|turn| turn.borrow()).collect();
     let offset = offset(params);
