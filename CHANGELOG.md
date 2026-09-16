@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reuse responsive iPhone connections on foreground return. Refresh the open conversation or task list with a one-second recovery deadline, retain the endpoint when replacement is needed, and close the old session without waiting for graceful delivery acknowledgments. Preserve drafts, avoid reconnecting on application errors, and cancel obsolete foreground attempts. Acceptance: real-iroh foreground reuse, timeout, error and cancellation tests plus isolated iOS foreground conversation/list tests.
+
 - Replace the iOS expanded-image thumbnail sidebar with native Quick Look paging, keeping selection stable during image downloads; prepare iOS build 53. Acceptance: `testSimulatorBrowsesAllSessionImagesAndSavesTheSelection` verifies the missing sidebar, traversal of all eight images, both boundaries, saving the selection and returning to the conversation.
 
 - Show the stock Lucide git-merge icon beside session activity on desktop, iOS and Android when the associated worktree is merged into local main; prepare iOS build 52. Acceptance: real Git through Host/Store covers fresh, merged and subsequently changed branches; native list tests cover spinner placement and iOS reopening.

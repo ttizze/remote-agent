@@ -36,6 +36,11 @@ pub enum Outcome {
 }
 enum Command {
     Dispatch(Dispatch),
+    Matches {
+        endpoint: crate::transport::Endpoint,
+        remote: crate::transport::NodeId,
+        complete: oneshot::Sender<bool>,
+    },
     Disconnect(oneshot::Sender<Result<(), PeerError>>),
     Attach {
         connection: Connection,
@@ -183,6 +188,78 @@ impl Store {
         store.reconnect(endpoint, ticket, invitation).await?;
         Ok(store)
     }
+    /// Refresh over the existing connection before replacing a suspended transport.
+    /// Only reads are retried; pending submissions retain their delivery evidence.
+    pub async fn resume(
+        &self,
+        endpoint: &crate::transport::Endpoint,
+        ticket: &crate::transport::Ticket,
+    ) -> Result<(), crate::transport::TransportError> {
+        let attempt = {
+            let mut current = self.connection_attempt.lock().unwrap();
+            current.cancel();
+            *current = self.stop.child_token();
+            current.clone()
+        };
+        let guard = attempt.clone().drop_guard();
+        let (complete, matches) = oneshot::channel();
+        self.commands
+            .send(Command::Matches {
+                endpoint: endpoint.clone(),
+                remote: ticket.node_id(),
+                complete,
+            })
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+        let matching = tokio::select! {
+            biased;
+            _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
+            result = matches => result.unwrap_or(false),
+        };
+        if matching {
+            let snapshot = self.snapshot();
+            let intent = match &snapshot.navigation.thread_id {
+                Some(id) => Intent::ReadThread(op::ReadThread::new(id.clone())),
+                None => Intent::ListThreads(op::ListThreads::new((*snapshot.list_query).clone())),
+            };
+            let refreshed = tokio::select! {
+                biased;
+                _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
+                result = tokio::time::timeout(std::time::Duration::from_secs(1), self.dispatch(intent)) => result,
+            };
+            match refreshed {
+                Ok(Ok(_)) => {
+                    if snapshot.navigation.thread_id.is_some() {
+                        // Queue the list update without making conversation readiness wait for it.
+                        drop(self.dispatch(Intent::ListThreads(op::ListThreads::new(
+                            (*self.snapshot().list_query).clone(),
+                        ))));
+                    }
+                    drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
+                    guard.disarm();
+                    return Ok(());
+                }
+                // An application response proves reachability; reconnecting cannot fix it.
+                Ok(Err(error @ (PeerError::Remote { .. } | PeerError::InvalidResponse { .. }))) => {
+                    return Err(error.into());
+                }
+                _ => {}
+            }
+        }
+        let disconnected = {
+            // Atomically move this same recovery attempt into replacement. A newer
+            // attempt must not be cancelled by an older read reaching its deadline.
+            let _current = self.connection_attempt.lock().unwrap();
+            if attempt.is_cancelled() {
+                return Err(
+                    PeerError::ConnectionClosed("connection attempt cancelled".into()).into(),
+                );
+            }
+            self.request_disconnect()?
+        };
+        guard.disarm();
+        self.attach_connection(endpoint, ticket, None, attempt, disconnected)
+            .await
+    }
     /// Replace transport while retaining local edits. A newer reconnect or
     /// disconnect cancels setup before it can attach an obsolete connection.
     pub async fn reconnect(
@@ -199,13 +276,24 @@ impl Store {
             // cannot reorder a newer attempt behind an older disconnect.
             (current.clone(), self.request_disconnect()?)
         };
+        self.attach_connection(endpoint, ticket, invitation, attempt, disconnected)
+            .await
+    }
+    async fn attach_connection(
+        &self,
+        endpoint: &crate::transport::Endpoint,
+        ticket: &crate::transport::Ticket,
+        invitation: Option<uuid::Uuid>,
+        attempt: CancellationToken,
+        disconnected: oneshot::Receiver<Result<(), PeerError>>,
+    ) -> Result<(), crate::transport::TransportError> {
         let guard = attempt.clone().drop_guard();
         let setup = async {
             disconnected
                 .await
                 .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            // Do not probe a suspended connection: its RPC deadline would delay
-            // foreground recovery. The actor releases it before setup begins.
+            // Explicit replacement never waits for a read on the old transport.
+            // Foreground resume has already applied its separate short deadline.
             let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| {
                 session.close();
             });
@@ -707,6 +795,10 @@ async fn run(
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
                     Command::Dispatch(command) => command,
+                    Command::Matches { endpoint, remote, complete } => {
+                        let _ = complete.send(session.as_ref().is_some_and(|session| session.uses_endpoint(&endpoint) && session.node_id() == remote));
+                        continue;
+                    }
                     Command::Disconnect(complete) => {
                         disconnected = Some(complete);
                         break "Host disconnected".into();
@@ -762,33 +854,44 @@ async fn run(
             }
         }
     };
-    // Let an already issued PTY command finish before killing its process.
-    // In particular, a spawn must register its handle before cleanup can kill it.
-    // The peer's request deadline also bounds this wait.
-    while terminal_running {
-        let Some(completed) = jobs.next().await else {
-            break;
-        };
-        if completed.terminal.is_some() {
-            terminal_running = false;
-        }
+    let replacing = disconnected.is_some() && session.is_some();
+    if replacing {
+        // The Host owns connection-scoped PTYs and grants. Do not wait for an
+        // unreachable old peer before opening its replacement.
+        session.as_ref().unwrap().close();
     }
-    drop(jobs);
-    // PTYs live in the daemon's upstream connection, so closing this view's
-    // connection alone does not terminate them.
-    let terminals = updates.borrow().terminals.clone();
-    for (handle, terminal) in terminals.iter() {
-        if !matches!(terminal.phase, crate::state::TerminalPhase::Exited(_)) {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                client.call(&op::CloseTerminal {
-                    handle: handle.clone(),
-                }),
-            )
-            .await;
+    if !replacing {
+        // Let an already issued PTY command finish before killing its process.
+        // In particular, a spawn must register its handle before cleanup can kill it.
+        // The peer's request deadline also bounds this wait.
+        while terminal_running {
+            let Some(completed) = jobs.next().await else {
+                break;
+            };
+            if completed.terminal.is_some() {
+                terminal_running = false;
+            }
         }
+        drop(jobs);
+        // Preserve explicit PTY cleanup for normal shutdown and peers without
+        // a connection-scoped iroh session.
+        let terminals = updates.borrow().terminals.clone();
+        for (handle, terminal) in terminals.iter() {
+            if !matches!(terminal.phase, crate::state::TerminalPhase::Exited(_)) {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    client.call(&op::CloseTerminal {
+                        handle: handle.clone(),
+                    }),
+                )
+                .await;
+            }
+        }
+    } else {
+        drop(jobs);
     }
-    let result = peer.close().await;
+    let closed = peer.close().await;
+    let result = if replacing { Ok(()) } else { closed };
     drop(connection);
     apply(&updates, Event::Disconnected(reason));
     if let Some(complete) = disconnected {
@@ -811,6 +914,10 @@ async fn run_offline(
         };
         let command = match command {
             Command::Dispatch(command) => command,
+            Command::Matches { complete, .. } => {
+                let _ = complete.send(false);
+                continue;
+            }
             Command::Disconnect(complete) => {
                 let _ = complete.send(Ok(()));
                 continue;
