@@ -323,7 +323,9 @@ impl SessionRouter {
 
     pub(crate) fn handle_server_message(&self, provider: ProviderKind, message: &RpcMessage<'_>) {
         let params = message.params::<Value>().unwrap_or(Value::Null);
-        if message.method() == Some("serverRequest/resolved") {
+        if message.kind() == RpcMessageKind::Notification
+            && message.method() == Some("serverRequest/resolved")
+        {
             self.resolve_native_request(provider, &params["requestId"]);
             return;
         }
@@ -698,6 +700,14 @@ fn identical_native_request_ids_keep_their_provider_owner() {
             }
         );
     }
+    let not_a_notification =
+        serde_json::json!({"id":1,"method":"serverRequest/resolved","params":{"requestId":native}})
+            .to_string();
+    router.handle_server_message(
+        ProviderKind::Codex,
+        &RpcMessage::parse(&not_a_notification).unwrap(),
+    );
+    assert!(router.request_session(&ids[0]).is_some());
     let resolved =
         serde_json::json!({"method":"serverRequest/resolved","params":{"requestId":native}})
             .to_string();
