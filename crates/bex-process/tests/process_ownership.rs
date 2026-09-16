@@ -115,9 +115,8 @@ fn abrupt_host_exit_terminates_owned_pty_and_shell_jobs() {
             let command = bex_process::PtyCommand::Start {
                 command: vec![
                     "/bin/sh".into(),
-                    "-i".into(),
                     "-c".into(),
-                    "sleep 120 & echo \"$$ $!\" > \"$BEX_TEST_PTY_PID_FILE\"; wait".into(),
+                    "exec \"${SHELL:-/bin/sh}\" -l".into(),
                 ],
                 cwd: Path::new(&file)
                     .parent()
@@ -129,6 +128,13 @@ fn abrupt_host_exit_terminates_owned_pty_and_shell_jobs() {
             };
             let mut input = child.stdin().take().unwrap();
             let mut bytes = serde_json::to_vec(&command).unwrap();
+            bytes.push(b'\n');
+            input.write_all(&bytes).await.unwrap();
+            let write = bex_process::PtyCommand::Write {
+                id: 1,
+                data: b"[ -z \"${BASH_VERSION-}\" ] || set +H\nsleep 120 & first=$!; sleep 120 & printf '%s %s %s\\n' \"$$\" \"$first\" \"$!\" > \"$BEX_TEST_PTY_PID_FILE\"; wait\n".to_vec(),
+            };
+            let mut bytes = serde_json::to_vec(&write).unwrap();
             bytes.push(b'\n');
             input.write_all(&bytes).await.unwrap();
             tokio::time::sleep(Duration::from_secs(120)).await;
@@ -145,13 +151,14 @@ fn abrupt_host_exit_terminates_owned_pty_and_shell_jobs() {
             "--nocapture",
         ])
         .env("BEX_TEST_PTY_PID_FILE", &file)
+        .env("SHELL", "/bin/sh")
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
     let started = Instant::now();
     let pids = loop {
         if let Ok(text) = std::fs::read_to_string(&file)
-            && text.split_whitespace().count() == 2
+            && text.split_whitespace().count() == 3
         {
             break text;
         }
@@ -161,6 +168,21 @@ fn abrupt_host_exit_terminates_owned_pty_and_shell_jobs() {
         );
         std::thread::sleep(Duration::from_millis(20));
     };
+    let mut groups = pids.split_whitespace().map(|pid| {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", pid])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    });
+    let shell_group = groups.next().unwrap();
+    for group in groups {
+        assert!(!group.is_empty());
+        assert_ne!(
+            shell_group, group,
+            "fixture must use separate job-control groups"
+        );
+    }
     host.kill().unwrap();
     host.wait().unwrap();
     for pid in pids.split_whitespace() {

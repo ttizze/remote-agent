@@ -554,8 +554,24 @@ impl ItemReads {
             let receipt = scheduled.complete.get_or_insert_default().clone();
             self.receipts.insert(key, receipt);
         }
-        self.pending.push_back(scheduled);
+        if scheduled.effect.1 {
+            // Continue the same item before issuing new grants. Its slot covers
+            // the control response, body transfer, and final application.
+            self.pending.push_front(scheduled);
+        } else {
+            self.pending.push_back(scheduled);
+        }
         Ok(())
+    }
+    fn next(&mut self) -> Option<Scheduled> {
+        let next = self.pending.front()?;
+        if self.running.len() >= 4 && !self.running.contains(next.effect.0.item_read().unwrap()) {
+            return None;
+        }
+        let scheduled = self.pending.pop_front().unwrap();
+        self.running
+            .insert(scheduled.effect.0.item_read().unwrap().clone());
+        Some(scheduled)
     }
     fn finish(
         &mut self,
@@ -565,14 +581,13 @@ impl ItemReads {
     ) -> Vec<Scheduled> {
         let key = completed.item_read.clone();
         let effects = finish(ordered, updates, completed);
-        if let Some(key) = key {
-            self.running.remove(&key);
-            if !effects
+        if let Some(key) = key
+            && !effects
                 .iter()
                 .any(|s| s.effect.1 && s.effect.0.item_read() == Some(&key))
-            {
-                self.receipts.remove(&key);
-            }
+        {
+            self.running.remove(&key);
+            self.receipts.remove(&key);
         }
         effects
     }
@@ -654,13 +669,7 @@ async fn run(
                 complete,
             ));
         }
-        while item_reads.running.len() < 4 {
-            let Some(scheduled) = item_reads.pending.pop_front() else {
-                break;
-            };
-            item_reads
-                .running
-                .insert(scheduled.effect.0.item_read().unwrap().clone());
+        while let Some(scheduled) = item_reads.next() {
             jobs.push(perform(
                 Some(&client),
                 Some(peer),

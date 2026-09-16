@@ -131,6 +131,21 @@ impl ReadItem {
         output: ItemRead,
         current_epoch: bool,
     ) -> Result<Vec<Effect>, PeerError> {
+        if output
+            .response
+            .as_ref()
+            .is_ok_and(|response| response.transfer.is_some())
+        {
+            // Consume the Host's grant even when a newer update has made this
+            // response stale. Dropping it locally does not release the grant.
+            return Ok(vec![Effect::continuation(ResolveItem {
+                request: self,
+                source: output.source,
+                subscription: output.subscription,
+                response: output.response?,
+                current_epoch,
+            })]);
+        }
         let current = self.source(snapshot);
         if !current_epoch
             || output.subscription != snapshot.subscriptions.get(&self.thread_id).copied()
@@ -151,14 +166,6 @@ impl ReadItem {
             };
         }
         let response = output.response?;
-        if response.transfer.is_some() {
-            return Ok(vec![Effect::continuation(ResolveItem {
-                request: self,
-                source: output.source,
-                subscription: output.subscription,
-                response,
-            })]);
-        }
         *snapshot = upsert_item(snapshot, &self.thread_id, &self.turn_id, response.item);
         reconcile_pending(snapshot, &self.thread_id);
         Ok(Vec::new())
@@ -194,6 +201,7 @@ struct ResolveItem {
     source: Option<Arc<Item>>,
     subscription: Option<uuid::Uuid>,
     response: rpc::ItemResponse,
+    current_epoch: bool,
 }
 impl Operation for ResolveItem {
     fn item_read(&self) -> Option<&ReadItem> {
@@ -223,7 +231,8 @@ impl Operation for ResolveItem {
         output: Self::Output,
         current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        self.request.apply_read(snapshot, output, current)
+        self.request
+            .apply_read(snapshot, output, current && self.current_epoch)
     }
 }
 

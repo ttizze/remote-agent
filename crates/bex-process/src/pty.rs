@@ -1,24 +1,35 @@
 use bex_process::{PtyCommand, PtyEvent};
-use portable_pty::{ChildKiller, CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{self, Read, Write};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[cfg(unix)]
+#[path = "pty_session.rs"]
+mod session;
+
 struct OwnedPty {
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    #[cfg(not(unix))]
+    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     #[cfg(unix)]
     pid: Option<u32>,
 }
 impl Drop for OwnedPty {
     fn drop(&mut self) {
-        // Let the interactive shell propagate hangup to its jobs, then ensure
-        // the owned process group cannot survive the supervisor.
-        let _ = self.killer.kill();
+        let _ = self.cleanup();
+    }
+}
+impl OwnedPty {
+    fn cleanup(&mut self) -> io::Result<()> {
         #[cfg(unix)]
         if let Some(pid) = self.pid {
-            unsafe {
-                libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-            }
+            session::terminate(pid as libc::pid_t)?;
+            self.pid = None;
         }
+        #[cfg(not(unix))]
+        // The Host's Job Object also owns the descendants. The shell may
+        // already have exited naturally before we reach this point.
+        let _ = self.killer.kill();
+        Ok(())
     }
 }
 
@@ -74,7 +85,8 @@ pub async fn run() -> io::Result<i32> {
         .slave
         .spawn_command(command_builder)
         .map_err(io_error)?;
-    let owned = OwnedPty {
+    let mut owned = OwnedPty {
+        #[cfg(not(unix))]
         killer: child.clone_killer(),
         #[cfg(unix)]
         pid: child.process_id(),
@@ -111,6 +123,16 @@ pub async fn run() -> io::Result<i32> {
             }
         }
     });
+    // Keep the session leader unreaped until all its jobs are gone. Its PID
+    // must not be reused while we identify processes by their session ID.
+    #[cfg(unix)]
+    let mut exited = {
+        let pid = child
+            .process_id()
+            .ok_or_else(|| io_error("PTY PID missing"))?;
+        tokio::task::spawn_blocking(move || session::wait_without_reaping(pid))
+    };
+    #[cfg(not(unix))]
     let mut exited = tokio::task::spawn_blocking(move || child.wait());
     let result: io::Result<u32> = async {
         emit(&mut output, PtyEvent::Started).await?;
@@ -140,14 +162,14 @@ pub async fn run() -> io::Result<i32> {
             }
         }
     }.await;
-    let _ = owned.killer.clone_killer().kill();
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    drop(owned);
+    owned.cleanup()?;
     drop(write_input);
     drop(pair.master);
     if !exited.is_finished() {
         let _ = (&mut exited).await;
     }
+    #[cfg(unix)]
+    child.wait()?;
     // The child can exit before the final PTY read arrives. Drain those bytes
     // before publishing its exit, with a bound for descendants holding handles.
     let drain = async {
@@ -159,7 +181,9 @@ pub async fn run() -> io::Result<i32> {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), drain).await;
     match result {
         Ok(code) => {
-            emit(&mut output, PtyEvent::Exited { code }).await?;
+            // The Host closes the output pipe when cancelling. Cleanup has
+            // succeeded even if the final event cannot reach that connection.
+            let _ = emit(&mut output, PtyEvent::Exited { code }).await;
             Ok(0)
         }
         Err(error) => {
@@ -170,7 +194,7 @@ pub async fn run() -> io::Result<i32> {
                 },
             )
             .await;
-            Err(error)
+            Ok(0)
         }
     }
 }

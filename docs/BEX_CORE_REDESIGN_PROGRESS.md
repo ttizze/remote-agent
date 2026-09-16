@@ -50,7 +50,7 @@ wire golden fixtureには追加したSessionRef・capabilitiesだけを反映し
 - `portable-pty = 0.9.0` とロックファイルでPTYを実装。Hostが接続、cwd、handle、入力、取消し、cleanup完了を所有し、既存RPCへ入出力・resize・killを接続する。
 - 最大32PTY、入力キュー32件、supervisor出力キュー16件。Codexから来た旧process出力・終了通知も遮断し、Hostが所有するPTYへ混入させない。起動予約後の切断・起動future取消しもcleanupへ進む。他接続のhandle操作は拒否する。
 - killの成功はcleanupと所有記録の解放後に返す。worktree利用記録はcleanup中も残る。既存のworktree排他・削除保護を維持する。
-- Unixはlifetime pipe EOF、shellへのHUP、process group終了を使用。WindowsはHostがJob Objectを所有するコードに接続したが、この作業環境では未実行。
+- Unixはlifetime pipe EOFでPTYセッション全体の終了処理を開始し、別のjob-control groupも終了対象にする。session IDの再利用を避けるため、後始末までshellをreapしない。WindowsはHostがJob Objectを所有するコードに接続したが、この作業環境では未実行。
 - 音声入力のbackend所有・利用可否判定をdictationへ移した。**責任境界の分離済み、認識backendのCodex依存は残存**。別のAPIや認証は導入していない。
 
 Codex未導入fixtureで、Claude送信・履歴再読込、PTY入出力・resize・kill・他接続拒否、ファイル一覧・revision付き読書き、Git review、worktree設定、dictation失敗後の継続を確認する。Codex途中終了時はPTYをRunningのまま維持するという計画の新要件をassertionへ反映し、Claude承認の既存条件は変えていない。Host強制終了でshell・background jobが残らないことと、PTY起動途中の切断も追加検証した。
@@ -101,3 +101,21 @@ Host、desktop、FFIは同じ作業ツリーからworkspaceビルド・テスト
 | 文書 | 110 | 6 |
 
 本体の増加は、既存supervisorに加えたPTY backend、Host側のPTY所有・認可・終了処理、および本文取得の有限キューとreceipt継続が中心。削除対象はCodexによるPTY起動・管理、未知RPCの転送、文字列での配達判断、共通層のprovider別capabilities。生成bindings・APK・ビルド出力はソース差分に含めない。既存の未追跡Androidディレクトリ、画像、動画は変更していない。
+
+## PR #21レビュー後の修正（`ccde07d`への指摘）
+
+- 一つの項目の取得枠を、制御応答・本文転送・適用完了まで保持する。継続処理を新規項目より先に実行し、wire順序待ちは従来どおり制御応答で解除する。Hostの転送予約上限8件は変更していない。
+- staleな制御応答も、Hostが発行したgrantを既存のバイナリ転送で消費してから破棄・再取得する。本文を適用する際には元のArc・購読・epochを再検査する。
+- PTYの後始末はLinuxの`/proc`、macOSのprocess APIから同じsession IDの生存プロセスを列挙し、終了を確認するまで再走査する。shellのHUP転送に依存しない。Hostはsupervisorを3秒で強制終了する処理を削除し、cleanup失敗時はkillをエラーにしてworktreeの所有記録を保持する。
+
+追加した回帰テストは、実際のStore・iroh接続とHostの`WorkspaceFiles`予約管理を使う。制御応答だけをfixtureで制御し、Hostの本物の8枠制限とsingle-use token消費を検査する。
+
+- 大容量のメッセージ・画像12件。先頭4件の転送を止めても、新規予約が増えず、会話delta・承認回答・停止が進む。最後は12件すべて内容一致、未消費grantは0件。
+- ReadItemの制御応答より前にdeltaが適用されたことをbarrierで確認し、12回反復する。各応答のgrantを消費し、最後に最新の完全な本文を取得する。
+- PTY内でshellとは異なるPGIDのbackground jobを2件生成する。明示kill・接続切断の完了時点で全jobが終了し、完了まではworktree保護が残る。Host強制終了も実際のRust supervisorと隔離したHost代替プロセスで検査する。
+
+Linux検証はDebian bookwormの隔離コンテナ、arm64、`/bin/sh -> dash`（0.5.12-2）、`SHELL=/bin/sh`。コンパイラはリポジトリのNix flake/lock、依存はCargo.lockを使用。`bex-process`の3テストとHostの71テストが成功した。macOSでもPTYの明示kill・接続切断・Host強制終了と転送2テストが成功。コミット後の全体qualityは別途PRへ記録する。
+
+対照実験として、同じLinuxコンテナで`ccde07d`のRust supervisorに今回のPTY再現テストを適用した。旧実装ではbackground jobがHost強制終了後も生存して失敗し、修正後は成功する。既存テストの`sh -i -c`を、Hostと同じlogin shell起動とPTY入力へ変更し、別PGIDのjobが実際に生成されたことも検査している。
+
+修正後のmacOS workspaceテストは307件成功、2件opt-in ignored。最終調整後の転送テストとHost・desktop・fixture・supervisorの同時ビルドも成功した。

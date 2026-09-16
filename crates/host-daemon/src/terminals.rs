@@ -31,7 +31,7 @@ struct Record {
     cwd: PathBuf,
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
-    finished: watch::Receiver<bool>,
+    finished: watch::Receiver<Option<Result<(), String>>>,
 }
 #[derive(Default)]
 pub(crate) struct Terminals {
@@ -63,7 +63,7 @@ impl Terminals {
             return Err("terminal directory is unavailable".into());
         }
         let (input, receiver) = mpsc::channel(32);
-        let (complete, finished) = watch::channel(false);
+        let (complete, finished) = watch::channel(None);
         let stop = CancellationToken::new();
         {
             let mut records = self.records.lock().unwrap();
@@ -89,12 +89,6 @@ impl Terminals {
         let (ready, started) = oneshot::channel();
         let records = Arc::downgrade(&self.records);
         tokio::spawn(async move {
-            let _finished = scopeguard::guard((), |_| {
-                if let Some(records) = records.upgrade() {
-                    records.lock().unwrap().remove(&handle);
-                }
-                complete.send_replace(true);
-            });
             let worker = Worker {
                 router,
                 owner,
@@ -103,7 +97,13 @@ impl Terminals {
                 input: receiver,
                 ready: Some(ready),
             };
-            worker.run(cwd, size).await;
+            let cleanup = worker.run(cwd, size).await;
+            if cleanup.is_ok()
+                && let Some(records) = records.upgrade()
+            {
+                records.lock().unwrap().remove(&handle);
+            }
+            complete.send_replace(Some(cleanup));
         });
         tokio::time::timeout(std::time::Duration::from_secs(10), started)
             .await
@@ -142,7 +142,11 @@ impl Terminals {
         };
         if method == "process/kill" {
             stop.cancel();
-            while !*finished.borrow_and_update() {
+            loop {
+                if let Some(result) = finished.borrow_and_update().clone() {
+                    result?;
+                    break;
+                }
                 finished
                     .changed()
                     .await
@@ -205,7 +209,7 @@ impl Terminals {
             })
             .collect();
         for mut finished in records {
-            while !*finished.borrow_and_update() {
+            while finished.borrow_and_update().is_none() {
                 if finished.changed().await.is_err() {
                     break;
                 }
@@ -229,11 +233,13 @@ impl Worker {
             json!({"method":method,"params":params}).to_string(),
         )
     }
-    async fn run(mut self, cwd: PathBuf, size: TerminalSize) {
+    async fn run(mut self, cwd: PathBuf, size: TerminalSize) -> Result<(), String> {
         let mut pending: Option<(u64, Receipt)> = None;
+        let mut cleanup = Ok(());
         let result = async {
             if self.stop.is_cancelled() { return Err("terminal startup cancelled".into()); }
             let mut child = bex_process::terminal_command().and_then(|mut command| command.spawn()).map_err(|error| error.to_string())?;
+            cleanup = Err("terminal cleanup incomplete".into());
             let mut stdin = child.stdin().take().ok_or("terminal input pipe unavailable")?;
             let mut output = JsonlReader::new(child.stdout().take().ok_or("terminal output pipe unavailable")?);
             let initialize = PtyCommand::Start { command:crate::platform::terminal_command().iter().map(|value| (*value).into()).collect(), cwd:cwd.to_string_lossy().into_owned(), rows:size.rows, cols:size.cols };
@@ -275,12 +281,14 @@ impl Worker {
                 }
             }.await;
             // EOF is the supervisor's lifetime signal. Keep the owner record
-            // until its process group/Job Object has finished cleanup.
+            // until its entire PTY session/Job Object has finished cleanup.
+            // Killing the supervisor on a deadline would strand its jobs.
             drop(output);
             drop(stdin);
-            if tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await.is_err() {
-                let _ = std::pin::Pin::from(child.kill()).await;
-            }
+            cleanup = child.wait().await.map_err(|error| error.to_string()).and_then(|status| {
+                if status.success() { Ok(()) } else { Err(format!("terminal cleanup failed: {status}")) }
+            });
+            cleanup.clone()?;
             if self.stop.is_cancelled() { let _ = self.publish("process/exited", json!({"exitCode":0})); }
             interaction
         }.await;
@@ -296,6 +304,7 @@ impl Worker {
         if let Err(message) = result {
             let _ = self.publish("host/terminal/failed", json!({"message":message}));
         }
+        cleanup
     }
 }
 async fn write(
@@ -313,6 +322,57 @@ async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_and_disconnect_keep_ownership_until_shell_job_groups_are_gone() {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            for disconnect in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let cwd = std::fs::canonicalize(directory.path()).unwrap();
+                let terminals = Terminals::default();
+                let router = SessionRouter::new();
+                let connection = router.open_session(64);
+                terminals.start(router, connection.id(), "jobs".into(), directory.path().to_string_lossy().into_owned(), TerminalSize {rows:24, cols:80}).await.unwrap();
+                // Linux validation runs this Host with SHELL=/bin/sh (dash).
+                // Disable interactive history expansion for Bash on macOS.
+                let command = "[ -z \"${BASH_VERSION-}\" ] || set +H\nsleep 120 & first=$!; sleep 120 & printf '%s %s %s\\n' \"$$\" \"$first\" \"$!\" > owned-pids; wait\n";
+                terminals.request(connection.id(), "process/writeStdin", json!({"processHandle":"jobs","deltaBase64":STANDARD.encode(command)})).await.unwrap();
+                let pids = loop {
+                    if let Ok(text) = std::fs::read_to_string(directory.path().join("owned-pids"))
+                        && text.split_whitespace().count() == 3
+                    { break text; }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                };
+                let mut groups = pids.split_whitespace().map(|pid| {
+                    let output = std::process::Command::new("ps").args(["-o","pgid=","-p",pid]).output().unwrap();
+                    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+                });
+                let shell_group = groups.next().unwrap();
+                for group in groups {
+                    assert!(!group.is_empty());
+                    assert_ne!(shell_group, group, "fixture must create job-control groups");
+                }
+                assert!(terminals.in_use(&cwd));
+                if disconnect {
+                    terminals.close_session(connection.id());
+                    assert!(terminals.in_use(&cwd));
+                    terminals.shutdown().await;
+                } else {
+                    let mut kill = Box::pin(terminals.request(connection.id(), "process/kill", json!({"processHandle":"jobs"})));
+                    assert!(futures_util::poll!(&mut kill).is_pending());
+                    assert!(terminals.in_use(&cwd));
+                    kill.await.unwrap();
+                }
+                assert!(!terminals.in_use(&cwd));
+                for pid in pids.split_whitespace() {
+                    let output = std::process::Command::new("ps").args(["-o","stat=","-p",pid]).output().unwrap();
+                    let state = String::from_utf8_lossy(&output.stdout);
+                    assert!(state.trim().is_empty() || state.trim().starts_with('Z'), "process {pid} survived cleanup: {state}");
+                }
+            }
+        }).await.expect("terminal cleanup stalled");
+    }
+
     #[tokio::test]
     async fn disconnect_during_startup_releases_the_reservation_before_shutdown_returns() {
         let directory = tempfile::tempdir().unwrap();
