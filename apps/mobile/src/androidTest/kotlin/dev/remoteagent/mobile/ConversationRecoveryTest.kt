@@ -65,7 +65,7 @@ class ConversationRecoveryTest {
                     while (true) {
                         val thread =
                             JSONObject(model.snapshot.serialize().decodeToString())
-                                .getJSONObject("conversations_v2")
+                                .getJSONObject("conversations")
                                 .getJSONObject(id)
                         val turns = thread.getJSONArray("turns")
                         if (
@@ -99,7 +99,7 @@ class ConversationRecoveryTest {
                     perform(Intent.Submit(id, UUID.randomUUID().toString())).getOrThrow()
                     while (true) {
                         val thread = JSONObject(model.snapshot.serialize().decodeToString())
-                            .getJSONObject("conversations_v2").getJSONObject(id)
+                            .getJSONObject("conversations").getJSONObject(id)
                         val turns = thread.getJSONArray("turns")
                         if (turns.length() == 2 && turns.getJSONObject(1).getString("status") == "completed") {
                             assertTrue(turns.getJSONObject(1).toString().contains("preserved draft"))

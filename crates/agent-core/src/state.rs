@@ -82,7 +82,6 @@ pub struct PendingSubmission {
     pub turn_id: Option<String>,
     pub after_item_id: Option<String>,
     pub accepted: bool,
-    #[serde(default)]
     pub delivery_unknown: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_text: Option<String>,
@@ -111,39 +110,26 @@ pub struct Terminal {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
-    #[serde(default)]
     pub storage_scope: String,
-    #[serde(default)]
     pub archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
-    #[serde(default)]
     pub account: Arc<AccountState>,
     #[serde(skip)]
     pub terminals: Arc<BTreeMap<String, Arc<Terminal>>>,
-    // Older caches may already contain gaps that page overlap cannot detect.
-    #[serde(default, rename = "conversations_v2")]
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
     pub threads: Option<Arc<ThreadList>>,
     pub models: Arc<Vec<Model>>,
-    #[serde(default)]
     pub model_errors: Arc<Map<String, Value>>,
     #[serde(skip)]
     pub requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
-    #[serde(default)]
     pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
-    #[serde(default)]
     pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
-    #[serde(default)]
     pub workspace: Arc<Workspace>,
-    #[serde(default)]
     pub navigation: Arc<Navigation>,
-    #[serde(default)]
     pub activity: Arc<Activity>,
-    #[serde(default)]
     pub management: Arc<HostManagement>,
     #[serde(skip)]
     pub list_query: Arc<ListQuery>,
-    #[serde(default)]
     pub epoch: u64,
     #[serde(skip)]
     pub connected: bool,
@@ -176,7 +162,7 @@ pub use operations::Intent;
 use operations::add_attachment;
 
 /// Client-owned data from a previously configured Host storage area. Keeping
-/// it separate prevents cache migrations from deleting or mixing user drafts.
+/// it separate prevents storage switches from deleting or mixing user drafts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScopedData {
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,

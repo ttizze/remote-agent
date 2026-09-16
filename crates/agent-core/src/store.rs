@@ -762,32 +762,9 @@ async fn run(
             }
         }
     };
-    // Let an already issued PTY command finish before killing its process.
-    // In particular, a spawn must register its handle before cleanup can kill it.
-    // The peer's request deadline also bounds this wait.
-    while terminal_running {
-        let Some(completed) = jobs.next().await else {
-            break;
-        };
-        if completed.terminal.is_some() {
-            terminal_running = false;
-        }
-    }
+    // The Host owns PTY cleanup, including starts still in flight. Closing
+    // the connection cancels them without waiting for individual RPC replies.
     drop(jobs);
-    // PTYs live in the daemon's upstream connection, so closing this view's
-    // connection alone does not terminate them.
-    let terminals = updates.borrow().terminals.clone();
-    for (handle, terminal) in terminals.iter() {
-        if !matches!(terminal.phase, crate::state::TerminalPhase::Exited(_)) {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                client.call(&op::CloseTerminal {
-                    handle: handle.clone(),
-                }),
-            )
-            .await;
-        }
-    }
     let result = peer.close().await;
     drop(connection);
     apply(&updates, Event::Disconnected(reason));

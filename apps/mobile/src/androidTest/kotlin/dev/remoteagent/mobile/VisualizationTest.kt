@@ -13,7 +13,6 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
-import androidx.test.uiautomator.Until
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.ReadThread
@@ -69,7 +68,7 @@ class VisualizationTest {
             withTimeout(30_000) {
                 while (true) {
                     val complete = withContext(Dispatchers.Main) {
-                        val thread = JSONObject(model.snapshot.serialize().decodeToString()).getJSONObject("conversations_v2").getJSONObject(id)
+                        val thread = JSONObject(model.snapshot.serialize().decodeToString()).getJSONObject("conversations").getJSONObject(id)
                         val turns = thread.optJSONArray("turns")
                         turns != null && turns.length() > 0 && turns.getJSONObject(turns.length() - 1).optString("status") == "completed"
                     }
@@ -87,10 +86,11 @@ class VisualizationTest {
             fun verify(name: String) {
                 // UiAutomator does not advance Compose's test frame clock.
                 compose.waitUntil(20_000) { device.hasObject(By.text("01 · Git の合流")) }
-                val second = device.wait(Until.findObject(By.text("02 ブランチ＋チェックをプレビュー")), 20_000)
+                compose.waitUntil(20_000) { device.hasObject(By.text("02 ブランチ＋チェックをプレビュー")) }
+                val second = device.findObject(By.text("02 ブランチ＋チェックをプレビュー"))
                 assertNotNull("The second option must be accessible in the native WebView", second)
                 second.click()
-                assertTrue(device.wait(Until.hasObject(By.text("02 · ブランチ＋チェック")), 5_000))
+                compose.waitUntil(5_000) { device.hasObject(By.text("02 · ブランチ＋チェック")) }
                 assertTrue(device.takeScreenshot(File(base.getExternalFilesDir(null), name)))
             }
             verify("visualize-selected.png")

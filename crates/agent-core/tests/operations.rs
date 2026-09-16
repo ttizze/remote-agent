@@ -247,16 +247,7 @@ async fn run_case(case: &Value) {
         assert_eq!(result.unwrap(), *expected, "{}", case["name"]);
     } else {
         let error = result.expect_err("expected operation failure");
-        let expected = match case["errorContains"].as_str().unwrap() {
-            "カーソル" => "cursor",
-            "モデル一覧の続きを取得できませんでした" => {
-                "model cursor did not advance"
-            }
-            "音声を認識できませんでした" => "host/dictation/transcribe",
-            "承認の選択肢が無効です" => "invalid approval choice",
-            "すべての質問に回答してください" => "every question requires an answer",
-            other => other,
-        };
+        let expected = case["errorContains"].as_str().unwrap();
         assert!(
             error.to_string().contains(expected),
             "{}: {error}; expected {expected}",
