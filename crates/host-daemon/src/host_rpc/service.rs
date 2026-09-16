@@ -789,7 +789,7 @@ impl HostRpcService {
                 error,
             );
         }
-        error_delivery(response, agent_core::peer::Delivery::NotSent)
+        Ok(response)
     }
 
     pub(crate) fn files(&self) -> &crate::workspace_files::WorkspaceFiles {
@@ -1233,8 +1233,8 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-// Old provider envelopes may lack delivery evidence. The adapter passes Unknown;
-// locally rejected requests pass NotSent. Messages never participate in this decision.
+// Add delivery evidence once at dispatch for local errors. Provider adapters
+// already supply Unknown; messages never participate in this decision.
 fn error_delivery(
     line: String,
     delivery: agent_core::peer::Delivery,
