@@ -1,6 +1,9 @@
 //! Read-only access to Claude's native transcript tree. Never repairs or writes
 //! transcripts, and never launches the CLI to list or display a conversation.
-use agent_core::models::{Item, Thread, ThreadResponse, Turn};
+use agent_core::{
+    models::{Item, Thread, ThreadResponse, Turn},
+    session::{ProviderKind, SessionRef},
+};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -97,6 +100,10 @@ pub(super) fn summary(path: &Path) -> Result<Thread, String> {
         .ok_or("invalid native transcript filename")?;
     let mut thread = Thread {
         id: Some(format!("claude:{id}")),
+        session: Some(SessionRef {
+            provider: ProviderKind::Claude,
+            id: id.into(),
+        }),
         path: Some(path.to_string_lossy().into()),
         updated_at: metadata
             .modified()
@@ -186,6 +193,10 @@ pub(super) fn read_related(
     }
     let mut thread = Thread {
         id: Some(format!("claude:{session_id}")),
+        session: Some(SessionRef {
+            provider: ProviderKind::Claude,
+            id: session_id.to_string(),
+        }),
         path: Some(path.to_string_lossy().into()),
         ..Default::default()
     };
@@ -252,11 +263,11 @@ fn convert(
     limit: usize,
     mut warnings: Vec<&str>,
 ) -> Result<ThreadResponse, String> {
-    let native_id = thread
-        .id
-        .as_deref()
-        .and_then(|id| id.strip_prefix("claude:"))
-        .ok_or("Claude session ID missing")?;
+    let native_id = &thread
+        .session
+        .as_ref()
+        .ok_or("Claude session ID missing")?
+        .id;
     let mut indexed = HashMap::new();
     let mut leaf = None;
     for (index, node) in nodes.iter().enumerate() {
@@ -450,7 +461,19 @@ fn convert(
     thread
         .extra
         .insert("historyHasMore".into(), has_more.into());
-    thread.extra.insert("historyReadState".into(), json!({"type":if warnings.is_empty() { if has_more {"partial"} else {"complete"} } else {"incomplete"},"issues":warnings}));
+    use agent_core::session::{HistoryReadKind, HistoryReadState};
+    thread.history_read_state = Some(HistoryReadState::new(
+        if warnings.is_empty() {
+            if has_more {
+                HistoryReadKind::Partial
+            } else {
+                HistoryReadKind::Complete
+            }
+        } else {
+            HistoryReadKind::Incomplete
+        },
+        warnings.into_iter().map(str::to_owned).collect(),
+    ));
     thread.turns = Some(turns);
     Ok(ThreadResponse {
         thread,
@@ -513,12 +536,17 @@ mod tests {
             let (root, path) = fixture(&source);
             let response = read(&path, 5).unwrap();
             assert_eq!(
-                response.thread.extra["historyReadState"]["type"],
-                "incomplete"
+                response.thread.history_read_state.as_ref().unwrap().kind,
+                agent_core::session::HistoryReadKind::Incomplete
             );
             assert!(
-                response.thread.extra["historyReadState"]["issues"]
-                    .to_string()
+                response
+                    .thread
+                    .history_read_state
+                    .as_ref()
+                    .unwrap()
+                    .issues
+                    .join("\n")
                     .contains(issue)
             );
             assert_eq!(fs::read_to_string(path).unwrap(), source);
@@ -584,6 +612,10 @@ mod tests {
         let response = convert(
             Thread {
                 id: Some(format!("claude:{ID}")),
+                session: Some(SessionRef {
+                    provider: ProviderKind::Claude,
+                    id: ID.into(),
+                }),
                 ..Default::default()
             },
             rows.into(),

@@ -622,7 +622,7 @@ fn has_session_status(thread: &Thread) -> bool {
     thread
         .status
         .as_ref()
-        .is_some_and(|status| status.kind == "active")
+        .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
         || thread
             .turns
             .iter()
@@ -633,7 +633,7 @@ fn clear_session_status(thread: &mut Thread) {
     if thread
         .status
         .as_ref()
-        .is_some_and(|status| status.kind == "active")
+        .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
     {
         thread.status = None;
     }

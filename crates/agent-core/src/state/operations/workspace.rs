@@ -92,11 +92,7 @@ impl SaveFile {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReviewWorkspace {
-    pub cwd: String,
-}
+pub use crate::client::ReviewWorkspace;
 rpc::rpc_method!(ReviewWorkspace, WorkspaceReview, "host/workspace/review");
 
 /// Navigation and notifications already belong to an epoch. Their review read
@@ -230,11 +226,7 @@ impl Operation for ListWorktrees {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoveWorktree {
-    pub path: String,
-}
+pub use crate::client::RemoveWorktree;
 impl rpc::RpcMethod for RemoveWorktree {
     type Output = ();
     const METHOD: &'static str = "host/worktree/remove";
@@ -250,12 +242,7 @@ impl Operation for RemoveWorktree {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadVisualization {
-    pub path: String,
-    pub cwd: String,
-}
+pub use crate::client::LoadVisualization;
 rpc::rpc_method!(LoadVisualization, String, "host/visualize/read");
 impl Operation for LoadVisualization {
     rpc_operation!();

@@ -59,10 +59,9 @@ impl Snapshot {
                 .map(|thread| {
                     let id = thread.id.clone().unwrap_or_default();
                     let active = self.activity.active.get(&id).copied().unwrap_or_else(|| {
-                        thread
-                            .status
-                            .as_ref()
-                            .is_some_and(|status| status.kind == "active")
+                        thread.status.as_ref().is_some_and(|status| {
+                            status.kind == crate::models::ThreadStatusKind::Active
+                        })
                     });
                     let unread = self.activity.unread.contains(&id);
                     ThreadSummary {

@@ -29,7 +29,8 @@ When a new major becomes generally available, verify the vendor release, update 
 | `crates/agent-core` | Models, typed RPC operations, `Snapshot`, the `Store`, conversation presentation, iroh transport, diagnostics. The single state owner for every client. |
 | `crates/agent-ffi` | UniFFI bindings for `agent-core`, consumed by Swift and Kotlin. |
 | `crates/host-daemon` | The Host: pairing, authorization, Host RPC routing, Codex and Claude Code session runtime, worktrees, dictation, file/terminal access. |
-| `crates/codex-app-server` | Codex App Server transport and the shared provider-process supervisor. |
+| `crates/codex-app-server` | Codex App Server transport. |
+| `crates/bex-process` | Shared process supervisor and PTY backend, independent of providers. |
 | `crates/agent-cli` | Headless client for scripts and integration tests. |
 | `crates/host-fixture` | Deterministic Codex and Claude subprocess fixtures and isolated iroh Host for tests. |
 | `crates/xtask` | Background quality worker driven by Lefthook. |
@@ -45,7 +46,7 @@ The session architecture, limits, migration data and verification matrix are doc
 The Host needs Git and at least one available agent for conversations. Codex is optional; the Host prefers Codex bundled with ChatGPT Desktop on macOS, then `codex` on PATH; `--codex <path>` is authoritative.
 
 ```sh
-nix develop . --command cargo build --locked -p codex-app-server --bin bex-provider-supervisor
+nix develop . --command cargo build --locked -p bex-process --bin bex-provider-supervisor
 nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
 ```
 
@@ -96,7 +97,7 @@ The Host runs the unmodified CLI with streaming JSON input/output and its own pe
 
 Text, PNG/JPEG/GIF/WebP images, file references, tool approvals, user questions, interruption and subsequent turns use the same Store and authenticated transport as Codex. Working-directory selection and automatic worktree settings apply to both. Claude's native transcript is the only persistent conversation source. The Host reads its configured native directory (`--claude-home`, `CLAUDE_CONFIG_DIR`, or `~/.claude`) without launching inference and never writes Bex conversation records. Old `<Host state-dir>/claude/` files are retained as migration data and are not read as a fallback. Disconnecting a client leaves execution running; reconnecting opens the current snapshot, including currently valid unanswered requests, without replaying events.
 
-Create a new conversation to switch between Codex and Claude. Claude currently accepts subsequent input after the active turn completes or is interrupted; the composer explains this limit and retains the draft during a running turn. Claude-to-Codex delegation and Claude forks/side chats are not implemented. Codex startup failure or exit does not stop the Host, Claude turns, pairing, files, or workspace selection. Terminal, dictation, and Codex account operations require Codex. Worktree deletion is blocked while Codex conversation activity cannot be checked. The CLI integration has been exercised with Claude Code 2.1.266.
+Create a new conversation to switch between Codex and Claude. Claude currently accepts subsequent input after the active turn completes or is interrupted; the composer explains this limit and retains the draft during a running turn. Claude-to-Codex delegation and Claude forks/side chats are not implemented. Codex startup failure or exit does not stop the Host, Claude turns, pairing, files, or workspace selection. The Host owns PTYs independently of Codex, scopes each handle to its connection, and cleans them up on disconnect or shutdown. Dictation and Codex account operations still require Codex. Worktree deletion is blocked while Codex conversation activity cannot be checked. The CLI integration has been exercised with Claude Code 2.1.266.
 
 Mac conversation file links open the Host's parent directory and file editor in the Files panel, retaining unsaved file drafts and revision checks. Side Chat displays files and diffs in its own panel with a return-to-chat control, preserving the conversation draft.
 

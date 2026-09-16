@@ -13,7 +13,7 @@ use std::{
 use agent_core::{
     models::{Item, Model, ReasoningEffort, Thread, ThreadResponse, ThreadStatus, Turn},
     peer::RpcMessage,
-    session::{ProviderKind, SessionChange, TextField},
+    session::{ProviderKind, SessionChange, SessionRef, TextField},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -23,6 +23,26 @@ use uuid::Uuid;
 
 use crate::host_rpc::routing::SessionRouter;
 use process::Process;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct OperationError {
+    pub(crate) message: String,
+    pub(crate) delivery: agent_core::peer::Delivery,
+}
+impl From<String> for OperationError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            delivery: agent_core::peer::Delivery::NotSent,
+        }
+    }
+}
+impl From<&str> for OperationError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
 
 pub(crate) const MODEL_PREFIX: &str = "claude:";
 
@@ -80,6 +100,15 @@ impl Drop for Claude {
 }
 
 impl Claude {
+    pub(crate) fn capabilities() -> agent_core::session::Capabilities {
+        agent_core::session::Capabilities {
+            additional_input: false,
+            fork: false,
+            rename: false,
+            model_change: true,
+        }
+    }
+
     pub(crate) async fn load(
         program: PathBuf,
         directory: PathBuf,
@@ -215,6 +244,10 @@ impl Claude {
         let response = ThreadResponse {
             thread: Thread {
                 id: Some(id.clone()),
+                session: Some(SessionRef {
+                    provider: ProviderKind::Claude,
+                    id: session_id.to_string(),
+                }),
                 cwd: Some(cwd.to_string_lossy().into_owned()),
                 status: Some(status("idle")),
                 turns: Some(Vec::new()),
@@ -233,7 +266,7 @@ impl Claude {
             running: None,
             idle: None,
         };
-        self.retain_record(id, Arc::new(AsyncMutex::new(record)))
+        self.retain_record(session_id.to_string(), Arc::new(AsyncMutex::new(record)))
             .await?;
         Ok(response)
     }
@@ -242,11 +275,7 @@ impl Claude {
         if let Some(record) = self.records.lock().await.get(id).cloned() {
             return Ok(record);
         }
-        let native_id = Uuid::parse_str(
-            id.strip_prefix(MODEL_PREFIX)
-                .ok_or("invalid Claude session ID")?,
-        )
-        .map_err(|_| "invalid Claude session ID")?;
+        let native_id = Uuid::parse_str(id).map_err(|_| "invalid Claude session ID")?;
         let home = self.native_home.clone();
         let summary = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native_id)?;
@@ -309,14 +338,21 @@ impl Claude {
                                 .file_stem()
                                 .and_then(|id| id.to_str())
                                 .map(|id| format!("claude:{id}")),
+                            session: path.file_stem().and_then(|id| id.to_str()).map(|id| {
+                                SessionRef {
+                                    provider: ProviderKind::Claude,
+                                    id: id.into(),
+                                }
+                            }),
                             name: Some("Claude履歴を読み取れません".into()),
                             status: Some(status("notLoaded")),
                             ..Default::default()
                         };
-                        thread.extra.insert(
-                            "historyReadState".into(),
-                            json!({"type":"unavailable","issues":[error]}),
-                        );
+                        thread.history_read_state =
+                            Some(agent_core::session::HistoryReadState::new(
+                                agent_core::session::HistoryReadKind::Unavailable,
+                                vec![error],
+                            ));
                         thread
                     }))
                 })
@@ -337,6 +373,10 @@ impl Claude {
                 } else {
                     threads.push(Thread {
                         id: Some(id),
+                        session: Some(SessionRef {
+                            provider: ProviderKind::Claude,
+                            id: record.session_id.to_string(),
+                        }),
                         cwd: Some(record.cwd.clone()),
                         status: Some(status("active")),
                         ..Default::default()
@@ -370,11 +410,7 @@ impl Claude {
 
     /// Read native history on each open; the router overlays only owned execution.
     pub(crate) async fn read(&self, id: &str, requested: usize) -> Result<ThreadResponse, String> {
-        let native = Uuid::parse_str(
-            id.strip_prefix(MODEL_PREFIX)
-                .ok_or("invalid Claude session ID")?,
-        )
-        .map_err(|e| e.to_string())?;
+        let native = Uuid::parse_str(id).map_err(|e| e.to_string())?;
         let home = self.native_home.clone();
         let history: Result<ThreadResponse, String> = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
@@ -382,10 +418,10 @@ impl Claude {
                 Ok(response) => Ok(response),
                 Err(error) => {
                     let mut thread = history::summary(&path)?;
-                    thread.extra.insert(
-                        "historyReadState".into(),
-                        json!({"type":"unavailable", "issues":[error]}),
-                    );
+                    thread.history_read_state = Some(agent_core::session::HistoryReadState::new(
+                        agent_core::session::HistoryReadKind::Unavailable,
+                        vec![error],
+                    ));
                     Ok(ThreadResponse {
                         thread,
                         model: None,
@@ -404,15 +440,25 @@ impl Claude {
                 let records = self.records.lock().await;
                 let record = records.get(id).ok_or(error.clone())?.lock().await;
                 let mut thread = Thread {
-                    id: Some(id.into()),
+                    id: Some(
+                        SessionRef {
+                            provider: ProviderKind::Claude,
+                            id: id.into(),
+                        }
+                        .thread_id(),
+                    ),
+                    session: Some(SessionRef {
+                        provider: ProviderKind::Claude,
+                        id: id.into(),
+                    }),
                     cwd: Some(record.cwd.clone()),
                     ..Default::default()
                 };
                 if record.resumable {
-                    thread.extra.insert(
-                        "historyReadState".into(),
-                        json!({"type":"unavailable", "issues":[error]}),
-                    );
+                    thread.history_read_state = Some(agent_core::session::HistoryReadState::new(
+                        agent_core::session::HistoryReadKind::Unavailable,
+                        vec![error],
+                    ));
                 } else {
                     thread.turns = Some(Vec::new());
                 }
@@ -425,8 +471,12 @@ impl Claude {
         }
     }
 
-    pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        let id = params["threadId"].as_str().ok_or("threadId is required")?;
+    pub(crate) async fn request(
+        &self,
+        id: &str,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, OperationError> {
         if matches!(method, "thread/resume" | "host/thread/resume") {
             self.record(id).await?;
             return Ok(json!({}));
@@ -467,9 +517,7 @@ impl Claude {
             }
             if let Some(agent_id) = item.extra.get("agentId").and_then(Value::as_str) {
                 let home = self.native_home.clone();
-                let session_id =
-                    Uuid::parse_str(id.strip_prefix(MODEL_PREFIX).ok_or("invalid Claude ID")?)
-                        .map_err(|_| "invalid Claude ID")?;
+                let session_id = Uuid::parse_str(id).map_err(|_| "invalid Claude ID")?;
                 let agent_id = agent_id.to_owned();
                 let related = tokio::task::spawn_blocking(move || {
                     history::read_related(&home, session_id, &agent_id, usize::MAX)
@@ -524,7 +572,7 @@ impl Claude {
                 "Claudeの実行中は追加送信できません。完了を待つか、停止してから送信してください。"
                     .into(),
             ),
-            _ => Err(format!("Claude Codeでは {method} に対応していません。")),
+            _ => Err(format!("Claude Codeでは {method} に対応していません。").into()),
         }
     }
 
@@ -533,7 +581,7 @@ impl Claude {
         id: &str,
         record: Arc<AsyncMutex<Record>>,
         params: &Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, OperationError> {
         for field in [
             "model",
             "effort",
@@ -541,7 +589,7 @@ impl Claude {
             "clientUserMessageId",
         ] {
             if !params[field].is_null() && !params[field].is_string() {
-                return Err(format!("{field} must be a string"));
+                return Err(format!("{field} must be a string").into());
             }
         }
         if self.stop.is_cancelled() {
@@ -629,7 +677,7 @@ impl Claude {
             ..Default::default()
         };
         if let Err(error) = process.write(&json!({"type":"user","uuid":turn_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
-            return Err(format!("submission outcome unknown: {error}"));
+            return Err(OperationError { message: error, delivery: agent_core::peer::Delivery::Unknown });
         }
         state.model = model.clone();
         let (input, receiver) = mpsc::channel(32);
@@ -640,8 +688,12 @@ impl Claude {
             interrupt: interrupted,
         });
         drop(state);
+        let target = SessionRef {
+            provider: ProviderKind::Claude,
+            id: id.into(),
+        };
         self.router.session_change(
-            id,
+            &target,
             SessionChange::Turn {
                 turn,
                 completed: false,
@@ -651,7 +703,7 @@ impl Claude {
             record,
             router: self.router.clone(),
             pending: self.pending.clone(),
-            thread_id: id.into(),
+            session: target,
             turn_id: turn_id.clone(),
             input,
             stop: self.stop.child_token(),
@@ -727,7 +779,7 @@ struct Worker {
     record: Arc<AsyncMutex<Record>>,
     router: SessionRouter,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
-    thread_id: String,
+    session: SessionRef,
     turn_id: String,
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
@@ -794,7 +846,7 @@ impl Worker {
             let mut pending = self.pending.lock().unwrap();
             let ids: Vec<_> = pending
                 .iter()
-                .filter(|(_, request)| request.thread_id == self.thread_id)
+                .filter(|(_, request)| request.thread_id == self.session.thread_id())
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in &ids {
@@ -807,14 +859,14 @@ impl Worker {
                 .resolve_native_request(ProviderKind::Claude, &id.into());
         }
         let mut record = self.record.lock().await;
-        let Some(mut turn) = self.router.current_turn(&self.thread_id, &self.turn_id) else {
+        let Some(mut turn) = self.router.current_turn(&self.session, &self.turn_id) else {
             record.running = None;
             drop(record);
             if let Some(process) = retained {
                 let _ = process.finish().await;
             }
             self.router.session_change(
-                &self.thread_id,
+                &self.session,
                 SessionChange::Status {
                     status: ThreadStatus {
                         kind: "notLoaded".into(),
@@ -858,7 +910,7 @@ impl Worker {
             });
         }
         self.router.session_change(
-            &self.thread_id,
+            &self.session,
             SessionChange::Turn {
                 turn,
                 completed: true,
@@ -904,7 +956,7 @@ impl Worker {
         let tool = request["tool_name"]
             .as_str()
             .ok_or("Claude permission tool name is missing")?;
-        let mut params = json!({"threadId":self.thread_id,"turnId":self.turn_id,"itemId":request["tool_use_id"],
+        let mut params = json!({"threadId":self.session.thread_id(),"turnId":self.turn_id,"itemId":request["tool_use_id"],
             "reason":format!("{tool}\n{}", serde_json::to_string_pretty(&request["input"]).map_err(|error| error.to_string())?),
             "availableDecisions":["accept","decline"]});
         let method = if tool == "AskUserQuestion" {
@@ -932,15 +984,17 @@ impl Worker {
         self.pending.lock().unwrap().insert(
             id.clone(),
             Pending {
-                thread_id: self.thread_id.clone(),
+                thread_id: self.session.thread_id(),
                 request_id: request_id.into(),
                 input: request["input"].clone(),
                 sender: self.input.clone(),
             },
         );
         let result = self.router.request(
-            ProviderKind::Claude,
+            self.session.clone(),
             agent_core::client::ServerRequest {
+                delivery_state: None,
+                native_request_id: None,
                 id: id.clone().into(),
                 method: method.into(),
                 params: serde_json::from_value(params).map_err(|error| error.to_string())?,
@@ -956,7 +1010,7 @@ impl Worker {
     fn approval_id(&self, request_id: &str) -> String {
         format!(
             "claude-permission:{}:{}:{request_id}",
-            self.thread_id, self.turn_id
+            self.session.id, self.turn_id
         )
     }
 
@@ -983,7 +1037,7 @@ impl Worker {
         drop(record);
         let mut turn = self
             .router
-            .current_turn(&self.thread_id, &self.turn_id)
+            .current_turn(&self.session, &self.turn_id)
             .ok_or("Claude execution state is unavailable")?;
         let items = turn.items.get_or_insert_default();
         for (index, block) in blocks.iter().enumerate() {
@@ -1027,7 +1081,7 @@ impl Worker {
                     );
                     item.result = Some(block["content"].clone());
                     self.router.session_change(
-                        &self.thread_id,
+                        &self.session,
                         SessionChange::Item {
                             turn_id: self.turn_id.clone(),
                             item: item.clone(),
@@ -1043,7 +1097,7 @@ impl Worker {
                 item.extra.insert("parentToolUseId".into(), parent.into());
             }
             self.router.session_change(
-                &self.thread_id,
+                &self.session,
                 SessionChange::Item {
                     turn_id: self.turn_id.clone(),
                     item: item.clone(),
@@ -1095,7 +1149,7 @@ impl Worker {
                     item.extra.insert("parentToolUseId".into(), scope.into());
                 }
                 self.router.session_change(
-                    &self.thread_id,
+                    &self.session,
                     SessionChange::Item {
                         turn_id: self.turn_id.clone(),
                         item,
@@ -1120,7 +1174,7 @@ impl Worker {
                     .as_str()
                     .ok_or("Claude stream text is missing")?;
                 self.router.session_change(
-                    &self.thread_id,
+                    &self.session,
                     SessionChange::Text {
                         turn_id: self.turn_id.clone(),
                         item_id: id,

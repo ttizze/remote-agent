@@ -1,12 +1,6 @@
 use super::*;
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListThreads {
-    #[serde(flatten)]
-    pub query: ListQuery,
-}
+pub use crate::client::ListThreads;
 impl ListThreads {
     pub fn new(query: ListQuery) -> Self {
         Self { query }
@@ -36,10 +30,14 @@ impl Operation for ListThreads {
                 let Some(id) = cached.id.as_ref() else {
                     continue;
                 };
-                let provider = if id.starts_with("claude:") {
-                    "claude"
-                } else {
-                    "codex"
+                let session = cached
+                    .session
+                    .clone()
+                    .or_else(|| crate::session::SessionRef::from_thread_id(id).ok());
+                let Some(session) = session else { continue };
+                let provider = match session.provider {
+                    crate::session::ProviderKind::Codex => "codex",
+                    crate::session::ProviderKind::Claude => "claude",
                 };
                 if errors.contains_key(provider)
                     && !threads
@@ -82,14 +80,7 @@ impl Operation for ListThreads {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadItem {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub item_id: String,
-}
+pub use crate::client::ReadItem;
 impl rpc::RpcMethod for ReadItem {
     type Output = rpc::ItemResponse;
     const METHOD: &'static str = "host/thread/item/read";
@@ -102,20 +93,146 @@ impl rpc::RpcMethod for ReadItem {
     }
 }
 
+/// The item Arc is its local source generation. Session updates replace this
+/// Arc even when the new value happens to equal the old one.
+#[derive(Debug)]
+pub struct ItemRead {
+    source: Option<Arc<Item>>,
+    subscription: Option<uuid::Uuid>,
+    response: Result<rpc::ItemResponse, PeerError>,
+}
+
+impl ReadItem {
+    fn source<'a>(&self, snapshot: &'a Snapshot) -> Option<&'a Arc<Item>> {
+        snapshot
+            .conversations
+            .get(&self.thread_id)?
+            .turns
+            .as_ref()?
+            .iter()
+            .rfind(|turn| turn.id == self.turn_id)?
+            .items
+            .as_ref()?
+            .iter()
+            .find(|item| item.id == self.item_id)
+    }
+    fn deferred(&self, snapshot: &Snapshot) -> bool {
+        snapshot
+            .conversations
+            .get(&self.thread_id)
+            .and_then(|thread| thread.turns.as_ref())
+            .and_then(|turns| turns.iter().rfind(|turn| turn.id == self.turn_id))
+            .and_then(|turn| turn.deferred_item_ids.as_ref())
+            .is_some_and(|ids| ids.contains(&self.item_id))
+    }
+    fn apply_read(
+        self,
+        snapshot: &mut Snapshot,
+        output: ItemRead,
+        current_epoch: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        if output
+            .response
+            .as_ref()
+            .is_ok_and(|response| response.transfer.is_some())
+        {
+            // Consume the Host's grant even when a newer update has made this
+            // response stale. Dropping it locally does not release the grant.
+            return Ok(vec![Effect::continuation(ResolveItem {
+                request: self,
+                source: output.source,
+                subscription: output.subscription,
+                response: output.response?,
+                current_epoch,
+            })]);
+        }
+        let current = self.source(snapshot);
+        if !current_epoch
+            || output.subscription != snapshot.subscriptions.get(&self.thread_id).copied()
+            || !current
+                .zip(output.source.as_ref())
+                .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+        {
+            // Full Item updates already supply the new body. A delta preserves
+            // the deferred marker, so retry once this transfer has finished.
+            return if current.is_some() && self.deferred(snapshot) {
+                Ok(vec![Effect::continuation(self)])
+            } else if current.is_some() {
+                Ok(Vec::new())
+            } else {
+                Err(PeerError::InvalidMessage(
+                    "item is no longer available".into(),
+                ))
+            };
+        }
+        let response = output.response?;
+        *snapshot = upsert_item(snapshot, &self.thread_id, &self.turn_id, response.item);
+        reconcile_pending(snapshot, &self.thread_id);
+        Ok(Vec::new())
+    }
+}
 impl Operation for ReadItem {
-    type Output = rpc::ItemResponse;
+    fn item_read(&self) -> Option<&ReadItem> {
+        Some(self)
+    }
+    type Output = ItemRead;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context.call(self).await?.resolve(context.session).await
+        let source = self.source(context.snapshot).cloned();
+        Ok(ItemRead {
+            source,
+            subscription: context.snapshot.subscriptions.get(&self.thread_id).copied(),
+            response: Ok(context.call(self).await?),
+        })
     }
     const ORDERED: bool = true;
-    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        let Self {
-            thread_id, turn_id, ..
-        } = self;
-        let rpc::ItemResponse { item, .. } = output;
-        *snapshot = upsert_item(snapshot, &thread_id, &turn_id, item);
-        reconcile_pending(snapshot, &thread_id);
-        Vec::new()
+    fn complete(
+        self,
+        snapshot: &mut Snapshot,
+        output: Self::Output,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        self.apply_read(snapshot, output, current)
+    }
+}
+
+#[derive(Debug)]
+struct ResolveItem {
+    request: ReadItem,
+    source: Option<Arc<Item>>,
+    subscription: Option<uuid::Uuid>,
+    response: rpc::ItemResponse,
+    current_epoch: bool,
+}
+impl Operation for ResolveItem {
+    fn item_read(&self) -> Option<&ReadItem> {
+        Some(&self.request)
+    }
+    type Output = ItemRead;
+    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        Ok(ItemRead {
+            source: self.source.clone(),
+            subscription: self.subscription,
+            response: tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                self.response.clone().resolve(context.session),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(PeerError::RequestTimeout {
+                    method: "item body transfer".into(),
+                    id: 0,
+                })
+            }),
+        })
+    }
+    fn complete(
+        self,
+        snapshot: &mut Snapshot,
+        output: Self::Output,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        self.request
+            .apply_read(snapshot, output, current && self.current_epoch)
     }
 }
 
@@ -220,9 +337,9 @@ impl Operation for ReadThread {
         if output
             .response
             .thread
-            .extra
-            .get("historyReadState")
-            .is_some_and(|state| state["type"] == "unavailable")
+            .history_read_state
+            .as_ref()
+            .is_some_and(|state| state.kind == crate::session::HistoryReadKind::Unavailable)
             && let Some(cached) = snapshot.conversations.get(&self.thread_id)
         {
             let live = output.response.thread.turns.get_or_insert_default();
@@ -498,12 +615,7 @@ impl Operation for LoadModels {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenRequest {
-    pub request_id: Value,
-}
+pub use crate::client::OpenRequest;
 impl rpc::RpcMethod for OpenRequest {
     type Output = crate::session::SessionRef;
     const METHOD: &'static str = "host/session/request";
@@ -523,5 +635,145 @@ impl Operation for OpenRequest {
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         ReadThread::new(output.session.thread_id()).stale(snapshot, output)
+    }
+}
+
+#[cfg(test)]
+mod item_read_tests {
+    use super::*;
+    use crate::session::{SessionChange, TextField};
+
+    fn fixture() -> (Snapshot, ReadItem) {
+        let thread = serde_json::from_value(serde_json::json!({"id":"chat","turns":[{"id":"turn","status":"inProgress","deferredItemIds":["item"],"items":[{"id":"item","type":"agentMessage","text":"summary"}]}]})).unwrap();
+        let snapshot = Snapshot {
+            conversations: Arc::new(BTreeMap::from([("chat".into(), Arc::new(thread))])),
+            ..Default::default()
+        };
+        (
+            snapshot,
+            ReadItem {
+                thread_id: "chat".into(),
+                turn_id: "turn".into(),
+                item_id: "item".into(),
+            },
+        )
+    }
+    fn read(snapshot: &Snapshot, request: &ReadItem) -> ItemRead {
+        ItemRead { source: request.source(snapshot).cloned(), subscription: snapshot.subscriptions.get("chat").copied(), response: Ok(rpc::ItemResponse {item: serde_json::from_value(serde_json::json!({"id":"item","type":"agentMessage","text":"old full body","status":"inProgress"})).unwrap(), transfer:None,extra:Default::default()}) }
+    }
+    fn update(snapshot: &mut Snapshot, change: SessionChange) {
+        let thread = change.apply(&snapshot.conversations["chat"]).unwrap();
+        Arc::make_mut(&mut snapshot.conversations).insert("chat".into(), Arc::new(thread));
+    }
+    #[test]
+    fn full_item_update_wins_over_late_body_and_its_status() {
+        let (mut snapshot, request) = fixture();
+        let old = read(&snapshot, &request);
+        update(&mut snapshot, SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(serde_json::json!({"id":"item","type":"agentMessage","text":"new full body","status":"completed"})).unwrap()});
+        let current = snapshot.conversations.clone();
+        assert!(
+            request
+                .apply_read(&mut snapshot, old, true)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(Arc::ptr_eq(&current, &snapshot.conversations));
+    }
+    #[test]
+    fn delta_and_reopen_invalidate_body_and_coalesce_into_one_retry() {
+        for reopen in [false, true] {
+            let (mut snapshot, request) = fixture();
+            let old = read(&snapshot, &request);
+            if reopen {
+                // Even a read failure retaining cached Item Arcs changes the subscription.
+                Arc::make_mut(&mut snapshot.subscriptions)
+                    .insert("chat".into(), uuid::Uuid::new_v4());
+            } else {
+                update(
+                    &mut snapshot,
+                    SessionChange::Text {
+                        turn_id: "turn".into(),
+                        item_id: "item".into(),
+                        field: TextField::Message,
+                        delta: "delta".into(),
+                    },
+                );
+            }
+            let effects = request
+                .clone()
+                .apply_read(&mut snapshot, old, true)
+                .unwrap();
+            assert_eq!(effects.len(), 1);
+            assert!(request.deferred(&snapshot));
+            assert_ne!(
+                request.source(&snapshot).unwrap().text.as_deref(),
+                Some("old full body")
+            );
+        }
+    }
+    #[test]
+    fn deletion_rejects_completion_and_epoch_change_retries() {
+        for deleted in [false, true] {
+            let (mut snapshot, request) = fixture();
+            let old = read(&snapshot, &request);
+            if deleted {
+                update(
+                    &mut snapshot,
+                    SessionChange::RemoveItem {
+                        turn_id: "turn".into(),
+                        item_id: "item".into(),
+                    },
+                );
+            }
+            let result = request.apply_read(&mut snapshot, old, deleted);
+            if deleted {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap().len(), 1);
+            }
+        }
+    }
+    #[test]
+    fn transfer_failure_keeps_deferred_and_new_delta_still_gets_a_retry() {
+        for (changed, error) in [
+            (false, PeerError::InvalidMessage("digest mismatch".into())),
+            (true, PeerError::InvalidMessage("digest mismatch".into())),
+            (
+                false,
+                PeerError::RequestTimeout {
+                    method: "item body transfer".into(),
+                    id: 0,
+                },
+            ),
+            (
+                true,
+                PeerError::RequestTimeout {
+                    method: "item body transfer".into(),
+                    id: 0,
+                },
+            ),
+        ] {
+            let (mut snapshot, request) = fixture();
+            let mut old = read(&snapshot, &request);
+            old.response = Err(error);
+            if changed {
+                update(
+                    &mut snapshot,
+                    SessionChange::Text {
+                        turn_id: "turn".into(),
+                        item_id: "item".into(),
+                        field: TextField::Message,
+                        delta: "delta".into(),
+                    },
+                );
+            }
+            let result = request.clone().apply_read(&mut snapshot, old, true);
+            if changed {
+                assert_eq!(result.unwrap().len(), 1);
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(request.deferred(&snapshot));
+        }
     }
 }

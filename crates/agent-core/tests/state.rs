@@ -19,7 +19,9 @@ fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     {
         if !previous.conversations.contains_key(&id) {
             let active = match &change {
-                agent_core::session::SessionChange::Status { status } => status.kind == "active",
+                agent_core::session::SessionChange::Status { status } => {
+                    status.kind == agent_core::models::ThreadStatusKind::Active
+                }
                 agent_core::session::SessionChange::Turn { completed, .. } => !completed,
                 _ => return (previous.clone(), Vec::new()),
             };

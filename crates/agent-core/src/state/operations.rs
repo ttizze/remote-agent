@@ -126,6 +126,9 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     fn submission_id(&self) -> Option<&str> {
         None
     }
+    fn item_read(&self) -> Option<&ReadItem> {
+        None
+    }
     fn terminal_handle(&self) -> Option<&str> {
         None
     }
@@ -151,6 +154,18 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
         } else {
             Vec::new()
         }
+    }
+    fn complete(
+        self,
+        snapshot: &mut Snapshot,
+        output: Self::Output,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
+        Ok(if current {
+            self.apply(snapshot, output)
+        } else {
+            self.stale(snapshot, output)
+        })
     }
     fn outcome(_output: &mut Self::Output) -> Outcome {
         Outcome::Applied

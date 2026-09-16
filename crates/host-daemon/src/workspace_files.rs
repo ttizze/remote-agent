@@ -23,6 +23,10 @@ const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
 
+#[cfg(test)]
+#[path = "workspace_files/item_read_tests.rs"]
+mod item_read_tests;
+
 #[derive(Clone)]
 pub(crate) struct WorkspaceFiles {
     upload_directory: Arc<Path>,
@@ -53,7 +57,7 @@ pub(crate) enum FileRequest {
     #[serde(rename = "host/file/list")]
     List(PathParams),
     #[serde(rename = "host/visualize/read")]
-    Visualization(agent_core::state::operations::LoadVisualization),
+    Visualization(agent_core::client::LoadVisualization),
     #[serde(rename = "host/file/read")]
     Read(PathParams),
     #[serde(rename = "host/file/write")]
@@ -565,7 +569,7 @@ mod tests {
         )
         .unwrap();
         let request = || {
-            FileRequest::Visualization(agent_core::state::operations::LoadVisualization {
+            FileRequest::Visualization(agent_core::client::LoadVisualization {
                 path: "comparison.html".into(),
                 cwd: directory.path().to_str().unwrap().into(),
             })

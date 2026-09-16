@@ -110,6 +110,8 @@ impl Writer {
                         serde_json::from_value(request["params"]["session"].clone())?;
                     let subscription = uuid::Uuid::new_v4();
                     state.sessions.insert(target.thread_id(), subscription);
+                    let mut response = response;
+                    response["thread"]["capabilities"] = json!({"additionalInput":true,"fork":true,"rename":true,"modelChange":true});
                     value["result"] =
                         json!({"session":target,"subscriptionId":subscription,"response":response});
                 }

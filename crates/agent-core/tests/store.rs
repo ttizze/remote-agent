@@ -659,7 +659,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
         };
         writer
             .write_line(
-                &json!({"id":failed["id"],"error":{"code":-32000,"message":"fixture failure"}})
+                &json!({"id":failed["id"],"error":{"code":-32000,"message":"fixture failure","delivery":"notSent"}})
                     .to_string(),
             )
             .await
@@ -776,7 +776,7 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
         assert_eq!(submit["params"]["input"][0]["text"], "original\nspoken");
         assert!(!transcribing.is_finished());
         let reply = if fail_send {
-            json!({"id":submit["id"],"error":{"code":-32000,"message":"send failed"}})
+            json!({"id":submit["id"],"error":{"code":-32000,"message":"send failed","delivery":"notSent"}})
         } else {
             json!({"id":submit["id"],"result":{"turn":{"id":"next"}}})
         };
@@ -1393,13 +1393,6 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
                 .await
                 .unwrap();
         }
-        let close = read(&mut reader).await;
-        assert_eq!(close["method"], "process/kill");
-        assert_eq!(close["params"]["processHandle"], "terminal");
-        writer
-            .write_line(&json!({"id":close["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
         // Keep the transport alive until Store closes it.
         assert!(reader.read_line().await.unwrap().is_none());
     });
@@ -1449,6 +1442,24 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
     assert!(store.snapshot().terminals["terminal"].output.is_empty());
     store.close().await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn disconnect_does_not_wait_for_a_terminal_start_reply() {
+    let (store, mut reader, _writer) = setup(Snapshot::default()).await;
+    let starting = store.dispatch(Intent::StartTerminal(op::StartTerminal {
+        handle: "starting".into(),
+        cwd: "/fixture".into(),
+        size: agent_core::client::TerminalSize { cols: 80, rows: 24 },
+    }));
+    assert_eq!(read(&mut reader).await["method"], "host/terminal/start");
+    // Keep the response pending: Host cleanup is triggered by connection EOF.
+    tokio::time::timeout(Duration::from_secs(1), store.close())
+        .await
+        .expect("disconnect waited for terminal startup")
+        .unwrap();
+    assert!(reader.read_line().await.unwrap().is_none());
+    assert!(starting.await.is_err());
 }
 
 #[tokio::test]
@@ -2467,4 +2478,151 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         Some("listed")
     );
     store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
+    use agent_core::{
+        peer::JsonlWriter,
+        session::{SessionChange, TextField},
+        transport::{Endpoint, Identity, Relays, Trust},
+    };
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+        let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+        let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
+        let ticket = host.ticket();
+        let (store, incoming) = tokio::join!(Store::connect(&client, &ticket, Snapshot::default(), None), scoped_incoming(&host, &trust));
+        let store = store.unwrap();
+        let (session, stream) = incoming;
+        let (read_half, write_half) = tokio::io::split(stream);
+        let output = Arc::new(tokio::sync::Mutex::new(JsonlWriter::new(write_half)));
+        let (send, mut requests) = tokio::sync::mpsc::channel(16);
+        let subscription_a = uuid::Uuid::new_v4();
+        let subscription_b = uuid::Uuid::new_v4();
+        let server = tokio::spawn({
+            let output = output.clone();
+            async move {
+                let mut reader = JsonlReader::new(read_half);
+                while let Some(line) = reader.read_line().await.unwrap() {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let result = match request["method"].as_str().unwrap() {
+                        "host/thread/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                        "model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/session/open" => {
+                            let a = request["params"]["session"]["id"] == "A";
+                            json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"id":if a {"A"} else {"B"},"turns":[{"id":"turn","status":"inProgress","deferredItemIds":if a {vec!["item"]} else {vec![]},"items":[{"id":"item","type":if a {"commandExecution"} else {"agentMessage"},"text":if a {""} else {"B prefix"}}]}]}}})
+                        }
+                        "host/session/close" => json!({}),
+                        _ => { send.send(request).await.unwrap(); continue; }
+                    };
+                    output.lock().await.write_line(&json!({"id":request["id"],"result":result}).to_string()).await.unwrap();
+                }
+            }
+        });
+        for id in ["A", "B"] {
+            store.dispatch(Intent::ReadThread(op::ReadThread::new(id.into()))).await.unwrap();
+        }
+        let read_item = op::ReadItem {thread_id:"A".into(),turn_id:"turn".into(),item_id:"item".into()};
+        let mut reading = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request["method"], "host/thread/item/read");
+        let body = serde_json::to_vec(&json!({"id":"item","type":"commandExecution","aggregatedOutput":"old body","status":"inProgress"})).unwrap();
+        let grant = json!({"token":URL_SAFE_NO_PAD.encode([1;32]),"sha256":URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256,&body)),"size":body.len()});
+        output.lock().await.write_line(&json!({"id":request["id"],"result":{"item":{"id":"item","type":"commandExecution"},"transfer":grant}}).to_string()).await.unwrap();
+        let mut transfer = session.accept_stream().await.unwrap();
+        let length = transfer.read_u32().await.unwrap();
+        let mut token = vec![0; length as usize];
+        transfer.read_exact(&mut token).await.unwrap();
+        // The binary stream is now an explicit barrier: no body bytes are sent
+        // until all the following control operations have completed.
+        assert!(futures_util::poll!(&mut reading).is_pending());
+        let mut duplicate = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
+        let changes = [
+            (subscription_b, SessionChange::Text {turn_id:"turn".into(),item_id:"item".into(),field:TextField::Message,delta:" + delta".into()}),
+            (subscription_a, SessionChange::Request {request:serde_json::from_value(json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"A","turnId":"turn","itemId":"item"}})).unwrap()}),
+        ];
+        for (subscription, change) in changes {
+            output.lock().await.write_line(&json!({"method":"host/session/update","params":{"subscriptionId":subscription,"change":change}}).to_string()).await.unwrap();
+        }
+        wait_for(&store, |s| s.requests.contains_key("\"approval\"") && s.conversations["B"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref() == Some("B prefix + delta")).await;
+        for intent in [
+            Intent::Respond(op::Respond {request_id:json!("approval"),answer:Answer::Decision {index:2}}),
+            Intent::Interrupt(op::Interrupt {thread_id:"A".into(),turn_id:"turn".into()}),
+        ] {
+            let completion = store.dispatch(intent);
+            let request = requests.recv().await.unwrap();
+            assert!(matches!(request["method"].as_str(), Some("host/session/answer" | "turn/interrupt")));
+            output.lock().await.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
+            completion.await.unwrap();
+        }
+        // A delta invalidates the in-flight source without clearing deferred.
+        output.lock().await.write_line(&json!({"method":"host/session/update","params":{"subscriptionId":subscription_a,"change":{"type":"text","turnId":"turn","itemId":"item","field":"commandOutput","delta":"new suffix"}}}).to_string()).await.unwrap();
+        wait_for(&store, |s| s.conversations["A"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].aggregated_output.as_deref() == Some("new suffix")).await;
+        assert!(store.snapshot().conversations["A"].turns.as_ref().unwrap()[0].deferred_item_ids.as_ref().unwrap().contains(&"item".into()));
+        assert!(futures_util::poll!(&mut reading).is_pending());
+        assert!(futures_util::poll!(&mut duplicate).is_pending());
+        transfer.write_all(&body).await.unwrap();
+        transfer.shutdown().await.unwrap();
+        let retry = requests.recv().await.unwrap();
+        assert_eq!(retry["method"], "host/thread/item/read");
+        output.lock().await.write_line(&json!({"id":retry["id"],"result":{"item":{"id":"item","type":"commandExecution","aggregatedOutput":"complete prefix + new suffix","status":"completed"}}}).to_string()).await.unwrap();
+        reading.await.unwrap();
+        duplicate.await.unwrap();
+        let snapshot = store.snapshot();
+        let turn = &snapshot.conversations["A"].turns.as_ref().unwrap()[0];
+        assert_eq!(turn.items.as_ref().unwrap()[0].aggregated_output.as_deref(), Some("complete prefix + new suffix"));
+        assert!(turn.deferred_item_ids.as_ref().unwrap().is_empty());
+        assert!(requests.try_recv().is_err(), "same-item requests must be coalesced");
+        for failure in ["digest", "id", "timeout"] {
+            let wrong_id = failure == "id";
+            let before = store.snapshot().conversations.clone();
+            let mut failed_read = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
+            let request = requests.recv().await.unwrap();
+            let invalid = serde_json::to_vec(&json!({"id":if wrong_id {"different"} else {"item"},"type":"commandExecution","aggregatedOutput":"invalid body"})).unwrap();
+            let digest = if wrong_id { URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &invalid)) } else { URL_SAFE_NO_PAD.encode([0;32]) };
+            output.lock().await.write_line(&json!({"id":request["id"],"result":{"item":{"id":"item","type":"commandExecution"},"transfer":{"token":URL_SAFE_NO_PAD.encode([2;32]),"sha256":digest,"size":invalid.len()}}}).to_string()).await.unwrap();
+            let mut transfer = session.accept_stream().await.unwrap();
+            let length = transfer.read_u32().await.unwrap();
+            let mut token = vec![0;length as usize];
+            transfer.read_exact(&mut token).await.unwrap();
+            if failure == "timeout" {
+                // Exercise the production deadline against a stalled real stream.
+                // Keep using the independent control connection throughout it.
+                loop {
+                    tokio::select! {
+                        result = &mut failed_read => {
+                            assert!(matches!(result, Err(PeerError::RequestTimeout { .. })), "{result:?}");
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                            let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:"A".into(),turn_id:"turn".into()}));
+                            let request = requests.recv().await.unwrap();
+                            assert_eq!(request["method"], "turn/interrupt");
+                            output.lock().await.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
+                            interrupt.await.unwrap();
+                        }
+                    }
+                }
+            } else {
+                transfer.write_all(&invalid).await.unwrap();
+                transfer.shutdown().await.unwrap();
+                assert!(matches!(failed_read.await, Err(PeerError::InvalidMessage(_))));
+            }
+            assert!(Arc::ptr_eq(&before, &store.snapshot().conversations));
+            let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:"A".into(),turn_id:"turn".into()}));
+            let request = requests.recv().await.unwrap();
+            assert_eq!(request["method"], "turn/interrupt");
+            output.lock().await.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
+            interrupt.await.unwrap();
+            assert!(store.snapshot().connected);
+        }
+        store.close().await.unwrap();
+        server.abort();
+        session.close();
+        client.close().await;
+        host.close().await;
+    }).await.unwrap();
 }

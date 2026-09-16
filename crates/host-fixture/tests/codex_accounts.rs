@@ -127,8 +127,8 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let second = status["result"]["accountId"].as_str().unwrap();
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
-        let refreshed = call(&service, &mut session, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
-        assert_eq!(refreshed["result"], json!({"accountId":"desktop","hasToken":true}));
+        let refreshed = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
+        assert_eq!(refreshed, json!({"accountId":"desktop","hasToken":true}));
         let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
         assert_eq!(before["result"]["thread"], after["result"]["thread"]);
         completed_turn(&service, &mut session, thread, "after switch").await;
@@ -154,10 +154,10 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session(256);
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
-        let missing = call(&service, &mut session, "fixture/account/refresh", json!({"previousAccountId":"missing"})).await;
-        assert_eq!(missing["result"]["hasToken"], false);
-        let refreshed = call(&service, &mut session, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
-        assert_eq!(refreshed["result"]["accountId"], "desktop");
+        let missing = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"missing"})).await;
+        assert_eq!(missing["hasToken"], false);
+        let refreshed = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
+        assert_eq!(refreshed["accountId"], "desktop");
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":"desktop"})).await["result"]["selectedId"], "desktop");
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "desktop");
@@ -319,7 +319,7 @@ async fn logout_removes_credentials_survives_restart_and_allows_login_again() {
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":account_id})).await;
         assert!(logged_out.get("error").is_none(), "{logged_out}");
         assert!(!accounts_dir.join(account_id).join("account-fixture.json").exists());
-        assert_eq!(call(&service, &mut session, "fixture/account/refresh", json!({"previousAccountId":"second"})).await["result"]["hasToken"], false);
+        assert_eq!(rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"second"})).await["hasToken"], false);
         drop(session); drop(service);
         server.shutdown().await.unwrap();
     }).await.expect("logout and login stalled");

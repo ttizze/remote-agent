@@ -44,6 +44,12 @@ pub struct HostStatus {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Thread {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_read_state: Option<crate::session::HistoryReadState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<crate::session::SessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::session::Capabilities>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub requests: BTreeMap<String, Arc<crate::client::ServerRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,10 +83,36 @@ pub struct Thread {
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadStatusKind {
+    Active,
+    Idle,
+    NotLoaded,
+    SystemError,
+    #[serde(untagged)]
+    Other(String),
+}
+impl From<&str> for ThreadStatusKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "active" => Self::Active,
+            "idle" => Self::Idle,
+            "notLoaded" => Self::NotLoaded,
+            "systemError" => Self::SystemError,
+            _ => Self::Other(value.into()),
+        }
+    }
+}
+impl From<String> for ThreadStatusKind {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadStatus {
     #[serde(rename = "type")]
-    pub kind: String,
+    pub kind: ThreadStatusKind,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -619,7 +651,7 @@ mod tests {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Empty {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferGrant {
     pub token: String,
     pub size: u64,

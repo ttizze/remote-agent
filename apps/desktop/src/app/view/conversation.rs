@@ -968,7 +968,7 @@ mod rendering_tests {
         let _runtime = init(cx);
         for status in ["completed", "inProgress"] {
             let source = serde_json::from_value(serde_json::json!({
-                "id": "fixture", "turns": [{
+                "id": "fixture", "capabilities": {"additionalInput":true,"fork":true,"rename":true,"modelChange":true}, "turns": [{
                     "id": "turn", "status": status, "items": [{
                         "id": "answer", "type": "agentMessage", "phase": "final_answer",
                         "text": "Answer"

@@ -24,7 +24,7 @@ if ! git diff --quiet HEAD --; then BEX_BUILD_REVISION+=-dirty; fi
 sign() { /usr/bin/codesign --force --sign "$identity" --timestamp=none "$@"; }
 verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
 if [[ $product == host ]]; then
-    cargo build --locked --package host-daemon --package codex-app-server --release
+    cargo build --locked --package host-daemon --package codex-app-server --package bex-process --release
     sign --identifier app.bex.provider-supervisor "$target/release/bex-provider-supervisor"
     verify "$target/release/bex-provider-supervisor"
     sign --identifier app.bex.host "$target/release/host-daemon"
@@ -34,7 +34,7 @@ if [[ $product == host ]]; then
 fi
 [[ $(uname -m) == arm64 ]] || { echo 'The GPUI Mac bundle requires Apple Silicon.' >&2; exit 2; }
 npm --prefix apps/desktop/web ci --ignore-scripts --no-audit --no-fund
-cargo build --locked --package host-daemon --package codex-app-server --package bex-desktop --release
+cargo build --locked --package host-daemon --package codex-app-server --package bex-process --package bex-desktop --release
 staging=$(mktemp -d "$target/.Bex-build.XXXXXX")
 destination="$target/Bex.app"
 cleanup() {

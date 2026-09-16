@@ -5,6 +5,7 @@ members = [
     "crates/agent-cli",
     "crates/agent-ffi",
     "crates/codex-app-server",
+    "crates/bex-process",
     "crates/host-daemon",
     "crates/xtask",
     "crates/host-fixture",

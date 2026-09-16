@@ -1,0 +1,19 @@
+[package]
+name = "bex-process"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["io-std"] }
+serde.workspace = true
+serde_json.workspace = true
+process-wrap = { version = "10", features = ["tokio1"] }
+portable-pty = "=0.9.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -4,10 +4,10 @@ use super::routing::SessionRouter;
 use super::service::Failure;
 use crate::desktop_projects::ThreadPage;
 use agent_core::{
+    client as op,
     models::{Item, Thread, ThreadResponse, Turn},
     peer::{RpcMessage, RpcMessageKind, RpcResponse},
     session::{ProviderKind, SessionChange, SessionRef, TextField},
-    state::operations as op,
 };
 use codex_app_server::CodexAppServer;
 use serde::{Deserialize, Serialize};
@@ -94,6 +94,15 @@ pub(super) struct Codex {
     pub(super) processed: tokio::sync::watch::Sender<u64>,
 }
 impl Codex {
+    pub(super) fn capabilities() -> agent_core::session::Capabilities {
+        agent_core::session::Capabilities {
+            additional_input: true,
+            fork: true,
+            rename: true,
+            model_change: true,
+        }
+    }
+
     pub(super) fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {
         Self {
             process,
@@ -122,9 +131,9 @@ impl Codex {
         let mut processed = self.processed.subscribe();
         tokio::select! {
             result = processed.wait_for(|sequence| *sequence >= reply.sequence) => {
-                result.map_err(|_| Failure::new("codex_unavailable", "Codex event pump stopped"))?;
+                result.map_err(|_| Failure::unknown("codex_unavailable", "Codex event pump stopped"))?;
             }
-            _ = self.stopped.cancelled() => return Err(Failure::new("codex_unavailable", "Codex event stream is unavailable")),
+            _ = self.stopped.cancelled() => return Err(Failure::unknown("codex_unavailable", "Codex event stream is unavailable")),
         }
         Ok(reply.value)
     }
@@ -138,14 +147,14 @@ impl Codex {
             .await
             .map_err(Failure::from)?
             .outcome
-            .map_err(Failure::Upstream)
+            .map_err(Failure::upstream)
     }
 
     pub(super) async fn read(&self, id: &str, limit: usize) -> Result<ThreadResponse, Failure> {
         let line = self.request(&serde_json::json!({"id":0,"method":"thread/read","params":{"threadId":id,"includeTurns":false}}).to_string()).await?;
         let mut response = RpcResponse::<ThreadResponse>::parse(&line)?
             .outcome
-            .map_err(Failure::Upstream)?;
+            .map_err(Failure::upstream)?;
         let history = self
             .history(
                 id,
@@ -154,6 +163,7 @@ impl Codex {
             )
             .await?;
         response.thread.turns = history.turns;
+        response.thread.history_read_state = history.history_read_state;
         response.thread.extra.extend(history.extra);
         Ok(response)
     }
@@ -163,7 +173,7 @@ impl Codex {
             let line = self.request(&serde_json::json!({"id":0,"method":"thread/read","params":{"threadId":id,"includeTurns":true}}).to_string()).await?;
             let mut thread = RpcResponse::<ThreadResponse>::parse(&line)?
                 .outcome
-                .map_err(Failure::Upstream)?
+                .map_err(Failure::upstream)?
                 .thread;
             if thread.id.as_deref() != Some(id) {
                 return Err(Failure::new(
@@ -211,12 +221,10 @@ impl Codex {
                     Ok(history) => Ok(history),
                     Err(error) => Ok(Thread {
                         id: Some(id.into()),
-                        extra: [(
-                            "historyReadState".into(),
-                            serde_json::json!({"type":"unavailable","issues":[error.to_string()]}),
-                        )]
-                        .into_iter()
-                        .collect(),
+                        history_read_state: Some(agent_core::session::HistoryReadState::new(
+                            agent_core::session::HistoryReadKind::Unavailable,
+                            vec![error.to_string()],
+                        )),
                         ..Default::default()
                     }),
                 };
@@ -421,7 +429,7 @@ impl Codex {
                 .request::<_, HistoryPage<HistoryItem>>("thread/items/list", &query)
                 .await
                 .map_err(Failure::from)?;
-            let page = response.outcome.map_err(Failure::Upstream)?;
+            let page = response.outcome.map_err(Failure::upstream)?;
             if let Some(entry) = page.data.into_iter().find(|entry| {
                 entry.turn_id.as_deref() == Some(params.turn_id.as_str())
                     && entry.item.id == params.item_id
@@ -519,6 +527,13 @@ fn notification_change(
 
 /// Provider-specific notifications end at this adapter boundary.
 pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<(), String> {
+    // Only the Host terminal owner can publish events for client PTY handles.
+    if matches!(
+        message.method(),
+        Some("process/outputDelta" | "process/exited")
+    ) {
+        return Ok(());
+    }
     if message.kind() != RpcMessageKind::Notification {
         return Err("expected Codex notification".into());
     }
@@ -529,19 +544,52 @@ pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<
         notification_change(message.method().unwrap_or_default(), params)
             .map_err(|error| error.to_string())?
     {
-        if SessionRef::from_thread_id(&id)
-            .is_ok_and(|target| target.provider == ProviderKind::Codex)
-        {
-            router.session_change(&id, change);
-        }
+        router.session_change(
+            &SessionRef {
+                provider: ProviderKind::Codex,
+                id,
+            },
+            change,
+        );
     } else {
         router.broadcast(message.line());
     }
     Ok(())
 }
 
+pub(super) fn request(
+    router: &SessionRouter,
+    mut request: agent_core::client::ServerRequest,
+) -> Result<(), String> {
+    let id = request
+        .params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .ok_or("request session ID is missing")?
+        .to_owned();
+    let target = SessionRef {
+        provider: ProviderKind::Codex,
+        id,
+    };
+    request
+        .params
+        .insert("threadId".into(), target.thread_id().into());
+    router.request(target, request)
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn provider_process_events_cannot_mutate_host_owned_terminals() {
+        use futures_util::FutureExt;
+        let router = super::SessionRouter::new();
+        let mut connection = router.open_session(8);
+        for method in ["process/outputDelta", "process/exited"] {
+            let line = serde_json::json!({"method":method,"params":{"processHandle":"owned","deltaBase64":"aW5qZWN0ZWQ=","exitCode":0}}).to_string();
+            super::event(&router, &super::RpcMessage::parse(&line).unwrap()).unwrap();
+            assert!(connection.recv().now_or_never().is_none());
+        }
+    }
     use super::unmaterialized_history;
     use serde_json::json;
 

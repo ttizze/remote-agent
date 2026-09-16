@@ -140,6 +140,10 @@
         "fork": true,
         "rename": true,
         "modelChange": true
+      },
+      "session": {
+        "provider": "codex",
+        "id": "fixture-thread-1"
       }
     }
   },
@@ -155,7 +159,17 @@
           "type": "idle"
         },
         "updatedAt": 1,
-        "worktreeMerged": false
+        "worktreeMerged": false,
+        "session": {
+          "provider": "codex",
+          "id": "fixture-thread-1"
+        },
+        "capabilities": {
+          "additionalInput": true,
+          "fork": true,
+          "rename": true,
+          "modelChange": true
+        }
       }
     ],
     "hasMoreChats": false,

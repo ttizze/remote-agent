@@ -1,13 +1,6 @@
 use super::*;
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartTerminal {
-    #[serde(rename = "processHandle")]
-    pub handle: String,
-    pub cwd: String,
-    pub size: rpc::TerminalSize,
-}
+pub use crate::client::StartTerminal;
 rpc::rpc_method!(StartTerminal, Map<String, Value>, "host/terminal/start");
 
 impl Operation for StartTerminal {
@@ -43,14 +36,6 @@ impl Operation for StartTerminal {
     }
     const APPLY_WHEN_STALE: bool = true;
 }
-
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloseTerminal {
-    #[serde(rename = "processHandle")]
-    pub handle: String,
-}
-rpc::rpc_method!(CloseTerminal, Map<String, Value>, "process/kill");
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]

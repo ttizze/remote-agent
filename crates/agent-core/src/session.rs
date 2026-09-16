@@ -22,21 +22,35 @@ pub struct SessionRef {
 
 impl SessionRef {
     pub fn from_thread_id(id: &str) -> Result<Self, &'static str> {
-        let (provider, id) = match id.strip_prefix("claude:") {
-            Some(id) => (ProviderKind::Claude, id),
-            None => (ProviderKind::Codex, id),
+        let (provider, id) = if let Some(id) = id.strip_prefix("codex:") {
+            (ProviderKind::Codex, id)
+        } else if let Some(id) = id.strip_prefix("claude:") {
+            (ProviderKind::Claude, id)
+        } else {
+            (ProviderKind::Codex, id)
         };
-        if id.is_empty() || id.len() > 4096 || id.trim() != id {
-            return Err("native session ID is required");
-        }
-        Ok(Self {
+        let session = Self {
             provider,
             id: id.into(),
-        })
+        };
+        session.validate()?;
+        Ok(session)
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.id.is_empty() || self.id.len() > 4096 || self.id.trim() != self.id {
+            return Err("native session ID is required");
+        }
+        Ok(())
     }
 
     pub fn thread_id(&self) -> String {
         match self.provider {
+            ProviderKind::Codex
+                if self.id.starts_with("claude:") || self.id.starts_with("codex:") =>
+            {
+                format!("codex:{}", self.id)
+            }
             ProviderKind::Codex => self.id.clone(),
             ProviderKind::Claude => format!("claude:{}", self.id),
         }
@@ -122,10 +136,7 @@ impl SessionChange {
                     .requests
                     .get_mut(request_id)
                     .ok_or("request is no longer pending")?;
-                Arc::make_mut(request).extra.insert(
-                    "deliveryState".into(),
-                    serde_json::to_value(state).map_err(|_| "invalid delivery state")?,
-                );
+                Arc::make_mut(request).delivery_state = Some(*state);
                 return Ok(next);
             }
             Self::ResolveRequest { request_id } => {
@@ -375,7 +386,7 @@ pub struct CloseSession {
     pub subscription_id: uuid::Uuid,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
     pub additional_input: bool,
@@ -383,42 +394,57 @@ pub struct Capabilities {
     pub rename: bool,
     pub model_change: bool,
 }
-impl SessionRef {
-    pub fn capabilities(&self) -> Capabilities {
-        match self.provider {
-            ProviderKind::Codex => Capabilities {
-                additional_input: true,
-                fork: true,
-                rename: true,
-                model_change: true,
-            },
-            ProviderKind::Claude => Capabilities {
-                additional_input: false,
-                fork: false,
-                rename: false,
-                model_change: true,
-            },
+pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
+    (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status.as_deref() == Some("inProgress")))
+        .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum HistoryReadKind {
+    Complete,
+    Partial,
+    Incomplete,
+    Unavailable,
+    Other(String),
+}
+impl From<String> for HistoryReadKind {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "complete" => Self::Complete,
+            "partial" => Self::Partial,
+            "incomplete" => Self::Incomplete,
+            "unavailable" => Self::Unavailable,
+            _ => Self::Other(value),
         }
     }
 }
-pub fn capabilities(thread: &Thread) -> Capabilities {
-    thread
-        .extra
-        .get("capabilities")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_else(|| {
-            SessionRef::from_thread_id(thread.id.as_deref().unwrap_or("unknown"))
-                .map(|session| session.capabilities())
-                .unwrap_or(Capabilities {
-                    additional_input: false,
-                    fork: false,
-                    rename: false,
-                    model_change: false,
-                })
-        })
+impl From<HistoryReadKind> for String {
+    fn from(value: HistoryReadKind) -> Self {
+        match value {
+            HistoryReadKind::Complete => "complete".into(),
+            HistoryReadKind::Partial => "partial".into(),
+            HistoryReadKind::Incomplete => "incomplete".into(),
+            HistoryReadKind::Unavailable => "unavailable".into(),
+            HistoryReadKind::Other(value) => value,
+        }
+    }
 }
-pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
-    (!capabilities(thread).additional_input && thread.turns.iter().flatten().any(|turn| turn.status.as_deref() == Some("inProgress")))
-        .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryReadState {
+    #[serde(rename = "type")]
+    pub kind: HistoryReadKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+impl HistoryReadState {
+    pub fn new(kind: HistoryReadKind, issues: Vec<String>) -> Self {
+        Self {
+            kind,
+            issues,
+            extra: Map::new(),
+        }
+    }
 }
