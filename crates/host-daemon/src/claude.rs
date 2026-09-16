@@ -366,92 +366,77 @@ impl Claude {
         Ok(threads)
     }
 
+    /// Read native history; cache selection belongs to SessionRuntime.
+    pub(crate) async fn read(&self, id: &str, requested: usize) -> Result<ThreadResponse, String> {
+        let current = self.router.current_session(id);
+        let native = Uuid::parse_str(
+            id.strip_prefix(MODEL_PREFIX)
+                .ok_or("invalid Claude session ID")?,
+        )
+        .map_err(|e| e.to_string())?;
+        let home = self.native_home.clone();
+        let native: Result<ThreadResponse, String> = tokio::task::spawn_blocking(move || {
+            let path = history::resolve(&home, native)?;
+            match history::read(&path, requested) {
+                Ok(response) => Ok(response),
+                Err(error) => {
+                    let mut thread = history::summary(&path)?;
+                    thread.extra.insert(
+                        "historyReadState".into(),
+                        json!({"type":"unavailable","issues":[error]}),
+                    );
+                    Ok(ThreadResponse {
+                        thread,
+                        model: None,
+                        extra: Default::default(),
+                    })
+                }
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(match native {
+            Ok(mut response) => {
+                if let Some(current) = &current {
+                    for turn in current
+                        .thread
+                        .turns
+                        .iter()
+                        .flatten()
+                        .filter(|turn| turn.status.as_deref() == Some("inProgress"))
+                    {
+                        response.thread = agent_core::session::SessionChange::Turn {
+                            turn: (**turn).clone(),
+                            completed: false,
+                        }
+                        .apply(&response.thread)
+                        .map_err(str::to_owned)?;
+                    }
+                }
+                response
+            }
+            Err(error) => current
+                .clone()
+                .filter(|response| {
+                    response
+                        .thread
+                        .turns
+                        .iter()
+                        .flatten()
+                        .any(|turn| turn.status.as_deref() == Some("inProgress"))
+                })
+                .ok_or(error)?,
+        })
+    }
+
     pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = params["threadId"].as_str().ok_or("threadId is required")?;
         if matches!(
             method,
-            "host/thread/read"
-                | "thread/read"
-                | "thread/resume"
-                | "host/thread/resume"
-                | "host/thread/item/read"
+            "thread/resume" | "host/thread/resume" | "host/thread/item/read"
         ) {
-            let current = self.router.current_session(id);
             let requested = params["historyLimit"].as_u64().unwrap_or(1000) as usize;
-            let use_current = method != "host/thread/item/read"
-                && current.as_ref().is_some_and(|response| {
-                    response.thread.extra.get("historyHasMore") != Some(&Value::Bool(true))
-                        || response
-                            .thread
-                            .extra
-                            .get("historyLimit")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0) as usize
-                            >= requested
-                });
-            let mut response = if use_current {
-                current.clone().unwrap()
-            } else {
-                let native = Uuid::parse_str(
-                    id.strip_prefix(MODEL_PREFIX)
-                        .ok_or("invalid Claude session ID")?,
-                )
-                .map_err(|e| e.to_string())?;
-                let home = self.native_home.clone();
-                let native: Result<ThreadResponse, String> =
-                    tokio::task::spawn_blocking(move || {
-                        let path = history::resolve(&home, native)?;
-                        match history::read(&path, requested) {
-                            Ok(response) => Ok(response),
-                            Err(error) => {
-                                let mut thread = history::summary(&path)?;
-                                thread.extra.insert(
-                                    "historyReadState".into(),
-                                    json!({"type":"unavailable","issues":[error]}),
-                                );
-                                Ok(ThreadResponse {
-                                    thread,
-                                    model: None,
-                                    extra: Default::default(),
-                                })
-                            }
-                        }
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?;
-                match native {
-                    Ok(mut response) => {
-                        if let Some(current) = &current {
-                            for turn in current
-                                .thread
-                                .turns
-                                .iter()
-                                .flatten()
-                                .filter(|turn| turn.status.as_deref() == Some("inProgress"))
-                            {
-                                response.thread = agent_core::session::SessionChange::Turn {
-                                    turn: (**turn).clone(),
-                                    completed: false,
-                                }
-                                .apply(&response.thread)
-                                .map_err(str::to_owned)?;
-                            }
-                        }
-                        response
-                    }
-                    Err(error) => current
-                        .clone()
-                        .filter(|response| {
-                            response
-                                .thread
-                                .turns
-                                .iter()
-                                .flatten()
-                                .any(|turn| turn.status.as_deref() == Some("inProgress"))
-                        })
-                        .ok_or(error)?,
-                }
-            };
+            let mut response = self.read(id, requested).await?;
             if method == "host/thread/item/read" {
                 let item = response
                     .thread

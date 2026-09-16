@@ -25,12 +25,32 @@ struct Entry {
     complete: bool,
     response: Option<ThreadResponse>,
     limit: usize,
-    active: bool,
+    hydrated: bool,
     submissions: HashSet<String>,
-    active_turn: Option<String>,
     last_used: u64,
     readers: usize,
     subscriptions: HashMap<Uuid, SessionId>,
+}
+
+impl Entry {
+    fn retained(&self) -> bool {
+        self.readers > 0
+            || !self.subscriptions.is_empty()
+            || !self.submissions.is_empty()
+            || self.response.as_ref().is_some_and(|response| {
+                let thread = &response.thread;
+                !thread.requests.is_empty()
+                    || thread
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| status.kind == "active")
+                    || thread
+                        .turns
+                        .iter()
+                        .flatten()
+                        .any(|turn| turn.status.as_deref() == Some("inProgress"))
+            })
+    }
 }
 
 pub(super) struct ReadToken {
@@ -45,15 +65,7 @@ impl SessionRuntime {
             let candidate = self
                 .entries
                 .iter()
-                .filter(|(_, e)| {
-                    !e.active
-                        && e.submissions.is_empty()
-                        && e.readers == 0
-                        && e.subscriptions.is_empty()
-                        && e.response
-                            .as_ref()
-                            .is_none_or(|response| response.thread.requests.is_empty())
-                })
+                .filter(|(_, entry)| !entry.retained())
                 .min_by_key(|(_, e)| e.last_used)
                 .map(|(id, _)| id.clone());
             let Some(candidate) = candidate else {
@@ -96,7 +108,7 @@ impl SessionRuntime {
         if self
             .entries
             .get(&target)
-            .is_some_and(|entry| entry.response.is_some())
+            .is_some_and(|entry| entry.hydrated)
         {
             return Ok(());
         }
@@ -110,6 +122,7 @@ impl SessionRuntime {
         entry.bytes = bytes;
         entry.complete = response.thread.turns.as_ref().is_some_and(Vec::is_empty);
         entry.response = Some(response);
+        entry.hydrated = true;
         Ok(())
     }
 
@@ -138,13 +151,15 @@ impl SessionRuntime {
 
     pub(super) fn cached(&self, token: &ReadToken) -> Option<ThreadResponse> {
         let entry = self.entries.get(&token.target)?;
-        (entry.response.as_ref().is_some_and(|response| {
-            response
-                .thread
-                .extra
-                .get("historyReadState")
-                .is_none_or(|state| state["type"] != "unavailable")
-        }) && (entry.complete || entry.limit >= token.limit))
+        (entry.hydrated
+            && entry.response.as_ref().is_some_and(|response| {
+                response
+                    .thread
+                    .extra
+                    .get("historyReadState")
+                    .is_none_or(|state| state["type"] != "unavailable")
+            })
+            && (entry.complete || entry.limit >= token.limit))
             .then(|| entry.response.clone())
             .flatten()
     }
@@ -186,17 +201,6 @@ impl SessionRuntime {
             .map(|current| current.thread.requests.clone())
             .unwrap_or_default();
         let bytes = bound_snapshot(&mut response)?;
-        entry.active = response
-            .thread
-            .status
-            .as_ref()
-            .is_some_and(|status| status.kind == "active")
-            || response
-                .thread
-                .turns
-                .iter()
-                .flatten()
-                .any(|turn| turn.status.as_deref() == Some("inProgress"));
         entry.complete = response
             .thread
             .extra
@@ -209,17 +213,10 @@ impl SessionRuntime {
                 .iter()
                 .flatten()
                 .any(|turn| turn.items_has_more == Some(true));
-        entry.active_turn = response
-            .thread
-            .turns
-            .iter()
-            .flatten()
-            .rev()
-            .find(|turn| turn.status.as_deref() == Some("inProgress"))
-            .map(|turn| turn.id.clone());
         entry.limit = limit;
         entry.bytes = bytes;
         entry.response = Some(response.clone());
+        entry.hydrated = true;
         if entry.subscriptions.len() >= 256 {
             return Err("session subscription capacity reached");
         }
@@ -243,16 +240,7 @@ impl SessionRuntime {
     }
 
     fn release_idle(&mut self) {
-        self.entries.retain(|_, entry| {
-            entry.active
-                || !entry.submissions.is_empty()
-                || entry.readers > 0
-                || !entry.subscriptions.is_empty()
-                || entry
-                    .response
-                    .as_ref()
-                    .is_some_and(|response| !response.thread.requests.is_empty())
-        });
+        self.entries.retain(|_, entry| entry.retained());
     }
 
     pub(super) fn disconnect(&mut self, connection: SessionId) {
@@ -340,62 +328,50 @@ impl SessionRuntime {
         if matches!(change, SessionChange::Turn { .. }) {
             entry.complete = false;
         }
-        match change {
-            SessionChange::Status { status } => entry.active = status.kind == "active",
-            SessionChange::Turn {
-                completed: false,
-                turn,
-            } => {
-                entry.active = true;
-                entry.active_turn = Some(turn.id.clone());
+        // Keep one current model even before native hydration. The common
+        // reducer also owns activity transitions and rejects stale starts.
+        let response = entry.response.get_or_insert_with(|| ThreadResponse {
+            thread: agent_core::models::Thread {
+                id: Some(target.thread_id()),
+                ..Default::default()
+            },
+            model: None,
+            extra: Default::default(),
+        });
+        let previous = response.clone();
+        response.thread = match change.apply(&response.thread) {
+            Ok(thread) => thread,
+            Err(error) => {
+                entry.hydrated = false;
+                return Err(error);
             }
-            SessionChange::Turn {
-                completed: true,
-                turn,
-            } if entry.active_turn.as_deref() == Some(&turn.id) => {
-                entry.active = false;
-                entry.active_turn = None;
-            }
-            _ => {}
-        }
-        if let Some(response) = &mut entry.response {
-            let previous = response.clone();
-            response.thread = match change.apply(&response.thread) {
-                Ok(thread) => thread,
+        };
+        entry.limit = entry
+            .limit
+            .max(response.thread.turns.as_ref().map_or(0, Vec::len));
+        // Text deltas account only for their encoded growth. Do not encode
+        // the entire conversation for every streaming character.
+        entry.bytes = match change {
+            SessionChange::Text { delta, .. } => entry.bytes.saturating_add(
+                serde_json::to_vec(delta)
+                    .map_err(|_| "invalid text delta")?
+                    .len(),
+            ),
+            _ => serde_json::to_vec(response)
+                .map_err(|_| "invalid session update")?
+                .len(),
+        };
+        if entry.bytes > MAX_SNAPSHOT_BYTES {
+            entry.bytes = match bound_snapshot(response) {
+                Ok(bytes) => bytes,
                 Err(error) => {
-                    entry.response = None;
+                    *response = previous;
+                    entry.complete = false;
                     return Err(error);
                 }
             };
-            entry.limit = entry
-                .limit
-                .max(response.thread.turns.as_ref().map_or(0, Vec::len));
-            // Text deltas account only for their encoded growth. Do not encode
-            // the entire conversation for every streaming character.
-            entry.bytes = match change {
-                SessionChange::Text { delta, .. } => entry.bytes.saturating_add(
-                    serde_json::to_vec(delta)
-                        .map_err(|_| "invalid text delta")?
-                        .len(),
-                ),
-                _ => serde_json::to_vec(response)
-                    .map_err(|_| "invalid session update")?
-                    .len(),
-            };
-            if entry.bytes > MAX_SNAPSHOT_BYTES {
-                entry.bytes = match bound_snapshot(response) {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        *response = previous;
-                        entry.complete = false;
-                        return Err(error);
-                    }
-                };
-                entry.complete = false;
-                return Err(
-                    "session display window reached its byte limit; reopen the conversation",
-                );
-            }
+            entry.complete = false;
+            return Err("session display window reached its byte limit; reopen the conversation");
         }
         Ok(entry
             .subscriptions
@@ -463,7 +439,10 @@ impl SessionRuntime {
         for (id, entry) in &mut self.entries {
             if target.is_none_or(|target| target == id) {
                 if discard_current {
-                    entry.response = None;
+                    entry.hydrated = false;
+                    if let Some(response) = &mut entry.response {
+                        response.thread.requests.clear();
+                    }
                 }
                 entry.revision += 1;
                 connections.extend(entry.subscriptions.values().copied());
@@ -587,6 +566,74 @@ mod tests {
         }
     }
     #[test]
+    fn stale_start_cannot_pin_a_completed_session() {
+        let mut runtime = SessionRuntime::default();
+        let token = runtime.begin_read(target(), 5).unwrap();
+        let opened = runtime.finish_read(token, 1, response()).unwrap();
+        let turn = agent_core::models::Turn {
+            id: "turn".into(),
+            ..Default::default()
+        };
+        runtime
+            .update(
+                &target(),
+                &SessionChange::Turn {
+                    turn: turn.clone(),
+                    completed: true,
+                },
+            )
+            .unwrap();
+        runtime
+            .update(
+                &target(),
+                &SessionChange::Turn {
+                    turn,
+                    completed: false,
+                },
+            )
+            .unwrap();
+        runtime.close(1, opened.subscription_id);
+        assert!(runtime.current(&target()).is_none());
+    }
+
+    #[test]
+    fn invalid_history_preserves_execution_until_completion_but_requires_native_read() {
+        let mut runtime = SessionRuntime::default();
+        let token = runtime.begin_read(target(), 5).unwrap();
+        runtime.finish_read(token, 1, response()).unwrap();
+        let turn = agent_core::models::Turn {
+            id: "turn".into(),
+            ..Default::default()
+        };
+        runtime
+            .update(
+                &target(),
+                &SessionChange::Turn {
+                    turn: turn.clone(),
+                    completed: false,
+                },
+            )
+            .unwrap();
+        runtime.invalidate(Some(&target()), true);
+        runtime.disconnect(1);
+        assert!(runtime.current(&target()).is_some());
+        let token = runtime.begin_read(target(), 5).unwrap();
+        assert!(runtime.cached(&token).is_none());
+        runtime.cancel_read(token);
+        runtime
+            .update(
+                &target(),
+                &SessionChange::Turn {
+                    turn,
+                    completed: true,
+                },
+            )
+            .unwrap();
+        runtime.disconnect(1);
+        assert!(runtime.current(&target()).is_none());
+    }
+
+    #[test]
     fn image_bodies_are_deferred_without_losing_the_requested_history() {
         let mut snapshot = response();
         snapshot.thread.turns = Some(
@@ -660,7 +707,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1.subscription_id, second.subscription_id);
         runtime.disconnect(2);
-        assert!(runtime.entries[&target()].active);
+        assert!(runtime.entries[&target()].retained());
         assert!(runtime.entries[&target()].subscriptions.is_empty());
     }
     #[test]

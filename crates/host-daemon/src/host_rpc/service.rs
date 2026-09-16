@@ -13,18 +13,12 @@ use tokio::sync::broadcast;
 
 use super::codex::ThreadListParams;
 
-/// Host-only history policy is consumed before forwarding the remaining params.
+/// Creation parameters; history reads use the typed adapter directly.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct ThreadParams {
-    #[serde(skip_serializing)]
-    pub paginate_history: bool,
-    #[serde(skip_serializing)]
-    pub defer_item_details: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_turns: Option<bool>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -379,45 +373,88 @@ impl HostRpcService {
         request: &RpcMessage<'_>,
     ) -> Result<(), String> {
         let result = async {
-            let params: agent_core::session::OpenSession = request.params().map_err(invalid_message)?;
+            let params: agent_core::session::OpenSession =
+                request.params().map_err(invalid_message)?;
             let target = params.session.clone();
             if target.provider == agent_core::session::ProviderKind::Codex {
-                self.inner.codex.server().map_err(|error| error.to_string())?;
+                self.inner
+                    .codex
+                    .server()
+                    .map_err(|error| error.to_string())?;
             }
             let mut read = self.inner.router.begin_session_read(params)?;
             let limit = read.limit;
             let response = match read.cached.take() {
                 Some(response) => response,
                 None => {
-                    let values = serde_json::json!({"threadId":target.thread_id(),"includeTurns":true,"paginateHistory":true,"deferItemDetails":true,"historyLimit":limit});
-                    match target.provider {
+                    let id = target.thread_id();
+                    let mut response = match target.provider {
                         agent_core::session::ProviderKind::Claude => {
-                            let claude = self.inner.claude.get().ok_or("Claude is unavailable")?;
-                            serde_json::from_value(claude.request("host/thread/read", values).await?).map_err(|error| error.to_string())?
+                            self.inner
+                                .claude
+                                .get()
+                                .ok_or("Claude is unavailable")?
+                                .read(&id, limit)
+                                .await?
                         }
-                        agent_core::session::ProviderKind::Codex => {
-                            let line = request.request("host/thread/read", &values).map_err(invalid_message)?;
-                            let message = RpcMessage::parse(&line).map_err(invalid_message)?;
-                            let result = self.host_thread_request(&message, "thread/read", true).await.map_err(|error| error.to_string())?;
-                            result.outcome.map_err(|error| error.get().to_owned())?
-                        }
-                    }
+                        agent_core::session::ProviderKind::Codex => self
+                            .inner
+                            .codex
+                            .read(&id, limit)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    };
+                    response.thread.defer_item_details();
+                    self.inner
+                        .desktop_projects
+                        .enrich_threads(std::slice::from_mut(&mut response.thread))
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    response
                 }
             };
             let mut response: ThreadResponse = response;
-            response.thread.extra.insert("capabilities".into(), serde_json::to_value(target.capabilities()).map_err(|error| error.to_string())?);
+            response.thread.extra.insert(
+                "capabilities".into(),
+                serde_json::to_value(target.capabilities()).map_err(|error| error.to_string())?,
+            );
             if let Some(turns) = &mut response.thread.turns
-                && turns.len() > limit {
+                && turns.len() > limit
+            {
                 turns.drain(..turns.len() - limit);
-                response.thread.extra.insert("historyHasMore".into(), true.into());
+                response
+                    .thread
+                    .extra
+                    .insert("historyHasMore".into(), true.into());
             }
-            let more = response.thread.extra.get("historyHasMore") == Some(&serde_json::Value::Bool(true))
-                || response.thread.turns.iter().flatten().any(|turn| turn.items_has_more == Some(true));
-            response.thread.extra.insert("historyHasMore".into(), more.into());
-            response.thread.extra.insert("historyLimit".into(), limit.into());
-            response.thread.extra.entry("historyReadState").or_insert_with(|| serde_json::json!({"type": if more {"partial"} else {"complete"}}));
-            self.inner.router.finish_session_read(read, session, request, response)
-        }.await;
+            let more = response.thread.extra.get("historyHasMore")
+                == Some(&serde_json::Value::Bool(true))
+                || response
+                    .thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .any(|turn| turn.items_has_more == Some(true));
+            response
+                .thread
+                .extra
+                .insert("historyHasMore".into(), more.into());
+            response
+                .thread
+                .extra
+                .insert("historyLimit".into(), limit.into());
+            response
+                .thread
+                .extra
+                .entry("historyReadState")
+                .or_insert_with(
+                    || serde_json::json!({"type": if more {"partial"} else {"complete"}}),
+                );
+            self.inner
+                .router
+                .finish_session_read(read, session, request, response)
+        }
+        .await;
         if let Err(error) = result {
             self.inner.router.send_line(
                 session,
@@ -691,10 +728,7 @@ impl HostRpcService {
                     request.response(self.remove_worktree(request.params()?).await)?
                 }
 
-                HOST_THREAD_START_METHOD | "thread/start" => request.forward_response(
-                    self.host_thread_request(request, "thread/start", false)
-                        .await,
-                )?,
+                HOST_THREAD_START_METHOD | "thread/start" => request.response(self.start_thread(request).await)?,
                 "host/terminal/start" => match request.params::<op::StartTerminal>() {
                     Ok(params) => {
                         let params = TerminalParams {
@@ -1037,68 +1071,49 @@ impl HostRpcService {
         Ok(page)
     }
 
-    async fn host_thread_request(
-        &self,
-        request: &RpcMessage<'_>,
-        method: &str,
-        retain_recent_turns: bool,
-    ) -> Result<RpcResponse<ThreadResponse>, Failure> {
+    async fn start_thread(&self, request: &RpcMessage<'_>) -> Result<ThreadResponse, Failure> {
         let mut params: ThreadParams = request.params()?;
-        let history_limit = params
+        if !params
             .extra
-            .remove("historyLimit")
-            .and_then(|value| value.as_u64())
-            .map(|value| value as usize);
-        if history_limit
-            .is_some_and(|limit| !(1..=super::session_runtime::MAX_LIMIT).contains(&limit))
-        {
-            return Err(Failure::new("invalid_params", "invalid history limit"));
-        }
-        if method == "thread/start"
-            && !params
-                .extra
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|model| model.starts_with(crate::claude::MODEL_PREFIX))
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|model| model.starts_with(crate::claude::MODEL_PREFIX))
         {
             self.inner.codex.server()?;
         }
-        if method == "thread/start" {
-            // A missing selection must not inherit the App Server's checkout.
-            // Keep the real cwd on the thread; project enrichment identifies
-            // this persisted location as a chat even after a Host restart.
-            if params
-                .cwd
-                .as_deref()
-                .is_none_or(|cwd| cwd.trim().is_empty())
-            {
-                let directory = self.inner.desktop_projects.chat_directory();
-                tokio::fs::create_dir_all(&directory)
-                    .await
-                    .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
-                let directory = tokio::fs::canonicalize(directory)
-                    .await
-                    .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
-                params.cwd = Some(directory.into_os_string().into_string().map_err(|_| {
-                    Failure::new("chat_directory_unavailable", "chat path is not UTF-8")
-                })?);
-            } else {
-                match self.inner.worktrees.prepare(params.cwd.as_deref()).await {
-                    Ok(Some(cwd)) => {
-                        params.cwd = Some(cwd.into_os_string().into_string().map_err(|_| {
-                            Failure::new("worktree_creation_failed", "worktree path is not UTF-8")
-                        })?)
-                    }
-                    Ok(None) => {}
-                    Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
+        // A missing selection must not inherit the App Server's checkout.
+        // Keep the real cwd on the thread; project enrichment identifies
+        // this persisted location as a chat even after a Host restart.
+        if params
+            .cwd
+            .as_deref()
+            .is_none_or(|cwd| cwd.trim().is_empty())
+        {
+            let directory = self.inner.desktop_projects.chat_directory();
+            tokio::fs::create_dir_all(&directory)
+                .await
+                .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
+            let directory = tokio::fs::canonicalize(directory)
+                .await
+                .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
+            params.cwd = Some(directory.into_os_string().into_string().map_err(|_| {
+                Failure::new("chat_directory_unavailable", "chat path is not UTF-8")
+            })?);
+        } else {
+            match self.inner.worktrees.prepare(params.cwd.as_deref()).await {
+                Ok(Some(cwd)) => {
+                    params.cwd = Some(cwd.into_os_string().into_string().map_err(|_| {
+                        Failure::new("worktree_creation_failed", "worktree path is not UTF-8")
+                    })?)
                 }
+                Ok(None) => {}
+                Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
-        if method == "thread/start"
-            && let Some(model) = params
-                .extra
-                .get("model")
-                .and_then(serde_json::Value::as_str)
+        let mut response = if let Some(model) = params
+            .extra
+            .get("model")
+            .and_then(serde_json::Value::as_str)
             && model.starts_with(crate::claude::MODEL_PREFIX)
         {
             let claude = self.inner.claude.get().ok_or_else(|| {
@@ -1107,54 +1122,24 @@ impl HostRpcService {
                     "このHostではClaude Codeが有効になっていません。",
                 )
             })?;
-            let mut response = claude
+            claude
                 .create(params.cwd.as_deref().unwrap_or_default(), model)
                 .await
-                .map_err(|error| Failure::new("claude_unavailable", error))?;
-            self.inner
-                .desktop_projects
-                .enrich_threads(std::slice::from_mut(&mut response.thread))
-                .await?;
-            return RpcResponse::parse(&request.response::<_, Failure>(Ok(response))?)
-                .map_err(Failure::from);
-        }
-        let hydrate = method == "thread/read" && params.include_turns == Some(true);
-        if hydrate {
-            params.include_turns = Some(false);
-        }
-        let response = self
-            .inner
-            .codex
-            .request(&request.request(method, &params)?)
-            .await?;
-        let mut response: RpcResponse<ThreadResponse> = RpcResponse::parse(&response)?;
-        if let Ok(result) = &mut response.outcome {
-            if hydrate {
-                let history = self
-                    .inner
-                    .codex
-                    .history(
-                        result.thread.id.as_deref().unwrap_or_default(),
-                        result.thread.history_mode.as_deref() == Some("paginated"),
-                        params.paginate_history,
-                        history_limit.unwrap_or(if params.paginate_history { 5 } else { 10 }),
-                    )
-                    .await?;
-                result.thread.turns = history.turns;
-                result.thread.extra.extend(history.extra);
-            }
-            if let Err(error) = self
+                .map_err(|error| Failure::new("claude_unavailable", error))?
+        } else {
+            let line = self
                 .inner
-                .desktop_projects
-                .enrich_threads(std::slice::from_mut(&mut result.thread))
-                .await
-            {
-                return Err(error.into());
-            }
-            if retain_recent_turns && params.defer_item_details {
-                result.thread.defer_item_details();
-            }
-        }
+                .codex
+                .request(&request.request("thread/start", &params)?)
+                .await?;
+            RpcResponse::<ThreadResponse>::parse(&line)?
+                .outcome
+                .map_err(Failure::Upstream)?
+        };
+        self.inner
+            .desktop_projects
+            .enrich_threads(std::slice::from_mut(&mut response.thread))
+            .await?;
         Ok(response)
     }
 
@@ -1334,7 +1319,61 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[cfg(test)]
-mod storage_scope_tests {
+mod tests {
+    #[tokio::test]
+    async fn opening_unavailable_claude_history_retries_native_read_without_starting_a_cli() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let native = root.path().join("native");
+        let project = native.join("projects/example");
+        std::fs::create_dir_all(&project).unwrap();
+        let id = "12345678-1234-4234-8234-123456789abc";
+        std::fs::write(
+            project.join(format!("{id}.jsonl")),
+            include_str!("../../tests/fixtures/claude-2.1.266.jsonl"),
+        )
+        .unwrap();
+        let service = HostRpcService::new(
+            Err("unavailable".into()),
+            DesktopProjectStore::new(root.path().join("projects.json")),
+        );
+        service
+            .enable_claude(
+                root.path().join("does-not-exist"),
+                root.path().join("state"),
+                Some(native),
+            )
+            .await
+            .unwrap();
+        service.inner.router.created_session(ThreadResponse {
+            thread: Thread {
+                id: Some(format!("claude:{id}")),
+                turns: Some(Vec::new()),
+                extra: [(
+                    "historyReadState".into(),
+                    serde_json::json!({"type":"unavailable"}),
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+            model: None,
+            extra: Default::default(),
+        });
+        let mut session = service.open_session(16);
+        let line = serde_json::json!({"id":1,"method":"host/session/open","params":{"session":{"provider":"claude","id":id},"limit":5}}).to_string();
+        service
+            .dispatch(session.id(), &RpcMessage::parse(&line).unwrap())
+            .await
+            .unwrap();
+        let reply: serde_json::Value =
+            serde_json::from_str(&session.recv().await.unwrap()).unwrap();
+        assert!(reply.get("error").is_none(), "{reply}");
+        let thread = &reply["result"]["response"]["thread"];
+        assert!(!thread["turns"].as_array().unwrap().is_empty());
+        assert_ne!(thread["historyReadState"]["type"], "unavailable");
+    }
+
     #[test]
     fn creating_native_storage_does_not_change_its_identity() {
         let root = tempfile::tempdir().unwrap();

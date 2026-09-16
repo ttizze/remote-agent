@@ -123,13 +123,24 @@ impl Codex {
             .map_err(Failure::Upstream)
     }
 
-    pub(super) async fn history(
-        &self,
-        id: &str,
-        paginated: bool,
-        defer: bool,
-        limit: usize,
-    ) -> Result<Thread, Failure> {
+    pub(super) async fn read(&self, id: &str, limit: usize) -> Result<ThreadResponse, Failure> {
+        let line = self.request(&serde_json::json!({"id":0,"method":"thread/read","params":{"threadId":id,"includeTurns":false}}).to_string()).await?;
+        let mut response = RpcResponse::<ThreadResponse>::parse(&line)?
+            .outcome
+            .map_err(Failure::Upstream)?;
+        let history = self
+            .history(
+                id,
+                response.thread.history_mode.as_deref() == Some("paginated"),
+                limit,
+            )
+            .await?;
+        response.thread.turns = history.turns;
+        response.thread.extra.extend(history.extra);
+        Ok(response)
+    }
+
+    async fn history(&self, id: &str, paginated: bool, limit: usize) -> Result<Thread, Failure> {
         if !paginated {
             let line = self.request(&serde_json::json!({"id":0,"method":"thread/read","params":{"threadId":id,"includeTurns":true}}).to_string()).await?;
             let mut thread = RpcResponse::<ThreadResponse>::parse(&line)?
@@ -156,7 +167,7 @@ impl Codex {
             cursor: None,
             limit,
             sort_direction: "desc",
-            items_view: Some(if defer { "notLoaded" } else { "full" }),
+            items_view: Some("notLoaded"),
         };
         let mut page = match self
             .history_request::<Arc<Turn>>("thread/turns/list", &query)
@@ -170,7 +181,7 @@ impl Codex {
             {
                 // Native servers advertise pagination before materializing a
                 // first turn. Read that same native session without cursors.
-                return match Box::pin(self.history(id, false, defer, limit)).await {
+                return match Box::pin(self.history(id, false, limit)).await {
                     Ok(history) => Ok(history),
                     Err(error) => Ok(Thread {
                         id: Some(id.into()),
@@ -186,11 +197,9 @@ impl Codex {
             }
             Err(error) => return Err(Failure::new("invalid_thread_history", error)),
         };
-        if defer {
-            self.hydrate_turn_page(&mut page, &query)
-                .await
-                .map_err(|error| Failure::new("invalid_thread_history", error))?;
-        }
+        self.hydrate_turn_page(&mut page, &query)
+            .await
+            .map_err(|error| Failure::new("invalid_thread_history", error))?;
         let mut thread = Thread {
             id: Some(id.into()),
             ..Default::default()
