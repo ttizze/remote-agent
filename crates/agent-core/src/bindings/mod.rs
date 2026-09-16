@@ -404,7 +404,7 @@ mod tests {
                     let mut writer = JsonlWriter::new(write);
                     let response = |request: &Value, text: &str| {
                         let result = match request["method"].as_str().unwrap() {
-                            "host/status" => json!({"nodeId":"host","name":"Host","devices":[]}),
+                            "host/session/scope" => json!("fixture-storage"),
                             "host/thread/list" => json!({"data":[{"id":"thread","name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":text}]}]}}}),
                             "model/list" => json!({"data":[],"nextCursor":null}),
@@ -419,7 +419,7 @@ mod tests {
                             writer.write_line(&response(&request, "before")).await.unwrap();
                         }
                         let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
-                        assert_eq!(request["method"], "host/status");
+                        assert_eq!(request["method"], "host/session/scope");
                         if silent {
                             // Do not answer the Host check. Recovery must replace this
                             // transport without waiting for the normal 30-second deadline.
@@ -523,7 +523,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&request).unwrap()["method"],
-            "host/status"
+            "host/session/scope"
         );
         tokio::time::timeout(Duration::from_millis(500), store.disconnect())
             .await

@@ -963,6 +963,8 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
         let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation)).await.unwrap();
         store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+        // A paired mobile client must resume without local management privileges.
+        tokio::time::timeout(Duration::from_millis(500), store.resume(&endpoint, &fixture.ticket)).await.unwrap().unwrap();
         store.dispatch(Intent::SetDraftText { thread_id: "selected".into(), text: "Unsent draft".into() }).await.unwrap();
         let mut saved = None;
         let mut owner = Some(store);

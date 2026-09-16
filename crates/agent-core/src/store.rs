@@ -217,15 +217,17 @@ impl Store {
         };
         if let Some(peer) = reusable {
             // Provider reads can be slow even when QUIC is healthy. Check the Host
-            // itself so history/list latency cannot force transport replacement.
-            let client = Client::new(peer);
+            // itself through the paired-client scope read so provider latency cannot
+            // force replacement and changed storage cannot reuse stale state.
             let responsive = tokio::select! {
                 biased;
                 _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
-                result = tokio::time::timeout(std::time::Duration::from_secs(1), client.call(&ReadHostStatus {})) => result,
+                result = tokio::time::timeout(std::time::Duration::from_secs(1), read_storage_scope(&peer)) => result,
             };
             match responsive {
-                Ok(Ok(_)) => {
+                Ok(Ok(scope))
+                    if self.snapshot().storage_scope == format!("{}:{scope}", ticket.node_id()) =>
+                {
                     let snapshot = self.snapshot();
                     if let Some(id) = &snapshot.navigation.thread_id {
                         drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
@@ -303,15 +305,7 @@ impl Store {
                 peer.request::<_, <Pair as RpcMethod>::Output>(Pair::METHOD, &Pair { invitation })
                     .await?;
             }
-            let scope = peer
-                .request::<_, String>("host/session/scope", &serde_json::json!({}))
-                .await?
-                .value;
-            if scope.is_empty() || scope.len() > 256 {
-                return Err(
-                    PeerError::InvalidMessage("invalid provider storage scope".into()).into(),
-                );
-            }
+            let scope = read_storage_scope(&peer).await?;
             let (complete, result) = oneshot::channel();
             let command = Command::Attach {
                 connection: Connection {
@@ -420,6 +414,19 @@ impl Store {
                 .map_err(|_| PeerError::ConnectionClosed("store task stopped".into()))?;
         }
     }
+}
+
+async fn read_storage_scope(peer: &RpcPeer) -> Result<String, PeerError> {
+    let scope = peer
+        .request::<_, String>("host/session/scope", &serde_json::json!({}))
+        .await?
+        .value;
+    if scope.is_empty() || scope.len() > 256 {
+        return Err(PeerError::InvalidMessage(
+            "invalid provider storage scope".into(),
+        ));
+    }
+    Ok(scope)
 }
 
 fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Scheduled> {
