@@ -14,6 +14,7 @@ async fn main() {
     };
 
     if let Err(error) = runtime::run(config).await {
+        let error = format!("{error:#}");
         agent_core::diagnostics::error("host.runtime", &error);
         eprintln!(
             "host daemon failed: {}",

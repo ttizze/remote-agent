@@ -149,6 +149,7 @@ name = "agent-cli"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "anyhow",
  "clap",
  "serde_json",
  "tempfile",
@@ -4655,6 +4656,7 @@ name = "host-daemon"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "anyhow",
  "async-tungstenite",
  "atomicwrites",
  "base64 0.23.1",

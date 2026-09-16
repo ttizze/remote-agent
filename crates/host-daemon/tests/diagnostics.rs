@@ -10,7 +10,7 @@ async fn fatal_startup_errors_survive_process_exit_and_restart() {
     let codex_home = directory.path().join("codex");
     fs::create_dir(&codex_home).unwrap();
     let missing_program = directory.path().join("missing-codex");
-    let expected_error = "saved Host trust is invalid";
+    let expected_error = "cannot load Host credentials: saved Host trust is invalid";
     for _ in 0..2 {
         let output = tokio::time::timeout(
             Duration::from_secs(20),
@@ -36,6 +36,11 @@ async fn fatal_startup_errors_survive_process_exit_and_restart() {
         .unwrap()
         .unwrap();
         assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains(expected_error)
+        );
     }
     let lines = fs::read_to_string(state.join("logs/host.jsonl")).unwrap();
     let records: Vec<Value> = lines
