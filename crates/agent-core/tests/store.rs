@@ -1393,13 +1393,6 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
                 .await
                 .unwrap();
         }
-        let close = read(&mut reader).await;
-        assert_eq!(close["method"], "process/kill");
-        assert_eq!(close["params"]["processHandle"], "terminal");
-        writer
-            .write_line(&json!({"id":close["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
         // Keep the transport alive until Store closes it.
         assert!(reader.read_line().await.unwrap().is_none());
     });
@@ -1447,12 +1440,6 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         .await
         .unwrap();
     assert!(store.snapshot().terminals["terminal"].output.is_empty());
-    store
-        .dispatch(Intent::CloseTerminal(op::CloseTerminal {
-            handle: "terminal".into(),
-        }))
-        .await
-        .unwrap();
     store.close().await.unwrap();
     server.await.unwrap();
 }

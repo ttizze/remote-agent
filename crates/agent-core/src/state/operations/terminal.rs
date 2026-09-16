@@ -39,14 +39,6 @@ impl Operation for StartTerminal {
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloseTerminal {
-    #[serde(rename = "processHandle")]
-    pub handle: String,
-}
-rpc::rpc_method!(CloseTerminal, Map<String, Value>, "process/kill");
-
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResizeTerminal {
     #[serde(rename = "processHandle")]
     pub handle: String,
