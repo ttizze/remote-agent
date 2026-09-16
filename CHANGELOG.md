@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Reuse responsive iPhone connections on foreground return. Refresh the open conversation or task list with a one-second recovery deadline, retain the endpoint when replacement is needed, and close the old session without waiting for graceful delivery acknowledgments. Preserve drafts, avoid reconnecting on application errors, and cancel obsolete foreground attempts. Acceptance: real-iroh foreground reuse, timeout, error and cancellation tests plus isolated iOS foreground conversation/list tests.
+- Reuse responsive iPhone connections on foreground return. Check Host reachability with a one-second recovery deadline, refresh the open conversation and task list in the background, retain the endpoint when replacement is needed, and close the old session without waiting for graceful delivery acknowledgments. Preserve drafts, avoid reconnecting on application errors, and cancel obsolete foreground attempts. Acceptance: real-iroh foreground reuse, timeout, error and cancellation tests plus isolated iOS foreground conversation/list tests.
 
 - Replace the iOS expanded-image thumbnail sidebar with native Quick Look paging, keeping selection stable during image downloads; prepare iOS build 53. Acceptance: `testSimulatorBrowsesAllSessionImagesAndSavesTheSelection` verifies the missing sidebar, traversal of all eight images, both boundaries, saving the selection and returning to the conversation.
 

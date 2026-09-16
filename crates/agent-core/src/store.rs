@@ -36,10 +36,10 @@ pub enum Outcome {
 }
 enum Command {
     Dispatch(Dispatch),
-    Matches {
+    ResumePeer {
         endpoint: crate::transport::Endpoint,
         remote: crate::transport::NodeId,
-        complete: oneshot::Sender<bool>,
+        complete: oneshot::Sender<Option<Arc<RpcPeer>>>,
     },
     Disconnect(oneshot::Sender<Result<(), PeerError>>),
     Attach {
@@ -188,7 +188,7 @@ impl Store {
         store.reconnect(endpoint, ticket, invitation).await?;
         Ok(store)
     }
-    /// Refresh over the existing connection before replacing a suspended transport.
+    /// Reuse a responsive Host connection, then refresh without blocking interaction.
     /// Only reads are retried; pending submissions retain their delivery evidence.
     pub async fn resume(
         &self,
@@ -202,38 +202,37 @@ impl Store {
             current.clone()
         };
         let guard = attempt.clone().drop_guard();
-        let (complete, matches) = oneshot::channel();
+        let (complete, receiver) = oneshot::channel();
         self.commands
-            .send(Command::Matches {
+            .send(Command::ResumePeer {
                 endpoint: endpoint.clone(),
                 remote: ticket.node_id(),
                 complete,
             })
             .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
-        let matching = tokio::select! {
+        let reusable = tokio::select! {
             biased;
             _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
-            result = matches => result.unwrap_or(false),
+            result = receiver => result.unwrap_or(None),
         };
-        if matching {
-            let snapshot = self.snapshot();
-            let intent = match &snapshot.navigation.thread_id {
-                Some(id) => Intent::ReadThread(op::ReadThread::new(id.clone())),
-                None => Intent::ListThreads(op::ListThreads::new((*snapshot.list_query).clone())),
-            };
-            let refreshed = tokio::select! {
+        if let Some(peer) = reusable {
+            // Provider reads can be slow even when QUIC is healthy. Check the Host
+            // itself so history/list latency cannot force transport replacement.
+            let client = Client::new(peer);
+            let responsive = tokio::select! {
                 biased;
                 _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
-                result = tokio::time::timeout(std::time::Duration::from_secs(1), self.dispatch(intent)) => result,
+                result = tokio::time::timeout(std::time::Duration::from_secs(1), client.call(&ReadHostStatus {})) => result,
             };
-            match refreshed {
+            match responsive {
                 Ok(Ok(_)) => {
-                    if snapshot.navigation.thread_id.is_some() {
-                        // Queue the list update without making conversation readiness wait for it.
-                        drop(self.dispatch(Intent::ListThreads(op::ListThreads::new(
-                            (*self.snapshot().list_query).clone(),
-                        ))));
+                    let snapshot = self.snapshot();
+                    if let Some(id) = &snapshot.navigation.thread_id {
+                        drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
                     }
+                    drop(self.dispatch(Intent::ListThreads(op::ListThreads::new(
+                        (*snapshot.list_query).clone(),
+                    ))));
                     drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
                     guard.disarm();
                     return Ok(());
@@ -795,8 +794,8 @@ async fn run(
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
                     Command::Dispatch(command) => command,
-                    Command::Matches { endpoint, remote, complete } => {
-                        let _ = complete.send(session.as_ref().is_some_and(|session| session.uses_endpoint(&endpoint) && session.node_id() == remote));
+                    Command::ResumePeer { endpoint, remote, complete } => {
+                        let _ = complete.send(session.as_ref().filter(|session| session.uses_endpoint(&endpoint) && session.node_id() == remote).map(|_| peer.clone()));
                         continue;
                     }
                     Command::Disconnect(complete) => {
@@ -885,8 +884,8 @@ async fn run_offline(
         };
         let command = match command {
             Command::Dispatch(command) => command,
-            Command::Matches { complete, .. } => {
-                let _ = complete.send(false);
+            Command::ResumePeer { complete, .. } => {
+                let _ = complete.send(None);
                 continue;
             }
             Command::Disconnect(complete) => {

@@ -375,6 +375,8 @@ mod tests {
         for (selected, mode) in [
             (false, "live"),
             (true, "live"),
+            (false, "slow"),
+            (true, "slow"),
             (true, "silent"),
             (true, "error"),
         ] {
@@ -402,6 +404,7 @@ mod tests {
                     let mut writer = JsonlWriter::new(write);
                     let response = |request: &Value, text: &str| {
                         let result = match request["method"].as_str().unwrap() {
+                            "host/status" => json!({"nodeId":"host","name":"Host","devices":[]}),
                             "host/thread/list" => json!({"data":[{"id":"thread","name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":text}]}]}}}),
                             "model/list" => json!({"data":[],"nextCursor":null}),
@@ -416,9 +419,9 @@ mod tests {
                             writer.write_line(&response(&request, "before")).await.unwrap();
                         }
                         let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
-                        assert_eq!(request["method"], if selected { "host/session/open" } else { "host/thread/list" });
+                        assert_eq!(request["method"], "host/status");
                         if silent {
-                            // Do not answer the foreground read. Recovery must replace this
+                            // Do not answer the Host check. Recovery must replace this
                             // transport without waiting for the normal 30-second deadline.
                             let (next, stream) = scoped_incoming(&host, &trust).await;
                             let (read, write) = tokio::io::split(stream);
@@ -436,6 +439,7 @@ mod tests {
                                 json!({"id":request["id"],"error":{"code":-32000,"message":"history unavailable"}}).to_string()
                             } else { response(&request, "after") };
                             writer.write_line(&reply).await.unwrap();
+                            if mode == "slow" { tokio::time::sleep(Duration::from_millis(1200)).await; }
                             while let Ok(Some(line)) = reader.read_line().await {
                                 let request: Value = serde_json::from_str(&line).unwrap();
                                 let _ = writer.write_line(&response(&request, "after")).await;
@@ -450,8 +454,8 @@ mod tests {
                             updates.changed().await.unwrap();
                         }
                         store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "keep draft".into() }).unwrap().wait().await.unwrap();
-                        let resumed = tokio::time::timeout(Duration::from_secs(2), store.resume(connection())).await
-                            .expect("foreground recovery must not wait for old RPC or shutdown deadlines");
+                        let resumed = tokio::time::timeout(if silent { Duration::from_secs(2) } else { Duration::from_millis(500) }, store.resume(connection())).await
+                            .expect("foreground recovery must not wait for provider reads or shutdown deadlines");
                         if mode == "error" { assert!(resumed.is_err()); } else { resumed.unwrap(); }
                         if mode != "error" { loop {
                             let ready = {
@@ -519,7 +523,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&request).unwrap()["method"],
-            "host/thread/list"
+            "host/status"
         );
         tokio::time::timeout(Duration::from_millis(500), store.disconnect())
             .await
