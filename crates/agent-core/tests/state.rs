@@ -82,7 +82,7 @@ fn reply(thread: Thread) -> agent_core::session::OpenedSession {
 }
 
 #[test]
-fn legacy_history_cache_is_discarded_without_losing_drafts_or_navigation() {
+fn snapshot_preserves_history_drafts_and_navigation() {
     let mut snapshot = initial(
         serde_json::from_value(json!({
             "id":"thread", "historyCursor":null,
@@ -115,22 +115,11 @@ fn legacy_history_cache_is_discarded_without_losing_drafts_or_navigation() {
             clear_draft: None,
         }),
     )]));
-    let mut legacy = serde_json::to_value(&snapshot).unwrap();
-    legacy.as_object_mut().unwrap().remove("conversations_v2");
-    legacy["conversations"] = serde_json::to_value(&snapshot.conversations).unwrap();
-    let restored: Snapshot = serde_json::from_value(legacy).unwrap();
-    let mut expected = snapshot.clone();
-    expected.conversations = Arc::default();
-    assert_eq!(
-        restored, expected,
-        "legacy gaps cannot be trusted, but user state must survive"
-    );
-
     let restored: Snapshot =
         serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
     assert_eq!(
         restored, snapshot,
-        "new caches must retain loaded history after reopening"
+        "persisted snapshots must retain loaded history after reopening"
     );
 }
 

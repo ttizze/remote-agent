@@ -33,7 +33,7 @@ class StorePersistenceTest {
             JSONObject(Snapshot.empty().serialize().decodeToString())
                 .put("navigation", JSONObject("""{"thread_id":"thread","draft_key":"thread","cwd":"/fixture"}"""))
                 .put(
-                    "conversations_v2",
+                    "conversations",
                     JSONObject(
                         """{"thread":{"id":"thread","turns":[
                 {"id":"repeated","items":[{"id":"first","type":"agentMessage","text":"first answer"}]},

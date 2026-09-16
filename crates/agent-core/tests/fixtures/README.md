@@ -4,9 +4,7 @@ Source: `ttizze/remote-agent`, commit `ea8aefc`, `crates/agent-client/tests/fixt
 
 The retained corpus covers operation exchanges, failure payloads, events and submissions. Native history paging and synchronization now run through Host integration and shared Session tests rather than client-side cursor fixtures.
 
-The legacy `command.type` values describe scenarios; they are not the public API. New tests invoke typed operations directly. Do not restore the old JSON command dispatcher to consume these fixtures.
-
-The unused `history.json` corpus was removed with client cursor/overlap reconciliation. Native paging and current-window replacement are exercised by the Host integration tests and shared Session tests.
+The `command.type` values describe test scenarios. The test harness invokes the current typed operations and compares their exchanges and results.
 
 `model-settings.json` adds six desktop model-selection scenarios: catalog refresh with reordered options, option removal, unsupported defaults, empty catalogs, model changes, and replacement by the catalog default. These preserve the existing desktop model-settings behavior through typed `Snapshot` transitions; they are separate from the original 87 cases.
 

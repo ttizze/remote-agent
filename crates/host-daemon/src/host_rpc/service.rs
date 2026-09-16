@@ -490,22 +490,6 @@ impl HostRpcService {
             };
             return request.response(self.read_item(session, request.params()?, target).await);
         }
-        if matches!(
-            method,
-            "host/thread/read"
-                | "host/thread/watch"
-                | "host/thread/unwatch"
-                | "host/thread/turns/list"
-                | "host/thread/items/list"
-                | "thread/read"
-                | "thread/turns/list"
-                | "thread/items/list"
-        ) {
-            return request.error(
-                "retired_session_rpc",
-                &"use host/session/open or host/thread/item/read",
-            );
-        }
         let _workspace_read = if matches!(
             method,
             HOST_THREAD_START_METHOD

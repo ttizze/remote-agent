@@ -1,5 +1,5 @@
 use agent_core::{
-    state::{Intent, Snapshot, operations as op},
+    state::Snapshot,
     store::Store,
     transport::{Endpoint, Relays, Ticket},
 };
@@ -107,22 +107,14 @@ impl Connections {
                 match &location.state {
                     LocalHostState::Ready(ticket) => {
                         let endpoint = self.endpoint_for(&location).await?;
-                        // Legacy Hosts do not mark a startup generation. Verify the
-                        // live management route before exposing a possibly stale ticket.
-                        let attempt = tokio::time::timeout(Duration::from_secs(1), async {
-                            let store = Store::connect(endpoint, ticket, snapshot.clone(), None)
-                                .await
-                                .map_err(|error| error.to_string())?;
-                            store
-                                .dispatch(Intent::LoadHostManagement(op::LoadHostManagement {}))
-                                .await
-                                .map_err(|error| error.to_string())?;
-                            Ok::<_, String>(store)
-                        })
+                        let attempt = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            Store::connect(endpoint, ticket, snapshot.clone(), None),
+                        )
                         .await;
                         match attempt {
                             Ok(Ok(store)) => break Ok(store),
-                            Ok(Err(error)) => last_error = error,
+                            Ok(Err(error)) => last_error = error.to_string(),
                             Err(_) => last_error = "Host did not answer during startup".into(),
                         }
                     }
