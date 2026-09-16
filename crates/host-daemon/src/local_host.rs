@@ -3,6 +3,7 @@
 //! lifetime. A stale registry survives crashes without reviving a stale ticket.
 use crate::KeyStorage;
 use agent_core::transport::{Identity, Ticket};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
@@ -66,9 +67,9 @@ impl LocalHostRegistry {
         }
     }
 
-    pub fn for_user() -> Result<Self, String> {
+    pub fn for_user() -> Result<Self> {
         let directory = directories::ProjectDirs::from("app", "bex", "BEX")
-            .ok_or("application data directory unavailable")?
+            .context("application data directory unavailable")?
             .data_local_dir()
             .to_owned();
         Ok(Self {
@@ -83,26 +84,22 @@ impl LocalHostRegistry {
 
     /// Reuse a running registration, adopting a single pre-registry Host when
     /// upgrading. Remember its credential directory even after it stops.
-    pub fn resolve(&self, preferred: &Path) -> Result<LocalHost, String> {
+    pub fn resolve(&self, preferred: &Path) -> Result<LocalHost> {
         let _coordination = self.coordinate()?;
         self.resolve_locked(preferred)
     }
 
-    pub fn acquire(
-        &self,
-        directory: &Path,
-        key_storage: Option<KeyStorage>,
-    ) -> Result<HostLease, String> {
+    pub fn acquire(&self, directory: &Path, key_storage: Option<KeyStorage>) -> Result<HostLease> {
         let _coordination = self.coordinate()?;
         let current = self.resolve_locked(directory)?;
         if !matches!(current.state, LocalHostState::Stopped) {
-            return Err(format!(
+            anyhow::bail!(
                 "Host is already running in {}; use the existing Host",
                 current.directory.display()
-            ));
+            );
         }
-        crate::platform::create_state_directory(directory).map_err(|e| e.to_string())?;
-        let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+        crate::platform::create_state_directory(directory)?;
+        let directory = directory.canonicalize()?;
         let key_storage = key_storage
             .or_else(|| {
                 (current.directory == directory)
@@ -113,7 +110,7 @@ impl LocalHostRegistry {
             .unwrap_or_default();
         let lock = open_lock(&directory.join("host.lock"))?;
         lock.try_lock()
-            .map_err(|e| format!("Host is already running or its lock is unavailable: {e}"))?;
+            .context("Host is already running or its lock is unavailable")?;
         self.save(&Registration {
             directory: directory.clone(),
             key_storage: Some(key_storage),
@@ -127,25 +124,27 @@ impl LocalHostRegistry {
         })
     }
 
-    fn coordinate(&self) -> Result<FileLock, String> {
-        crate::platform::create_state_directory(&self.directory).map_err(|e| e.to_string())?;
+    fn coordinate(&self) -> Result<FileLock> {
+        crate::platform::create_state_directory(&self.directory)?;
         let lock = open_lock(&self.directory.join("host-instance.lock"))?;
-        lock.lock().map_err(|e| e.to_string())?;
+        lock.lock()?;
         Ok(FileLock(lock))
     }
 
-    fn resolve_locked(&self, preferred: &Path) -> Result<LocalHost, String> {
+    fn resolve_locked(&self, preferred: &Path) -> Result<LocalHost> {
         let registration = match fs::read(self.directory.join("host-instance.json")) {
             Ok(bytes) => {
-                let registration: Registration = serde_json::from_slice(&bytes)
-                    .map_err(|e| format!("invalid local Host registration: {e}"))?;
+                let registration: Registration =
+                    serde_json::from_slice(&bytes).context("invalid local Host registration")?;
                 if !registration.directory.is_absolute() {
-                    return Err("local Host registration requires an absolute directory".into());
+                    return Err(anyhow::anyhow!(
+                        "local Host registration requires an absolute directory"
+                    ));
                 }
                 Some(registration)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.into()),
         };
         let mut active = Vec::new();
         for directory in [
@@ -160,21 +159,21 @@ impl LocalHostRegistry {
         .flatten()
         {
             if running(directory)? {
-                let directory = directory.canonicalize().map_err(|e| e.to_string())?;
+                let directory = directory.canonicalize()?;
                 if !active.contains(&directory) {
                     active.push(directory);
                 }
             }
         }
         if active.len() > 1 {
-            return Err(format!(
+            anyhow::bail!(
                 "Multiple local Hosts are running in {}. Keep one Host after its work finishes; Bex will not choose or stop one automatically.",
                 active
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ")
-            ));
+            );
         }
         if let Some(directory) = active.pop() {
             if let Some(registration) = &registration
@@ -204,20 +203,18 @@ impl LocalHostRegistry {
         })
     }
 
-    fn save(&self, registration: &Registration) -> Result<(), String> {
+    fn save(&self, registration: &Registration) -> Result<()> {
         crate::platform::save_private_json(&self.directory.join("host-instance.json"), registration)
     }
 }
 
 impl Registration {
-    fn location(&self) -> Result<LocalHost, String> {
+    fn location(&self) -> Result<LocalHost> {
         let state = if self.ready {
             match fs::read_to_string(self.directory.join("host.ticket")) {
-                Ok(ticket) => LocalHostState::Ready(
-                    ticket.trim().parse::<Ticket>().map_err(|e| e.to_string())?,
-                ),
+                Ok(ticket) => LocalHostState::Ready(ticket.trim().parse::<Ticket>()?),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => LocalHostState::Starting,
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(error.into()),
             }
         } else {
             LocalHostState::Starting
@@ -231,7 +228,7 @@ impl Registration {
 }
 
 impl HostLease {
-    pub fn isolated(directory: &Path, key_storage: Option<KeyStorage>) -> Result<Self, String> {
+    pub fn isolated(directory: &Path, key_storage: Option<KeyStorage>) -> Result<Self> {
         LocalHostRegistry::new(directory.to_owned()).acquire(directory, key_storage)
     }
 
@@ -243,7 +240,7 @@ impl HostLease {
         self.key_storage
     }
 
-    pub fn publish(&self, ticket: &Ticket) -> Result<(), String> {
+    pub fn publish(&self, ticket: &Ticket) -> Result<()> {
         let _coordination = self.registry.coordinate()?;
         // No credentials are written here: tickets contain only endpoint addresses.
         atomicwrites::AtomicFile::new(
@@ -256,8 +253,7 @@ impl HostLease {
                 file.sync_all()
             },
             crate::platform::private_file_options(),
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         self.registry.save(&Registration {
             directory: self.directory.clone(),
             key_storage: Some(self.key_storage),
@@ -268,41 +264,33 @@ impl HostLease {
 
 impl LocalHost {
     /// Read the discovered Host's identity without provisioning a second one.
-    pub fn load_identity(&self) -> Result<Identity, String> {
+    pub fn load_identity(&self) -> Result<Identity> {
         let store = self.key_storage.unwrap_or_default().open(&self.directory)?;
         crate::load_local_identity(store.as_ref())
     }
 }
 
-fn existing_key_storage(directory: &Path) -> Result<Option<KeyStorage>, String> {
-    if directory
-        .join("identity.keys")
-        .try_exists()
-        .map_err(|error| error.to_string())?
-    {
+fn existing_key_storage(directory: &Path) -> Result<Option<KeyStorage>> {
+    if directory.join("identity.keys").try_exists()? {
         Ok(Some(KeyStorage::File))
-    } else if directory
-        .join("trust.json")
-        .try_exists()
-        .map_err(|error| error.to_string())?
-    {
+    } else if directory.join("trust.json").try_exists()? {
         Ok(Some(KeyStorage::Keyring))
     } else {
         Ok(None)
     }
 }
 
-fn open_lock(path: &Path) -> Result<File, String> {
+fn open_lock(path: &Path) -> Result<File> {
     File::options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)
-        .map_err(|e| e.to_string())
+        .map_err(Into::into)
 }
 
-fn running(directory: &Path) -> Result<bool, String> {
+fn running(directory: &Path) -> Result<bool> {
     let lock = match File::options()
         .read(true)
         .write(true)
@@ -310,15 +298,15 @@ fn running(directory: &Path) -> Result<bool, String> {
     {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(error.into()),
     };
     match lock.try_lock() {
         Ok(()) => {
-            lock.unlock().map_err(|error| error.to_string())?;
+            lock.unlock()?;
             Ok(false)
         }
         Err(fs::TryLockError::WouldBlock) => Ok(true),
-        Err(fs::TryLockError::Error(error)) => Err(error.to_string()),
+        Err(fs::TryLockError::Error(error)) => Err(error.into()),
     }
 }
 
@@ -439,6 +427,7 @@ mod tests {
                 .resolve(registry.directory())
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("Multiple local Hosts")
         );
         assert!(
@@ -472,6 +461,7 @@ mod tests {
                 .resolve(registry.directory())
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("Multiple local Hosts")
         );
         assert!(!registry.directory.join("host-instance.json").exists());

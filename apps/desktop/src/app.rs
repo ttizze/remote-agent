@@ -583,7 +583,8 @@ impl Desktop {
                         remote.as_ref().map(|remote| remote.ticket.as_str()),
                         snapshot,
                     )
-                    .await?;
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
                 Ok::<_, String>((Arc::new(store), path))
             }
             .await;

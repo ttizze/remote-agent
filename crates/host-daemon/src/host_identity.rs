@@ -1,4 +1,5 @@
 use agent_core::transport::{Identity, NodeId, Trust};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Write, path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
@@ -8,8 +9,8 @@ use agent_core::models::RemoteHost;
 /// Stores only the two identity keys (64 bytes), never growing Host metadata.
 /// Fixtures inject isolated storage at this boundary.
 pub trait CredentialStore: Send + Sync {
-    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String>;
-    fn save(&self, bytes: &[u8]) -> Result<(), String>;
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>>;
+    fn save(&self, bytes: &[u8]) -> Result<()>;
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -21,10 +22,10 @@ pub enum KeyStorage {
 }
 
 impl KeyStorage {
-    pub fn open(self, directory: &std::path::Path) -> Result<Arc<dyn CredentialStore>, String> {
+    pub fn open(self, directory: &std::path::Path) -> Result<Arc<dyn CredentialStore>> {
         match self {
             Self::Keyring => Ok(Arc::new(KeyringStore::new(
-                directory.to_str().ok_or("state directory is not UTF-8")?,
+                directory.to_str().context("state directory is not UTF-8")?,
             )?)),
             Self::File => Ok(Arc::new(FileKeyStore(directory.join("identity.keys")))),
         }
@@ -33,34 +34,33 @@ impl KeyStorage {
 
 pub struct KeyringStore(keyring::Entry);
 impl KeyringStore {
-    pub fn new(account: &str) -> Result<Self, String> {
-        keyring::Entry::new("app.bex.host", account)
-            .map(Self)
-            .map_err(|error| error.to_string())
+    pub fn new(account: &str) -> Result<Self> {
+        Ok(Self(keyring::Entry::new("app.bex.host", account)?))
     }
 }
 impl CredentialStore for KeyringStore {
-    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
         match self.0.get_secret() {
             Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(error.into()),
         }
     }
-    fn save(&self, bytes: &[u8]) -> Result<(), String> {
-        self.0.set_secret(bytes).map_err(|error| error.to_string())
+    fn save(&self, bytes: &[u8]) -> Result<()> {
+        self.0.set_secret(bytes).map_err(Into::into)
     }
 }
 
 /// Read only the local identity already provisioned by the daemon.
 /// OS-backed stores must be read on a blocking worker.
-pub fn load_local_identity(store: &dyn CredentialStore) -> Result<Identity, String> {
+pub fn load_local_identity(store: &dyn CredentialStore) -> Result<Identity> {
     let bytes = store
         .load()?
-        .ok_or("local Host credentials are not provisioned")?;
-    if bytes.len() != 64 {
-        return Err("saved Host keys must contain exactly 64 bytes".into());
-    }
+        .context("local Host credentials are not provisioned")?;
+    ensure!(
+        bytes.len() == 64,
+        "saved Host keys must contain exactly 64 bytes"
+    );
     Ok(Identity::from_bytes(bytes[32..].try_into().unwrap()))
 }
 
@@ -68,20 +68,20 @@ pub fn load_local_identity(store: &dyn CredentialStore) -> Result<Identity, Stri
 /// directory private; Unix files are 0600, Windows inherits its user DACL.
 pub struct FileKeyStore(pub PathBuf);
 impl CredentialStore for FileKeyStore {
-    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
         match std::fs::read(&self.0) {
             Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(error.into()),
         }
     }
-    fn save(&self, bytes: &[u8]) -> Result<(), String> {
+    fn save(&self, bytes: &[u8]) -> Result<()> {
         atomicwrites::AtomicFile::new(&self.0, atomicwrites::DisallowOverwrite)
             .write_with_options(
                 |file| file.write_all(bytes),
                 crate::platform::private_file_options(),
             )
-            .map_err(|error| error.to_string())
+            .map_err(Into::into)
     }
 }
 
@@ -89,9 +89,6 @@ impl CredentialStore for FileKeyStore {
 pub(crate) struct Record {
     pub trust: Trust,
     pub remotes: BTreeMap<NodeId, RemoteHost>,
-}
-fn save_record(path: &std::path::Path, record: &Record) -> Result<(), String> {
-    crate::platform::save_private_json(path, record)
 }
 
 pub struct HostCredentials {
@@ -101,29 +98,30 @@ pub struct HostCredentials {
 }
 impl HostCredentials {
     /// Keyring access can block for an OS dialog. Never run it on a Tokio worker.
-    pub async fn load(store: Arc<dyn CredentialStore>, directory: PathBuf) -> Result<Self, String> {
+    pub async fn load(store: Arc<dyn CredentialStore>, directory: PathBuf) -> Result<Self> {
         tokio::task::spawn_blocking(move || {
-            crate::platform::create_state_directory(&directory).map_err(|e| e.to_string())?;
+            crate::platform::create_state_directory(&directory)?;
             let record_path = directory.join("trust.json");
             let saved_record = match std::fs::read(&record_path) {
                 Ok(bytes) => Some(
                     serde_json::from_slice::<Record>(&bytes)
-                        .map_err(|_| "saved Host trust is invalid")?,
+                        .context("saved Host trust is invalid")?,
                 ),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(error.into()),
             };
             let keys = match store.load()? {
                 Some(bytes) => Zeroizing::new(
                     bytes
                         .as_slice()
                         .try_into()
-                        .map_err(|_| "saved Host keys must contain exactly 64 bytes")?,
+                        .context("saved Host keys must contain exactly 64 bytes")?,
                 ),
                 None => {
-                    if saved_record.is_some() {
-                        return Err("Host trust exists but identity keys are missing".into());
-                    }
+                    ensure!(
+                        saved_record.is_none(),
+                        "Host trust exists but identity keys are missing"
+                    );
                     let mut keys = Zeroizing::new([0; 64]);
                     keys[..32].copy_from_slice(&Identity::generate().to_bytes());
                     keys[32..].copy_from_slice(&Identity::generate().to_bytes());
@@ -139,7 +137,7 @@ impl HostCredentials {
                         .trust
                         .allowed
                         .insert(Identity::from_bytes(keys[32..].try_into().unwrap()).node_id());
-                    save_record(&record_path, &record)?;
+                    crate::platform::save_private_json(&record_path, &record)?;
                     record
                 }
             };
@@ -149,8 +147,7 @@ impl HostCredentials {
                 record: tokio::sync::Mutex::new(record),
             })
         })
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
     }
     pub async fn host_identity(&self) -> Identity {
         Identity::from_bytes(self.keys[..32].try_into().unwrap())
@@ -159,14 +156,13 @@ impl HostCredentials {
         Identity::from_bytes(self.keys[32..].try_into().unwrap())
     }
     /// Persist before publishing. Failed writes leave the live allowlist unchanged.
-    pub(crate) async fn persist(&self, record: Record) -> Result<Record, String> {
+    pub(crate) async fn persist(&self, record: Record) -> Result<Record> {
         let path = self.record_path.clone();
         tokio::task::spawn_blocking(move || {
-            save_record(&path, &record)?;
+            crate::platform::save_private_json(&path, &record)?;
             Ok(record)
         })
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
     }
 }
 
@@ -184,7 +180,7 @@ mod tests {
         writes: AtomicUsize,
     }
     impl CredentialStore for BoundedKeyring {
-        fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+        fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
             assert_ne!(
                 std::thread::current().id(),
                 self.worker,
@@ -192,10 +188,10 @@ mod tests {
             );
             Ok(self.bytes.lock().unwrap().clone())
         }
-        fn save(&self, bytes: &[u8]) -> Result<(), String> {
+        fn save(&self, bytes: &[u8]) -> Result<()> {
             assert_ne!(std::thread::current().id(), self.worker);
             if bytes.len() > 2560 {
-                return Err("Windows credential limit".into());
+                return Err(anyhow::anyhow!("Windows credential limit"));
             }
             self.writes.fetch_add(1, Ordering::SeqCst);
             *self.bytes.lock().unwrap() = Some(Zeroizing::new(bytes.to_vec()));
@@ -274,11 +270,22 @@ mod tests {
         }
         std::fs::remove_file(path).unwrap();
         assert!(
-            HostCredentials::load(store, directory.path().to_owned())
+            HostCredentials::load(store.clone(), directory.path().to_owned())
                 .await
                 .err()
                 .unwrap()
+                .to_string()
                 .contains("keys are missing")
+        );
+        std::fs::write(directory.path().join("trust.json"), "invalid trust record").unwrap();
+        let error = HostCredentials::load(store, directory.path().to_owned())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "saved Host trust is invalid");
+        assert!(
+            error.downcast_ref::<serde_json::Error>().is_some(),
+            "{error:#}"
         );
     }
 }

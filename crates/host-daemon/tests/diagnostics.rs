@@ -10,7 +10,7 @@ async fn fatal_startup_errors_survive_process_exit_and_restart() {
     let codex_home = directory.path().join("codex");
     fs::create_dir(&codex_home).unwrap();
     let missing_program = directory.path().join("missing-codex");
-    let expected_error = "cannot load Host credentials: saved Host trust is invalid";
+    let expected_error = "cannot load Host credentials: saved Host trust is invalid: expected value at line 1 column 1";
     for _ in 0..2 {
         let output = tokio::time::timeout(
             Duration::from_secs(20),

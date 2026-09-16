@@ -16,7 +16,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
                 config
                     .state_dir
                     .as_deref()
-                    .ok_or("--isolated requires --state-dir")?,
+                    .context("--isolated requires --state-dir")?,
                 config.key_storage,
             )
         } else {
@@ -30,7 +30,6 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     })
     .await
     .context("Host lease worker failed")?
-    .map_err(anyhow::Error::msg)
     .context("cannot acquire Host lease")?;
     let directory = lease.directory().to_owned();
     agent_core::diagnostics::initialize(
@@ -42,12 +41,10 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     let store = lease
         .key_storage()
         .open(&directory)
-        .map_err(anyhow::Error::msg)
         .context("cannot open Host key storage")?;
     let credentials = Arc::new(
         HostCredentials::load(store, directory.clone())
             .await
-            .map_err(anyhow::Error::msg)
             .context("cannot load Host credentials")?,
     );
     let relays = if config.no_relay {
@@ -94,22 +91,21 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     let ticket = runtime.ticket();
     let lease = tokio::task::spawn_blocking(move || {
         lease.publish(&ticket)?;
-        Ok::<_, String>(lease)
+        Ok::<_, anyhow::Error>(lease)
     })
     .await
     .context("Host publication worker failed")?
-    .map_err(anyhow::Error::msg)
     .context("cannot publish Host ticket")?;
     let shutdown = CancellationToken::new();
     let result = {
         let run = runtime.clone().run(shutdown.clone());
         tokio::pin!(run);
         tokio::select! {
-            result = &mut run => result.map_err(anyhow::Error::msg),
+            result = &mut run => result,
             signal = tokio::signal::ctrl_c() => {
                 shutdown.cancel();
                 let result = run.await;
-                signal.context("cannot receive shutdown signal").and(result.map_err(anyhow::Error::msg))
+                signal.context("cannot receive shutdown signal").and(result)
             }
         }
     };

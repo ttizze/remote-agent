@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use std::{fs, io, path::Path};
 
 /// Unix state is owner-only; Windows directories inherit the parent DACL.
@@ -55,9 +56,9 @@ pub(crate) fn terminal_command() -> &'static [&'static str] {
 }
 
 /// Atomically replace owner-only JSON state and flush its contents before rename.
-pub fn save_private_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
-    let parent = path.parent().ok_or("state path has no parent")?;
-    create_state_directory(parent).map_err(|error| error.to_string())?;
+pub fn save_private_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let parent = path.parent().context("state path has no parent")?;
+    create_state_directory(parent)?;
     atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
         .write_with_options(
             |file| {
@@ -66,5 +67,5 @@ pub fn save_private_json(path: &Path, value: &impl serde::Serialize) -> Result<(
             },
             private_file_options(),
         )
-        .map_err(|error| error.to_string())
+        .map_err(Into::into)
 }
