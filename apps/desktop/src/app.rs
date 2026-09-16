@@ -74,6 +74,12 @@ enum Tab {
     Settings,
 }
 #[derive(Clone, Copy, PartialEq)]
+enum SettingsPage {
+    Accounts,
+    Connections,
+    Worktrees,
+}
+#[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Home,
     Terminal,
@@ -204,6 +210,7 @@ pub(crate) struct Desktop {
     expanded_items: HashSet<String>,
     expanded_work: HashMap<String, ActivityExpansion>,
     tab: Tab,
+    settings_page: SettingsPage,
     sidebar: bool,
     panel_open: bool,
     panel: Panel,
@@ -486,6 +493,7 @@ impl Desktop {
             expanded_items: HashSet::new(),
             expanded_work: HashMap::new(),
             tab: Tab::Chat,
+            settings_page: SettingsPage::Accounts,
             sidebar: true,
             panel_open: false,
             panel: Panel::Home,
