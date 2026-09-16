@@ -1,8 +1,6 @@
 # Session runtime
 
-Implementation: September 2026, starting from `ad76149` and integrating
-`main` through `e052b01`. Codex and Claude Code
-are the supported providers. No additional provider scaffolding is introduced.
+Codex and Claude Code are the supported providers.
 
 ## Ownership and protocol
 
@@ -10,8 +8,8 @@ are the supported providers. No additional provider scaffolding is introduced.
   stores only owned execution turns, unresolved requests and in-flight input IDs.
   `SessionActor` never adopts a native history response. Completed turns are
   released, even while clients remain subscribed.
-- `SessionRef { provider, id }` preserves the complete native ID. The existing
-  `claude:` string representation is a compatibility boundary, not a Host ID.
+- `SessionRef { provider, id }` preserves the complete native ID. The
+  `claude:` prefix identifies Claude sessions in client thread keys.
 - `host/session/open` reads native history on every call, including reconnect.
   At response enqueue, the router overlays owned execution and registers the
   subscription under one lock. An execution that completes during a read is
@@ -97,7 +95,7 @@ those bodies too, preserving every requested turn and item identity. Only an
 oversized metadata-only response returns `response_too_large`; it does not create
 a subscription or close the connection.
 
-## Local data and retired paths
+## Local data
 
 Client persistence is scoped by Host public identity and a digest of configured
 provider storage locations, including canonical existing ancestors. Switching
@@ -105,31 +103,8 @@ storage archives the old client scope in the same persisted snapshot; returning
 to that configured area restores its drafts and unsaved file edits. The task
 list explains this recovery path. Cache replacement does not replace drafts.
 
-Old Bex Claude files are **not deleted** and are **not a permanent fallback**.
-Keep them until any information absent from native history has been recovered.
-Uploaded attachments and worktree files retain their existing storage and
-revision/permission protections; no new automatic cleanup is introduced.
-
-Removed: Bex Claude conversation writes/reads, external rollout watching,
-client history overlap/cursor merging, per-device approval aliases/replay,
-and raw provider conversation notifications on the client path. Old read/watch/
-page RPCs reject requests; current-session open and item-detail RPCs replace them.
-Pairing, revocation, files, worktrees, terminal, voice and native input remain.
-
-## Cleanup before review
-
-See [the size and responsibility audit](SESSION_REDESIGN_AUDIT.md) for the original
-reduction estimate, measured production growth, corrected duplication, and remaining
-required responsibilities. The original net-reduction estimate has not been achieved.
-
-The old provider forwarding layer and catalog wrapper are removed. Native query
-types now belong to the Host/Codex adapter, not client core. Shared sessions no
-longer carry unused history/item cursors; the adapter keeps native paging cursors
-locally. Desktop asks whether older history exists directly, without dummy
-turn/cursor pairs. The unused client-history fixture was deleted. Current main
-account login/logout and connection-attempt cancellation remain intact. Approval
-routing uses the owning Session provider instead of inferring it from request-ID
-prefixes; identical native IDs in different providers remain independent.
+Uploaded attachments and worktree files retain their storage and
+revision/permission protections.
 
 ## Verification
 
@@ -144,9 +119,7 @@ live turn B, pending requests and subsequent text updates; repeated opens of a
 history containing 17 MiB text/image/tool items; lossless binary item reads through
 the shared Store; and explicit oversized-RPC errors on a still-usable connection.
 
-Build Host and affected clients from the same revision: the session wire contract
-has changed. Production Host and installed apps have not been replaced. Real
-provider inference, physical devices and TestFlight are outside this verification.
+Build Host and affected clients from the same revision.
 
 Protocol references: [Codex app-server](https://developers.openai.com/codex/app-server/),
 [Claude sessions](https://code.claude.com/docs/en/sessions),

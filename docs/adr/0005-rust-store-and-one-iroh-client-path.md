@@ -8,7 +8,7 @@ Every client uses iroh, including desktop on the daemon's machine. A session is 
 
 A local client is paired during daemon startup using protected identity material. Management operations require the local client's endpoint identity; a remotely paired identity does not gain management access. Invites remain expiring and single-use. Revocation closes live sessions. Secrets use platform secure storage through existing libraries.
 
-The product is unreleased. No protocol-version wrappers, cache migrations or compatibility paths are introduced. Core tests and agent-cli are the migration gates; legacy UI may be temporarily broken. Core and CLI precede the daemon, desktop and mobile cutovers. Once generated UniFFI bindings are available, Kotlin common and hand-written FFI are removed together.
+The product is unreleased. No protocol-version wrappers, cache migrations or compatibility paths are introduced. Core tests, agent-cli and native client acceptance tests verify the shared implementation.
 
 The 87-case behavior corpus originates at `ea8aefc:crates/agent-client/tests/fixtures/`. Expanded copies retain RPC exchanges, expected outcomes and unknown fields. Its old JSON command tags label scenarios only; they do not define the new public API. Physical iroh adoption was approved following the isolated phone experiment. Cross-platform daemon/UI execution and production mobile behavior require their own verification.
 

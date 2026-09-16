@@ -69,7 +69,7 @@ class VisualizationTest {
             withTimeout(30_000) {
                 while (true) {
                     val complete = withContext(Dispatchers.Main) {
-                        val thread = JSONObject(model.snapshot.serialize().decodeToString()).getJSONObject("conversations_v2").getJSONObject(id)
+                        val thread = JSONObject(model.snapshot.serialize().decodeToString()).getJSONObject("conversations").getJSONObject(id)
                         val turns = thread.optJSONArray("turns")
                         turns != null && turns.length() > 0 && turns.getJSONObject(turns.length() - 1).optString("status") == "completed"
                     }
