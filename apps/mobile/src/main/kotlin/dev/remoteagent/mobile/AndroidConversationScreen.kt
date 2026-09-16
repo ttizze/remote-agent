@@ -58,7 +58,7 @@ internal fun ThreadDetailScreen(
     snapshot: Snapshot,
     projection: ConversationProjection?,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    older: ((String?) -> Unit)?,
+    older: (() -> Unit)?,
     modifier: Modifier = Modifier,
     scrollToTopRequest: Int = 0,
     composer: @Composable (() -> Unit) -> Unit,
@@ -76,12 +76,15 @@ internal fun ThreadDetailScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (threadId?.let(snapshot::conversation)?.historyCursor() != null)
+                threadId?.let(snapshot::conversation)?.historyNotice()?.let { notice ->
+                    item(key = "history:read-state") { Text(notice) }
+                }
+                if (threadId?.let(snapshot::conversation)?.hasMoreHistory() == true)
                     item(key = "history:turns") {
                         Button(
                             onClick = {
                                 following = false
-                                older?.invoke(null)
+                                older?.invoke()
                             },
                             enabled = older != null,
                         ) {
@@ -96,9 +99,9 @@ internal fun ThreadDetailScreen(
                         perform,
                         older =
                             older?.let { load ->
-                                { turnId ->
+                                {
                                     following = false
-                                    load(turnId)
+                                    load()
                                 }
                             },
                         activityHeader = { activity ->
@@ -166,12 +169,12 @@ private fun ConversationContent(
     threadId: String?,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    older: ((String) -> Unit)? = null,
+    older: (() -> Unit)? = null,
     activityHeader: @Composable (ActivityPresentation) -> Unit,
 ) {
     when (content) {
         is ConversationRowContent.OlderItems ->
-            Button(onClick = { older?.invoke(content.turnId) }, enabled = older != null) { Text("途中の履歴を読み込む") }
+            Button(onClick = { older?.invoke() }, enabled = older != null) { Text("途中の履歴を読み込む") }
         is ConversationRowContent.User -> ThreadMessageCard(content.item, true)
         is ConversationRowContent.Response -> ThreadMessageCard(content.item, false, cwd, perform)
         is ConversationRowContent.Activity ->
@@ -219,7 +222,9 @@ internal fun ThreadComposer(
     val navigation = snapshot.navigation()
     val draft = snapshot.draft(navigation.draftKey)
     var sending by remember { mutableStateOf(false) }
+    val inputUnavailable = navigation.threadId?.let(snapshot::conversation)?.inputUnavailableReason()
     Column(Modifier.padding(12.dp)) {
+        inputUnavailable?.let { Text(it) }
         draft.attachments.forEachIndexed { index, attachment ->
             Row {
                 Text(attachment.name, Modifier.weight(1f))
@@ -243,7 +248,9 @@ internal fun ThreadComposer(
                     onSend()
                     perform(Intent.Submit(navigation.threadId, UUID.randomUUID().toString())) { sending = false }
                 },
-                enabled = !sending && (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
+                enabled =
+                    inputUnavailable == null && !sending &&
+                        (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
             ) {
                 Text("送信")
             }

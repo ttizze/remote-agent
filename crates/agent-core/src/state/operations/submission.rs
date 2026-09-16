@@ -89,7 +89,8 @@ impl Operation for Respond {
         context.client.respond(request, &self.answer).await
     }
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
-        Arc::make_mut(&mut snapshot.requests).remove(&self.request_id.to_string());
+        // The Host owns delivery and resolution; transport enqueue is not an approval acknowledgement.
+        let _ = snapshot;
         Vec::new()
     }
 }
@@ -186,18 +187,40 @@ pub struct SendSubmission {
     pub client_user_message_id: String,
     pub draft: Arc<Draft>,
 }
+#[derive(Debug)]
+pub enum SubmissionProgress {
+    Opened(Box<crate::session::OpenedSession>),
+    Sent(Option<String>),
+}
 impl Operation for SendSubmission {
+    const ORDERED: bool = true;
+    const APPLY_WHEN_STALE: bool = true;
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
-    type Output = Option<String>;
-    const APPLY_WHEN_STALE: bool = true;
+    type Output = SubmissionProgress;
     fn outcome(output: &mut Self::Output) -> Outcome {
-        Outcome::Submitted {
-            turn_id: output.clone(),
+        match output {
+            SubmissionProgress::Opened(_) => Outcome::Applied,
+            SubmissionProgress::Sent(turn_id) => Outcome::Submitted {
+                turn_id: turn_id.clone(),
+            },
         }
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        if !context.snapshot.subscriptions.contains_key(&self.thread_id) {
+            let open = ReadThread::new(self.thread_id.clone()).with_history(
+                context
+                    .snapshot
+                    .conversations
+                    .get(&self.thread_id)
+                    .map(Arc::as_ref),
+            );
+            return context
+                .call(&open)
+                .await
+                .map(|opened| SubmissionProgress::Opened(Box::new(opened)));
+        }
         let target = submission_target(
             context
                 .snapshot
@@ -251,15 +274,22 @@ impl Operation for SendSubmission {
                 target,
             )
             .await?;
-        Ok(reply.value)
+        Ok(SubmissionProgress::Sent(reply.value))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        let turn_id = match output {
+            SubmissionProgress::Opened(opened) => {
+                let mut effects = ReadThread::new(self.thread_id.clone()).apply(snapshot, *opened);
+                effects.push(Effect::execute(self));
+                return effects;
+            }
+            SubmissionProgress::Sent(turn_id) => turn_id,
+        };
         let Self {
             thread_id,
             client_user_message_id,
             draft,
         } = self;
-        let turn_id = output;
 
         let draft = snapshot
             .pending_submissions

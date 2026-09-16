@@ -1080,26 +1080,10 @@ impl Desktop {
     fn remote_key(&self) -> &str {
         self.remote.as_ref().map_or("local", |remote| &remote.id)
     }
-    fn older_page(&self) -> Option<(Option<String>, Option<String>)> {
-        let thread = self.thread()?;
-        if let Some(turn) = thread
-            .turns
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .find(|turn| turn.items_has_more == Some(true))
-        {
-            return Some((
-                Some(turn.id.clone()),
-                turn.items_next_cursor.clone().flatten(),
-            ));
-        }
-        thread
-            .history_cursor
-            .as_ref()?
-            .as_ref()
-            .filter(|cursor| !cursor.is_empty())
-            .map(|cursor| (None, Some(cursor.clone())))
+    fn has_older_history(&self) -> bool {
+        self.thread().is_some_and(|thread| {
+            thread.extra.get("historyHasMore") == Some(&serde_json::Value::Bool(true))
+        })
     }
     fn user_items(&self) -> impl Iterator<Item = &Arc<Item>> {
         self.thread()
@@ -1230,15 +1214,17 @@ impl Desktop {
         if self.history_loading {
             return;
         }
-        let Some((turn_id, cursor)) = self.older_page() else {
+        if !self.has_older_history() {
             return;
-        };
+        }
         let generation = self.snapshot.epoch;
         self.history_loading = true;
         self.history_error.clear();
         self.list.remeasure_items(0..1);
         self.perform(
-            Intent::ReadOlder(op::ReadOlder::new(self.selected().into(), turn_id, cursor)),
+            Intent::ReadOlder {
+                thread_id: self.selected().into(),
+            },
             OperationCompletion::History { generation },
         );
         cx.notify();
@@ -1386,11 +1372,7 @@ impl Desktop {
                     .await
                     .map_err(|error| error.to_string())?;
                 store
-                    .dispatch(Intent::ReadThread(op::ReadThread {
-                        include_turns: false,
-                        paginate_history: false,
-                        ..op::ReadThread::open(id.clone())
-                    }))
+                    .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
                     .await
                     .map_err(|error| error.to_string())?;
                 store

@@ -150,7 +150,39 @@ where
         .ok_or_else(|| TransferError::Protocol("download destination has no parent".into()))?;
     let output = tempfile::NamedTempFile::new_in(parent)?;
     let mut file = tokio::fs::File::from_std(output.reopen()?);
-    let mut stream = open_stream().await?;
+    receive_download(grant, open_stream().await?, &mut file).await?;
+    file.sync_all().await?;
+    drop(file);
+    output
+        .persist_noclobber(destination)
+        .map_err(|error| TransferError::Io(error.error))?;
+    Ok(())
+}
+
+pub async fn download_bytes<S, F, Fut>(
+    grant: TransferGrant,
+    open_stream: F,
+) -> Result<Vec<u8>, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
+    let mut bytes = Vec::new();
+    receive_download(grant, open_stream().await?, &mut bytes).await?;
+    Ok(bytes)
+}
+
+async fn receive_download<S, W>(
+    grant: TransferGrant,
+    mut stream: S,
+    output: &mut W,
+) -> Result<(), TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let grant = grant.validate()?;
     stream.write_u32(grant.token.len() as u32).await?;
     stream.write_all(grant.token.as_bytes()).await?;
     let mut digest = Context::new(&SHA256);
@@ -160,7 +192,7 @@ where
         let length = remaining.min(buffer.len() as u64) as usize;
         stream.read_exact(&mut buffer[..length]).await?;
         digest.update(&buffer[..length]);
-        file.write_all(&buffer[..length]).await?;
+        output.write_all(&buffer[..length]).await?;
         remaining -= length as u64;
     }
     if stream.read(&mut buffer[..1]).await? != 0
@@ -170,10 +202,5 @@ where
             "download content digest or length mismatch".into(),
         ));
     }
-    file.sync_all().await?;
-    drop(file);
-    output
-        .persist_noclobber(destination)
-        .map_err(|error| TransferError::Io(error.error))?;
     Ok(())
 }

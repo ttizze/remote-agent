@@ -225,6 +225,7 @@ struct ThreadConversationRow: Identifiable, Sendable {
     let id: String
     let content: Content
     enum Content: Sendable {
+        case historyNotice(String)
         case olderTurns, native(ConversationRow, ConversationItem?), queued(ConversationItem)
     }
 }

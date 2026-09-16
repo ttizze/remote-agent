@@ -64,7 +64,10 @@
           "itemsView": "summary",
           "future": "new"
         }
-      ]
+      ],
+      "status": {
+        "type": "idle"
+      }
     }
   },
   {
@@ -136,7 +139,10 @@
             }
           ]
         }
-      ]
+      ],
+      "status": {
+        "type": "idle"
+      }
     }
   },
   {
@@ -245,7 +251,10 @@
             }
           ]
         }
-      ]
+      ],
+      "status": {
+        "type": "idle"
+      }
     }
   },
   {
@@ -314,7 +323,10 @@
           ],
           "itemsView": "summary"
         }
-      ]
+      ],
+      "status": {
+        "type": "idle"
+      }
     }
   },
   {
@@ -371,7 +383,10 @@
             }
           ]
         }
-      ]
+      ],
+      "status": {
+        "type": "idle"
+      }
     }
   },
   {
@@ -445,7 +460,10 @@
             }
           ]
         }
-      ]
+      ],
+      "status": {
+        "type": "idle"
+      }
     }
   }
 ]

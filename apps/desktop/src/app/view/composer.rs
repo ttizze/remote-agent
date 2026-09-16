@@ -342,7 +342,7 @@ impl Desktop {
             entity
                 .update(cx, |view, cx| match view.rows.get(index).cloned() {
                     Some(ConversationRow::History) => {
-                        if view.older_page().is_none() {
+                        if !view.has_older_history() {
                             return div().into_any_element();
                         }
                         let label = if view.history_loading {
@@ -396,6 +396,18 @@ impl Desktop {
         .flex_1()
         .min_h_0();
         let mut body = v_flex().flex_1().min_w_0().h_full();
+        if let Some(notice) = self
+            .thread()
+            .and_then(|thread| agent_core::session::input_unavailable_reason(thread))
+        {
+            body = body.child(div().px_4().py_2().text_sm().child(notice));
+        }
+        if let Some(notice) = self
+            .thread()
+            .and_then(|thread| agent_core::presentation::conversation::history_notice(thread))
+        {
+            body = body.child(div().px_4().py_2().text_sm().child(notice));
+        }
         if self.thread().is_none() && pending_rows(&self.snapshot).next().is_none() {
             body = body.child(
                 v_flex()
@@ -483,7 +495,15 @@ impl Desktop {
             self.icon_button("send", IconName::ArrowUp, "送信", cx, |s, _, cx| {
                 s.send(cx)
             })
-            .disabled(!self.snapshot.connected || self.busy > 0 || empty)
+            .disabled(
+                !self.snapshot.connected
+                    || self.busy > 0
+                    || empty
+                    || self
+                        .thread()
+                        .and_then(|thread| agent_core::session::input_unavailable_reason(thread))
+                        .is_some(),
+            )
         };
         let microphone = Button::new("dictation-toggle")
             .icon(Icon::default().path("bex/microphone.svg").size(px(23.)))

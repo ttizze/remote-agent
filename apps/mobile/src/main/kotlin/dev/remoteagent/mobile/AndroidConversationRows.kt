@@ -46,15 +46,24 @@ internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -
                 RequestKind.COMMAND_APPROVAL,
                 RequestKind.FILE_APPROVAL ->
                     request.decisionLabels.forEachIndexed { index, label ->
-                        Button(onClick = { respond(Answer.Decision(index.toUInt())) }, enabled = !busy) { Text(label) }
+                        Button(
+                            onClick = { respond(Answer.Decision(index.toUInt())) },
+                            enabled = !busy && request.canRespond,
+                        ) { Text(label) }
                     }
                 RequestKind.PERMISSIONS ->
                     Row {
-                        Button(onClick = { respond(Answer.Permissions(true)) }, enabled = !busy) { Text("このターンで許可") }
-                        Button(onClick = { respond(Answer.Permissions(false)) }, enabled = !busy) { Text("拒否") }
+                        Button(
+                            onClick = { respond(Answer.Permissions(true)) },
+                            enabled = !busy && request.canRespond,
+                        ) { Text("このターンで許可") }
+                        Button(
+                            onClick = { respond(Answer.Permissions(false)) },
+                            enabled = !busy && request.canRespond,
+                        ) { Text("拒否") }
                     }
-                RequestKind.QUESTIONS -> QuestionAnswers(request, busy, ::respond)
-                else -> RawAnswer(busy, ::respond) { error = it }
+                RequestKind.QUESTIONS -> QuestionAnswers(request, busy || !request.canRespond, ::respond)
+                else -> RawAnswer(busy || !request.canRespond, ::respond) { error = it }
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }

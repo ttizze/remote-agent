@@ -52,11 +52,11 @@ pub enum Intent {
     },
     StartThread(StartThread),
     ReadThread(ReadThread),
+    OpenRequest(OpenRequest),
     ReadItem(ReadItem),
     ResizeTerminal(ResizeTerminal),
     Interrupt(Interrupt),
-    Watch(Watch),
-    Unwatch(Unwatch),
+    CloseSubscription(CloseSubscription),
     ShowThreadList,
     WriteTerminal(WriteTerminal),
     AcknowledgeTerminal {
@@ -84,7 +84,9 @@ pub enum Intent {
         path: String,
         text: String,
     },
-    ReadOlder(ReadOlder),
+    ReadOlder {
+        thread_id: String,
+    },
     LoadModels(LoadModels),
     SetDraft {
         thread_id: String,

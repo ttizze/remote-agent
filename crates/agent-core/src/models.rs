@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, sync::Arc};
 
+pub const MAX_INLINE_ITEM_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -42,6 +44,8 @@ pub struct HostStatus {
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Thread {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requests: BTreeMap<String, Arc<crate::client::ServerRequest>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,12 +58,6 @@ pub struct Thread {
     pub status: Option<ThreadStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<Vec<Arc<Turn>>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "double_option"
-    )]
-    pub history_cursor: Option<Option<String>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -98,12 +96,6 @@ pub struct Turn {
     pub items_view: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_has_more: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "double_option"
-    )]
-    pub items_next_cursor: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_item_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,19 +245,24 @@ impl ItemChanges {
 }
 
 impl Thread {
-    /// Keep visible messages and generated images complete; mark large activity
-    /// bodies for explicit item reads without copying their serialized output.
-    pub fn defer_item_details(&mut self) {
+    /// Keep RPC snapshots small; item reads recover every deferred body.
+    pub fn defer_item_details(&mut self, max_inline_bytes: usize) {
         for turn in self.turns.iter_mut().flatten() {
             let turn = Arc::make_mut(turn);
             let mut deferred = Vec::new();
             for item in turn.items.iter_mut().flatten() {
                 if item.id.is_empty()
-                    || matches!(
-                        item.kind.as_deref(),
-                        Some("userMessage" | "agentMessage" | "imageGeneration")
+                    || fits_inline(
+                        item,
+                        if matches!(
+                            item.kind.as_deref(),
+                            Some("userMessage" | "agentMessage" | "imageGeneration")
+                        ) {
+                            max_inline_bytes
+                        } else {
+                            4096.min(max_inline_bytes)
+                        },
                     )
-                    || fits_inline(item)
                 {
                     continue;
                 }
@@ -274,25 +271,35 @@ impl Thread {
                 item.retain_header();
             }
             if !deferred.is_empty() {
-                turn.deferred_item_ids = Some(deferred);
+                let ids = turn.deferred_item_ids.get_or_insert_default();
+                for id in deferred {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            if let Some(item) = &mut turn.opening_user_message
+                && !fits_inline(item, max_inline_bytes)
+            {
+                Arc::make_mut(item).retain_header();
             }
         }
     }
 }
 impl Item {
-    fn retain_header(&mut self) {
+    pub fn retain_header(&mut self) {
         for text in [
             &mut self.text,
-            &mut self.status,
             &mut self.command,
             &mut self.aggregated_output,
-            &mut self.saved_path,
-            &mut self.client_id,
         ]
         .into_iter()
         .flatten()
         {
             truncate_detail(text);
+        }
+        if self.kind.as_deref() == Some("imageGeneration") {
+            self.result = None;
         }
         if let Some(result) = &mut self.result
             && !retain_scalar(result)
@@ -302,12 +309,25 @@ impl Item {
         if let Some(changes) = &mut self.changes {
             changes.retain_headers();
         }
-        self.extra.retain(|_, value| retain_scalar(value));
+        self.extra.retain(|key, value| {
+            if matches!(
+                key.as_str(),
+                "detailFile"
+                    | "parentToolUseId"
+                    | "nativeMessageId"
+                    | "agentId"
+                    | "sourceToolUseId"
+            ) {
+                value.as_str().is_some_and(|value| value.len() <= 4096)
+            } else {
+                retain_scalar(value)
+            }
+        });
     }
 }
 
 // Stop counting when the budget is exceeded; never allocate another large body.
-fn fits_inline(value: &impl Serialize) -> bool {
+fn fits_inline(value: &impl Serialize, limit: usize) -> bool {
     struct Budget(usize);
     impl std::io::Write for Budget {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -321,7 +341,7 @@ fn fits_inline(value: &impl Serialize) -> bool {
             Ok(())
         }
     }
-    serde_json::to_writer(Budget(4096), value).is_ok()
+    serde_json::to_writer(Budget(limit), value).is_ok()
 }
 fn truncate_detail(text: &mut String) {
     let mut end = text.len().min(256);
@@ -524,7 +544,7 @@ mod tests {
     use serde_json::json;
     #[test]
     fn nullable_update_fields_distinguish_absence_null_and_value() {
-        for field in ["historyCursor", "projectId"] {
+        for field in ["projectId"] {
             for value in [serde_json::json!(null), serde_json::json!("value")] {
                 let source = serde_json::json!({field:value});
                 let thread: Thread = serde_json::from_value(source.clone()).unwrap();
@@ -539,7 +559,7 @@ mod tests {
                     .is_none()
             );
         }
-        for field in ["itemsNextCursor", "startedAt", "completedAt", "durationMs"] {
+        for field in ["startedAt", "completedAt", "durationMs"] {
             let source = serde_json::json!({"id":"turn",field:null});
             let turn: Turn = serde_json::from_value(source).unwrap();
             assert!(
@@ -565,7 +585,7 @@ mod tests {
             {"id":"small","type":"reasoning","summary":["short"]}
         ]}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
-        typed.thread.defer_item_details();
+        typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
         let result = serde_json::to_value(typed).unwrap();
         let turn = &result["thread"]["turns"][0];
         let items = &turn["items"];
@@ -589,108 +609,15 @@ mod tests {
             "result":"A".repeat(8192),"savedPath":format!("/{} image.png", "directory/".repeat(40))});
         let result = json!({"thread":{"turns":[{"id":"turn","items":[image]}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
-        typed.thread.defer_item_details();
+        typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
         let result = serde_json::to_value(typed).unwrap();
         assert_eq!(result["thread"]["turns"][0]["items"][0], image);
         assert!(result["thread"]["turns"][0]["deferredItemIds"].is_null());
-    }
-
-    #[test]
-    fn history_page_preserves_the_opaque_cursor_and_chronological_order() {
-        let mut result: ThreadResponse = serde_json::from_value(json!({"thread":{}})).unwrap();
-        result.thread.apply_history_page(
-            serde_json::from_value(
-                json!({"data":[{"id":"new"},{"id":"old"}],"nextCursor":"opaque:token"}),
-            )
-            .unwrap(),
-        );
-        let result = serde_json::to_value(result).unwrap();
-        assert_eq!(result["thread"]["turns"][0]["id"], "old");
-        assert_eq!(result["thread"]["historyCursor"], "opaque:token");
     }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Empty {}
-
-/// Host-only history policy is consumed before forwarding the remaining params.
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ThreadParams {
-    #[serde(skip_serializing)]
-    pub paginate_history: bool,
-    #[serde(skip_serializing)]
-    pub defer_item_details: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_turns: Option<bool>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThreadListParams<'a> {
-    pub limit: usize,
-    pub sort_key: &'a str,
-    pub sort_direction: &'a str,
-    pub use_state_db_only: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub search_term: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryParams<'a> {
-    pub thread_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<&'a str>,
-    pub limit: usize,
-    pub sort_direction: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub items_view: Option<&'a str>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryPage<T> {
-    pub data: Vec<T>,
-    pub next_cursor: Option<String>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryItem {
-    pub item: Arc<Item>,
-    pub turn_id: Option<String>,
-}
-impl HistoryPage<HistoryItem> {
-    pub fn into_items(self) -> Result<(Vec<Arc<Item>>, Option<String>), &'static str> {
-        if self.data.len() > 100 {
-            return Err("item page exceeds requested size");
-        }
-        let items = self
-            .data
-            .into_iter()
-            .map(|entry| {
-                if entry.item.id.is_empty() {
-                    Err("history item ID is missing")
-                } else {
-                    Ok(entry.item)
-                }
-            })
-            .collect::<Result<_, _>>()?;
-        Ok((items, self.next_cursor))
-    }
-}
-impl Thread {
-    pub fn apply_history_page(&mut self, mut page: HistoryPage<Arc<Turn>>) {
-        page.data.reverse();
-        self.turns = Some(page.data);
-        self.history_cursor = Some(page.next_cursor.filter(|cursor| !cursor.is_empty()));
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TransferGrant {

@@ -14,6 +14,9 @@ pub(crate) struct StartupConfig {
     /// Claude Code executable. Uses the Host user's Claude subscription login.
     #[arg(long, default_value = "claude")]
     pub(crate) claude: PathBuf,
+    /// Native Claude Code configuration and transcript storage root.
+    #[arg(long)]
+    pub(crate) claude_home: Option<PathBuf>,
     #[arg(long)]
     pub(crate) codex_home: Option<PathBuf>,
     /// Credential directory; defaults to the remembered Host or platform data directory.

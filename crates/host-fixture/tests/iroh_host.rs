@@ -31,11 +31,45 @@ async fn start_host(directory: &Path) -> HostFixture {
     .await
     .unwrap()
 }
-async fn rpc(peer: &RpcPeer, method: &str, params: Value) -> Value {
+async fn rpc(peer: &RpcPeer, method: &str, mut params: Value) -> Value {
+    if matches!(method, "turn/start" | "turn/steer" | "thread/queue/add")
+        && params.get("clientUserMessageId").is_none()
+    {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        params["clientUserMessageId"] = format!(
+            "fixture-send-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+        .into();
+    }
     peer.request::<_, Value>(method, &params)
         .await
         .unwrap()
         .value
+}
+async fn open_session(peer: &RpcPeer, id: &Value, limit: usize) -> Value {
+    rpc(
+        peer,
+        "host/session/open",
+        json!({"session":{"provider":"codex","id":id},"limit":limit}),
+    )
+    .await
+}
+async fn next_change(events: &mut broadcast::Receiver<PeerEvent>, kind: &str) -> Value {
+    loop {
+        let message = next_method(events, "host/session/update").await;
+        if message["params"]["change"]["type"] == kind {
+            return message["params"]["change"].clone();
+        }
+    }
+}
+async fn completed_turn(events: &mut broadcast::Receiver<PeerEvent>) -> Value {
+    loop {
+        let change = next_change(events, "turn").await;
+        if change["completed"] == true {
+            return change["turn"].clone();
+        }
+    }
 }
 async fn next_message(events: &mut broadcast::Receiver<PeerEvent>) -> Value {
     loop {
@@ -254,7 +288,7 @@ async fn concurrent_consumers_cannot_both_use_one_invitation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn simultaneous_clients_receive_their_own_resolved_approval_id() {
+async fn simultaneous_clients_share_one_request_and_only_one_valid_answer_wins() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
@@ -263,33 +297,52 @@ async fn simultaneous_clients_receive_their_own_resolved_approval_id() {
         let mut first_events = first.peer.subscribe();
         let mut second_events = second.peer.subscribe();
         let started = rpc(&first.peer, "thread/start", json!({"cwd":directory.path()})).await;
-        rpc(&second.peer, "thread/list", json!({})).await;
         let id = &started["thread"]["id"];
+        open_session(&first.peer, id, 5).await;
+        open_session(&second.peer, id, 5).await;
         rpc(
             &first.peer,
             "turn/start",
             json!({"threadId":id,"input":[{"type":"text","text":"[approval]"}]}),
         )
         .await;
-        let a = next_method(&mut first_events, "item/commandExecution/requestApproval").await;
-        let b = next_method(&mut second_events, "item/commandExecution/requestApproval").await;
-        first
-            .peer
-            .respond_raw(&a["id"].to_string(), "result", r#"{"decision":"accept"}"#)
-            .await
-            .unwrap();
-        let done_a = next_method(&mut first_events, "serverRequest/resolved").await;
-        let done_b = next_method(&mut second_events, "serverRequest/resolved").await;
-        assert_eq!(done_a["params"]["requestId"], a["id"]);
-        assert_eq!(done_b["params"]["requestId"], b["id"]);
-        let completed = next_method(&mut second_events, "turn/completed").await;
-        assert_eq!(completed["params"]["turn"]["status"], "completed");
+        let a = next_change(&mut first_events, "request").await["request"].clone();
+        let b = next_change(&mut second_events, "request").await["request"].clone();
+        assert_eq!(
+            a["id"], b["id"],
+            "all devices share one native execution request"
+        );
+        assert!(
+            first
+                .peer
+                .request::<_, Value>(
+                    "host/session/answer",
+                    &json!({"requestId":a["id"],"result":{"decision":"invalid"}})
+                )
+                .await
+                .is_err()
+        );
+        let answer = json!({"requestId":a["id"],"result":{"decision":"accept"}});
+        let (one, two) = tokio::join!(
+            first
+                .peer
+                .request::<_, Value>("host/session/answer", &answer),
+            second
+                .peer
+                .request::<_, Value>("host/session/answer", &answer)
+        );
+        assert_ne!(one.is_ok(), two.is_ok(), "one validated answer must win");
+        for events in [&mut first_events, &mut second_events] {
+            let resolved = next_change(events, "resolveRequest").await;
+            assert_eq!(resolved["requestId"], a["id"].to_string());
+            assert_eq!(completed_turn(events).await["status"], "completed");
+        }
         first.close().await.unwrap();
         second.close().await.unwrap();
         fixture.close().await.unwrap();
     })
     .await
-    .expect("approval routing deadline");
+    .expect("simultaneous approval deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -549,23 +602,19 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
             .unwrap();
         let id = store.snapshot().navigation.thread_id.clone().unwrap();
         assert!(
-            store.snapshot().navigation.watch_id.is_none(),
-            "a live thread must not read its unmaterialized rollout"
+            store.snapshot().subscriptions.contains_key(&id),
+            "input must have an active subscription before it reaches the provider"
         );
         let client = fixture.local().await.unwrap();
-        let error = client
-            .peer
-            .request::<_, Value>(
-                "host/thread/read",
-                &json!({"threadId":id,"includeTurns":true}),
-            )
-            .await
-            .unwrap_err();
+        let current = open_session(&client.peer, &json!(id), 5).await;
+        assert_eq!(current["response"]["thread"]["id"], id);
         assert!(
-            error
-                .to_string()
-                .contains("list_turns is not supported yet"),
-            "{error}"
+            current["response"]["thread"]["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|turn| turn["status"] == "inProgress"),
+            "live state must be available before native history materializes"
         );
         std::fs::write(directory.path().join("release-inputs"), "").unwrap();
         let mut updates = store.subscribe();
@@ -1101,20 +1150,15 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         let snapshot = store.snapshot();
         let thread = &snapshot.conversations["history"];
         assert_eq!(thread.turns.as_ref().unwrap().len(), 5, "refresh must not attach disconnected cached turns");
-        assert!(thread.history_cursor.as_ref().unwrap().is_some());
+        assert_eq!(thread.extra["historyHasMore"], true);
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
         assert_eq!(latest.items.as_ref().unwrap().len(), 500);
         assert_eq!(latest.items_has_more, Some(true));
         assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-120");
         for _ in 0..20 {
             let snapshot = store.snapshot();
-            let thread = &snapshot.conversations["history"];
-            let turn = thread.turns.as_ref().unwrap().iter().find(|turn| turn.items_has_more == Some(true));
-            if let Some(turn) = turn {
-                store.dispatch(Intent::ReadOlder(op::ReadOlder::new("history".into(), Some(turn.id.clone()), None))).await.unwrap();
-            } else if thread.history_cursor.as_ref().unwrap().is_some() {
-                store.dispatch(Intent::ReadOlder(op::ReadOlder::new("history".into(), None, None))).await.unwrap();
-            } else { break; }
+            if snapshot.conversations["history"].extra["historyHasMore"] != true { break; }
+            store.dispatch(Intent::ReadOlder { thread_id: "history".into() }).await.unwrap();
         }
         for reopen in [false, true] {
             if reopen {
@@ -1122,7 +1166,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             }
             let snapshot = store.snapshot();
             let thread = &snapshot.conversations["history"];
-            assert_eq!(thread.history_cursor, Some(None));
+            assert_eq!(thread.extra["historyHasMore"], false);
             let loaded = thread.turns.as_ref().unwrap();
             assert_eq!(loaded.len(), turns.len());
             for (loaded, expected) in loaded.iter().zip(&turns) {
@@ -1156,7 +1200,11 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         assert_eq!(listed["data"][0]["id"], *thread);
         assert_eq!(listed["data"][0]["projectId"], "workspace");
         let start = std::time::Instant::now();
-        let preview = mobile.peer.request::<_, Value>("host/thread/read", &json!({"threadId":thread,"includeTurns":true,"deferItemDetails":true})).await.unwrap().value;
+        // This fixture materializes saved history after creation. Release the
+        // empty created view before asking the native adapter for that history.
+        let empty = open_session(&mobile.peer, thread, 5).await;
+        rpc(&mobile.peer, "host/session/close", json!({"subscriptionId":empty["subscriptionId"]})).await;
+        let preview = open_session(&mobile.peer, thread, 5).await["response"].clone();
         let preview_bytes = serde_json::to_vec(&preview).unwrap().len();
         assert_eq!(preview["thread"]["projectId"], "workspace");
         println!("large history preview: {preview_bytes} bytes, {} ms", start.elapsed().as_millis());
@@ -1166,59 +1214,49 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         assert_eq!(turn["items"][0]["content"][0]["text"], "Read the whole output");
         assert_eq!(turn["items"][2]["text"], "Large history is complete");
         assert_eq!(turn["deferredItemIds"], json!(["large-command"]));
-        let full = mobile.peer.request::<_, Value>("host/thread/read", &json!({"threadId":thread,"includeTurns":true})).await.unwrap().value;
-        assert!(full["thread"]["turns"][0].get("deferredItemIds").is_none(), "full-history clients must retain inline details");
-        let detail = mobile.peer.request::<_, Value>("host/thread/item/read", &json!({"threadId":thread,"turnId":"large-turn","itemId":"large-command"})).await.unwrap().value;
+        let detail = mobile.peer.request::<_, agent_core::client::ItemResponse>("host/thread/item/read", &json!({"threadId":thread,"turnId":"large-turn","itemId":"large-command"})).await.unwrap().value;
+        let detail = serde_json::to_value(detail.resolve(Some(&mobile.session)).await.unwrap()).unwrap();
         assert_eq!(detail["item"]["aggregatedOutput"], format!("{}END_OF_LARGE_OUTPUT", "output line\n".repeat(700000)));
-        assert_eq!(detail["item"], full["thread"]["turns"][0]["items"][1]);
+        assert_eq!(detail["item"]["id"], "large-command");
         assert!(mobile.peer.request::<_, Value>("host/thread/item/read", &json!({"threadId":thread,"turnId":"wrong-turn","itemId":"large-command"})).await.is_err());
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
             {"id":"fixture-long-history","cwd":directory.path(),"historyMode":"paginated","updatedAt":1}
         ])).unwrap()).unwrap();
         mobile.peer.request::<_, Value>("host/thread/list", &json!({"useStateDbOnly":true})).await.unwrap();
-        let mut page = mobile.peer.request::<_, Value>("host/thread/read", &json!({"threadId":"fixture-long-history","includeTurns":true,"paginateHistory":true})).await.unwrap().value;
+        let mut page = open_session(&mobile.peer, &json!("fixture-long-history"), 5).await["response"].clone();
         assert_eq!(page["thread"]["turns"].as_array().unwrap().len(), 5);
         assert_eq!(page["thread"]["turns"].as_array().unwrap().iter().map(|t| t["items"].as_array().unwrap().len()).sum::<usize>(), 500);
         assert_eq!(page["thread"]["turns"][4]["items"][153]["id"], "long-latest-message");
-        let mut turn_ids = std::collections::HashSet::new();
-        let mut item_ids = std::collections::HashSet::new();
-        loop {
-            for turn in page["thread"]["turns"].as_array().unwrap() {
-                assert!(turn_ids.insert(turn["id"].as_str().unwrap().to_owned()));
-                let mut items = turn.clone();
-                loop {
-                    assert!(items["items"].as_array().unwrap().len() <= 500);
-                    for item in items["items"].as_array().unwrap() {
-                        assert!(item_ids.insert(item["id"].as_str().unwrap().to_owned()), "repeated history item");
-                    }
-                    if items["itemsHasMore"] != true { break; }
-                    let cursor = &items["itemsNextCursor"];
-                    items = mobile.peer.request::<_, Value>("host/thread/items/list", &json!({"threadId":"fixture-long-history","turnId":turn["id"],"cursor":cursor})).await.unwrap().value["thread"]["turns"][0].take();
-                }
-            }
-            let Some(cursor) = page["thread"]["historyCursor"].as_str() else { break; };
-            page = mobile.peer.request::<_, Value>("host/thread/turns/list", &json!({"threadId":"fixture-long-history","cursor":cursor})).await.unwrap().value;
+        for limit in (10..=100).step_by(5) {
+            if page["thread"]["historyHasMore"] != true { break; }
+            page = open_session(&mobile.peer, &json!("fixture-long-history"), limit).await["response"].clone();
         }
-        assert_eq!(turn_ids.len(), 10);
-        assert_eq!(item_ids.len(), 3718);
+        assert_eq!(page["thread"]["historyHasMore"], false);
+        let turns = page["thread"]["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 10);
+        let items: Vec<_> = turns.iter().flat_map(|turn| turn["items"].as_array().unwrap()).collect();
+        let ids: std::collections::HashSet<_> = items.iter().map(|item| item["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), items.len(), "no item is duplicated when expanding the window");
+        assert_eq!(items.len(), 3718);
 
         let started = mobile.peer.request::<_, Value>("host/thread/start", &json!({"cwd":directory.path()})).await.unwrap().value;
         let image_thread = &started["thread"]["id"];
         let mut messages = mobile.peer.subscribe();
-        mobile.peer.request::<_, Value>("turn/start", &json!({"threadId":image_thread,"input":[{"type":"text","text":"[generated-images]"}]})).await.unwrap();
-        loop {
-            let event: Value = next_message(&mut messages).await;
-            if event["method"] == "turn/completed" && event["params"]["threadId"] == *image_thread { break; }
-        }
-        let history = mobile.peer.request::<_, Value>("host/thread/read", &json!({"threadId":image_thread,"includeTurns":true,"paginateHistory":true,"deferItemDetails":true})).await.unwrap().value;
+        open_session(&mobile.peer, image_thread, 5).await;
+        rpc(&mobile.peer, "turn/start", json!({"threadId":image_thread,"input":[{"type":"text","text":"[generated-images]"}]})).await;
+        completed_turn(&mut messages).await;
+        let history = open_session(&mobile.peer, image_thread, 5).await["response"].clone();
         let turn = &history["thread"]["turns"][0];
         let images: Vec<_> = turn["items"].as_array().unwrap().iter().filter(|item| item["type"] == "imageGeneration").collect();
         assert_eq!(images.len(), 2);
         let original = std::fs::read(directory.path().join("fixture image.png")).unwrap();
         for item in images {
             assert_eq!(item["status"], "completed");
-            assert_eq!(STANDARD.decode(item["result"].as_str().unwrap()).unwrap(), original);
-            assert!(!turn["deferredItemIds"].as_array().is_some_and(|ids| ids.contains(&item["id"])));
+            let full = mobile.peer.request::<_, agent_core::client::ItemResponse>("host/thread/item/read", &json!({"threadId":image_thread,"turnId":turn["id"],"itemId":item["id"]})).await.unwrap().value;
+            let full = serde_json::to_value(full.resolve(Some(&mobile.session)).await.unwrap()).unwrap();
+            assert!(STANDARD.decode(full["item"]["result"].as_str().unwrap()).unwrap() == original, "native image details must be lossless");
+            if turn["deferredItemIds"].as_array().is_some_and(|ids| ids.contains(&item["id"])) { assert!(item["result"].is_null(), "a truncated base64 value must never be rendered as an image"); }
+            else { assert!(STANDARD.decode(item["result"].as_str().unwrap()).unwrap() == original); }
         }
         mobile.close().await.unwrap();
         fixture.close().await.unwrap();
@@ -1295,22 +1333,12 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(found["projects"].as_array().unwrap().len(), 1);
         assert_eq!(found["data"].as_array().unwrap().len(), 5);
         assert_eq!(found["data"][0]["id"], "p1-18");
-        let body = mobile.peer.request::<_, Value>("host/thread/read", &json!({"threadId":"p5-1","includeTurns":true})).await.unwrap().value;
+        let body = open_session(&mobile.peer, &json!("p5-1"), 5).await["response"].clone();
         assert_eq!(body["thread"]["turns"][0]["items"][0]["text"], "History for Project 05 conversation 01");
         assert_eq!(body["thread"]["status"]["type"], "notLoaded");
         let item = mobile.peer.request::<_, Value>("host/thread/item/read", &json!({"threadId":"p5-1","turnId":"turn-p5-1","itemId":"answer-p5-1"})).await.unwrap().value;
         assert_eq!(item["item"]["text"], "History for Project 05 conversation 01");
-        let mut changes = mobile.peer.subscribe();
-        mobile.peer.request::<_, Value>("host/thread/watch", &json!({"watchId":1,"threadId":"p5-1","path":rollout})).await.unwrap();
-        std::fs::write(&rollout, "external client persisted a reply\n").unwrap();
-        let changed = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let event: Value = next_message(&mut changes).await;
-                if event["method"] == "host/thread/changed" { break event; }
-            }
-        }).await.expect("rollout changes must cross iroh");
-        assert_eq!(changed["params"], json!({"watchId":1,"threadId":"p5-1"}));
-        mobile.peer.request::<_, Value>("host/thread/unwatch", &json!({"watchId":1})).await.unwrap();
+        assert!(mobile.peer.request::<_, Value>("host/thread/watch", &json!({"watchId":1,"threadId":"p5-1","path":rollout})).await.is_err(), "external rollout following is retired");
         mobile.close().await.unwrap();
         fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");
@@ -1372,7 +1400,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         assert_ne!(paths[0], paths[1]);
         let before = std::process::Command::new("git").current_dir(&workspace).args(["worktree", "list", "--porcelain"]).output().unwrap().stdout;
         for id in &ids {
-            let read = request(&service, &mut session, "host/thread/read", json!({"threadId":id,"includeTurns":false})).await;
+            let read = request(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":id},"limit":5})).await["response"].clone();
             assert_eq!(read["thread"]["projectId"], "workspace");
         }
         let mut chat_ids = Vec::new();
@@ -1390,7 +1418,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         let mut restarted_session = restarted.open_session(64);
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
         for id in &chat_ids {
-            let read = request(&restarted, &mut restarted_session, "host/thread/read", json!({"threadId":id,"includeTurns":false})).await;
+            let read = request(&restarted, &mut restarted_session, "host/session/open", json!({"session":{"provider":"codex","id":id},"limit":5})).await["response"].clone();
             assert_eq!(read["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
             assert_eq!(read["thread"].get("projectId"), Some(&Value::Null));
         }
@@ -1469,10 +1497,11 @@ async fn daemon_model_wire_fixture() {
         let started = rpc(&local.peer, "host/thread/start", json!({"cwd":directory.path()})).await;
         let thread_id = &started["thread"]["id"];
         let mut events = local.peer.subscribe();
-        rpc(&local.peer, "turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":"[items]"}]})).await;
-        next_method(&mut events, "turn/completed").await;
+        open_session(&local.peer, thread_id, 5).await;
+        rpc(&local.peer, "turn/start", json!({"threadId":thread_id,"clientUserMessageId":"wire-fixture","input":[{"type":"text","text":"[items]"}]})).await;
+        completed_turn(&mut events).await;
         let list = rpc(&local.peer, "host/thread/list", json!({})).await;
-        let history = rpc(&local.peer, "host/thread/read", json!({"threadId":thread_id,"includeTurns":true})).await;
+        let history = open_session(&local.peer, thread_id, 5).await["response"].clone();
         assert_eq!(list["projects"][0]["roots"][0]["path"], directory.path().to_str().unwrap());
         assert!(history["thread"]["turns"][0]["items"].as_array().unwrap().iter().any(|item| item["result"].is_object()));
         let capture = serde_json::to_string_pretty(&json!({"list":list,"history":history})).unwrap()
@@ -1618,7 +1647,7 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn passive_client_receives_replayed_approval_and_completes_without_a_dummy_request() {
+async fn opening_a_session_recovers_the_current_approval_without_event_replay() {
     passive_approval_after(Duration::ZERO).await;
 }
 
@@ -1633,21 +1662,47 @@ async fn passive_approval_after(delay: Duration) {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
         let sender = fixture.local().await.unwrap();
-        let started = rpc(&sender.peer, "thread/start", json!({"cwd":directory.path()})).await;
+        let started = rpc(
+            &sender.peer,
+            "thread/start",
+            json!({"cwd":directory.path()}),
+        )
+        .await;
         let mut sender_events = sender.peer.subscribe();
-        rpc(&sender.peer, "turn/start", json!({"threadId":started["thread"]["id"],"input":[{"type":"text","text":"[approval]"}]})).await;
-        next_method(&mut sender_events, "item/commandExecution/requestApproval").await;
-        // No dummy request: opening this peer must register it and replay approval.
+        let id = &started["thread"]["id"];
+        open_session(&sender.peer, id, 5).await;
+        rpc(
+            &sender.peer,
+            "turn/start",
+            json!({"threadId":id,"input":[{"type":"text","text":"[approval]"}]}),
+        )
+        .await;
+        let original = next_change(&mut sender_events, "request").await["request"].clone();
+        sender.peer.close().await.unwrap();
         let passive = fixture.local().await.unwrap();
         let mut events = passive.peer.subscribe();
-        let request = next_method(&mut events, "item/commandExecution/requestApproval").await;
+        let opened = open_session(&passive.peer, id, 5).await;
+        let request = opened["response"]["thread"]["requests"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(request["id"], original["id"]);
         tokio::time::sleep(delay).await;
-        passive.peer.respond_raw(&request["id"].to_string(), "result", r#"{"decision":"accept"}"#).await.unwrap();
-        assert_eq!(next_method(&mut events, "turn/completed").await["params"]["turn"]["status"], "completed");
+        rpc(
+            &passive.peer,
+            "host/session/answer",
+            json!({"requestId":request["id"],"result":{"decision":"accept"}}),
+        )
+        .await;
+        assert_eq!(completed_turn(&mut events).await["status"], "completed");
         passive.close().await.unwrap();
         sender.close().await.unwrap();
         fixture.close().await.unwrap();
-    }).await.expect("unattended approval deadline");
+    })
+    .await
+    .expect("unattended approval deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2327,4 +2382,253 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
     })
     .await
     .expect("worktree merge list deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_open_delivers_a_snapshot_before_updates_and_reopens_current_state() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let client = fixture.local().await.unwrap();
+        let created = rpc(
+            &client.peer,
+            "host/thread/start",
+            json!({"cwd":directory.path()}),
+        )
+        .await;
+        let id = created["thread"]["id"].as_str().unwrap();
+        let mut events = client.peer.subscribe();
+        let opened = client
+            .peer
+            .request::<_, agent_core::session::OpenedSession>(
+                "host/session/open",
+                &json!({"session":{"provider":"codex","id":id},"limit":5}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(opened.value.response.thread.id.as_deref(), Some(id));
+        rpc(
+            &client.peer,
+            "turn/start",
+            json!({"threadId":id,"input":[{"type":"text","text":"session update fixture"}]}),
+        )
+        .await;
+        let mut thread = opened.value.response.thread;
+        let mut sequence = opened.sequence;
+        loop {
+            let message = events.recv().await.unwrap();
+            let PeerEvent::Message(message) = message else {
+                continue;
+            };
+            let notification: Value = serde_json::from_str(&message.value).unwrap();
+            if notification["method"] != "host/session/update" {
+                continue;
+            }
+            assert!(message.sequence > opened.sequence);
+            let update: agent_core::session::SessionUpdate =
+                serde_json::from_value(notification["params"].clone()).unwrap();
+            assert_eq!(update.subscription_id, opened.value.subscription_id);
+            assert!(
+                message.sequence > sequence,
+                "transport delivers updates in order"
+            );
+            sequence = message.sequence;
+            thread = update.change.apply(&thread).unwrap();
+            if matches!(
+                update.change,
+                agent_core::session::SessionChange::Turn {
+                    completed: true,
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+        let reopened: agent_core::session::OpenedSession = serde_json::from_value(
+            rpc(
+                &client.peer,
+                "host/session/open",
+                json!({"session":{"provider":"codex","id":id},"limit":5}),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_ne!(reopened.subscription_id, opened.value.subscription_id);
+        assert_eq!(reopened.response.thread.turns, thread.turns);
+        rpc(
+            &client.peer,
+            "host/session/close",
+            json!({"subscriptionId":opened.value.subscription_id}),
+        )
+        .await;
+        rpc(
+            &client.peer,
+            "host/session/close",
+            json!({"subscriptionId":reopened.subscription_id}),
+        )
+        .await;
+        client.close().await.unwrap();
+        fixture.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = start_host(directory.path()).await;
+    let mobile = fixture.local().await.unwrap();
+    let mut events = mobile.peer.subscribe();
+    let started = rpc(
+        &mobile.peer,
+        "thread/start",
+        json!({"cwd":directory.path()}),
+    )
+    .await;
+    let id = &started["thread"]["id"];
+    open_session(&mobile.peer, id, 5).await;
+    rpc(&mobile.peer, "turn/start", json!({"threadId":id,"input":[{"type":"text","text":"[generated-images] [gallery] Browse all generated images"}]})).await;
+    completed_turn(&mut events).await;
+    let peer = Arc::new(mobile.peer);
+    let images = agent_core::client::Client::new(peer.clone())
+        .session_images(id.as_str().unwrap(), Some(&mobile.session))
+        .await
+        .unwrap();
+    assert_eq!(
+        images.len(),
+        8,
+        "native older turns and earlier item pages remain accessible"
+    );
+    peer.close().await.unwrap();
+    mobile.session.close();
+    mobile.endpoint.close().await;
+    fixture.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without_reconnecting() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("oversized-history")).unwrap();
+        let fixture = start_host(directory.path()).await;
+        let mobile = fixture.local().await.unwrap();
+        let started = rpc(
+            &mobile.peer,
+            "host/thread/start",
+            json!({"cwd":directory.path().join("oversized-history")}),
+        )
+        .await;
+        let thread = &started["thread"]["id"];
+        for _ in 0..2 {
+            let opened = open_session(&mobile.peer, thread, 5).await;
+            assert!(serde_json::to_vec(&opened).unwrap().len() < 16 * 1024);
+            let turn = &opened["response"]["thread"]["turns"][0];
+            assert_eq!(
+                turn["deferredItemIds"],
+                json!(["oversized-text", "oversized-image", "oversized-tool"])
+            );
+            assert!(
+                turn["items"][1]["result"].is_null(),
+                "base64 must be absent, never truncated"
+            );
+            rpc(
+                &mobile.peer,
+                "host/session/close",
+                json!({"subscriptionId":opened["subscriptionId"]}),
+            )
+            .await;
+        }
+        for (id, field, byte) in [
+            ("oversized-text", "text", b'x'),
+            ("oversized-image", "result", b'A'),
+            ("oversized-tool", "aggregatedOutput", b'z'),
+        ] {
+            let reply = mobile
+                .peer
+                .request::<_, agent_core::client::ItemResponse>(
+                    "host/thread/item/read",
+                    &json!({"threadId":thread,"turnId":"oversized-turn","itemId":id}),
+                )
+                .await
+                .unwrap()
+                .value;
+            assert!(reply.transfer.as_ref().unwrap().size > 16 * 1024 * 1024);
+            assert!(serde_json::to_vec(&reply).unwrap().len() < 16 * 1024);
+            let item =
+                serde_json::to_value(reply.resolve(Some(&mobile.session)).await.unwrap().item)
+                    .unwrap();
+            let body = item[field].as_str().unwrap();
+            assert_eq!(body.len(), 17 * 1024 * 1024);
+            assert!(body.bytes().all(|value| value == byte));
+        }
+        // Exercise the shared Store path used by all native clients: visible
+        // messages/images load automatically, while tool details are requested.
+        use agent_core::{state::Intent, store::Store};
+        let endpoint = Endpoint::bind(
+            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
+            Relays::Disabled,
+        )
+        .await
+        .unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+            .await
+            .unwrap();
+        let mut updates = store.subscribe();
+        let thread_id = thread.as_str().unwrap();
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(thread_id.into())))
+            .await
+            .unwrap();
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            let items = &snapshot.conversations[thread_id].turns.as_ref().unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap();
+            if items[0]
+                .text
+                .as_ref()
+                .is_some_and(|text| text.len() == 17 * 1024 * 1024)
+                && items[1]
+                    .result
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .is_some_and(|data| data.len() == 17 * 1024 * 1024)
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+        store
+            .dispatch(Intent::ReadItem(op::ReadItem {
+                thread_id: thread_id.into(),
+                turn_id: "oversized-turn".into(),
+                item_id: "oversized-tool".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.snapshot().conversations[thread_id]
+                .turns
+                .as_ref()
+                .unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap()[2]
+                .aggregated_output
+                .as_ref()
+                .unwrap()
+                .len(),
+            17 * 1024 * 1024
+        );
+        store.close().await.unwrap();
+        endpoint.close().await;
+        rpc(&mobile.peer, "host/status", json!({})).await;
+        mobile.close().await.unwrap();
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("large item transfers exceeded deadline");
 }

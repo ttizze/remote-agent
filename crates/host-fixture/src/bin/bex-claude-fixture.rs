@@ -7,7 +7,59 @@ use std::{
     path::Path,
 };
 
+fn native(mut value: Value) {
+    if !matches!(value["type"].as_str(), Some("assistant" | "user")) {
+        return;
+    }
+    let Some(home) = std::env::var_os("CLAUDE_CONFIG_DIR") else {
+        return;
+    };
+    let args: Vec<_> = std::env::args().collect();
+    let session = args
+        .windows(2)
+        .find(|pair| pair[0] == "--session-id" || pair[0] == "--resume")
+        .unwrap()[1]
+        .clone();
+    let directory = Path::new(&home)
+        .join("projects")
+        .join("fixture-native-project");
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!("{session}.jsonl"));
+    let previous: Option<Value> = fs::read_to_string(&path).ok().and_then(|text| {
+        text.lines()
+            .last()
+            .and_then(|line| serde_json::from_str(line).ok())
+    });
+    value["parentUuid"] = previous
+        .map(|value| value["uuid"].clone())
+        .unwrap_or(Value::Null);
+    value["uuid"] = value.get("uuid").cloned().unwrap_or_else(|| {
+        format!(
+            "fixture-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+        .into()
+    });
+    value["sessionId"] = session.into();
+    value["cwd"] = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+        .into();
+    value["version"] = "2.1.266".into();
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(file, "{value}").unwrap();
+}
+
 fn emit(value: Value) {
+    native(value.clone());
     let mut out = io::stdout().lock();
     writeln!(out, "{value}").unwrap();
     out.flush().unwrap();
@@ -26,7 +78,7 @@ fn block(session: &str, message: &str, index: usize, kind: &str, text: &str) {
         json!({"type":"stream_event","session_id":session,"event":{"type":"content_block_delta","index":index,"delta":{"type":delta,field:text}}}),
     );
     emit(
-        json!({"type":"assistant","uuid":format!("envelope-{message}-{index}"),"session_id":session,"message":{"id":message,"role":"assistant","content":[{"type":kind,field:text}]}}),
+        json!({"type":"assistant","apiBlockIndex":index,"uuid":format!("envelope-{message}-{index}"),"session_id":session,"message":{"id":message,"role":"assistant","content":[{"type":kind,field:text}]}}),
     );
     emit(
         json!({"type":"stream_event","session_id":session,"event":{"type":"content_block_stop","index":index}}),
@@ -107,8 +159,11 @@ fn main() {
                     "unauthenticated input must never reach Claude"
                 );
                 assert_eq!(option("--model").as_deref(), Some("default"));
+                native(value.clone());
                 let content = value["message"]["content"].clone();
-                inputs.push(json!({"content":content,"effort":option("--effort")}));
+                inputs.push(
+                    json!({"content":content,"effort":option("--effort"),"pid":std::process::id()}),
+                );
                 fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
                 emit(json!({"type":"system","subtype":"init","session_id":session}));
                 let text = content

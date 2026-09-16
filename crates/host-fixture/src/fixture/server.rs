@@ -375,6 +375,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     context.respond(id, &Page { data: &page, next_cursor: (end < ordered.len()).then(|| end.to_string()) })?;
                 }
                 "thread/start" => {
+                    let failure = context.home.join("fail-next-thread-start");
+                    if failure.exists() {
+                        fs::remove_file(failure)?;
+                        context.error(id, -32603, "fixture session creation failed")?;
+                        continue;
+                    }
                     let cwd = match params.get_mut("cwd") {
                         Some(cwd) => cwd.take(),
                         // Unscoped chats must never inherit the developer's

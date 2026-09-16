@@ -277,7 +277,7 @@ impl Session {
     }
     pub async fn open_stream(
         &self,
-    ) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, TransportError> {
+    ) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send + 'static + use<>, TransportError> {
         let (send, recv) = self.connection.open_bi().await.map_err(connection)?;
         Ok(Stream {
             send,
@@ -288,7 +288,7 @@ impl Session {
     }
     pub async fn accept_stream(
         &self,
-    ) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, TransportError> {
+    ) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send + 'static + use<>, TransportError> {
         let (send, recv) = self.connection.accept_bi().await.map_err(connection)?;
         Ok(Stream {
             send,

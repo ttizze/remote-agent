@@ -1,5 +1,5 @@
-//! Typed RPC operations. This module has no transport or UI dependencies.
-use crate::state::operations::{ReadOlder, ReadThread};
+//! Typed RPC operations and deferred payload reads. No UI dependencies.
+use crate::state::operations::ReadThread;
 use crate::{
     models::ThreadResponse,
     peer::{PeerError, Reply, Request, RpcPeer},
@@ -181,8 +181,36 @@ pub(crate) fn validate_thread(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ItemResponse {
     pub item: crate::models::Item,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<crate::models::TransferGrant>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+impl ItemResponse {
+    pub async fn resolve(
+        mut self,
+        session: Option<&crate::transport::Session>,
+    ) -> Result<Self, PeerError> {
+        if let Some(grant) = self.transfer.take() {
+            let session = session.ok_or_else(|| {
+                PeerError::InvalidMessage("item transfer requires an iroh session".into())
+            })?;
+            let bytes = crate::transfers::download_bytes(grant, || async {
+                session.open_stream().await.map_err(std::io::Error::other)
+            })
+            .await
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            let item: crate::models::Item = serde_json::from_slice(&bytes)
+                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+            if item.id != self.item.id {
+                return Err(PeerError::InvalidMessage(
+                    "transferred item ID does not match".into(),
+                ));
+            }
+            self.item = item;
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -592,12 +620,103 @@ pub fn answer_result(request: &ServerRequest, answer: &Answer) -> Result<Value, 
         Answer::Raw { value } => Ok(value.clone()),
     }
 }
+/// Validate the complete wire answer before claiming a shared pending request.
+pub fn validate_answer(request: &ServerRequest, result: &Value) -> Result<(), String> {
+    if request.method == "item/tool/requestUserInput" {
+        let questions = request
+            .params
+            .get("questions")
+            .and_then(Value::as_array)
+            .ok_or("questions are unavailable")?;
+        let answers = result["answers"]
+            .as_object()
+            .ok_or("answers are required")?;
+        if answers.len() != questions.len() {
+            return Err("every question requires one answer".into());
+        }
+        for question in questions {
+            let id = question["id"].as_str().ok_or("question ID is missing")?;
+            let values = answers
+                .get(id)
+                .and_then(|answer| answer["answers"].as_array())
+                .ok_or("question answer is missing")?;
+            if values.is_empty()
+                || values
+                    .iter()
+                    .any(|value| value.as_str().is_none_or(|value| value.trim().is_empty()))
+            {
+                return Err("question answer is invalid".into());
+            }
+        }
+    } else if request.method == "item/permissions/requestApproval" {
+        let requested = request
+            .params
+            .get("permissions")
+            .and_then(Value::as_object)
+            .ok_or("permissions are unavailable")?;
+        let granted = result["permissions"]
+            .as_object()
+            .ok_or("permissions are required")?;
+        if result["scope"] != "turn"
+            || granted
+                .iter()
+                .any(|(key, value)| requested.get(key) != Some(value))
+        {
+            return Err("answer grants unrequested permissions".into());
+        }
+    } else if matches!(
+        request.method.as_str(),
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "claude/tool/requestApproval"
+    ) {
+        if !approval_decisions(request).contains(&result["decision"]) {
+            return Err("invalid approval decision".into());
+        }
+    } else if request.method == "mcpServer/elicitation/request" {
+        match result["action"].as_str() {
+            Some("decline" | "cancel") if result["content"].is_null() => {}
+            Some("accept")
+                if matches!(
+                    request.params.get("mode").and_then(Value::as_str),
+                    Some("form" | "openai/form")
+                ) && result["content"].is_object() => {}
+            Some("accept")
+                if request.params.get("mode").and_then(Value::as_str) == Some("url")
+                    && result["content"].is_null() => {}
+            _ => return Err("invalid MCP elicitation answer".into()),
+        }
+    } else if request.method == "item/tool/call" {
+        if !result["success"].is_boolean()
+            || result["contentItems"].as_array().is_none_or(|items| {
+                items.iter().any(|item| match item["type"].as_str() {
+                    Some("inputText") => !item["text"].is_string(),
+                    Some("inputImage") => item["imageUrl"]
+                        .as_str()
+                        .is_none_or(|url| !url.starts_with("data:image/")),
+                    _ => true,
+                })
+            })
+        {
+            return Err("invalid dynamic tool response".into());
+        }
+    } else {
+        return Err("unsupported provider request cannot be approved".into());
+    }
+    Ok(())
+}
+
 impl Client {
     pub async fn respond(&self, request: &ServerRequest, answer: &Answer) -> Result<(), PeerError> {
         let result = answer_result(request, answer)?;
+        validate_answer(request, &result).map_err(PeerError::InvalidMessage)?;
         self.peer
-            .respond_raw(&request.id.to_string(), "result", &result.to_string())
+            .request::<_, Value>(
+                "host/session/answer",
+                &serde_json::json!({"requestId":request.id,"result":result}),
+            )
             .await
+            .map(|_| ())
     }
 }
 
@@ -608,83 +727,88 @@ pub struct SessionImage {
     pub encoded: bool,
 }
 impl Client {
-    pub async fn session_images(&self, thread_id: &str) -> Result<Vec<SessionImage>, PeerError> {
-        let mut thread = self
-            .call(&ReadThread::new(thread_id.to_owned()))
+    pub async fn session_images(
+        &self,
+        thread_id: &str,
+        session: Option<&crate::transport::Session>,
+    ) -> Result<Vec<SessionImage>, PeerError> {
+        // One bounded provider view; close this transient subscription before
+        // returning images so it never replaces the Store's visible session.
+        let opened = self
+            .call(&ReadThread {
+                limit: 1000,
+                ..ReadThread::new(thread_id.to_owned())
+            })
             .await?
-            .value
-            .thread;
-        let mut visited = std::collections::HashSet::new();
-        loop {
-            let item_page = thread
-                .turns
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .find(|turn| turn.items_has_more == Some(true))
-                .map(|turn| {
-                    (
-                        turn.id.clone(),
-                        turn.items_next_cursor
-                            .as_ref()
-                            .and_then(|cursor| cursor.clone()),
-                    )
-                });
-            let (turn_id, cursor) = if let Some((turn_id, cursor)) = item_page {
-                (Some(turn_id), cursor)
-            } else if let Some(Some(cursor)) = &thread.history_cursor {
-                (None, Some(cursor.clone()))
-            } else {
-                break;
-            };
-            if !visited.insert((turn_id.clone(), cursor.clone())) {
-                return Err(PeerError::InvalidMessage(
-                    "history cursor did not advance".into(),
-                ));
-            }
-            let operation = ReadOlder::new(thread_id.to_owned(), turn_id, cursor);
-            let page = self.call(&operation).await?.value.thread;
-            thread = crate::state::older(
-                &thread,
-                &page,
-                operation.turn_id.as_deref(),
-                operation.cursor.as_deref(),
-            )
-            .map_err(PeerError::InvalidMessage)?;
-        }
+            .value;
+        let thread = opened.response.thread;
+        self.call(&crate::state::operations::CloseSubscription {
+            subscription_id: opened.subscription_id.to_string(),
+        })
+        .await?;
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();
-        for item in thread
-            .turns
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .rev()
-            .flat_map(|turn| turn.items.as_deref().unwrap_or_default().iter().rev())
+        let mut native_items = std::collections::HashSet::new();
+        let mut bytes = 0usize;
+        for turn in thread.turns.as_deref().unwrap_or_default().iter().rev() {
+            for item in turn.items.as_deref().unwrap_or_default().iter().rev() {
+                if item.kind.as_deref() != Some("imageGeneration") || !native_items.insert(&item.id)
+                {
+                    continue;
+                }
+                let detail;
+                let item = if turn
+                    .deferred_item_ids
+                    .as_ref()
+                    .is_some_and(|ids| ids.contains(&item.id))
+                {
+                    detail = self
+                        .call(&crate::state::operations::ReadItem {
+                            thread_id: thread_id.into(),
+                            turn_id: turn.id.clone(),
+                            item_id: item.id.clone(),
+                        })
+                        .await?
+                        .value
+                        .resolve(session)
+                        .await?;
+                    &detail.item
+                } else {
+                    item.as_ref()
+                };
+                let image = item
+                    .saved_path
+                    .as_deref()
+                    .filter(|path| !path.trim().is_empty())
+                    .map(|path| (path, false))
+                    .or_else(|| {
+                        item.result
+                            .as_ref()
+                            .and_then(Value::as_str)
+                            .filter(|data| !data.trim().is_empty())
+                            .map(|data| (data, true))
+                    });
+                if let Some((source, encoded)) = image
+                    && sources.insert(source.to_owned())
+                {
+                    bytes = bytes.saturating_add(source.len());
+                    if bytes > 16 * 1024 * 1024 {
+                        return Err(PeerError::InvalidMessage("画像一覧が16 MiBの上限に達しました。会話内の画像から個別に開いてください。".into()));
+                    }
+                    images.push(SessionImage {
+                        source: source.into(),
+                        encoded,
+                    });
+                }
+            }
+        }
+        if thread.extra.get("historyHasMore") == Some(&Value::Bool(true))
+            || thread
+                .extra
+                .get("historyReadState")
+                .is_some_and(|state| state["type"] != "complete")
         {
-            if item.kind.as_deref() != Some("imageGeneration") {
-                continue;
-            }
-            let image = item
-                .saved_path
-                .as_deref()
-                .filter(|path| !path.trim().is_empty())
-                .map(|path| (path, false))
-                .or_else(|| {
-                    item.result
-                        .as_ref()
-                        .and_then(Value::as_str)
-                        .filter(|data| !data.trim().is_empty())
-                        .map(|data| (data, true))
-                });
-            if let Some((source, encoded)) = image
-                && sources.insert(source)
-            {
-                images.push(SessionImage {
-                    source: source.into(),
-                    encoded,
-                });
-            }
+            return Err(PeerError::InvalidMessage("履歴が部分取得のため、画像一覧を完全には取得できません。会話内の画像から個別に開いてください。".into()));
         }
         images.reverse();
         Ok(images)

@@ -158,6 +158,10 @@ impl Desktop {
                                 .disabled(!self.snapshot.connected || self.remote.is_some()),
                             ),
                     )
+                    .when_some(
+                        list.as_ref().and_then(|list| list.notice.clone()),
+                        |this, notice| this.child(div().px_3().py_2().text_sm().child(notice)),
+                    )
                     .child(navigation)
                     .child(
                         Input::new(&self.search)

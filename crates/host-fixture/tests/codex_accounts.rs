@@ -43,6 +43,10 @@ async fn call(
         );
         let result: Value = serde_json::from_str(&line).unwrap();
         if result["id"] == 42 {
+            let mut result = result;
+            if method == "host/session/open" && result.get("error").is_none() {
+                result["result"] = result["result"]["response"].take();
+            }
             return result;
         }
     }
@@ -54,18 +58,29 @@ async fn completed_turn(
     thread: &str,
     text: &str,
 ) -> String {
+    call(
+        service,
+        session,
+        "host/session/open",
+        json!({"session":{"provider":"codex","id":thread},"limit":5}),
+    )
+    .await;
     let result = call(
         service,
         session,
         "turn/start",
-        json!({"threadId":thread,"input":[{"type":"text","text":text}]}),
+        json!({"threadId":thread,"clientUserMessageId":text,"input":[{"type":"text","text":text}]}),
     )
     .await;
     assert!(result.get("error").is_none(), "{result}");
     let id = result["result"]["turn"]["id"].as_str().unwrap().to_owned();
     loop {
         let event: Value = serde_json::from_str(&session.recv().await.unwrap()).unwrap();
-        if event["method"] == "turn/completed" && event["params"]["turn"]["id"] == id {
+        if event["method"] == "host/session/update"
+            && event["params"]["change"]["type"] == "turn"
+            && event["params"]["change"]["completed"] == true
+            && event["params"]["change"]["turn"]["id"] == id
+        {
             return id;
         }
     }
@@ -90,7 +105,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
         let thread = started["result"]["thread"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;
-        let before = call(&service, &mut session, "host/thread/read", json!({"threadId":thread,"includeTurns":true})).await;
+        let before = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
         assert!(before.get("error").is_none(), "{before}");
         assert_eq!(before["result"]["thread"]["turns"].as_array().unwrap().len(), 1);
         let canceled = call(&service, &mut session, "host/account/login/start", json!({})).await;
@@ -114,10 +129,10 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
         let refreshed = call(&service, &mut session, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
         assert_eq!(refreshed["result"], json!({"accountId":"desktop","hasToken":true}));
-        let after = call(&service, &mut session, "host/thread/read", json!({"threadId":thread,"includeTurns":true})).await;
+        let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
         assert_eq!(before["result"]["thread"], after["result"]["thread"]);
         completed_turn(&service, &mut session, thread, "after switch").await;
-        let after = call(&service, &mut session, "host/thread/read", json!({"threadId":thread,"includeTurns":true})).await;
+        let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
         assert_eq!(after["result"]["thread"]["turns"].as_array().unwrap().len(), 2);
         let invalid = call(&service, &mut session, "host/account/select", json!({"accountId":"missing"})).await;
         assert!(invalid.get("error").is_some());
@@ -157,7 +172,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert!(accounts["result"]["selectedId"].is_null());
         assert!(accounts["result"]["error"].is_string());
         assert!(call(&service, &mut session, "thread/list", json!({})).await.get("error").is_none());
-        assert_eq!(call(&service, &mut session, "turn/start", json!({"threadId":"any","input":[{"type":"text","text":"must not use a different account"}]})).await["error"]["code"], "account_unavailable");
+        assert_eq!(call(&service, &mut session, "turn/start", json!({"threadId":"any","clientUserMessageId":"unavailable-account","input":[{"type":"text","text":"must not use a different account"}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
         completed_turn(&service, &mut session, started["result"]["thread"]["id"].as_str().unwrap(), "recovered account").await;
@@ -228,8 +243,8 @@ async fn helper_initialization_does_not_block_completed_turns() {
         let read = call(
             &service,
             &mut session,
-            "host/thread/read",
-            json!({"threadId":thread,"includeTurns":true}),
+            "host/session/open",
+            json!({"session":{"provider":"codex","id":thread},"limit":5}),
         )
         .await;
         assert_eq!(read["result"]["thread"]["turns"][0]["status"], "completed");

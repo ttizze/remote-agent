@@ -27,7 +27,7 @@ ios-markdown:
 
 # Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
 android-e2e:
-    cargo build --locked -p host-fixture --bins
+    cargo build --locked -p host-fixture -p codex-app-server --bins
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
     nix develop .#android-test --command bash scripts/android-e2e.sh
 
@@ -58,6 +58,7 @@ conversation-ui:
 
 # Exercise the real iroh Host through the headless client.
 iroh-e2e:
+    cargo build --locked --package codex-app-server --bin bex-provider-supervisor
     cargo test --locked --package host-fixture --test iroh_host
 
 # Run Rust, Kotlin and Swift quality checks, or one selected language.

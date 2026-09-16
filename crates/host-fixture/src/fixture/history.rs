@@ -12,7 +12,11 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     let id = thread.metadata["id"].as_str().unwrap();
     let cwd = thread.metadata["cwd"].as_str().unwrap();
     let gallery = thread.metadata.get("gallery") == Some(&Value::Bool(true));
-    if id != "fixture-long-history" && !cwd.ends_with("large-history") && !gallery {
+    if id != "fixture-long-history"
+        && !cwd.ends_with("large-history")
+        && !cwd.ends_with("oversized-history")
+        && !gallery
+    {
         return None;
     }
     let mut turns = if id == "fixture-long-history" {
@@ -46,6 +50,14 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
             }).collect();
             Rc::new(RefCell::new(json!({"id":format!("long-turn-{number}"),"status":status,"items":items})))
         }).collect::<Vec<_>>()
+    } else if cwd.ends_with("oversized-history") {
+        vec![Rc::new(RefCell::new(
+            json!({"id":"oversized-turn","status":"completed","items":[
+                {"id":"oversized-text","type":"agentMessage","text":"x".repeat(17 * 1024 * 1024)},
+                {"id":"oversized-image","type":"imageGeneration","result":"A".repeat(17 * 1024 * 1024)},
+                {"id":"oversized-tool","type":"commandExecution","aggregatedOutput":"z".repeat(17 * 1024 * 1024)}
+            ]}),
+        ))]
     } else if cwd.ends_with("large-history") {
         vec![Rc::new(RefCell::new(
             json!({"id":"large-turn","status":"completed","items":[

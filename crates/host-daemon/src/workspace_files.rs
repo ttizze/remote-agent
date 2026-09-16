@@ -117,6 +117,34 @@ impl WorkspaceFiles {
             .retain(|_, grant| grant.session != session);
     }
 
+    /// An anonymous transfer file is closed on consumption, expiry or disconnect.
+    /// It is never added to native history or the attachment directory.
+    pub(crate) async fn download_bytes(
+        &self,
+        session: SessionId,
+        bytes: Vec<u8>,
+    ) -> Result<TransferGrant, String> {
+        let files = self.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Seek, SeekFrom};
+            if bytes.len() as u64 > TRANSFER_LIMIT {
+                return Err("transfer exceeds 512 MiB".into());
+            }
+            let mut file = tempfile::tempfile().map_err(io_error)?;
+            file.write_all(&bytes).map_err(io_error)?;
+            file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            files.grant(Grant {
+                session,
+                expires: Instant::now() + GRANT_LIFETIME,
+                file: GrantFile::Download(file),
+                size: bytes.len() as u64,
+                digest: hash(&bytes),
+            })
+        })
+        .await
+        .map_err(io_error)?
+    }
+
     fn dispatch(&self, session: SessionId, request: FileRequest) -> Result<FileResponse, String> {
         match request {
             FileRequest::Visualization(params) => {
