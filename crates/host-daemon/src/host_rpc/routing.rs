@@ -142,7 +142,7 @@ impl State {
                     .live
                     .requests
                     .values()
-                    .find(|request| request.extra.get("nativeRequestId") == Some(id))
+                    .find(|request| request.native_request_id.as_ref() == Some(id))
                     .map(|request| (target.clone(), (**request).clone()))
             })
     }
@@ -177,22 +177,34 @@ impl SessionRouter {
         }
     }
 
-    pub(super) fn begin_submission(&self, params: &Value) -> Result<SessionRef, String> {
-        let target = SessionRef::from_thread_id(
-            params["threadId"]
-                .as_str()
-                .ok_or("session ID is required")?,
-        )?;
-        let id = params["clientUserMessageId"]
-            .as_str()
-            .filter(|id| !id.is_empty() && id.len() <= 256)
-            .ok_or("clientUserMessageId is required")?;
+    pub(super) fn begin_submission(
+        &self,
+        target: &SessionRef,
+        id: &str,
+    ) -> Result<(), super::service::Failure> {
+        use super::service::Failure;
+        if id.is_empty() || id.len() > 256 {
+            return Err(Failure::new(
+                "invalid_params",
+                "clientUserMessageId is required",
+            ));
+        }
         let mut state = lock_state(&self.state);
         let actor = state.executions.entry(target.clone()).or_default();
-        if actor.inputs.len() >= 128 || !actor.inputs.insert(id.into()) {
-            return Err("submission is already in flight or input capacity reached; read the session before sending again".into());
+        if actor.inputs.contains(id) {
+            return Err(Failure::unknown(
+                "submission_outcome_unknown",
+                "submission is already in flight; read the session before sending again",
+            ));
         }
-        Ok(target)
+        if actor.inputs.len() >= 128 {
+            return Err(Failure::new(
+                "input_capacity_reached",
+                "active input capacity reached",
+            ));
+        }
+        actor.inputs.insert(id.into());
+        Ok(())
     }
 
     pub(super) fn reject_submission(&self, target: &SessionRef, id: &str) {
@@ -203,10 +215,14 @@ impl SessionRouter {
         state.executions.retain(|_, actor| actor.release());
     }
 
-    pub(crate) fn current_turn(&self, id: &str, turn_id: &str) -> Option<agent_core::models::Turn> {
+    pub(crate) fn current_turn(
+        &self,
+        target: &SessionRef,
+        turn_id: &str,
+    ) -> Option<agent_core::models::Turn> {
         lock_state(&self.state)
             .executions
-            .get(&SessionRef::from_thread_id(id).ok()?)
+            .get(target)
             .and_then(|actor| {
                 actor
                     .live
@@ -219,9 +235,8 @@ impl SessionRouter {
     }
 
     pub(super) fn begin_session_read(&self, params: OpenSession) -> Result<SessionRead, String> {
-        if params.limit == 0
-            || SessionRef::from_thread_id(&params.session.thread_id())? != params.session
-        {
+        params.session.validate()?;
+        if params.limit == 0 {
             return Err("invalid session reference or zero history limit".into());
         }
         let mut state = lock_state(&self.state);
@@ -389,19 +404,15 @@ impl SessionRouter {
 
     pub(crate) fn request(
         &self,
-        provider: ProviderKind,
+        target: SessionRef,
         mut request: ServerRequest,
     ) -> Result<(), String> {
-        let target = SessionRef::from_thread_id(
-            request
-                .params
-                .get("threadId")
-                .and_then(Value::as_str)
-                .ok_or("request session ID is missing")?,
-        )?;
-        if target.provider != provider {
+        if request.params.get("threadId").and_then(Value::as_str)
+            != Some(target.thread_id().as_str())
+        {
             return Err("request provider does not match session".into());
         }
+        let provider = target.provider;
         let mut state = lock_state(&self.state);
         let actor = state
             .executions
@@ -418,9 +429,7 @@ impl SessionRouter {
         if state.pending_native(provider, &request.id).is_some() {
             return Ok(());
         }
-        request
-            .extra
-            .insert("nativeRequestId".into(), request.id.clone());
+        request.native_request_id = Some(request.id.clone());
         request.id = serde_json::json!([
             target.provider,
             target.id,
@@ -431,10 +440,12 @@ impl SessionRouter {
         Ok(())
     }
 
-    pub(crate) fn session_change(&self, id: &str, change: agent_core::session::SessionChange) {
-        if let Ok(target) = SessionRef::from_thread_id(id) {
-            change_locked(&mut lock_state(&self.state), &target, &change);
-        }
+    pub(crate) fn session_change(
+        &self,
+        target: &SessionRef,
+        change: agent_core::session::SessionChange,
+    ) {
+        change_locked(&mut lock_state(&self.state), target, &change);
     }
 
     pub(crate) fn resolve_native_request(&self, provider: ProviderKind, id: &Value) {
@@ -480,9 +491,8 @@ impl SessionRouter {
             return Err("request was already answered or its execution has ended".into());
         };
         if request
-            .extra
-            .get("deliveryState")
-            .is_some_and(|state| state != "awaiting")
+            .delivery_state
+            .is_some_and(|state| state != agent_core::session::RequestDelivery::Awaiting)
         {
             return Err("request was already answered or its execution has ended".into());
         }
@@ -503,8 +513,8 @@ impl SessionRouter {
         }
         agent_core::client::validate_answer(&request, result)?;
         let native = request
-            .extra
-            .get("nativeRequestId")
+            .native_request_id
+            .as_ref()
             .ok_or("request execution is unavailable")?
             .clone();
         change_locked(
@@ -570,7 +580,9 @@ fn change_locked(
     // Background navigation needs activity, not copies of
     // provider turn/item payloads outside a subscription.
     let active = match change {
-        agent_core::session::SessionChange::Status { status } => Some(status.kind == "active"),
+        agent_core::session::SessionChange::Status { status } => {
+            Some(status.kind == agent_core::models::ThreadStatusKind::Active)
+        }
         agent_core::session::SessionChange::Turn { .. } => {
             state.executions.get(target).map(|actor| {
                 actor
@@ -658,7 +670,10 @@ mod tests {
 
     fn turn(router: &SessionRouter, completed: bool) {
         router.session_change(
-            "native",
+            &SessionRef {
+                provider: ProviderKind::Codex,
+                id: "native".into(),
+            },
             SessionChange::Turn {
                 turn: Turn {
                     id: "run".into(),
@@ -811,7 +826,10 @@ mod tests {
         let read = open(&router, "native", 5);
         turn(&router, false);
         router.session_change(
-            "native",
+            &SessionRef {
+                provider: ProviderKind::Codex,
+                id: "native".into(),
+            },
             SessionChange::Item {
                 turn_id: "run".into(),
                 item: Item {
@@ -823,7 +841,10 @@ mod tests {
             },
         );
         router.session_change(
-            "native",
+            &SessionRef {
+                provider: ProviderKind::Codex,
+                id: "native".into(),
+            },
             SessionChange::Text {
                 turn_id: "run".into(),
                 item_id: "answer".into(),
@@ -862,15 +883,18 @@ mod tests {
     #[test]
     fn duplicate_input_is_blocked_only_while_execution_is_in_flight() {
         let router = SessionRouter::new();
-        let input = json!({"threadId":"native","clientUserMessageId":"send"});
-        router.begin_submission(&input).unwrap();
-        assert!(router.begin_submission(&input).is_err());
+        let target = SessionRef {
+            provider: ProviderKind::Codex,
+            id: "native".into(),
+        };
+        router.begin_submission(&target, "send").unwrap();
+        assert!(router.begin_submission(&target, "send").is_err());
         turn(&router, false);
-        assert!(router.begin_submission(&input).is_err());
+        assert!(router.begin_submission(&target, "send").is_err());
         turn(&router, true);
         assert!(lock_state(&router.state).executions.is_empty());
         // There is deliberately no completed receipt or time-based cache.
-        let target = router.begin_submission(&input).unwrap();
+        router.begin_submission(&target, "send").unwrap();
         router.reject_submission(&target, "send");
         assert!(lock_state(&router.state).executions.is_empty());
     }
@@ -975,7 +999,7 @@ fn identical_native_request_ids_keep_their_provider_owner() {
             .finish_session_read(read, connection.id(), &open, response)
             .unwrap();
         router.session_change(
-            thread,
+            &target,
             SessionChange::Turn {
                 turn: agent_core::models::Turn {
                     id: "turn".into(),
@@ -987,7 +1011,7 @@ fn identical_native_request_ids_keep_their_provider_owner() {
         let line = serde_json::json!({"id":native,"method":"item/commandExecution/requestApproval",
                 "params":{"threadId":thread,"turnId":"turn","availableDecisions":["accept","decline"]}}).to_string();
         router
-            .request(target.provider, serde_json::from_str(&line).unwrap())
+            .request(target.clone(), serde_json::from_str(&line).unwrap())
             .unwrap();
         let (_, request) = lock_state(&router.state)
             .pending_native(target.provider, &native)

@@ -560,6 +560,23 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                     let management = fixture.local().await.unwrap();
                     let status = management.peer.request::<_, Value>("host/status", &json!({})).await.unwrap().value;
                     assert!(status["providerErrors"]["codex"]["message"].is_string());
+                    if selected {
+                        let path = Path::new(&current).join("tracked.txt");
+                        let listed = management.peer.request::<_, Value>("host/file/list", &json!({"path":current})).await.unwrap().value;
+                        assert!(listed["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "tracked.txt"));
+                        let read = management.peer.request::<_, Value>("host/file/read", &json!({"path":path})).await.unwrap().value;
+                        let contents = format!("workspace edit {index}\n");
+                        let saved_file = management.peer.request::<_, Value>("host/file/write", &json!({"path":path,"revision":read["revision"],"text":contents})).await.unwrap().value;
+                        assert_eq!(saved_file["text"], contents);
+                        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+                        let review = management.peer.request::<_, Value>("host/workspace/review", &json!({"cwd":current})).await.unwrap().value;
+                        assert!(review["files"].as_array().unwrap().iter().any(|file| file["path"] == "tracked.txt"));
+                    }
+                    let drafts = store.snapshot().drafts.clone();
+                    let dictation = management.peer.request::<_, Value>("host/dictation/transcribe", &json!({"audio":"AAA="})).await;
+                    assert!(dictation.is_err());
+                    assert_eq!(*store.snapshot().drafts, *drafts);
+                    assert!(management.peer.request::<_, Value>("host/worktree/settings/read", &json!({})).await.is_ok());
                     let count_worktrees = || std::fs::read_dir(root.join("worktrees")).map(|entries| entries.count()).unwrap_or_default();
                     let before = count_worktrees();
                     assert!(management.peer.request::<_, Value>("host/thread/start", &json!({"model":"fixture-model","cwd":current})).await.is_err());
@@ -641,9 +658,9 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         assert!(
             matches!(
                 store.snapshot().terminals["codex-terminal"].phase,
-                agent_core::state::TerminalPhase::Failed(_)
+                agent_core::state::TerminalPhase::Running
             ),
-            "a lost Codex terminal must not remain running"
+            "Host-owned terminals must survive Codex exit"
         );
         store.disconnect().await.unwrap();
         store
@@ -875,4 +892,124 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
     store.close().await.unwrap();
     endpoint.close().await;
     fixture.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resize_and_kill() {
+    use agent_core::peer::PeerEvent;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = HostFixture::start(
+            root.path(),
+            AppServerConfig {
+                program: root.path().join("missing-codex"),
+                ..Default::default()
+            },
+            Arc::new(Memory::default()),
+            "PTY fixture",
+            false,
+            Some(fixture_program()),
+        )
+        .await
+        .unwrap();
+        let owner = fixture.local().await.unwrap();
+        let stranger = fixture.local().await.unwrap();
+        let mut events = owner.peer.subscribe();
+        owner
+            .peer
+            .request::<_, Value>(
+                "host/terminal/start",
+                &json!({"processHandle":"owned","cwd":root.path(),"size":{"rows":24,"cols":80}}),
+            )
+            .await
+            .unwrap();
+        for (method, params) in [
+            (
+                "process/writeStdin",
+                json!({"processHandle":"owned","deltaBase64":STANDARD.encode(b"exit\n")}),
+            ),
+            (
+                "process/resizePty",
+                json!({"processHandle":"owned","size":{"rows":39,"cols":97}}),
+            ),
+            ("process/kill", json!({"processHandle":"owned"})),
+        ] {
+            assert!(
+                stranger
+                    .peer
+                    .request::<_, Value>(method, &params)
+                    .await
+                    .is_err(),
+                "another connection must not control a PTY"
+            );
+        }
+        owner
+            .peer
+            .request::<_, Value>(
+                "process/resizePty",
+                &json!({"processHandle":"owned","size":{"rows":39,"cols":97}}),
+            )
+            .await
+            .unwrap();
+        #[cfg(unix)]
+        let input = b"printf 'BEX_%s\\n' 'PTY_READY'; stty size\n".as_slice();
+        #[cfg(windows)]
+        let input = b"echo BEX_PTY_READY\r\n".as_slice();
+        owner
+            .peer
+            .request::<_, Value>(
+                "process/writeStdin",
+                &json!({"processHandle":"owned","deltaBase64":STANDARD.encode(input)}),
+            )
+            .await
+            .unwrap();
+        let mut output = Vec::new();
+        loop {
+            if let PeerEvent::Message(message) = events.recv().await.unwrap() {
+                let message: Value = serde_json::from_str(&message.value).unwrap();
+                if message["method"] == "process/outputDelta" {
+                    output.extend(
+                        STANDARD
+                            .decode(message["params"]["deltaBase64"].as_str().unwrap())
+                            .unwrap(),
+                    );
+                    let text = String::from_utf8_lossy(&output);
+                    if text.contains("BEX_PTY_READY") {
+                        #[cfg(unix)]
+                        if !text.contains("39 97") {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        owner
+            .peer
+            .request::<_, Value>("process/kill", &json!({"processHandle":"owned"}))
+            .await
+            .unwrap();
+        // A successful kill includes process cleanup and ownership release.
+        assert!(
+            owner
+                .peer
+                .request::<_, Value>(
+                    "process/resizePty",
+                    &json!({"processHandle":"owned","size":{"rows":24,"cols":80}})
+                )
+                .await
+                .is_err()
+        );
+        owner
+            .peer
+            .request::<_, Value>("host/status", &json!({}))
+            .await
+            .unwrap();
+        stranger.close().await.unwrap();
+        owner.close().await.unwrap();
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("independent PTY deadline");
 }

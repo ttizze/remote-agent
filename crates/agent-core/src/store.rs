@@ -13,7 +13,7 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Outcome {
     #[default]
@@ -56,29 +56,56 @@ impl Drop for Connection {
         }
     }
 }
+type CompletionSender = oneshot::Sender<Result<Outcome, PeerError>>;
 struct Dispatch {
     effects: Vec<Effect>,
     snapshot: Arc<Snapshot>,
-    complete: oneshot::Sender<Result<Outcome, PeerError>>,
+    complete: CompletionSender,
 }
 struct Applied {
     sequence: Option<u64>,
     application: Box<dyn Application>,
     outcome: Outcome,
 }
+#[derive(Clone, Default)]
+struct Receipt(Arc<Mutex<Vec<CompletionSender>>>);
+impl Receipt {
+    fn new(sender: CompletionSender) -> Self {
+        Self(Arc::new(Mutex::new(vec![sender])))
+    }
+    fn join(&self, other: Self) {
+        if !Arc::ptr_eq(&self.0, &other.0) {
+            let mut waiters = self.0.lock().unwrap();
+            if waiters.len() >= 128 {
+                drop(waiters);
+                other.send(Err(PeerError::InvalidMessage(
+                    "too many waiters for item read".into(),
+                )));
+            } else {
+                waiters.extend(other.0.lock().unwrap().drain(..));
+            }
+        }
+    }
+    fn send(self, result: Result<Outcome, PeerError>) {
+        for sender in self.0.lock().unwrap().drain(..) {
+            let _ = sender.send(result.clone());
+        }
+    }
+}
 struct Completed {
+    item_read: Option<op::ReadItem>,
     delivery_attempted: bool,
     epoch: u64,
     result: Result<Applied, PeerError>,
     request_id: Option<u64>,
     failed_submission: Option<String>,
     terminal: Option<String>,
-    complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
+    complete: Option<Receipt>,
 }
 struct Scheduled {
     effect: Effect,
     snapshot: Arc<Snapshot>,
-    complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
+    complete: Option<Receipt>,
 }
 pub struct Store {
     updates: watch::Receiver<Arc<Snapshot>>,
@@ -416,10 +443,18 @@ fn finish(
         let current = completed.epoch == snapshot.epoch;
         let mut next = snapshot.as_ref().clone();
         result = match completed.result {
-            Ok(applied) => {
-                effects = applied.application.apply(&mut next, current);
-                Ok(applied.outcome)
-            }
+            Ok(applied) => match applied.application.apply(&mut next, current) {
+                Ok(next_effects) => {
+                    effects = next_effects;
+                    Ok(applied.outcome)
+                }
+                Err(error) => {
+                    if current {
+                        next.error = Some(error.to_string());
+                    }
+                    Err(error)
+                }
+            },
             Err(error) => {
                 if let Some(handle) = completed.terminal {
                     next = reduce(
@@ -432,9 +467,28 @@ fn finish(
                     .0;
                 }
                 if let Some(id) = completed.failed_submission {
-                    let unknown = completed.delivery_attempted && (matches!(&error, PeerError::ConnectionClosed(_) | PeerError::RequestTimeout { .. } | PeerError::InvalidResponse { .. })
-                        || matches!(&error, PeerError::Remote { error, .. } if error.contains("unknown")));
-                    next = reduce(&next, if unknown { Event::SubmissionUnknown(id) } else { Event::SubmissionFailed(id) }).0;
+                    let unknown = completed.delivery_attempted
+                        && (matches!(
+                            &error,
+                            PeerError::ConnectionClosed(_)
+                                | PeerError::RequestTimeout { .. }
+                                | PeerError::InvalidResponse { .. }
+                        ) || matches!(
+                            &error,
+                            PeerError::Remote {
+                                delivery: crate::peer::Delivery::Unknown,
+                                ..
+                            }
+                        ));
+                    next = reduce(
+                        &next,
+                        if unknown {
+                            Event::SubmissionUnknown(id)
+                        } else {
+                            Event::SubmissionFailed(id)
+                        },
+                    )
+                    .0;
                 }
                 if current {
                     next.error = Some(error.to_string());
@@ -455,17 +509,73 @@ fn finish(
     });
     let continuation = scheduled
         .iter()
-        .position(|scheduled| scheduled.effect.0.submission_id().is_some());
+        .position(|scheduled| scheduled.effect.1 || scheduled.effect.0.submission_id().is_some());
     let mut complete = completed.complete;
     if continuation.is_none()
         && let Some(complete) = complete.take()
     {
-        let _ = complete.send(result);
+        complete.send(result);
     }
     if let Some(index) = continuation {
         scheduled[index].complete = complete;
     }
     scheduled
+}
+/// Bounded, connection-local item work. A continuation keeps its original
+/// receipt and slot identity, while releasing the wire response barrier.
+#[derive(Default)]
+struct ItemReads {
+    receipts: BTreeMap<op::ReadItem, Receipt>,
+    running: BTreeSet<op::ReadItem>,
+    pending: VecDeque<Scheduled>,
+}
+impl ItemReads {
+    fn enqueue(&mut self, mut scheduled: Scheduled) -> Result<(), PeerError> {
+        let key = scheduled.effect.0.item_read().unwrap().clone();
+        if let Some(receipt) = self.receipts.get(&key) {
+            if let Some(complete) = scheduled.complete.take() {
+                receipt.join(complete);
+            }
+            if !scheduled.effect.1 {
+                return Ok(());
+            }
+            scheduled.complete = Some(receipt.clone());
+        } else {
+            if self.receipts.len() >= 132 {
+                let error = PeerError::InvalidMessage(format!(
+                    "too many pending item reads: {}",
+                    key.item_id
+                ));
+                if let Some(complete) = scheduled.complete {
+                    complete.send(Err(error.clone()));
+                }
+                return Err(error);
+            }
+            let receipt = scheduled.complete.get_or_insert_default().clone();
+            self.receipts.insert(key, receipt);
+        }
+        self.pending.push_back(scheduled);
+        Ok(())
+    }
+    fn finish(
+        &mut self,
+        ordered: &Mutex<BTreeSet<u64>>,
+        updates: &watch::Sender<Arc<Snapshot>>,
+        completed: Completed,
+    ) -> Vec<Scheduled> {
+        let key = completed.item_read.clone();
+        let effects = finish(ordered, updates, completed);
+        if let Some(key) = key {
+            self.running.remove(&key);
+            if !effects
+                .iter()
+                .any(|s| s.effect.1 && s.effect.0.item_read() == Some(&key))
+            {
+                self.receipts.remove(&key);
+            }
+        }
+        effects
+    }
 }
 fn decode_message(line: &str) -> Result<Event, PeerError> {
     let message =
@@ -506,6 +616,7 @@ async fn run(
     let mut stream_open = true;
     let mut terminal_reason = None;
     let mut terminal_commands = VecDeque::new();
+    let mut item_reads = ItemReads::default();
     let mut terminal_running = false;
     let mut disconnected = None;
     let reason = loop {
@@ -523,6 +634,16 @@ async fn run(
                 });
                 continue;
             }
+            if effect.0.item_read().is_some() {
+                if let Err(error) = item_reads.enqueue(Scheduled {
+                    effect,
+                    snapshot: captured,
+                    complete,
+                }) {
+                    apply(&updates, Event::Failed(error.to_string()));
+                }
+                continue;
+            }
             jobs.push(perform(
                 Some(&client),
                 Some(peer),
@@ -531,6 +652,23 @@ async fn run(
                 captured,
                 effect,
                 complete,
+            ));
+        }
+        while item_reads.running.len() < 4 {
+            let Some(scheduled) = item_reads.pending.pop_front() else {
+                break;
+            };
+            item_reads
+                .running
+                .insert(scheduled.effect.0.item_read().unwrap().clone());
+            jobs.push(perform(
+                Some(&client),
+                Some(peer),
+                &ordered,
+                session.as_ref(),
+                scheduled.snapshot,
+                scheduled.effect,
+                scheduled.complete,
             ));
         }
         if !terminal_running
@@ -570,7 +708,7 @@ async fn run(
                         continue;
                     }
                 };
-                let mut complete = Some(command.complete);
+                let mut complete = Some(Receipt::new(command.complete));
                 for effect in command.effects {
                     effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: complete.take() });
                 }
@@ -579,7 +717,7 @@ async fn run(
                 let result = result.unwrap();
                 if result.terminal.is_some() { terminal_running = false; }
                 if let Some(sequence) = completion_sequence(&result) { completed.insert(sequence,result); }
-                else { effects.extend(finish(&ordered,&updates,result)); }
+                else { effects.extend(item_reads.finish(&ordered,&updates,result)); }
             }
             event = events.recv(), if stream_open => match event {
                 Ok(event) => received.push_back(event),
@@ -600,7 +738,7 @@ async fn run(
                 let Some(result) = completed.remove(&sequence) else {
                     break;
                 };
-                effects.extend(finish(&ordered, &updates, result));
+                effects.extend(item_reads.finish(&ordered, &updates, result));
             }
             match received.pop_front().unwrap() {
                 PeerEvent::Message(frame) => {
@@ -687,7 +825,7 @@ async fn run_offline(
                 return Some((connection, effects));
             }
         };
-        let mut complete = Some(command.complete);
+        let mut complete = Some(Receipt::new(command.complete));
         for effect in command.effects {
             // Disconnect already removed the subscription on the Host.
             if effect.0.disconnected_is_complete() {
@@ -706,7 +844,7 @@ async fn run_offline(
             drop(finish(&ordered, updates, result));
         }
         if let Some(complete) = complete {
-            let _ = complete.send(Ok(Outcome::Applied));
+            complete.send(Ok(Outcome::Applied));
         }
     }
     None
@@ -719,8 +857,9 @@ async fn perform(
     session: Option<&crate::transport::Session>,
     snapshot: Arc<Snapshot>,
     effect: Effect,
-    complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
+    complete: Option<Receipt>,
 ) -> Completed {
+    let item_read = effect.0.item_read().cloned();
     let terminal = effect.0.terminal_handle().map(str::to_owned);
     let failed_submission = effect.0.submission_id().map(str::to_owned);
     let mut request_id = None;
@@ -742,6 +881,7 @@ async fn perform(
     }
     .await;
     Completed {
+        item_read,
         delivery_attempted: client.is_some() && peer.is_some(),
         epoch: snapshot.epoch,
         result,
@@ -754,7 +894,11 @@ async fn perform(
 
 // The typed completion is executable Store state, never part of a replayable Event.
 trait Application: Send + std::fmt::Debug {
-    fn apply(self: Box<Self>, snapshot: &mut Snapshot, current: bool) -> Vec<Effect>;
+    fn apply(
+        self: Box<Self>,
+        snapshot: &mut Snapshot,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError>;
 }
 #[derive(Debug)]
 struct Completion<O: op::Operation> {
@@ -762,29 +906,39 @@ struct Completion<O: op::Operation> {
     output: Option<O::Output>,
 }
 impl<O: op::Operation> Application for Completion<O> {
-    fn apply(self: Box<Self>, snapshot: &mut Snapshot, current: bool) -> Vec<Effect> {
+    fn apply(
+        self: Box<Self>,
+        snapshot: &mut Snapshot,
+        current: bool,
+    ) -> Result<Vec<Effect>, PeerError> {
         let Self { operation, output } = *self;
         let output = output.expect("only completed operations are published");
-        if current {
-            operation.apply(snapshot, output)
-        } else {
-            operation.stale(snapshot, output)
-        }
+        operation.complete(snapshot, output, current)
     }
 }
 // Intent is replayable data. Only the effect queue erases an operation's type;
 // the same allocation carries its output until the response marker is applied.
 #[derive(Debug)]
-pub struct Effect(Box<dyn Pending>);
+pub struct Effect(Box<dyn Pending>, bool);
 impl Effect {
+    /// Continue the dispatch receipt after the ordered control step is applied.
+    pub(crate) fn continuation<O: op::Operation>(operation: O) -> Self {
+        let mut effect = Self::execute(operation);
+        effect.1 = true;
+        effect
+    }
     pub fn execute<O: op::Operation>(operation: O) -> Self {
-        Self(Box::new(Completion {
-            operation,
-            output: None,
-        }))
+        Self(
+            Box::new(Completion {
+                operation,
+                output: None,
+            }),
+            false,
+        )
     }
 }
 trait Pending: Application {
+    fn item_read(&self) -> Option<&op::ReadItem>;
     fn submission_id(&self) -> Option<&str>;
     fn terminal_handle(&self) -> Option<&str>;
     fn disconnected_is_complete(&self) -> bool;
@@ -794,6 +948,9 @@ trait Pending: Application {
     ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>>;
 }
 impl<O: op::Operation> Pending for Completion<O> {
+    fn item_read(&self) -> Option<&op::ReadItem> {
+        self.operation.item_read()
+    }
     fn submission_id(&self) -> Option<&str> {
         self.operation.submission_id()
     }

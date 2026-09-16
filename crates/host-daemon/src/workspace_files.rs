@@ -53,7 +53,7 @@ pub(crate) enum FileRequest {
     #[serde(rename = "host/file/list")]
     List(PathParams),
     #[serde(rename = "host/visualize/read")]
-    Visualization(agent_core::state::operations::LoadVisualization),
+    Visualization(agent_core::client::LoadVisualization),
     #[serde(rename = "host/file/read")]
     Read(PathParams),
     #[serde(rename = "host/file/write")]
@@ -565,7 +565,7 @@ mod tests {
         )
         .unwrap();
         let request = || {
-            FileRequest::Visualization(agent_core::state::operations::LoadVisualization {
+            FileRequest::Visualization(agent_core::client::LoadVisualization {
                 path: "comparison.html".into(),
                 cwd: directory.path().to_str().unwrap().into(),
             })

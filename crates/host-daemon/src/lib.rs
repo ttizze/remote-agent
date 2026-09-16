@@ -9,6 +9,7 @@ mod host_runtime;
 mod jsonl_session;
 pub mod local_host;
 pub mod platform;
+mod terminals;
 mod workspace_files;
 mod workspace_review;
 mod worktrees;

@@ -530,17 +530,16 @@ pub fn request(key: &str, source: &ServerRequest) -> Request {
         key: key.into(),
         method: source.method.clone(),
         kind,
-        title: match source.extra.get("deliveryState").and_then(Value::as_str) {
-            Some("sending") => "回答を送信中",
-            Some("unknown") => "回答の配送結果が不明です",
+        title: match source.delivery_state {
+            Some(crate::session::RequestDelivery::Sending) => "回答を送信中",
+            Some(crate::session::RequestDelivery::Unknown) => "回答の配送結果が不明です",
             _ => title,
         }
         .into(),
         body,
         can_respond: source
-            .extra
-            .get("deliveryState")
-            .is_none_or(|state| state == "awaiting"),
+            .delivery_state
+            .is_none_or(|state| state == crate::session::RequestDelivery::Awaiting),
         decision_labels,
         decisions: decisions.to_vec(),
         params: params.clone(),
@@ -679,6 +678,10 @@ mod tests {
                 .get_mut("thread")
                 .unwrap(),
         );
+        thread.capabilities = Some(crate::session::Capabilities {
+            fork: true,
+            ..Default::default()
+        });
         let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
         turn.items_has_more = Some(true);
         turn.opening_user_message = Some(Arc::new(
@@ -1013,24 +1016,23 @@ mod progress_tests {
 
 /// Shared read-state wording; native views only render this projection.
 pub fn history_notice(thread: &models::Thread) -> Option<String> {
-    let state = thread.extra.get("historyReadState")?;
-    let heading = match state["type"].as_str()? {
-        "partial" => "履歴の一部を表示しています。",
-        "incomplete" => "履歴の一部を読み取れませんでした。",
-        "unavailable" => "履歴を取得できません。保存済みの表示は最新とは限りません。",
+    use crate::session::HistoryReadKind;
+    let state = thread.history_read_state.as_ref()?;
+    let heading = match state.kind {
+        HistoryReadKind::Partial => "履歴の一部を表示しています。",
+        HistoryReadKind::Incomplete => "履歴の一部を読み取れませんでした。",
+        HistoryReadKind::Unavailable => {
+            "履歴を取得できません。保存済みの表示は最新とは限りません。"
+        }
         _ => return None,
     };
-    let issues = state["issues"]
-        .as_array()
-        .map(|issues| {
-            issues
-                .iter()
-                .filter_map(Value::as_str)
-                .take(8)
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
+    let issues = state
+        .issues
+        .iter()
+        .take(8)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(if issues.is_empty() {
         heading.into()
     } else {

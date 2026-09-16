@@ -178,7 +178,7 @@ pub(crate) fn validate_thread(
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemResponse {
     pub item: crate::models::Item,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -377,7 +377,7 @@ pub fn submission_target<'a>(
             thread
                 .status
                 .as_ref()
-                .is_some_and(|status| status.kind == "active")
+                .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
         })
     }) {
         return Ok(SubmissionTarget::Queue);
@@ -392,7 +392,7 @@ pub fn submission_target<'a>(
         thread
             .status
             .as_ref()
-            .is_some_and(|status| status.kind == "notLoaded")
+            .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::NotLoaded)
     });
     Ok(SubmissionTarget::Start { cwd, resume })
 }
@@ -531,6 +531,18 @@ impl Client {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerRequest {
+    #[serde(
+        default,
+        rename = "deliveryState",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub delivery_state: Option<crate::session::RequestDelivery>,
+    #[serde(
+        default,
+        rename = "nativeRequestId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub native_request_id: Option<Value>,
     pub id: Value,
     pub method: String,
     #[serde(default)]
@@ -804,9 +816,9 @@ impl Client {
         }
         if thread.extra.get("historyHasMore") == Some(&Value::Bool(true))
             || thread
-                .extra
-                .get("historyReadState")
-                .is_some_and(|state| state["type"] != "complete")
+                .history_read_state
+                .as_ref()
+                .is_some_and(|state| state.kind != crate::session::HistoryReadKind::Complete)
         {
             return Err(PeerError::InvalidMessage("履歴が部分取得のため、画像一覧を完全には取得できません。会話内の画像から個別に開いてください。".into()));
         }
@@ -820,4 +832,85 @@ impl Client {
 pub struct TerminalSize {
     pub cols: u16,
     pub rows: u16,
+}
+
+// Shared Host/Client request records; Store behavior lives in state::operations.
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListThreads {
+    #[serde(flatten)]
+    pub query: crate::models::ListQuery,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadItem {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRequest {
+    pub request_id: Value,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartTerminal {
+    #[serde(rename = "processHandle")]
+    pub handle: String,
+    pub cwd: String,
+    pub size: TerminalSize,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewWorkspace {
+    pub cwd: String,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveWorktree {
+    pub path: String,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectAccount {
+    #[serde(rename = "accountId")]
+    pub id: String,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogoutAccount {
+    #[serde(rename = "accountId")]
+    pub id: String,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadAccountLogin {
+    #[serde(rename = "loginId")]
+    pub id: String,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelAccountLogin {
+    #[serde(rename = "loginId")]
+    pub id: String,
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadVisualization {
+    pub path: String,
+    pub cwd: String,
 }

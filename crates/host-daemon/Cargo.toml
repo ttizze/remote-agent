@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bex-process = { path = "../bex-process" }
 agent-core = { path = "../agent-core" }
 keyring = "4.2"
 directories = "6"

@@ -24,7 +24,7 @@ impl SessionActor {
             .live
             .status
             .as_ref()
-            .is_none_or(|status| status.kind != "active")
+            .is_none_or(|status| status.kind != agent_core::models::ThreadStatusKind::Active)
         {
             self.inputs.clear();
         }

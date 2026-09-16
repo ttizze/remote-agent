@@ -85,7 +85,7 @@ impl HostRuntime {
         };
         shutdown.cancel();
         while sessions.join_next().await.is_some() {}
-        self.service.shutdown_claude().await;
+        self.service.shutdown_owned_processes().await;
         self.endpoint.close().await;
         result
     }

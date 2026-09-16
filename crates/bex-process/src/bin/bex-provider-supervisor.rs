@@ -1,12 +1,18 @@
-//! No history or protocol parsing: only an owned process group and a lifetime
-//! pipe. There is no discovery/adoption of processes left by an earlier Host.
+#[path = "../pty.rs"]
+mod pty;
+// No history or provider protocol parsing: only owned process lifetimes.
 use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use std::process::Stdio;
 use tokio::process::Command;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let code = run().await.unwrap_or(1);
+    let code = if std::env::args().nth(1).as_deref() == Some("--bex-pty") {
+        pty::run().await
+    } else {
+        run().await
+    }
+    .unwrap_or(1);
     // Tokio's stdin reader may still be blocked after a native process exits.
     // All owned children have already been killed/reaped before reaching here.
     std::process::exit(code);

@@ -1,13 +1,6 @@
 use super::*;
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartTerminal {
-    #[serde(rename = "processHandle")]
-    pub handle: String,
-    pub cwd: String,
-    pub size: rpc::TerminalSize,
-}
+pub use crate::client::StartTerminal;
 rpc::rpc_method!(StartTerminal, Map<String, Value>, "host/terminal/start");
 
 impl Operation for StartTerminal {

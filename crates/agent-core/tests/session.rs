@@ -69,7 +69,10 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
         turns[1].items.as_ref().unwrap()[0].text.as_deref(),
         Some("live updated")
     );
-    assert_eq!(thread.status.as_ref().unwrap().kind, "active");
+    assert_eq!(
+        thread.status.as_ref().unwrap().kind,
+        agent_core::models::ThreadStatusKind::Active
+    );
     assert!(thread.requests.contains_key("approval"));
     assert!(snapshot.requests.contains_key("approval"));
 }
@@ -237,7 +240,10 @@ fn late_completion_does_not_make_a_newer_execution_idle() {
     }
     .apply(&running)
     .unwrap();
-    assert_eq!(late.status.as_ref().unwrap().kind, "active");
+    assert_eq!(
+        late.status.as_ref().unwrap().kind,
+        agent_core::models::ThreadStatusKind::Active
+    );
     assert_eq!(late.turns.as_ref().unwrap().last().unwrap().id, "next");
 }
 
@@ -265,4 +271,25 @@ fn large_images_are_deferred_without_truncating_base64_or_mutating_native_data()
         item.result.as_ref().unwrap().as_str().unwrap().len(),
         5 * 1024 * 1024
     );
+}
+
+#[test]
+fn native_session_ids_round_trip_without_provider_collisions() {
+    for id in ["same-native-id", "claude:native", "codex:native"] {
+        let codex = SessionRef {
+            provider: ProviderKind::Codex,
+            id: id.into(),
+        };
+        let claude = SessionRef {
+            provider: ProviderKind::Claude,
+            id: id.into(),
+        };
+        assert_ne!(codex.thread_id(), claude.thread_id());
+        for session in [codex, claude] {
+            assert_eq!(
+                SessionRef::from_thread_id(&session.thread_id()).unwrap(),
+                session
+            );
+        }
+    }
 }

@@ -83,12 +83,14 @@ pub(super) fn notification(
             }
         );
         let active = match &update.change {
-            SessionChange::Status { status } => Some(status.kind == "active"),
+            SessionChange::Status { status } => {
+                Some(status.kind == crate::models::ThreadStatusKind::Active)
+            }
             SessionChange::Turn { .. } => Some(
                 thread
                     .status
                     .as_ref()
-                    .is_some_and(|status| status.kind == "active"),
+                    .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active),
             ),
             _ => None,
         };

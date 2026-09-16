@@ -97,7 +97,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 scripts/build-agent-ios.sh simulator
-cargo build --locked --package codex-app-server --bin bex-provider-supervisor --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture --bin bex-claude-fixture
+cargo build --locked --package bex-process --bin bex-provider-supervisor --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture --bin bex-claude-fixture
 codex_program="$target/debug/bex-codex-fixture"
 claude_args=()
 if [[ $without_codex == true ]]; then

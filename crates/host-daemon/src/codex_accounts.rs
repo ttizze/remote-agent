@@ -1,10 +1,10 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use agent_core::{
+    client as op,
     client::{AccountLogin, AccountLoginStatus},
     models::Empty,
     peer::PeerEvent,
-    state::operations as op,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_app_server::{AppServerConfig, CodexAppServer};

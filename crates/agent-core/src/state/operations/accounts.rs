@@ -9,12 +9,7 @@ impl Operation for ListAccounts {
     rpc_operation!(account.accounts);
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelectAccount {
-    #[serde(rename = "accountId")]
-    pub id: String,
-}
+pub use crate::client::SelectAccount;
 rpc::rpc_method!(SelectAccount, rpc::AccountSelection, "host/account/select");
 
 impl Operation for SelectAccount {
@@ -57,12 +52,7 @@ impl Operation for StartAccountLogin {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadAccountLogin {
-    #[serde(rename = "loginId")]
-    pub id: String,
-}
+pub use crate::client::ReadAccountLogin;
 rpc::rpc_method!(
     ReadAccountLogin,
     rpc::AccountLoginStatus,
@@ -89,12 +79,7 @@ impl Operation for ReadAccountLogin {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CancelAccountLogin {
-    #[serde(rename = "loginId")]
-    pub id: String,
-}
+pub use crate::client::CancelAccountLogin;
 rpc::rpc_method!(CancelAccountLogin, Map<String, Value>, "host/account/login/cancel");
 
 impl Operation for CancelAccountLogin {
@@ -108,12 +93,7 @@ impl Operation for CancelAccountLogin {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogoutAccount {
-    #[serde(rename = "accountId")]
-    pub id: String,
-}
+pub use crate::client::LogoutAccount;
 rpc::rpc_method!(LogoutAccount, Map<String, Value>, "host/account/logout");
 
 impl Operation for LogoutAccount {

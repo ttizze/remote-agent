@@ -17,16 +17,28 @@ const AUDIO_CHUNK_BASE64_BYTES: usize = 6_400;
 const DICTATION_URL: &str = "wss://chatgpt.com/backend-api/dictation/stream";
 const TRANSCRIBE_URL: &str = "https://chatgpt.com/backend-api/transcribe";
 
-pub(crate) async fn transcribe(
-    app_server: &CodexAppServer,
-    params: &agent_core::client::Transcribe<&str>,
-) -> Result<agent_core::client::Transcription, String> {
-    tokio::time::timeout(
-        Duration::from_secs(25),
-        transcribe_request(app_server, params),
-    )
-    .await
-    .map_err(|_| "文字起こしがタイムアウトしました。")?
+pub(crate) struct Dictation {
+    backend: Result<std::sync::Arc<CodexAppServer>, String>,
+}
+impl Dictation {
+    pub(crate) fn new(backend: Result<std::sync::Arc<CodexAppServer>, String>) -> Self {
+        Self { backend }
+    }
+    pub(crate) async fn transcribe(
+        &self,
+        params: &agent_core::client::Transcribe<&str>,
+    ) -> Result<agent_core::client::Transcription, String> {
+        let app_server = self
+            .backend
+            .as_deref()
+            .map_err(|error| format!("音声入力のCodexバックエンドを利用できません: {error}"))?;
+        tokio::time::timeout(
+            Duration::from_secs(25),
+            transcribe_request(app_server, params),
+        )
+        .await
+        .map_err(|_| "文字起こしがタイムアウトしました。")?
+    }
 }
 
 async fn transcribe_request(

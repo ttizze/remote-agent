@@ -24,8 +24,7 @@ impl Process {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> Result<(Self, Value), String> {
-        let mut command =
-            codex_app_server::owned_process::command(program).map_err(|error| error.to_string())?;
+        let mut command = bex_process::command(program).map_err(|error| error.to_string())?;
         command
             .env("CLAUDE_CONFIG_DIR", native_home)
             .current_dir(cwd)
