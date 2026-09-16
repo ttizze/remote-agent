@@ -3,26 +3,142 @@ use super::*;
 impl Desktop {
     pub(super) fn open_settings(&mut self) {
         self.tab = Tab::Settings;
+        self.settings_page = SettingsPage::Accounts;
         self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
         self.worktree_removal = None;
         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
         self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
     }
 
-    pub(super) fn settings(&self, cx: &Context<Self>) -> AnyElement {
-        let mut body = v_flex()
-            .gap_4()
-            .p_7()
-            .child(div().text_2xl().child("設定"))
-            .child(self.host_menu("settings-host", cx));
-        if let Some(hosts) = &self.hosts {
-            body = body.child(hosts.clone());
+    pub(super) fn settings_sidebar(&self, cx: &Context<Self>) -> AnyElement {
+        let mut navigation = v_flex().gap_2();
+        for (id, label, icon, page) in [
+            (
+                "settings-accounts",
+                "アカウント",
+                IconName::User,
+                SettingsPage::Accounts,
+            ),
+            (
+                "settings-connections",
+                "端末と接続",
+                IconName::Network,
+                SettingsPage::Connections,
+            ),
+            (
+                "settings-worktrees",
+                "ワークツリー",
+                IconName::Folder,
+                SettingsPage::Worktrees,
+            ),
+        ] {
+            navigation = navigation.child(
+                self.button(id, label, cx, move |s, _, _| s.settings_page = page)
+                    .icon(icon)
+                    .w_full()
+                    .h(px(44.))
+                    .px_4()
+                    .selected(self.settings_page == page),
+            );
         }
-        body = body.child(self.account_settings(cx));
-        body = body.child(
+        v_flex()
+            .w(px(240.))
+            .flex_shrink_0()
+            .h_full()
+            .bg(rgb(0x212121))
+            .pt(px(52.))
+            .px_4()
+            .gap_6()
+            .child(
+                self.button("settings-back", "チャットに戻る", cx, |s, _, _| {
+                    s.tab = Tab::Chat
+                })
+                .icon(IconName::ArrowLeft)
+                .h(px(36.)),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .text_2xl()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("設定"),
+            )
+            .child(navigation)
+            .into_any_element()
+    }
+
+    pub(super) fn settings(&self, cx: &Context<Self>) -> AnyElement {
+        let (title, subtitle) = match self.settings_page {
+            SettingsPage::Accounts => (
+                "アカウント",
+                if self.remote.is_some() {
+                    "接続先に保存した Codex アカウントを管理します。"
+                } else {
+                    "この端末に保存した Codex アカウントを管理します。"
+                },
+            ),
+            SettingsPage::Connections => {
+                ("端末と接続", "端末のペアリングと保存した接続を管理します。")
+            }
+            SettingsPage::Worktrees => (
+                "ワークツリー",
+                "作業場所の作成方法と作成済みのワークツリーを管理します。",
+            ),
+        };
+        let mut body = v_flex().w_full().max_w(px(960.)).gap_6().child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_2xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
+                )
+                .child(div().text_color(rgb(0xa3a3a3)).child(subtitle)),
+        );
+        if !self.error.is_empty() {
+            body = body.child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(rgb(0xff8e86))
+                            .child(error_message(&self.error)),
+                    )
+                    .child(self.icon_button(
+                        "settings-dismiss-error",
+                        IconName::Close,
+                        "エラーを閉じる",
+                        cx,
+                        |s, _, _| s.error.clear(),
+                    )),
+            );
+        }
+        body = match self.settings_page {
+            SettingsPage::Accounts => body.child(self.account_settings(cx)),
+            SettingsPage::Connections => body.children(self.hosts.clone()),
+            SettingsPage::Worktrees => body.child(self.worktree_settings(cx)),
+        };
+        div()
+            .id(match self.settings_page {
+                SettingsPage::Accounts => "settings-accounts-scroll",
+                SettingsPage::Connections => "settings-connections-scroll",
+                SettingsPage::Worktrees => "settings-worktrees-scroll",
+            })
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .child(div().pt(px(64.)).px_8().pb_8().child(body))
+            .into_any_element()
+    }
+
+    fn worktree_settings(&self, cx: &Context<Self>) -> AnyElement {
+        let body = v_flex().gap_6().child(
             v_flex().gap_3()
-                .child(div().text_xl().child("ワークツリー"))
-                .child("選択中の Host に保存し、すべての端末 からの新規セッションに適用します。")
+                .child(div().text_xl().child("新規チャットの作業場所"))
+                .child("選択中の Host に保存し、すべての端末からの新規セッションに適用します。")
                 .child(switch::Switch::new("worktree-create")
                     .label("新規セッションをワークツリーで開始")
                     .checked(self.snapshot.workspace.settings.as_ref().is_some_and(|settings| settings.create_on_new_session))
@@ -54,14 +170,8 @@ impl Desktop {
                     "スイッチは切り替え時、入力欄は入力を終えると自動保存します。"
                 }))
         );
-        body = body.child(self.managed_worktrees(cx));
-        div()
-            .id("settings-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .child(body)
-            .into_any_element()
+        let body = body.child(self.managed_worktrees(cx));
+        body.into_any_element()
     }
     pub(super) fn workspace_card(&self, cx: &Context<Self>) -> AnyElement {
         let enabled = self.snapshot.connected && !self.snapshot.navigation.cwd.is_empty();
@@ -349,62 +459,102 @@ impl Desktop {
 
     fn account_settings(&self, cx: &Context<Self>) -> AnyElement {
         let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
-        let mut body = v_flex().gap_3()
-            .child(div().text_xl().child("Codex アカウント"))
-            .child("選択中の Host のアカウントを管理します。変更は同じ Host に接続する端末にも適用されます。");
+        let mut body = v_flex().gap_4().pt_4().child(
+            h_flex()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Codex アカウント"),
+                )
+                .child(
+                    Button::new("account-start-login")
+                        .label("アカウントを追加")
+                        .icon(IconName::Plus)
+                        .primary()
+                        .bg(rgb(0x087ff5))
+                        .text_color(rgb(0xffffff))
+                        .disabled(disabled || self.snapshot.account.login.is_some())
+                        .on_click(cx.listener(|s, _, _, cx| {
+                            s.account_operation(Intent::StartAccountLogin(
+                                op::StartAccountLogin {},
+                            ));
+                            cx.notify();
+                        })),
+                ),
+        );
         if let Some(accounts) = &self.snapshot.account.accounts {
-            if accounts.selected_id.is_none() && accounts.error.is_none() {
-                body = body.child("ログインするアカウントを追加または選択してください。");
+            let mut rows = v_flex()
+                .border_1()
+                .border_color(rgb(0x383838))
+                .rounded(px(8.))
+                .overflow_hidden();
+            if accounts.accounts.is_empty() {
+                rows =
+                    rows.child(div().p_6().text_color(rgb(0xa3a3a3)).child(
+                        "アカウントがありません。アカウントを追加してログインしてください。",
+                    ));
             }
             for (index, account) in accounts.accounts.iter().enumerate() {
-                let select_id = account.id.clone();
                 let logout_id = account.id.clone();
-                let selected = accounts.selected_id.as_ref() == Some(&account.id);
-                body = body.child(
+                let email = account.email.clone().unwrap_or_else(|| account.id.clone());
+                let initial = email
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .to_string();
+                rows = rows.child(
                     h_flex()
-                        .gap_2()
+                        .gap_4()
+                        .p_5()
+                        .when(index > 0, |row| {
+                            row.border_t_1().border_color(rgb(0x383838))
+                        })
                         .child(
                             div()
-                                .flex_1()
-                                .child(account.email.clone().unwrap_or_else(|| account.id.clone())),
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(44.))
+                                .flex_shrink_0()
+                                .rounded(px(8.))
+                                .bg(rgb(0x333333))
+                                .text_xl()
+                                .child(initial),
                         )
+                        .child(div().flex_1().min_w_0().text_ellipsis().child(email))
                         .child(
-                            self.button(
-                                format!("settings-account-select-{index}"),
-                                if selected {
-                                    "使用中"
-                                } else {
-                                    "使用する"
-                                },
-                                cx,
-                                move |s, _, _| {
-                                    s.account_operation(Intent::SelectAccount(op::SelectAccount {
-                                        id: select_id.clone(),
-                                    }));
-                                },
-                            )
-                            .disabled(
-                                disabled || selected || self.snapshot.account.login.is_some(),
-                            ),
-                        )
-                        .child(
-                            self.button(
-                                format!("settings-account-logout-{index}"),
-                                "ログアウト",
-                                cx,
-                                move |s, _, _| {
+                            Button::new(format!("settings-account-logout-{index}"))
+                                .label("ログアウト")
+                                .disabled(disabled || self.snapshot.account.login.is_some())
+                                .on_click(cx.listener(move |s, _, _, cx| {
                                     s.account_operation(Intent::LogoutAccount(op::LogoutAccount {
                                         id: logout_id.clone(),
                                     }));
-                                },
-                            )
-                            .disabled(disabled || self.snapshot.account.login.is_some()),
+                                    cx.notify();
+                                })),
                         ),
                 );
             }
-            if let Some(error) = &accounts.error {
-                body = body.child(div().text_sm().child(error.clone()));
-            }
+            body = body.child(rows).child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("使用するアカウントは、チャットの入力欄で切り替えます。"),
+            );
+        } else {
+            body = body.child(
+                div()
+                    .text_color(rgb(0xa3a3a3))
+                    .child(if self.snapshot.connected {
+                        "アカウントを読み込み中…"
+                    } else {
+                        "接続されていません。接続後にアカウントを管理できます。"
+                    }),
+            );
         }
         if let Some(login) = &self.snapshot.account.login {
             let code = login.user_code.clone();
@@ -457,18 +607,6 @@ impl Desktop {
                     )
                     .disabled(disabled),
                 );
-        } else {
-            body = body.child(
-                self.button(
-                    "account-start-login",
-                    "アカウントを追加・再ログイン",
-                    cx,
-                    |s, _, _| {
-                        s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {}));
-                    },
-                )
-                .disabled(disabled),
-            );
         }
         body.into_any_element()
     }

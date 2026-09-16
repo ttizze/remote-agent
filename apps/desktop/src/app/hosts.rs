@@ -270,10 +270,7 @@ impl Hosts {
 impl Render for Hosts {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let disabled = !self.snapshot.connected || self.busy;
-        let mut body = v_flex()
-            .w_full()
-            .gap_3()
-            .child(div().text_xl().child("端末と接続"));
+        let mut body = v_flex().w_full().gap_4();
         if let Some(status) = &self.snapshot.management.status {
             body = body.child(format!("{} · {}", status.name, status.node_id));
         }

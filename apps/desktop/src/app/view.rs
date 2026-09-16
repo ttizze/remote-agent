@@ -273,26 +273,34 @@ impl Render for Desktop {
                 .text_size(px(14.))
                 .child(gallery);
         }
-        let wide = window.viewport_size().width >= px(1080.);
-        let title = if self.tab == Tab::Settings {
-            "設定"
-        } else {
-            self.thread()
-                .and_then(|thread| thread.name.as_deref())
-                .or_else(|| {
-                    self.snapshot
-                        .threads
-                        .as_ref()
-                        .and_then(|page| {
-                            page.data
-                                .iter()
-                                .find(|thread| thread.id.as_deref() == Some(self.selected()))
-                        })
-                        .and_then(|thread| thread.name.as_deref())
-                })
-                .unwrap_or("新しいチャット")
+        if self.tab == Tab::Settings {
+            return h_flex()
+                .size_full()
+                .items_stretch()
+                .bg(rgb(0x191919))
+                .text_color(rgb(0xececec))
+                .text_size(px(14.))
+                .font_weight(FontWeight::NORMAL)
+                .child(self.settings_sidebar(cx))
+                .child(self.settings(cx));
         }
-        .to_owned();
+        let wide = window.viewport_size().width >= px(1080.);
+        let title = self
+            .thread()
+            .and_then(|thread| thread.name.as_deref())
+            .or_else(|| {
+                self.snapshot
+                    .threads
+                    .as_ref()
+                    .and_then(|page| {
+                        page.data
+                            .iter()
+                            .find(|thread| thread.id.as_deref() == Some(self.selected()))
+                    })
+                    .and_then(|thread| thread.name.as_deref())
+            })
+            .unwrap_or("新しいチャット")
+            .to_owned();
         let mut header = h_flex().h(px(48.)).flex_shrink_0().px_4().gap_2();
         if !self.sidebar {
             header = header.pl(px(88.)).child(self.icon_button(
@@ -311,15 +319,6 @@ impl Render for Desktop {
                 .text_ellipsis()
                 .child(title),
         );
-        if self.tab == Tab::Settings {
-            header = header.child(self.icon_button(
-                "back-chat",
-                IconName::ArrowLeft,
-                "チャットに戻る",
-                cx,
-                |s, _, _| s.tab = Tab::Chat,
-            ));
-        }
         header = header.child(
             self.icon_button(
                 "panel-toggle",
@@ -340,8 +339,6 @@ impl Render for Desktop {
             } else {
                 self.chat(cx)
             }
-        } else if self.tab == Tab::Settings {
-            self.settings(cx)
         } else if self.panel_open {
             let right = self.workbench(cx);
             if wide {
