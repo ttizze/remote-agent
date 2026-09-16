@@ -175,84 +175,72 @@ pub fn expanded_body(item: &Item) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    #[test]
-    fn file_display_keeps_paths_and_diffs_from_named_wire_fields() {
-        for (changes, expected) in [
-            (
-                json!([{"path":"/a.txt","kind":{"type":"update"},"diff":"-old\n+new"}, {"path":"/b.txt","kind":"add","diff":"+second"}]),
-                vec![
-                    ("/a.txt", "update", "-old\n+new"),
-                    ("/b.txt", "add", "+second"),
-                ],
-            ),
-            (
-                json!([{"path":"/a.txt","kind":"update"}]),
-                vec![("/a.txt", "update", "")],
-            ),
-            (json!([]), vec![]),
-            (json!(null), vec![]),
-            (json!({"future":true}), vec![]),
-        ] {
-            let item: Item = serde_json::from_value(
-                json!({"id":"files", "type":"fileChange", "changes":changes}),
-            )
-            .unwrap();
-            let displayed: Vec<_> = file_changes(&item)
-                .map(|change| {
-                    (
-                        change.path.into_owned(),
-                        change.kind.into_owned(),
-                        change.diff.into_owned(),
-                    )
-                })
-                .collect();
-            let expected: Vec<_> = expected
-                .into_iter()
-                .map(|(path, kind, diff)| (path.to_owned(), kind.to_owned(), diff.to_owned()))
-                .collect();
-            assert_eq!(displayed, expected);
-        }
+    #[rstest::rstest]
+    #[case::named_fields(
+        json!([{"path":"/a.txt","kind":{"type":"update"},"diff":"-old\n+new"}, {"path":"/b.txt","kind":"add","diff":"+second"}]),
+        &[("/a.txt", "update", "-old\n+new"), ("/b.txt", "add", "+second")]
+    )]
+    #[case::missing_diff(json!([{"path":"/a.txt","kind":"update"}]), &[("/a.txt", "update", "")])]
+    #[case::empty(json!([]), &[])]
+    #[case::null(json!(null), &[])]
+    #[case::unknown(json!({"future":true}), &[])]
+    fn file_display_keeps_paths_and_diffs_from_named_wire_fields(
+        #[case] changes: Value,
+        #[case] expected: &[(&str, &str, &str)],
+    ) {
+        let item: Item =
+            serde_json::from_value(json!({"id":"files", "type":"fileChange", "changes":changes}))
+                .unwrap();
+        let changes: Vec<_> = file_changes(&item).collect();
+        let displayed: Vec<_> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change.path.as_ref(),
+                    change.kind.as_ref(),
+                    change.diff.as_ref(),
+                )
+            })
+            .collect();
+        assert_eq!(displayed, expected);
     }
+
+    #[rstest::rstest]
+    #[case::user_with_attachments(
+        json!({"id":"user","type":"userMessage","content":[{"text":"hello"},{"type":"mention","name":"a.txt","path":"/a"},{"type":"localImage","path":"/photo.png"}]}),
+        "hello\n添付: a.txt (/a)", "hello\n添付: a.txt (/a)", &["/photo.png"]
+    )]
+    #[case::reasoning_summary(
+        json!({"id":"reason","type":"reasoning","summary":[{"text":"one"},{"unknown":true},"two"]}),
+        "詳細を表示", "one\ntwo", &[]
+    )]
+    #[case::reasoning_text(
+        json!({"id":"reason","type":"reasoning","text":"reasoning text"}),
+        "詳細を表示", "reasoning text", &[]
+    )]
+    #[case::command(
+        json!({"id":"cmd","type":"commandExecution","cwd":"/fixture","aggregatedOutput":"done"}),
+        "詳細を表示", "cwd: /fixture\ndone", &[]
+    )]
+    #[case::file_change(
+        json!({"id":"file","type":"fileChange","changes":[{"kind":{"type":"update"},"path":"/a","diff":"+line"}]}),
+        "詳細を表示", "update: /a\n+line", &[]
+    )]
+    fn body_contract_covers_messages_images_and_details(
+        #[case] wire: Value,
+        #[case] collapsed: &str,
+        #[case] expanded: &str,
+        #[case] images: &[&str],
+    ) {
+        let item: Item = serde_json::from_value(wire).unwrap();
+        let body = item_body(&item, &super::super::item_presentation(&item));
+        assert_eq!(body.text, collapsed);
+        assert_eq!(body.images, images);
+        assert_eq!(expanded_body(&item), expanded);
+    }
+
     #[test]
-    fn body_contract_covers_messages_images_details_and_unknown_payloads() {
-        for (wire, collapsed, expanded, images) in [
-            (
-                json!({"id":"user","type":"userMessage","content":[{"text":"hello"},{"type":"mention","name":"a.txt","path":"/a"},{"type":"localImage","path":"/photo.png"}]}),
-                "hello\n添付: a.txt (/a)",
-                "hello\n添付: a.txt (/a)",
-                vec!["/photo.png"],
-            ),
-            (
-                json!({"id":"reason","type":"reasoning","summary":[{"text":"one"},{"unknown":true},"two"]}),
-                "詳細を表示",
-                "one\ntwo",
-                vec![],
-            ),
-            (
-                json!({"id":"reason","type":"reasoning","text":"reasoning text"}),
-                "詳細を表示",
-                "reasoning text",
-                vec![],
-            ),
-            (
-                json!({"id":"cmd","type":"commandExecution","cwd":"/fixture","aggregatedOutput":"done"}),
-                "詳細を表示",
-                "cwd: /fixture\ndone",
-                vec![],
-            ),
-            (
-                json!({"id":"file","type":"fileChange","changes":[{"kind":{"type":"update"},"path":"/a","diff":"+line"}]}),
-                "詳細を表示",
-                "update: /a\n+line",
-                vec![],
-            ),
-        ] {
-            let item: Item = serde_json::from_value(wire).unwrap();
-            let body = item_body(&item, &super::super::item_presentation(&item));
-            assert_eq!(body.text, collapsed);
-            assert_eq!(body.images, images);
-            assert_eq!(expanded_body(&item), expanded);
-        }
+    fn body_contract_preserves_unknown_payloads_and_generated_image_paths() {
         let item: Item = serde_json::from_value(
             json!({"id":"future","type":"futureTool","extraPayload":{"array":[1,true]}}),
         )

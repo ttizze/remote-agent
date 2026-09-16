@@ -6,6 +6,19 @@ concurrency boundaries even when their final values resemble another test.
 Avoid testing a fixture's own behavior, third-party serialization, private ID
 formatting, or a second implementation of the production UI.
 
+## Test libraries
+
+`agent-core` uses `rstest` for input matrices: use named `#[case]` entries for
+selected combinations and `#[values]` only when every combination is intended.
+Keep the original assertions; each case runs independently and can be filtered
+with `cargo test`. Use ordinary functions for setup that does not need fixtures.
+
+Use `insta` JSON snapshots for structured expected output. Review the
+expected values in the adjacent `snapshots/*.snap` files; preserve explicit
+behavioral assertions alongside snapshots. Run `nix develop . --command cargo test --locked -p agent-core`
+to verify them. A snapshot mismatch is a failure, not permission to accept changed
+behavior; update expectations only after reviewing the product contract.
+
 ## September 2026 audit
 
 The audit reviewed 320 test definitions, the JSON corpora, standalone WebView
