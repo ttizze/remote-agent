@@ -275,7 +275,7 @@ pub fn project_conversation(
                 return old.clone();
             }
             render_turn(
-                crate::session::capabilities(&source).fork,
+                source.capabilities.unwrap_or_default().fork,
                 turn.clone(),
                 pending.cloned().collect(),
                 requests.cloned().collect(),
