@@ -302,9 +302,32 @@ impl SessionRouter {
         Ok(())
     }
 
-    pub(crate) fn handle_server_message(&self, provider: ProviderKind, message: &RpcMessage<'_>) {
+    pub(crate) fn session_change(&self, id: &str, change: agent_core::session::SessionChange) {
+        if let Ok(target) = SessionRef::from_thread_id(id) {
+            change_locked(&mut lock_state(&self.state), &target, &change);
+        }
+    }
+
+    pub(crate) fn resolve_native_request(&self, provider: ProviderKind, id: &Value) {
         let mut state = lock_state(&self.state);
+        if let Some((target, request)) = state.conversations.pending_native(provider, id) {
+            change_locked(
+                &mut state,
+                &target,
+                &agent_core::session::SessionChange::ResolveRequest {
+                    request_id: request.id.to_string(),
+                },
+            );
+        }
+    }
+
+    pub(crate) fn handle_server_message(&self, provider: ProviderKind, message: &RpcMessage<'_>) {
         let params = message.params::<Value>().unwrap_or(Value::Null);
+        if message.method() == Some("serverRequest/resolved") {
+            self.resolve_native_request(provider, &params["requestId"]);
+            return;
+        }
+        let mut state = lock_state(&self.state);
         if message.kind() == RpcMessageKind::Request {
             let Some(target) = params["threadId"]
                 .as_str()
@@ -338,21 +361,6 @@ impl SessionRouter {
             );
             return;
         }
-        if message.method() == Some("serverRequest/resolved") {
-            if let Some((target, request)) = state
-                .conversations
-                .pending_native(provider, &params["requestId"])
-            {
-                change_locked(
-                    &mut state,
-                    &target,
-                    &agent_core::session::SessionChange::ResolveRequest {
-                        request_id: request.id.to_string(),
-                    },
-                );
-            }
-            return;
-        }
         if message.kind() == RpcMessageKind::Notification {
             let target = params["threadId"]
                 .as_str()
@@ -363,31 +371,6 @@ impl SessionRouter {
                         && target.provider == provider
                     {
                         change_locked(&mut state, &target, &change);
-                        // Background navigation needs activity, not copies of
-                        // provider turn/item payloads outside a subscription.
-                        let active =
-                            match &change {
-                                agent_core::session::SessionChange::Status { status } => {
-                                    Some(status.kind == "active")
-                                }
-                                agent_core::session::SessionChange::Turn { .. } => {
-                                    state.conversations.current(&target).map(|response| {
-                                        response.thread.turns.iter().flatten().any(|turn| {
-                                            turn.status.as_deref() == Some("inProgress")
-                                        })
-                                    })
-                                }
-                                _ => None,
-                            };
-                        if let Some(active) = active {
-                            let line = serde_json::json!({"method":"host/session/activity", "params":{"session":target,"active":active,"finished":!active && matches!(&change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed"))}}).to_string();
-                            let deliveries = state
-                                .sessions
-                                .keys()
-                                .map(|id| Delivery::Send(*id, line.clone()))
-                                .collect();
-                            deliver_locked(&mut state, deliveries);
-                        }
                     }
                     return;
                 }
@@ -509,6 +492,31 @@ fn change_locked(
                 remove_session_locked(state, connection);
             }
         }
+    }
+    // Background navigation needs activity, not copies of
+    // provider turn/item payloads outside a subscription.
+    let active = match change {
+        agent_core::session::SessionChange::Status { status } => Some(status.kind == "active"),
+        agent_core::session::SessionChange::Turn { .. } => {
+            state.conversations.current(target).map(|response| {
+                response
+                    .thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .any(|turn| turn.status.as_deref() == Some("inProgress"))
+            })
+        }
+        _ => None,
+    };
+    if let Some(active) = active {
+        let line = serde_json::json!({"method":"host/session/activity", "params":{"session":target,"active":active,"finished":!active && matches!(change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed"))}}).to_string();
+        let deliveries = state
+            .sessions
+            .keys()
+            .map(|id| Delivery::Send(*id, line.clone()))
+            .collect();
+        deliver_locked(state, deliveries);
     }
 }
 

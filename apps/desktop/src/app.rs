@@ -1222,7 +1222,9 @@ impl Desktop {
         self.history_error.clear();
         self.list.remeasure_items(0..1);
         self.perform(
-            Intent::ReadOlder(op::ReadOlder::new(self.selected().into())),
+            Intent::ReadOlder {
+                thread_id: self.selected().into(),
+            },
             OperationCompletion::History { generation },
         );
         cx.notify();

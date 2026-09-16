@@ -241,9 +241,16 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt, CloseSubscription,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
-        LoadHostManagement, ReadOlder, LoadModels,
+        LoadHostManagement, LoadModels,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
+        Intent::ReadOlder { thread_id } => {
+            let limit = previous.conversations.get(&thread_id).map_or(5, |thread| {
+                thread.extra.get("historyLimit").and_then(Value::as_u64)
+                    .unwrap_or_else(|| thread.turns.as_ref().map_or(5, |turns| turns.len() as u64))
+            }).saturating_add(5).min(1000) as u32;
+            return prepare(previous, next, op::ReadThread { limit, ..op::ReadThread::new(thread_id) });
+        }
         Intent::AcknowledgeTerminal { handle, sequence } => {
             if previous.terminals.get(&handle).is_some_and(|terminal| {
                 terminal.output.front().is_some_and(|chunk| chunk.sequence <= sequence)

@@ -107,6 +107,10 @@ Pairing, revocation, files, worktrees, terminal, voice and native input remain.
 
 ## Cleanup before review
 
+See [the size and responsibility audit](SESSION_REDESIGN_AUDIT.md) for the original
+reduction estimate, measured production growth, corrected duplication, and remaining
+required responsibilities. The original net-reduction estimate has not been achieved.
+
 The old provider forwarding layer and catalog wrapper are removed. Native query
 types now belong to the Host/Codex adapter, not client core. Shared sessions no
 longer carry unused history/item cursors; the adapter keeps native paging cursors

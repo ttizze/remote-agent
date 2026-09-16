@@ -36,7 +36,6 @@ import dev.remoteagent.core.Connection
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ListThreads
 import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.ReadOlder
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.ThreadList
 import dev.remoteagent.core.UploadAttachment
@@ -405,7 +404,7 @@ internal fun AndroidAppModel.showHosts() {
 internal fun AndroidAppModel.older() {
     val id = snapshot.navigation().threadId ?: return
     loadingHistory = true
-    perform(Intent.ReadOlder(ReadOlder(id))) { loadingHistory = false }
+    perform(Intent.ReadOlder(id)) { loadingHistory = false }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

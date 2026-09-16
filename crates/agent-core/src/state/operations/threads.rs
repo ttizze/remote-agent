@@ -408,60 +408,6 @@ impl Operation for CloseSubscription {
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadOlder {
-    pub thread_id: String,
-    #[serde(default)]
-    #[cfg_attr(feature = "bindings", uniffi(default = 5))]
-    pub limit: u32,
-}
-impl ReadOlder {
-    pub fn new(thread_id: String) -> Self {
-        Self {
-            thread_id,
-            limit: 5,
-        }
-    }
-}
-impl Operation for ReadOlder {
-    type Output = crate::session::OpenedSession;
-    const ORDERED: bool = true;
-    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        self.limit = snapshot
-            .conversations
-            .get(&self.thread_id)
-            .and_then(|thread| thread.extra.get("historyLimit"))
-            .and_then(Value::as_u64)
-            .unwrap_or_else(|| {
-                snapshot
-                    .conversations
-                    .get(&self.thread_id)
-                    .and_then(|thread| thread.turns.as_ref())
-                    .map_or(5, |turns| turns.len() as u64)
-            })
-            .saturating_add(5)
-            .min(1000) as u32;
-        snapshot.error = None;
-        Ok(())
-    }
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        context
-            .call(&ReadThread {
-                limit: self.limit,
-                ..ReadThread::new(self.thread_id.clone())
-            })
-            .await
-    }
-    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        ReadThread::new(self.thread_id).apply(snapshot, output)
-    }
-    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        ReadThread::new(self.thread_id).stale(snapshot, output)
-    }
-}
-
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadModels {}
 impl Operation for LoadModels {
     type Output = crate::client::ModelPage;

@@ -1158,7 +1158,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         for _ in 0..20 {
             let snapshot = store.snapshot();
             if snapshot.conversations["history"].extra["historyHasMore"] != true { break; }
-            store.dispatch(Intent::ReadOlder(op::ReadOlder::new("history".into()))).await.unwrap();
+            store.dispatch(Intent::ReadOlder { thread_id: "history".into() }).await.unwrap();
         }
         for reopen in [false, true] {
             if reopen {

@@ -1650,13 +1650,17 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
     });
     assert!(
         store
-            .dispatch(Intent::ReadOlder(op::ReadOlder::new("thread".into())))
+            .dispatch(Intent::ReadOlder {
+                thread_id: "thread".into()
+            })
             .await
             .is_err()
     );
     assert_eq!(store.snapshot().conversations, cached);
     store
-        .dispatch(Intent::ReadOlder(op::ReadOlder::new("thread".into())))
+        .dispatch(Intent::ReadOlder {
+            thread_id: "thread".into(),
+        })
         .await
         .unwrap();
     let recovered = store.snapshot();
@@ -1708,7 +1712,9 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
     });
     for _ in 0..2 {
         store
-            .dispatch(Intent::ReadOlder(op::ReadOlder::new("thread".into())))
+            .dispatch(Intent::ReadOlder {
+                thread_id: "thread".into(),
+            })
             .await
             .unwrap();
     }

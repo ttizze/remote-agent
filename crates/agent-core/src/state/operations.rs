@@ -84,7 +84,9 @@ pub enum Intent {
         path: String,
         text: String,
     },
-    ReadOlder(ReadOlder),
+    ReadOlder {
+        thread_id: String,
+    },
     LoadModels(LoadModels),
     SetDraft {
         thread_id: String,

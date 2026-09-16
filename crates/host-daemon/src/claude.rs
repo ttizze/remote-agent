@@ -13,6 +13,7 @@ use std::{
 use agent_core::{
     models::{Item, Model, ReasoningEffort, Thread, ThreadResponse, ThreadStatus, Turn},
     peer::RpcMessage,
+    session::{ProviderKind, SessionChange, TextField},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
@@ -663,15 +664,12 @@ impl Claude {
             interrupt: interrupted,
         });
         drop(state);
-        emit(
-            &self.router,
-            "turn/started",
-            json!({"threadId":id,"turn":turn}),
-        );
-        emit(
-            &self.router,
-            "thread/status/changed",
-            json!({"threadId":id,"status":{"type":"active"}}),
+        self.router.session_change(
+            id,
+            SessionChange::Turn {
+                turn,
+                completed: false,
+            },
         );
         let worker = Worker {
             record,
@@ -743,11 +741,8 @@ impl Claude {
             .await
             .map_err(|_| "Claude answer delivery is unknown")?
             .map_err(|_| "Claude exited before confirming the answer write")??;
-        emit(
-            &self.router,
-            "serverRequest/resolved",
-            json!({"requestId":id}),
-        );
+        self.router
+            .resolve_native_request(ProviderKind::Claude, &id.into());
         Ok(true)
     }
 }
@@ -809,7 +804,7 @@ impl Worker {
                             let request_id = message["request_id"].as_str().ok_or("Claude canceled request ID is missing")?;
                             let id = self.approval_id(request_id);
                             self.pending.lock().unwrap().remove(&id);
-                            emit(&self.router, "serverRequest/resolved", json!({"requestId":id}));
+                            self.router.resolve_native_request(ProviderKind::Claude, &id.into());
                         } else if message["type"] == "control_response" && message["response"]["request_id"] == "interrupt" {
                             let result = if message["response"]["subtype"] == "success" { interrupted = true; Ok(()) }
                                 else { Err(format!("Claude Codeの停止に失敗しました: {}", message["response"]["error"])) };
@@ -842,11 +837,8 @@ impl Worker {
             ids
         };
         for id in pending {
-            emit(
-                &self.router,
-                "serverRequest/resolved",
-                json!({"requestId":id}),
-            );
+            self.router
+                .resolve_native_request(ProviderKind::Claude, &id.into());
         }
         let mut record = self.record.lock().await;
         let Some(mut turn) = self.current_turn() else {
@@ -855,10 +847,14 @@ impl Worker {
             if let Some(process) = retained {
                 let _ = process.finish().await;
             }
-            emit(
-                &self.router,
-                "thread/status/changed",
-                json!({"threadId":self.thread_id,"status":{"type":"notLoaded"}}),
+            self.router.session_change(
+                &self.thread_id,
+                SessionChange::Status {
+                    status: ThreadStatus {
+                        kind: "notLoaded".into(),
+                        extra: Default::default(),
+                    },
+                },
             );
             return;
         };
@@ -895,15 +891,12 @@ impl Worker {
                 released: released.clone(),
             });
         }
-        emit(
-            &self.router,
-            "turn/completed",
-            json!({"threadId":self.thread_id,"turn":turn}),
-        );
-        emit(
-            &self.router,
-            "thread/status/changed",
-            json!({"threadId":self.thread_id,"status":{"type":"idle"}}),
+        self.router.session_change(
+            &self.thread_id,
+            SessionChange::Turn {
+                turn,
+                completed: true,
+            },
         );
         let retained = record.idle.is_some();
         drop(record);
@@ -1059,10 +1052,12 @@ impl Worker {
                         .into(),
                     );
                     item.result = Some(block["content"].clone());
-                    emit(
-                        &self.router,
-                        "item/completed",
-                        json!({"threadId":self.thread_id,"turnId":self.turn_id,"item":item}),
+                    self.router.session_change(
+                        &self.thread_id,
+                        SessionChange::Item {
+                            turn_id: self.turn_id.clone(),
+                            item: item.clone(),
+                        },
                     );
                     continue;
                 }
@@ -1073,15 +1068,12 @@ impl Worker {
             if let Some(parent) = message["parent_tool_use_id"].as_str() {
                 item.extra.insert("parentToolUseId".into(), parent.into());
             }
-            let method = if item.status.as_deref() == Some("inProgress") {
-                "item/started"
-            } else {
-                "item/completed"
-            };
-            emit(
-                &self.router,
-                method,
-                json!({"threadId":self.thread_id,"turnId":self.turn_id,"item":item}),
+            self.router.session_change(
+                &self.thread_id,
+                SessionChange::Item {
+                    turn_id: self.turn_id.clone(),
+                    item: item.clone(),
+                },
             );
             if let Some(existing) = items.iter_mut().find(|existing| existing.id == item.id) {
                 *existing = Arc::new(item);
@@ -1128,16 +1120,18 @@ impl Worker {
                 if !scope.is_empty() {
                     item.extra.insert("parentToolUseId".into(), scope.into());
                 }
-                emit(
-                    &self.router,
-                    "item/started",
-                    json!({"threadId":self.thread_id,"turnId":self.turn_id,"item":item}),
+                self.router.session_change(
+                    &self.thread_id,
+                    SessionChange::Item {
+                        turn_id: self.turn_id.clone(),
+                        item,
+                    },
                 );
             }
             Some("content_block_delta") => {
-                let (method, field) = match event["delta"]["type"].as_str() {
-                    Some("text_delta") => ("item/agentMessage/delta", "text"),
-                    Some("thinking_delta") => ("item/reasoning/textDelta", "thinking"),
+                let (target, field) = match event["delta"]["type"].as_str() {
+                    Some("text_delta") => (TextField::Message, "text"),
+                    Some("thinking_delta") => (TextField::Reasoning, "thinking"),
                     _ => return Ok(()),
                 };
                 let (message, _) = self
@@ -1151,10 +1145,14 @@ impl Worker {
                 let delta = event["delta"][field]
                     .as_str()
                     .ok_or("Claude stream text is missing")?;
-                emit(
-                    &self.router,
-                    method,
-                    json!({"threadId":self.thread_id,"turnId":self.turn_id,"itemId":id,"delta":delta}),
+                self.router.session_change(
+                    &self.thread_id,
+                    SessionChange::Text {
+                        turn_id: self.turn_id.clone(),
+                        item_id: id,
+                        field: target,
+                        delta: delta.into(),
+                    },
                 );
             }
             _ => {}
@@ -1207,11 +1205,4 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-fn emit(router: &SessionRouter, method: &str, params: Value) {
-    let line = json!({"method":method,"params":params}).to_string();
-    router.handle_server_message(
-        agent_core::session::ProviderKind::Claude,
-        &RpcMessage::parse(&line).expect("serialized notification"),
-    );
 }
