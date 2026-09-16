@@ -4,6 +4,7 @@ use agent_core::{
     models::{Item, Thread, ThreadResponse, Turn},
     session::{ProviderKind, SessionRef},
 };
+use anyhow::{Context as _, Result, anyhow};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -19,31 +20,33 @@ pub(super) const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
 
-pub(super) fn home() -> Result<PathBuf, String> {
+pub(super) fn home() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return fs::canonicalize(path).map_err(|e| format!("Claude storage is unavailable: {e}"));
+        return fs::canonicalize(path).context("Claude storage is unavailable");
     }
     directories::BaseDirs::new()
         .map(|base| base.home_dir().join(".claude"))
-        .ok_or_else(|| "Claude home directory is unavailable".into())
+        .context("Claude home directory is unavailable")
 }
 
-pub(super) fn files(home: &Path) -> Result<Vec<PathBuf>, String> {
+pub(super) fn files(home: &Path) -> Result<Vec<PathBuf>> {
     let projects = match fs::read_dir(home.join("projects")) {
         Ok(projects) => projects,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("Claude projects cannot be read: {error}")),
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context("Claude projects cannot be read"));
+        }
     };
     let mut files = Vec::new();
     for project in projects {
-        let project = project.map_err(|e| e.to_string())?;
-        if !project.file_type().map_err(|e| e.to_string())?.is_dir() {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(project.path()).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
+        for entry in fs::read_dir(project.path())? {
+            let entry = entry?;
             let path = entry.path();
-            if entry.file_type().map_err(|e| e.to_string())?.is_file()
+            if entry.file_type()?.is_file()
                 && path.extension().is_some_and(|ext| ext == "jsonl")
                 && path
                     .file_stem()
@@ -52,9 +55,9 @@ pub(super) fn files(home: &Path) -> Result<Vec<PathBuf>, String> {
             {
                 files.push(path);
                 if files.len() > MAX_FILES {
-                    return Err(
-                        "Claude listing exceeds its scan limit; results are incomplete".into(),
-                    );
+                    return Err(anyhow!(
+                        "Claude listing exceeds its scan limit; results are incomplete"
+                    ));
                 }
             }
         }
@@ -62,7 +65,7 @@ pub(super) fn files(home: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-pub(super) fn resolve(home: &Path, id: Uuid) -> Result<PathBuf, String> {
+pub(super) fn resolve(home: &Path, id: Uuid) -> Result<PathBuf> {
     let filename = format!("{id}.jsonl");
     let mut matches = files(home)?.into_iter().filter(|path| {
         path.file_name()
@@ -70,34 +73,30 @@ pub(super) fn resolve(home: &Path, id: Uuid) -> Result<PathBuf, String> {
     });
     let path = matches
         .next()
-        .ok_or("Claude native transcript was not found")?;
+        .context("Claude native transcript was not found")?;
     if matches.next().is_some() {
-        return Err("Claude native session ID is ambiguous across projects".into());
+        return Err(anyhow!(
+            "Claude native session ID is ambiguous across projects"
+        ));
     }
     Ok(path)
 }
 
 /// Extract metadata without loading complete tool output or message bodies.
-pub(super) fn summary(path: &Path) -> Result<Thread, String> {
+pub(super) fn summary(path: &Path) -> Result<Thread> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
     let mut head = Vec::new();
-    (&mut file)
-        .take(128 * 1024)
-        .read_to_end(&mut head)
-        .map_err(|e| e.to_string())?;
+    (&mut file).take(128 * 1024).read_to_end(&mut head)?;
     let mut tail = Vec::new();
     let offset = metadata.len().saturating_sub(128 * 1024);
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| e.to_string())?;
-    file.take(128 * 1024)
-        .read_to_end(&mut tail)
-        .map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.take(128 * 1024).read_to_end(&mut tail)?;
     let id = path
         .file_stem()
         .and_then(|id| id.to_str())
-        .ok_or("invalid native transcript filename")?;
+        .context("invalid native transcript filename")?;
     let mut thread = Thread {
         id: Some(format!("claude:{id}")),
         session: Some(SessionRef {
@@ -123,7 +122,9 @@ pub(super) fn summary(path: &Path) -> Result<Thread, String> {
         if let Some(session) = value["sessionId"].as_str().or(value["session_id"].as_str())
             && session != id
         {
-            return Err("Claude transcript session identity does not match its filename".into());
+            return Err(anyhow!(
+                "Claude transcript session identity does not match its filename"
+            ));
         }
         if let Some(cwd) = value["cwd"].as_str() {
             thread.cwd = Some(cwd.into());
@@ -161,7 +162,7 @@ fn input_blocks(blocks: &[Value]) -> Vec<Value> {
     }).collect()
 }
 
-pub(super) fn read(path: &Path, limit: usize) -> Result<ThreadResponse, String> {
+pub(super) fn read(path: &Path, limit: usize) -> Result<ThreadResponse> {
     read_with_summary(path, summary(path)?, limit)
 }
 
@@ -170,26 +171,24 @@ pub(super) fn read_related(
     session_id: Uuid,
     agent_id: &str,
     limit: usize,
-) -> Result<ThreadResponse, String> {
+) -> Result<ThreadResponse> {
     if agent_id.is_empty()
         || !agent_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
-        return Err("invalid native subagent ID".into());
+        return Err(anyhow!("invalid native subagent ID"));
     }
     let transcript = resolve(home, session_id)?;
     let directory = transcript.with_extension("").join("subagents");
-    let root =
-        fs::canonicalize(&directory).map_err(|_| "native subagent history is unavailable")?;
+    let root = fs::canonicalize(&directory).context("native subagent history is unavailable")?;
     let path = fs::canonicalize(directory.join(format!("agent-{agent_id}.jsonl")))
-        .map_err(|_| "native subagent history is unavailable")?;
-    if !root.starts_with(
-        fs::canonicalize(transcript.parent().ok_or("invalid native session path")?)
-            .map_err(|error| error.to_string())?,
-    ) || path.parent() != Some(root.as_path())
+        .context("native subagent history is unavailable")?;
+    if !root.starts_with(fs::canonicalize(
+        transcript.parent().context("invalid native session path")?,
+    )?) || path.parent() != Some(root.as_path())
     {
-        return Err("native subagent path escapes its session".into());
+        return Err(anyhow!("native subagent path escapes its session"));
     }
     let mut thread = Thread {
         id: Some(format!("claude:{session_id}")),
@@ -204,16 +203,11 @@ pub(super) fn read_related(
     read_with_summary(&path, thread, limit)
 }
 
-fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<ThreadResponse, String> {
+fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<ThreadResponse> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let offset = file
-        .metadata()
-        .map_err(|e| e.to_string())?
-        .len()
-        .saturating_sub(MAX_FILE_BYTES);
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|e| e.to_string())?;
+    let mut file = fs::File::open(path)?;
+    let offset = file.metadata()?.len().saturating_sub(MAX_FILE_BYTES);
+    file.seek(SeekFrom::Start(offset))?;
     let mut input = BufReader::new(file);
     let mut nodes = Vec::new();
     let mut warnings = Vec::new();
@@ -222,10 +216,9 @@ fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<Thread
         warnings.push("only the latest 64 MiB of the transcript was read");
         (&mut input)
             .take((MAX_LINE_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)
-            .map_err(|e| e.to_string())?;
+            .read_until(b'\n', &mut line)?;
         if line.len() > MAX_LINE_BYTES {
-            return Err("native row exceeds the transcript read limit".into());
+            return Err(anyhow!("native row exceeds the transcript read limit"));
         }
     }
     let mut bytes = line.len() as u64;
@@ -235,8 +228,7 @@ fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<Thread
         // arbitrarily much memory. Treat either cap as incomplete history.
         let length = (&mut input)
             .take((MAX_LINE_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)
-            .map_err(|e| e.to_string())?;
+            .read_until(b'\n', &mut line)?;
         if length == 0 {
             break;
         }
@@ -262,11 +254,11 @@ fn convert(
     nodes: Vec<Value>,
     limit: usize,
     mut warnings: Vec<&str>,
-) -> Result<ThreadResponse, String> {
+) -> Result<ThreadResponse> {
     let native_id = &thread
         .session
         .as_ref()
-        .ok_or("Claude session ID missing")?
+        .context("Claude session ID missing")?
         .id;
     let mut indexed = HashMap::new();
     let mut leaf = None;
@@ -274,11 +266,11 @@ fn convert(
         if let Some(id) = node["sessionId"].as_str().or(node["session_id"].as_str())
             && id != native_id
         {
-            return Err("Claude transcript session identity changed".into());
+            return Err(anyhow!("Claude transcript session identity changed"));
         }
         if let Some(agent_id) = thread.extra.get("agentId").and_then(Value::as_str) {
             if node["agentId"].as_str().is_some_and(|id| id != agent_id) {
-                return Err("native subagent identity changed".into());
+                return Err(anyhow!("native subagent identity changed"));
             }
         } else if node["isSidechain"] == true {
             continue;
@@ -384,7 +376,7 @@ fn convert(
         let turn = Arc::make_mut(turns.last_mut().unwrap());
         let items = turn.items.as_mut().unwrap();
         if user_input {
-            items.push(Arc::new(serde_json::from_value(json!({"id":node["uuid"],"type":"userMessage","content":input_blocks(blocks),"clientId":node["uuid"]})).map_err(|e| e.to_string())?));
+            items.push(Arc::new(serde_json::from_value(json!({"id":node["uuid"],"type":"userMessage","content":input_blocks(blocks),"clientId":node["uuid"]}))?));
         }
         let message_id = node["message"]["id"]
             .as_str()
@@ -442,7 +434,7 @@ fn convert(
                     continue;
                 }
             };
-            let mut item: Item = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let mut item: Item = serde_json::from_value(value)?;
             item.extra
                 .insert("nativeMessageId".into(), node["uuid"].clone());
             if let Some(parent) = node.get("parentUuid") {
@@ -596,6 +588,7 @@ mod tests {
         assert!(
             resolve(root.path(), Uuid::parse_str(ID).unwrap())
                 .unwrap_err()
+                .to_string()
                 .contains("ambiguous")
         );
         assert!(resolve(root.path(), Uuid::new_v4()).is_err());

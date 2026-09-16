@@ -142,7 +142,7 @@ impl Fixture {
                             {
                                 Ok(grant) => json!({"item":item(id,false),"transfer":grant}),
                                 Err(error) => {
-                                    send(&output, json!({"id":request["id"],"error":{"code":-32000,"message":error}})).await;
+                                    send(&output, json!({"id":request["id"],"error":{"code":-32000,"message":format!("{error:#}")}})).await;
                                     continue;
                                 }
                             }

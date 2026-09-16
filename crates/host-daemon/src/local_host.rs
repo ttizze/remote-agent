@@ -53,7 +53,7 @@ impl Drop for FileLock {
         // A concurrently forked child can retain this open file description
         // until exec. Releasing ownership must not wait for its descriptor.
         if let Err(error) = self.0.unlock() {
-            agent_core::diagnostics::error("release local Host lock", &error.to_string());
+            tracing::error!(target: "bex", operation = "release local Host lock", message = %error);
         }
     }
 }

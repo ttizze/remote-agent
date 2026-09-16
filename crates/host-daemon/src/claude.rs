@@ -3,6 +3,7 @@
 mod history;
 mod process;
 
+use anyhow::Context;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -36,6 +37,11 @@ impl From<String> for OperationError {
             message,
             delivery: agent_core::peer::Delivery::NotSent,
         }
+    }
+}
+impl From<anyhow::Error> for OperationError {
+    fn from(error: anyhow::Error) -> Self {
+        format!("{error:#}").into()
     }
 }
 impl From<&str> for OperationError {
@@ -114,8 +120,8 @@ impl Claude {
         directory: PathBuf,
         native_home: Option<PathBuf>,
         router: SessionRouter,
-    ) -> Result<Self, String> {
-        crate::platform::create_state_directory(&directory).map_err(|error| error.to_string())?;
+    ) -> anyhow::Result<Self> {
+        crate::platform::create_state_directory(&directory)?;
         let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
         Ok(Self {
             program,
@@ -136,7 +142,7 @@ impl Claude {
         let mut workers = self.workers.lock().await;
         while let Some(result) = workers.join_next().await {
             if let Err(error) = result {
-                agent_core::diagnostics::error("claude.worker", &error.to_string());
+                tracing::error!(target: "bex", operation = "claude.worker", message = %error);
             }
         }
     }
@@ -224,20 +230,21 @@ impl Claude {
             .map(Vec::as_slice)
     }
 
-    pub(crate) async fn create(&self, cwd: &str, model: &str) -> Result<ThreadResponse, String> {
+    pub(crate) async fn create(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {
         if !self
             .models()
-            .await?
+            .await
+            .map_err(anyhow::Error::msg)?
             .iter()
             .any(|entry| entry.model == model)
         {
-            return Err("このClaudeモデルは利用できません。モデル一覧を更新してください。".into());
+            return Err(anyhow::anyhow!(
+                "このClaudeモデルは利用できません。モデル一覧を更新してください。"
+            ));
         }
-        let cwd = tokio::fs::canonicalize(cwd)
-            .await
-            .map_err(|error| error.to_string())?;
+        let cwd = tokio::fs::canonicalize(cwd).await?;
         if !cwd.is_dir() {
-            return Err("Claudeの作業フォルダがありません。".into());
+            return Err(anyhow::anyhow!("Claudeの作業フォルダがありません。"));
         }
         let session_id = Uuid::new_v4();
         let id = format!("claude:{session_id}");
@@ -271,22 +278,21 @@ impl Claude {
         Ok(response)
     }
 
-    async fn record(&self, id: &str) -> Result<Arc<AsyncMutex<Record>>, String> {
+    async fn record(&self, id: &str) -> anyhow::Result<Arc<AsyncMutex<Record>>> {
         if let Some(record) = self.records.lock().await.get(id).cloned() {
             return Ok(record);
         }
-        let native_id = Uuid::parse_str(id).map_err(|_| "invalid Claude session ID")?;
+        let native_id = Uuid::parse_str(id).context("invalid Claude session ID")?;
         let home = self.native_home.clone();
         let summary = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native_id)?;
             history::summary(&path)
         })
-        .await
-        .map_err(|e| e.to_string())??;
+        .await??;
         let record = Arc::new(AsyncMutex::new(Record {
             cwd: summary
                 .cwd
-                .ok_or("Claude working directory is unavailable")?,
+                .context("Claude working directory is unavailable")?,
             model: "claude:default".into(),
             session_id: native_id,
             resumable: true,
@@ -300,7 +306,7 @@ impl Claude {
         &self,
         id: String,
         record: Arc<AsyncMutex<Record>>,
-    ) -> Result<Arc<AsyncMutex<Record>>, String> {
+    ) -> anyhow::Result<Arc<AsyncMutex<Record>>> {
         let mut records = self.records.lock().await;
         if let Some(existing) = records.get(&id) {
             return Ok(existing.clone());
@@ -314,9 +320,9 @@ impl Claude {
             });
         }
         if records.len() >= 128 {
-            return Err(
-                "Claude session capacity reached; wait for an active task to finish".into(),
-            );
+            return Err(anyhow::anyhow!(
+                "Claude session capacity reached; wait for an active task to finish"
+            ));
         }
         records.insert(id, record.clone());
         Ok(record)
@@ -326,7 +332,7 @@ impl Claude {
         &self.native_home
     }
 
-    pub(crate) async fn list(&self, search: &str) -> Result<Vec<Thread>, String> {
+    pub(crate) async fn list(&self, search: &str) -> anyhow::Result<Vec<Thread>> {
         let home = self.native_home.clone();
         let mut threads = tokio::task::spawn_blocking(move || {
             history::files(&home)?
@@ -351,15 +357,14 @@ impl Claude {
                         thread.history_read_state =
                             Some(agent_core::session::HistoryReadState::new(
                                 agent_core::session::HistoryReadKind::Unavailable,
-                                vec![error],
+                                vec![format!("{error:#}")],
                             ));
                         thread
                     }))
                 })
-                .collect::<Result<Vec<_>, String>>()
+                .collect::<anyhow::Result<Vec<_>>>()
         })
-        .await
-        .map_err(|e| e.to_string())??;
+        .await??;
         let records: Vec<_> = self.records.lock().await.values().cloned().collect();
         for record in records {
             let record = record.lock().await;
@@ -409,10 +414,10 @@ impl Claude {
     }
 
     /// Read native history on each open; the router overlays only owned execution.
-    pub(crate) async fn read(&self, id: &str, requested: usize) -> Result<ThreadResponse, String> {
-        let native = Uuid::parse_str(id).map_err(|e| e.to_string())?;
+    pub(crate) async fn read(&self, id: &str, requested: usize) -> anyhow::Result<ThreadResponse> {
+        let native = Uuid::parse_str(id)?;
         let home = self.native_home.clone();
-        let history: Result<ThreadResponse, String> = tokio::task::spawn_blocking(move || {
+        let history: anyhow::Result<ThreadResponse> = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
             match history::read(&path, requested) {
                 Ok(response) => Ok(response),
@@ -420,7 +425,7 @@ impl Claude {
                     let mut thread = history::summary(&path)?;
                     thread.history_read_state = Some(agent_core::session::HistoryReadState::new(
                         agent_core::session::HistoryReadKind::Unavailable,
-                        vec![error],
+                        vec![format!("{error:#}")],
                     ));
                     Ok(ThreadResponse {
                         thread,
@@ -430,15 +435,17 @@ impl Claude {
                 }
             }
         })
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
         match history {
             Ok(response) => Ok(response),
             Err(error) => {
                 // A newly created execution can precede its first native write.
                 // Only execution metadata lives here; the router overlays live output.
                 let records = self.records.lock().await;
-                let record = records.get(id).ok_or(error.clone())?.lock().await;
+                let record = match records.get(id) {
+                    Some(record) => record.lock().await,
+                    None => return Err(error),
+                };
                 let mut thread = Thread {
                     id: Some(
                         SessionRef {
@@ -457,7 +464,7 @@ impl Claude {
                 if record.resumable {
                     thread.history_read_state = Some(agent_core::session::HistoryReadState::new(
                         agent_core::session::HistoryReadKind::Unavailable,
-                        vec![error],
+                        vec![format!("{error:#}")],
                     ));
                 } else {
                     thread.turns = Some(Vec::new());
@@ -527,7 +534,7 @@ impl Claude {
                 item.result = Some(match related {
                     Ok(response) => json!({"output":item.result,"subagent":response.thread}),
                     Err(error) => {
-                        json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":error}})
+                        json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":format!("{error:#}")}})
                     }
                 });
             }
@@ -715,7 +722,7 @@ impl Claude {
         let mut workers = self.workers.lock().await;
         while let Some(result) = workers.try_join_next() {
             if let Err(error) = result {
-                agent_core::diagnostics::error("claude.worker", &error.to_string());
+                tracing::error!(target: "bex", operation = "claude.worker", message = %error);
             }
         }
         workers.spawn(worker.run(process, receiver));

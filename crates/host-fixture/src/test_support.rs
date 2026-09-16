@@ -83,8 +83,7 @@ impl HostFixture {
                     directory.join("claude"),
                     Some(directory.join("claude-native")),
                 )
-                .await
-                .map_err(anyhow::Error::msg)?;
+                .await?;
         }
         if accounts && server.is_ok() {
             service

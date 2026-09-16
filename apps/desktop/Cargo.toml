@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tracing.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

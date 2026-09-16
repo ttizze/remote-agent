@@ -79,7 +79,7 @@ fn main() {
                 connections: std::sync::Arc::new(platform::Connections::default()),
             });
             cx.on_app_quit(|cx| {
-                agent_core::diagnostics::shutdown();
+                tracing::info!(target: "bex", operation = "shutdown", "Bex shutting down");
                 let runtime = cx.global::<Runtime>().clone();
                 async move {
                     runtime.closing.close();

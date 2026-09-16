@@ -238,7 +238,7 @@ pub(crate) struct Desktop {
 }
 impl Desktop {
     fn set_error(&mut self, error: String) {
-        agent_core::diagnostics::error("desktop", &error);
+        tracing::error!(target: "bex", operation = "desktop", message = %error);
         self.error = error;
     }
     pub(crate) fn new(mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -691,7 +691,7 @@ impl Desktop {
                             })
                         }
                         Err(error) => {
-                            agent_core::diagnostics::error("image.load", &error);
+                            tracing::error!(target: "bex", operation = "image.load", message = %error);
                             image.error = Some(error);
                         }
                     }
@@ -850,7 +850,7 @@ impl Desktop {
                         }
                     }
                     Err(error) => {
-                        agent_core::diagnostics::error("gallery.load", &error);
+                        tracing::error!(target: "bex", operation = "gallery.load", message = %error);
                         gallery.error = error;
                     }
                     _ => unreachable!("session image outcome"),
@@ -873,7 +873,7 @@ impl Desktop {
         if previous.error != self.snapshot.error
             && let Some(error) = &self.snapshot.error
         {
-            agent_core::diagnostics::error("store", error);
+            tracing::error!(target: "bex", operation = "store", message = %error);
         }
         sync_error_banner(
             &mut self.error,

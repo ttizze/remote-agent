@@ -7,14 +7,14 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{LazyLock, OnceLock},
+    sync::LazyLock,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 const FILE_BYTES: usize = 5 * 1024 * 1024;
 const ARCHIVES: usize = 4;
 const MESSAGE_BYTES: usize = 8192;
-static LOG: OnceLock<Log> = OnceLock::new();
 thread_local! {
     static WRITING: Cell<bool> = const { Cell::new(false) };
 }
@@ -70,58 +70,42 @@ pub fn initialize(
         version,
     )?;
     log.write("info", "startup", "Bex started", None, None)?;
-    LOG.set(log)
-        .map_err(|_| io::Error::other("diagnostics already initialized"))?;
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(log))
+        .map_err(io::Error::other)?;
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        error("panic", &info.to_string());
+        tracing::error!(target: "bex", operation = "panic", message = %info);
         previous(info);
     }));
     Ok(())
 }
 
-pub fn error(operation: &str, message: &str) {
-    record("error", operation, message, None, None);
-}
-
-pub fn shutdown() {
-    record("info", "shutdown", "Bex shutting down", None, None);
-}
-
 pub fn rpc_error(operation: &str, request_id: Option<u64>, raw: &RawValue) {
-    if LOG.get().is_none() {
-        return;
-    }
     #[derive(Deserialize)]
     struct RpcError {
         message: Option<String>,
         code: Option<Value>,
     }
     match serde_json::from_str::<RpcError>(raw.get()) {
-        Ok(error) => record(
-            "error",
+        Ok(error) => tracing::error!(target: "bex",
             operation,
+            message = %(
             error
                 .message
                 .as_deref()
-                .unwrap_or("RPC error without a message"),
+                .unwrap_or("RPC error without a message")),
             request_id,
-            error
-                .code
-                .filter(|code| code.is_number() || code.is_string()),
+            error_code = %(error.code.filter(|code| code.is_number() || code.is_string()).unwrap_or(serde_json::Value::Null)),
         ),
         Err(_) => match serde_json::from_str::<String>(raw.get()) {
-            Ok(message) => record("error", operation, &message, request_id, None),
-            Err(_) => record("error", operation, "Malformed RPC error", request_id, None),
+            Ok(message) => tracing::error!(target: "bex", operation, message, request_id),
+            Err(_) => tracing::error!(target: "bex", operation, request_id, "Malformed RPC error"),
         },
     }
 }
 
 /// Decode only error fields; ignore conversation bodies in turn notifications.
 pub(crate) fn notification(message: &crate::peer::RpcMessage<'_>) {
-    if LOG.get().is_none() {
-        return;
-    }
     let Some(method @ ("error" | "turn/completed")) = message.method() else {
         return;
     };
@@ -139,21 +123,77 @@ pub(crate) fn notification(message: &crate::peer::RpcMessage<'_>) {
     }
 }
 
-fn record(
-    level: &'static str,
-    operation: &str,
-    message: &str,
-    id: Option<u64>,
-    code: Option<Value>,
-) {
-    if let Some(log) = LOG.get()
-        && let Err(error) = log.write(level, operation, message, id, code)
-    {
-        // Do not recursively try to log a full disk or an unwritable directory.
-        let _ = writeln!(
-            io::stderr().lock(),
-            "Bex error log could not be written: {error}"
-        );
+// Only explicitly selected Bex diagnostic fields enter the private log.
+// Dependency traces and arbitrary request/response fields are never persisted.
+#[derive(Default)]
+struct Fields {
+    operation: String,
+    message: String,
+    request_id: Option<u64>,
+    error_code: Option<Value>,
+}
+
+impl tracing::field::Visit for Fields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "operation" => self.operation = value.into(),
+            "message" => self.message = value.into(),
+            "error_code" => self.error_code = Some(Value::String(value.into())),
+            _ => (),
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "request_id" {
+            self.request_id = Some(value);
+        } else if field.name() == "error_code" {
+            self.error_code = Some(value.into());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        match field.name() {
+            "operation" => self.operation = format!("{value:?}"),
+            "message" => self.message = format!("{value:?}"),
+            "error_code" => {
+                self.error_code = serde_json::from_str::<Value>(&format!("{value:?}"))
+                    .ok()
+                    .filter(|code| code.is_number() || code.is_string())
+            }
+            _ => (),
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for Log {
+    fn enabled(
+        &self,
+        metadata: &tracing::Metadata<'_>,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        metadata.target() == "bex" && *metadata.level() <= tracing::Level::INFO
+    }
+
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        let level = match *event.metadata().level() {
+            tracing::Level::ERROR => "error",
+            tracing::Level::WARN => "warn",
+            _ => "info",
+        };
+        if let Err(error) = self.write(
+            level,
+            &fields.operation,
+            &fields.message,
+            fields.request_id,
+            fields.error_code,
+        ) {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "Bex error log could not be written: {error}"
+            );
+        }
     }
 }
 

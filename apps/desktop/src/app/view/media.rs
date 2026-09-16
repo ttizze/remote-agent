@@ -433,7 +433,7 @@ impl Desktop {
                     match result {
                         Ok(saved) => gallery.saved = saved,
                         Err(error) => {
-                            agent_core::diagnostics::error("gallery.save", &error);
+                            tracing::error!(target: "bex", operation = "gallery.save", message = %error);
                             gallery.error = error;
                         }
                     }

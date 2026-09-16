@@ -70,14 +70,14 @@ impl HostRuntime {
                                     runtime.serve(incoming, stop, permit, authorized_slots).await
                                 });
                             }
-                            Some(Err(error)) => agent_core::diagnostics::error("host.accept", &error.to_string()),
+                            Some(Err(error)) => tracing::error!(target: "bex", operation = "host.accept", message = %error),
                             None => break Ok(()),
                         }
                     },
                     Some(result) = sessions.join_next(), if !sessions.is_empty() => {
                         match result {
-                            Ok(Err(error)) => agent_core::diagnostics::error("host.session", &format!("{error:#}")),
-                            Err(error) => agent_core::diagnostics::error("host.session", &error.to_string()),
+                            Ok(Err(error)) => tracing::error!(target: "bex", operation = "host.session", message = %format_args!("{error:#}")),
+                            Err(error) => tracing::error!(target: "bex", operation = "host.session", message = %error),
                             Ok(Ok(())) => {}
                         }
                     }

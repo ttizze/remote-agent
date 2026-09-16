@@ -71,13 +71,12 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         .map(Arc::new)
         .map_err(|error| error.to_string());
     if let Err(error) = &app_server {
-        agent_core::diagnostics::error("host.codex", error);
+        tracing::error!(target: "bex", operation = "host.codex", message = %error);
     }
     let service = HostRpcService::new(app_server.clone(), projects);
     service
         .enable_claude(config.claude, directory.join("claude"), config.claude_home)
         .await
-        .map_err(anyhow::Error::msg)
         .context("cannot enable Claude")?;
     if app_server.is_ok() {
         service

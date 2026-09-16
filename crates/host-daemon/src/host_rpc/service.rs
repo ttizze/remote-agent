@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::sync::{Arc, OnceLock};
 
 use agent_core::peer::RpcMessageKind;
@@ -69,19 +70,25 @@ impl Failure {
     pub(super) fn unknown(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self::Host {
             code,
-            message: error.to_string(),
+            message: format!("{error:#}"),
             delivery: agent_core::peer::Delivery::Unknown,
         }
     }
     pub(super) fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self::Host {
             code,
-            message: error.to_string(),
+            message: format!("{error:#}"),
             delivery: agent_core::peer::Delivery::NotSent,
         }
     }
 }
-async fn run_handler<P, R, E: std::fmt::Display, F: Future<Output = Result<R, String>>>(
+async fn run_handler<
+    P,
+    R,
+    E: std::fmt::Display,
+    H: std::fmt::Display,
+    F: Future<Output = Result<R, H>>,
+>(
     params: Result<P, E>,
     code: &'static str,
     run: impl FnOnce(P) -> F,
@@ -160,14 +167,14 @@ impl HostRpcService {
         program: std::path::PathBuf,
         directory: std::path::PathBuf,
         native_home: Option<std::path::PathBuf>,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         let claude =
             crate::claude::Claude::load(program, directory, native_home, self.inner.router.clone())
                 .await?;
         self.inner
             .claude
             .set(claude)
-            .map_err(|_| "Claude Code is already configured".into())
+            .map_err(|_| anyhow::anyhow!("Claude Code is already configured"))
     }
 
     pub(crate) async fn shutdown_owned_processes(&self) {
@@ -318,47 +325,44 @@ impl HostRpcService {
         session: SessionId,
         request: &RpcMessage<'_>,
     ) -> Result<(), String> {
-        let result = async {
+        let result: anyhow::Result<()> = async {
             let params: agent_core::session::OpenSession =
-                request.params().map_err(invalid_message)?;
+                request.params().context("invalid raw JSONL message")?;
             let target = params.session.clone();
             if target.provider == agent_core::session::ProviderKind::Codex {
-                self.inner
-                    .codex
-                    .server()
-                    .map_err(|error| error.to_string())?;
+                self.inner.codex.server()?;
             }
             let limit = params.limit;
-            let read = self.inner.router.begin_session_read(params)?;
+            let read = self
+                .inner
+                .router
+                .begin_session_read(params)
+                .map_err(anyhow::Error::msg)?;
             let mut response = match target.provider {
                 agent_core::session::ProviderKind::Claude => {
                     self.inner
                         .claude
                         .get()
-                        .ok_or("Claude is unavailable")?
+                        .context("Claude is unavailable")?
                         .read(&target.id, limit)
                         .await?
                 }
-                agent_core::session::ProviderKind::Codex => self
-                    .inner
-                    .codex
-                    .read(&target.id, limit)
-                    .await
-                    .map_err(|error| error.to_string())?,
+                agent_core::session::ProviderKind::Codex => {
+                    self.inner.codex.read(&target.id, limit).await?
+                }
             };
             let expected = match target.provider {
                 agent_core::session::ProviderKind::Codex => target.id.clone(),
                 agent_core::session::ProviderKind::Claude => target.thread_id(),
             };
             if response.thread.id.as_deref() != Some(expected.as_str()) {
-                return Err("native session identity changed".into());
+                return Err(anyhow::anyhow!("native session identity changed"));
             }
             response.thread.id = Some(target.thread_id());
             self.inner
                 .desktop_projects
                 .enrich_threads(std::slice::from_mut(&mut response.thread))
-                .await
-                .map_err(|error| error.to_string())?;
+                .await?;
             response.thread.capabilities = Some(provider_capabilities(target.provider));
             response.thread.session = Some(target.clone());
             let more = response.thread.extra.get("historyHasMore")
@@ -390,13 +394,14 @@ impl HostRpcService {
             self.inner
                 .router
                 .finish_session_read(read, session, request, response)
+                .map_err(anyhow::Error::msg)
         }
         .await;
         if let Err(error) = result {
             self.inner.router.send_line(
                 session,
                 request
-                    .error("session_open_failed", &error)
+                    .error("session_open_failed", &format!("{error:#}"))
                     .map_err(invalid_message)?,
             )?;
         }
@@ -674,7 +679,7 @@ impl HostRpcService {
                                     );
                                 };
                                 errors
-                                    .insert("claude".into(), serde_json::json!({"message":error}));
+                                    .insert("claude".into(), serde_json::json!({"message":format!("{error:#}")}));
                             }
                         }
                     }
@@ -967,12 +972,17 @@ impl HostRpcService {
             ),
         );
         let mut provider_errors = serde_json::Map::new();
-        let mut claude_threads = match claude_result
-            .unwrap_or_else(|_| Err("Claude listing timed out; results are partial".into()))
-        {
+        let mut claude_threads = match claude_result.unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "Claude listing timed out; results are partial"
+            ))
+        }) {
             Ok(threads) => threads,
             Err(error) => {
-                provider_errors.insert("claude".into(), serde_json::json!({"message":error}));
+                provider_errors.insert(
+                    "claude".into(),
+                    serde_json::json!({"message":format!("{error:#}")}),
+                );
                 Vec::new()
             }
         }
@@ -1206,7 +1216,7 @@ impl HostRpcService {
                                 let _ = codex.send_raw(&response).await;
                             }
                         } else if let Err(error) = super::codex::event(&router, &request) {
-                            agent_core::diagnostics::error("host.codex.event", &error.to_string());
+                            tracing::error!(target: "bex", operation = "host.codex.event", message = %error);
                             break;
                         }
                     }
@@ -1223,7 +1233,7 @@ impl HostRpcService {
                 && let Ok(codex) = &inner.codex.process
                 && let Err(error) = codex.shutdown().await
             {
-                agent_core::diagnostics::error("host.codex.shutdown", &error.to_string());
+                tracing::error!(target: "bex", operation = "host.codex.shutdown", message = %error);
             }
             router.fail_provider(agent_core::session::ProviderKind::Codex,
                             "Codexとの接続が終了したため、この実行は継続できません。Hostを再起動してから再送信してください。");

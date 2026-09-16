@@ -308,7 +308,7 @@ impl RpcPeer {
         let _permit = tokio::select! {
             permit = self.permits.acquire() => permit.map_err(|_| self.closed_error())?,
             _ = &mut expiration => {
-                crate::diagnostics::error(&method, "RPC request timed out waiting for capacity");
+                tracing::error!(target: "bex", operation = %(&method), message = "RPC request timed out waiting for capacity");
                 return Err(PeerError::RequestTimeout { method, id });
             },
         };
@@ -358,10 +358,7 @@ impl RpcPeer {
                                 )),
                             );
                         } else {
-                            crate::diagnostics::error(
-                                &method,
-                                "RPC request timed out waiting for response",
-                            );
+                            tracing::error!(target: "bex", operation = %(&method), message = "RPC request timed out waiting for response");
                         }
                         PeerError::RequestTimeout { method, id }
                     }
@@ -644,7 +641,7 @@ fn terminate(
     stop.cancel();
     for pending in pending.into_values() {
         if failed {
-            crate::diagnostics::error(&pending.method, &reason);
+            tracing::error!(target: "bex", operation = %(&pending.method), message = %reason);
         }
         let _ = pending
             .complete
