@@ -409,7 +409,7 @@ impl Desktop {
                             thread.name
                         ),
                         cx,
-                        move |s, _, _| s.open_chat(id.clone()),
+                        move |s, window, cx| s.open_chat(id.clone(), window, cx),
                     )
                     .icon(IconName::FileText)
                     .disabled(!self.snapshot.connected || self.worktree_busy),

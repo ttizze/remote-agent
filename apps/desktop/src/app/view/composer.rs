@@ -261,9 +261,9 @@ impl Desktop {
                 menu = menu.item(
                     PopupMenuItem::new("チャット")
                         .checked(selected_directory.is_empty())
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
                             let _ = unassigned.update(cx, |s, cx| {
-                                s.new_chat(String::new());
+                                s.new_chat(String::new(), window, cx);
                                 cx.notify();
                             });
                         }),
@@ -286,9 +286,9 @@ impl Desktop {
                         menu = menu.item(
                             PopupMenuItem::new(label)
                                 .checked(path == selected_directory)
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     let _ = target.update(cx, |s, cx| {
-                                        s.new_chat(path.clone());
+                                        s.new_chat(path.clone(), window, cx);
                                         cx.notify();
                                     });
                                 }),
