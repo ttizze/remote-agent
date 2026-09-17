@@ -141,7 +141,11 @@ extension BexLaunchUITests {
         field.tap(); field.press(forDuration: 1.2)
         let selectAll = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == 'Select All' OR label == 'すべてを選択'")).firstMatch
-        XCTAssertTrue(selectAll.waitForExistence(timeout: 5)); selectAll.tap()
+        if selectAll.waitForExistence(timeout: 2) {
+            selectAll.tap()
+        }
+        field.typeText(XCUIKeyboardKey.delete.rawValue)
+        XCTAssertEqual(field.value as? String, field.placeholderValue)
         field.typeText(text)
     }
 
