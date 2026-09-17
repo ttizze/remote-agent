@@ -368,7 +368,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 62;
+				CURRENT_PROJECT_VERSION = 63;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -381,7 +381,7 @@
 				MARKETING_VERSION = 1.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
-				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../../../target/agent-bindings/AgentCoreFFI.modulemap";
@@ -396,7 +396,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 62;
+				CURRENT_PROJECT_VERSION = 63;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -409,7 +409,7 @@
 				MARKETING_VERSION = 1.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
-				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
 				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../../../target/agent-bindings/AgentCoreFFI.modulemap";
@@ -425,7 +425,7 @@
 				DEVELOPMENT_TEAM = K65K9J8686;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
@@ -441,7 +441,7 @@
 				DEVELOPMENT_TEAM = K65K9J8686;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.remoteagent.mobile.ios.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;

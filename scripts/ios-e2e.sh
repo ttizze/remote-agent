@@ -126,8 +126,8 @@ xcodebuild -skipPackagePluginValidation -project apps/mobile/iosApp/Bex.xcodepro
     CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=YES BEX_CARGO_TARGET_DIR="$target" build-for-testing
 products="$build/Build/Products"
 xcrun simctl install "$simulator" "$products/Debug-iphonesimulator/Bex.app"
-xcrun simctl privacy "$simulator" grant photos-add com.ttizze.b-codex
-container=$(xcrun simctl get_app_container "$simulator" com.ttizze.b-codex data)
+xcrun simctl privacy "$simulator" grant photos-add dev.remoteagent.mobile.ios
+container=$(xcrun simctl get_app_container "$simulator" dev.remoteagent.mobile.ios data)
 mkdir -p "$container/Documents"
 printf 'Isolated attachment upload fixture.\n' >"$container/Documents/attachment-fixture.txt"
 runs=("$products/"*.xctestrun)
