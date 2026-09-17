@@ -1196,12 +1196,13 @@ impl Desktop {
             }
         }
     }
-    fn new_chat(&mut self, cwd: String) {
+    fn new_chat(&mut self, cwd: String, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Chat;
         self.cancel_recording();
         self.dispatch(Intent::NewChat { cwd });
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
-    fn open_chat(&mut self, id: String) {
+    fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Chat;
         self.cancel_recording();
         self.busy += 1;
@@ -1209,6 +1210,7 @@ impl Desktop {
             Intent::ReadThread(op::ReadThread::open(id)),
             OperationCompletion::Busy,
         );
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
     fn older(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.history_loading {
