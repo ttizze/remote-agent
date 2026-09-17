@@ -146,6 +146,7 @@ fn main() {
         );
         Vec::new()
     };
+    assert!(args.iter().any(|arg| arg == "--replay-user-messages"));
     let mut waiting = None;
     for line in io::stdin().lock().lines() {
         let value: Value = serde_json::from_str(&line.unwrap()).unwrap();
@@ -178,7 +179,13 @@ fn main() {
                     "unauthenticated input must never reach Claude"
                 );
                 assert_eq!(option("--model").as_deref(), Some("default"));
-                native(value.clone());
+                if waiting.take() == Some("wait") {
+                    // The previous input can finish before the queued input is consumed.
+                    emit(
+                        json!({"type":"result","session_id":session,"is_error":false,"result":"finished waiting"}),
+                    );
+                }
+                emit(value.clone());
                 let content = value["message"]["content"].clone();
                 inputs.push(
                     json!({"content":content,"effort":option("--effort"),"pid":std::process::id()}),

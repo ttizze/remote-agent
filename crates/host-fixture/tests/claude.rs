@@ -329,23 +329,13 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
             .unwrap()
             .id
             .clone();
-        draft(&store, "retain while busy").await;
-        store
-            .dispatch(Intent::Submit {
-                thread_id: Some(id.clone()),
-                client_user_message_id: "busy".into(),
-            })
-            .await
-            .unwrap();
-        assert!(
-            store
-                .snapshot()
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("追加"))
-        );
-        assert!(!store.snapshot().pending_submissions.contains_key("busy"));
-        assert_eq!(store.snapshot().drafts[&id].text, "retain while busy");
+        send(&store, "wait", "busy").await;
+        assert!(store.snapshot().error.is_none());
+        assert!(store.snapshot().drafts[&id].text.is_empty());
+        until(&store, |snapshot| {
+            !snapshot.pending_submissions.contains_key("busy")
+        })
+        .await;
         let local = fixture.local().await.unwrap();
         let previous_turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[2].id;
         assert!(
@@ -1119,6 +1109,142 @@ async fn live_claude_account_login_url_and_cancellation() {
             .exists()
     );
     drop(store);
+    endpoint.close().await;
+    fixture.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+    let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+    store
+        .dispatch(Intent::NewChat { cwd: String::new() })
+        .await
+        .unwrap();
+    let key = store.snapshot().navigation.draft_key.clone();
+    store
+        .dispatch(Intent::SelectModel {
+            thread_id: key,
+            model: "claude:default".into(),
+        })
+        .await
+        .unwrap();
+    let id = send(&store, "wait", "initial").await;
+    until(&store, |snapshot| {
+        snapshot
+            .conversations
+            .get(&id)
+            .and_then(|thread| thread.turns.as_ref())
+            .and_then(|turns| turns.get(0))
+            .and_then(|turn| turn.items.as_ref())
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.text.as_deref() == Some("Waiting for interruption"))
+            })
+    })
+    .await;
+    assert!(
+        store.snapshot().conversations[&id]
+            .capabilities
+            .unwrap()
+            .additional_input
+    );
+    assert!(
+        agent_core::session::input_unavailable_reason(&store.snapshot().conversations[&id])
+            .is_none()
+    );
+    let local = fixture.local().await.unwrap();
+    assert!(
+        local
+            .peer
+            .call(&rpc::SteerTurn {
+                thread_id: id.clone(),
+                client_user_message_id: "stale".into(),
+                input: vec![rpc::Input::Text {
+                    text: "must not arrive".into()
+                }],
+                expected_turn_id: "stale".into(),
+            })
+            .await
+            .is_err()
+    );
+    send(&store, "follow-up", "steered").await;
+    let snapshot = completed(&store, &id, 1, "completed").await;
+    let items = snapshot.conversations[&id].turns.as_ref().unwrap()[0]
+        .items
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .filter(|item| item.client_id.as_deref() == Some("steered"))
+            .count(),
+        1
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.text.as_deref() == Some("reply 2: follow-up"))
+    );
+    assert!(snapshot.pending_submissions.is_empty());
+    send(&store, "wait", "wait-again").await;
+    until(&store, |snapshot| {
+        snapshot
+            .conversations
+            .get(&id)
+            .and_then(|thread| thread.turns.as_ref())
+            .and_then(|turns| turns.get(1))
+            .and_then(|turn| turn.items.as_ref())
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.text.as_deref() == Some("Waiting for interruption"))
+            })
+    })
+    .await;
+    let queued = local
+        .peer
+        .call(&rpc::QueueTurn {
+            thread_id: id.clone(),
+            client_user_message_id: "queued".into(),
+            input: vec![rpc::Input::Text {
+                text: "queued follow-up".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    let snapshot = completed(&store, &id, 2, "completed").await;
+    let items = snapshot.conversations[&id].turns.as_ref().unwrap()[1]
+        .items
+        .as_ref()
+        .unwrap();
+    assert!(
+        items
+            .iter()
+            .any(|item| item.id == queued.queued_submission.id
+                && item.client_id.as_deref() == Some("queued"))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.text.as_deref() == Some("reply 4: queued follow-up"))
+    );
+    send(&store, "after completion", "last").await;
+    completed(&store, &id, 3, "completed").await;
+    let native_id = id.strip_prefix("claude:").unwrap();
+    let inputs: Vec<Value> = serde_json::from_slice(
+        &std::fs::read(
+            Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inputs.len(), 5);
+    assert!(inputs.iter().all(|input| input["pid"] == inputs[0]["pid"]));
+    local.close().await;
+    store.close().await.unwrap();
     endpoint.close().await;
     fixture.close().await.unwrap();
 }

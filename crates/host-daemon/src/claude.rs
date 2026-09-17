@@ -6,7 +6,7 @@ mod process;
 
 use anyhow::Context;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -101,6 +101,7 @@ struct Running {
 
 struct Command {
     value: Value,
+    user: Option<Item>,
     delivered: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
@@ -120,7 +121,7 @@ impl Drop for Claude {
 impl Claude {
     pub(crate) fn capabilities() -> agent_core::session::Capabilities {
         agent_core::session::Capabilities {
-            additional_input: false,
+            additional_input: true,
             fork: false,
             rename: false,
             model_change: true,
@@ -591,7 +592,7 @@ impl Claude {
                     (running.input.clone(), running.interrupt.clone())
                 };
                 if interrupt.borrow().is_none() {
-                    input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
+                    input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), user: None, delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
                 }
                 tokio::time::timeout(std::time::Duration::from_secs(15), async {
                     loop {
@@ -608,12 +609,76 @@ impl Claude {
                 .map_err(|_| "Claude Codeの停止要求がタイムアウトしました。")??;
                 Ok(agent_core::models::Empty {}.into())
             }
-            Call::SteerTurn(_) | Call::QueueTurn(_) => Err(
-                "Claudeの実行中は追加送信できません。完了を待つか、停止してから送信してください。"
-                    .into(),
-            ),
+            Call::SteerTurn(params) => {
+                self.additional_input(
+                    &record,
+                    Some(&params.expected_turn_id),
+                    &params.input,
+                    &params.client_user_message_id,
+                )
+                .await?;
+                Ok(agent_core::models::Empty {}.into())
+            }
+            Call::QueueTurn(params) => {
+                let id = self
+                    .additional_input(&record, None, &params.input, &params.client_user_message_id)
+                    .await?;
+                Ok(op::QueuedTurn {
+                    queued_submission: op::TurnIdentity { id },
+                }
+                .into())
+            }
             _ => Err(format!("Claude Codeでは {method} に対応していません。").into()),
         }
+    }
+
+    async fn additional_input(
+        &self,
+        record: &AsyncMutex<Record>,
+        expected_turn_id: Option<&str>,
+        input: &[op::Input],
+        client_id: &str,
+    ) -> Result<String, OperationError> {
+        if self.stop.is_cancelled() {
+            return Err("Host is shutting down".into());
+        }
+        let content = input_content(input).await?;
+        let state = record.lock().await;
+        let running = state
+            .running
+            .as_ref()
+            .ok_or("Claudeは実行中ではありません。")?;
+        if expected_turn_id.is_some_and(|id| id != running.turn_id) {
+            return Err("Claudeの実行対象が変わりました。会話を更新してください。".into());
+        }
+        let sender = running.input.clone();
+        let session = state.session_id;
+        drop(state);
+        let id = Uuid::new_v4().to_string();
+        let (delivered, receipt) = tokio::sync::oneshot::channel();
+        sender.send(Command {
+            value: json!({"type":"user","uuid":id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null}),
+            user: Some(Item {
+                id: id.clone(),
+                kind: Some("userMessage".into()),
+                content: Some(op::Input::content(input)),
+                client_id: Some(client_id.into()),
+                ..Default::default()
+            }),
+            delivered: Some(delivered),
+        }).await.map_err(|_| "Claude Code input is closed")?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
+            .await
+            .map_err(|_| OperationError {
+                message: "Claude input delivery is unknown".into(),
+                delivery: agent_core::peer::Delivery::Unknown,
+            })?
+            .map_err(|_| "Claude finished before accepting additional input")?
+            .map_err(|message| OperationError {
+                message,
+                delivery: agent_core::peer::Delivery::Unknown,
+            })?;
+        Ok(id)
     }
 
     async fn start_turn(
@@ -798,7 +863,7 @@ impl Claude {
             json!({"behavior":"deny","message":"ユーザーがこの操作を拒否しました。"})
         };
         let (delivered, receipt) = tokio::sync::oneshot::channel();
-        pending.sender.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":pending.request_id,"response":response}}), delivered: Some(delivered) }).await.map_err(|_| "Claude Code input is closed")?;
+        pending.sender.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":pending.request_id,"response":response}}), user: None, delivered: Some(delivered) }).await.map_err(|_| "Claude Code input is closed")?;
         tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
             .await
             .map_err(|_| "Claude answer delivery is unknown")?
@@ -827,6 +892,7 @@ struct Worker {
 impl Worker {
     async fn run(mut self, mut process: Process, mut input: mpsc::Receiver<Command>) {
         let mut interrupted = false;
+        let mut pending_inputs = HashSet::new();
         let outcome = async {
             loop {
                 tokio::select! {
@@ -838,6 +904,12 @@ impl Worker {
                     command = input.recv() => {
                         let command = command.ok_or("Claude input queue is closed")?;
                         let result = process.write(&command.value).await;
+                        if result.is_ok() && let Some(user) = command.user {
+                            pending_inputs.insert(user.id.clone());
+                            self.router.session_change(&self.session, SessionChange::Item {
+                                turn_id: self.turn_id.clone(), item: Arc::new(user),
+                            });
+                        }
                         if let Some(delivered) = command.delivered { let _ = delivered.send(result.clone()); }
                         result?;
                     }
@@ -849,7 +921,15 @@ impl Worker {
                                     .or_else(|| message["errors"].as_array().map(|errors| errors.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")))
                                     .unwrap_or_else(|| "Claude Codeの実行に失敗しました。".into()));
                             }
-                            return Ok(());
+                            // A result can belong to the input before a queued message.
+                            // Keep reading until Claude has consumed every submitted input.
+                            if interrupted || pending_inputs.is_empty() {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        if message["type"] == "user" && let Some(id) = message["uuid"].as_str() {
+                            pending_inputs.remove(id);
                         }
                         if message["type"] == "control_request" {
                             self.permission(&message)?;
@@ -869,6 +949,8 @@ impl Worker {
                 }
             }
         }.await;
+        // Reject commands that lost the race with completion before retaining the process.
+        drop(input);
         let mut retained = None;
         let outcome = if outcome.is_ok() && !self.stop.is_cancelled() {
             retained = Some(process);
