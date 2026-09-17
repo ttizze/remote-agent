@@ -25,7 +25,7 @@ struct ThreadParams {
 }
 
 use super::routing::{HostSession, SessionId, SessionRouter};
-use crate::{DesktopProjectStore, HOST_THREAD_LIST_METHOD, HOST_THREAD_START_METHOD};
+use crate::{HOST_THREAD_LIST_METHOD, HOST_THREAD_START_METHOD, ProjectStore};
 
 #[derive(Debug, Serialize, thiserror::Error)]
 #[serde(untagged)]
@@ -52,11 +52,6 @@ impl From<RpcMessageError> for Failure {
 impl From<AppServerError> for Failure {
     fn from(error: AppServerError) -> Self {
         Self::unknown("codex_unavailable", error)
-    }
-}
-impl From<crate::DesktopProjectError> for Failure {
-    fn from(error: crate::DesktopProjectError) -> Self {
-        Self::new("desktop_project_state_unavailable", error)
     }
 }
 
@@ -107,7 +102,8 @@ struct ServiceInner {
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
     codex: super::codex::Codex,
-    desktop_projects: DesktopProjectStore,
+    projects: ProjectStore,
+    project_creation: tokio::sync::Mutex<()>,
     router: SessionRouter,
     event_pump_started: OnceLock<()>,
     files: crate::workspace_files::WorkspaceFiles,
@@ -118,12 +114,9 @@ struct ServiceInner {
 }
 
 impl HostRpcService {
-    pub fn new(
-        codex: Result<Arc<CodexAppServer>, String>,
-        desktop_projects: DesktopProjectStore,
-    ) -> Self {
+    pub fn new(codex: Result<Arc<CodexAppServer>, String>, projects: ProjectStore) -> Self {
         let files = crate::workspace_files::WorkspaceFiles::new(
-            desktop_projects.path().with_file_name("bex-attachments"),
+            projects.path().with_file_name("bex-attachments"),
         );
         Self {
             inner: Arc::new(ServiceInner {
@@ -132,10 +125,11 @@ impl HostRpcService {
                 restoration_error: tokio::sync::watch::channel(None).0,
                 dictation: crate::dictation::Dictation::new(codex.clone()),
                 codex: super::codex::Codex::new(codex),
-                worktrees: crate::worktrees::Worktrees::new(desktop_projects.path()),
+                worktrees: crate::worktrees::Worktrees::new(projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
                 terminals: Default::default(),
-                desktop_projects,
+                projects,
+                project_creation: Default::default(),
                 router: SessionRouter::new(),
                 event_pump_started: OnceLock::new(),
                 files,
@@ -373,9 +367,11 @@ impl HostRpcService {
                 return Err(anyhow::anyhow!("native session identity changed"));
             }
             response.thread.id = Some(target.thread_id());
-            self.inner
-                .desktop_projects
-                .enrich_threads(std::slice::from_mut(&mut response.thread))
+            response.thread.project_id = self
+                .project_membership(
+                    response.thread.cwd.as_deref(),
+                    response.thread.project_id.as_ref(),
+                )
                 .await?;
             response.thread.capabilities = Some(provider_capabilities(target.provider));
             response.thread.session = Some(target.clone());
@@ -574,12 +570,8 @@ impl HostRpcService {
                     Ok(mut value) if value.get("thread").is_some() => {
                         let mut thread: Thread = serde_json::from_value(value["thread"].take())?;
                         describe_thread(&mut thread, agent_core::session::ProviderKind::Claude);
-                        self.inner
-                            .desktop_projects
-                            .enrich_threads(std::slice::from_mut(&mut thread))
-                            .await
-                            .map_err(Failure::from)
-                            .map(|()| {
+                        self.project_membership(thread.cwd.as_deref(), thread.project_id.as_ref()).await.map(|project_id| {
+                                thread.project_id = project_id;
                                 value["thread"] =
                                     serde_json::to_value(thread).expect("Thread serializes");
                                 value
@@ -696,7 +688,7 @@ impl HostRpcService {
                     request.response(self.inner.router.request_session(&params.request_id.to_string()).ok_or_else(|| Failure::new("request_unavailable", "request is no longer pending")))?
                 }
                 "host/session/scope" => {
-                    let codex = self.inner.desktop_projects.path().parent().unwrap_or_else(|| std::path::Path::new("."));
+                    let codex = self.inner.projects.path().parent().unwrap_or_else(|| std::path::Path::new("."));
                     let path = canonical_storage_path;
                     let areas = serde_json::json!({"codex":path(codex),"claude":self.inner.claude.get().map(|claude| path(claude.storage_directory()))});
                     let digest = ring::digest::digest(&ring::digest::SHA256, areas.to_string().as_bytes());
@@ -720,6 +712,11 @@ impl HostRpcService {
                         .router
                         .close_subscription(session, params.subscription_id);
                     request.response::<_, ()>(Ok(agent_core::models::Empty {}))?
+                }
+                "host/project/add" => {
+                    let params: op::AddProject = request.params()?;
+                    request.response(self.add_project(&params.cwd).await
+                        .map_err(|error| Failure::new("project_add_failed", error)))?
                 }
                 HOST_THREAD_LIST_METHOD => {
                     let params: op::ListThreads = request.params()?;
@@ -935,18 +932,60 @@ impl HostRpcService {
             .map_err(|error| Failure::new("worktree_remove_failed", error))
     }
 
+    async fn project_membership(
+        &self,
+        cwd: Option<&str>,
+        assigned: Option<&Option<String>>,
+    ) -> Result<Option<Option<String>>, Failure> {
+        if let Some(assigned) = assigned {
+            return Ok(Some(assigned.clone()));
+        }
+        Ok(self.project_snapshot().await?.project_for_directory(cwd))
+    }
+
+    async fn project_snapshot(&self) -> Result<crate::projects::state::Snapshot, Failure> {
+        let projects = if self.inner.codex.server().is_ok() {
+            Some(self.inner.codex.projects().await?)
+        } else {
+            None
+        };
+        self.inner
+            .projects
+            .load(projects)
+            .await
+            .map_err(|error| Failure::new("project_state_unavailable", error))
+    }
+
+    async fn add_project(&self, cwd: &str) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            std::path::Path::new(cwd).is_absolute(),
+            "project directory must be absolute"
+        );
+        let root = tokio::fs::canonicalize(cwd).await?;
+        anyhow::ensure!(
+            tokio::fs::metadata(&root).await?.is_dir(),
+            "project path must be a directory"
+        );
+        let _registration = self.inner.project_creation.lock().await;
+        if self
+            .project_snapshot()
+            .await?
+            .project_for_root(&root)
+            .is_none()
+        {
+            self.inner.codex.create_project(&root).await?;
+        }
+        root.into_os_string()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("project path is not UTF-8"))
+    }
+
     async fn host_title_list(
         &self,
         query: ListQuery,
     ) -> Result<agent_core::models::ThreadList, Failure> {
-        let snapshot = self
-            .inner
-            .desktop_projects
-            .load()
-            .await
-            .map_err(Failure::from)?;
-        let mut titles =
-            crate::desktop_projects::titles::TitleList::new(&snapshot.projects, &query);
+        let snapshot = self.project_snapshot().await?;
+        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, &query);
         let mut params = ThreadListParams {
             limit: 100,
             sort_key: "updated_at",
@@ -1018,10 +1057,14 @@ impl HostRpcService {
                 }) {
                     let mut claude = claude_threads.next().unwrap();
                     describe_thread(&mut claude, agent_core::session::ProviderKind::Claude);
-                    snapshot.enrich_thread(&mut claude);
+                    claude.project_id = claude
+                        .project_id
+                        .or_else(|| snapshot.project_for_directory(claude.cwd.as_deref()));
                     titles.push(claude);
                 }
-                snapshot.enrich_thread(&mut thread);
+                thread.project_id = thread
+                    .project_id
+                    .or_else(|| snapshot.project_for_directory(thread.cwd.as_deref()));
                 titles.push(thread);
             }
             params.cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
@@ -1037,7 +1080,9 @@ impl HostRpcService {
         }
         for mut thread in claude_threads {
             describe_thread(&mut thread, agent_core::session::ProviderKind::Claude);
-            snapshot.enrich_thread(&mut thread);
+            thread.project_id = thread
+                .project_id
+                .or_else(|| snapshot.project_for_directory(thread.cwd.as_deref()));
             titles.push(thread);
         }
         let mut page = titles.finish();
@@ -1075,6 +1120,12 @@ impl HostRpcService {
         if provider == agent_core::session::ProviderKind::Codex {
             self.inner.codex.server()?;
         }
+        if let Some(cwd) = params.cwd.as_deref().filter(|cwd| !cwd.is_empty())
+            && !params.extra.contains_key("projectId")
+            && let Some(id) = self.project_snapshot().await?.project_for_workspace(cwd)
+        {
+            params.extra.insert("projectId".into(), id.into());
+        }
         // A missing selection must not inherit the App Server's checkout.
         // Keep the real cwd on the thread; project enrichment identifies
         // this persisted location as a chat even after a Host restart.
@@ -1083,7 +1134,7 @@ impl HostRpcService {
             .as_deref()
             .is_none_or(|cwd| cwd.trim().is_empty())
         {
-            let directory = self.inner.desktop_projects.chat_directory();
+            let directory = self.inner.projects.chat_directory();
             tokio::fs::create_dir_all(&directory)
                 .await
                 .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
@@ -1131,9 +1182,11 @@ impl HostRpcService {
                 .map_err(Failure::upstream)?
         };
         describe_thread(&mut response.thread, provider);
-        self.inner
-            .desktop_projects
-            .enrich_threads(std::slice::from_mut(&mut response.thread))
+        response.thread.project_id = self
+            .project_membership(
+                response.thread.cwd.as_deref(),
+                response.thread.project_id.as_ref(),
+            )
             .await?;
         Ok(response)
     }
@@ -1341,7 +1394,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             Err("must not be consulted".into()),
-            DesktopProjectStore::new(root.path().join("projects.json")),
+            ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
         let mut session = service.open_session(16);
         for params in [
@@ -1373,7 +1426,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             Err("not available".into()),
-            DesktopProjectStore::new(root.path().join("projects.json")),
+            ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
         let mut session = service.open_session(16);
         for method in [
@@ -1399,7 +1452,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             Err("unavailable".into()),
-            DesktopProjectStore::new(root.path().join("projects.json")),
+            ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
         let mut session = service.open_session(16);
         let line = serde_json::json!({"id":1,"method":"turn/start","params":{"threadId":"native","clientUserMessageId":"input","input":[]}}).to_string();
@@ -1429,7 +1482,7 @@ mod tests {
         .unwrap();
         let service = HostRpcService::new(
             Err("unavailable".into()),
-            DesktopProjectStore::new(root.path().join("projects.json")),
+            ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
         service
             .enable_claude(

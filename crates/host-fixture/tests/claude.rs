@@ -151,7 +151,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                     std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
                     git(&workspace, &["add", "tracked.txt"]);
                     git(&workspace, &["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","-c","commit.gpgsign=false","commit","--quiet","-m","fixture"]);
-                    std::fs::write(root.join("projects.json"), json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[workspace]}}}).to_string()).unwrap();
+                    std::fs::write(root.join("projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
                     std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
                     let memory = Arc::new(Memory::default());
                     let mut fixture = host(&root, memory.clone(), fixture_program()).await;
@@ -519,7 +519,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                 std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
                 git(&workspace, &["add", "tracked.txt"]);
                 git(&workspace, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
-                std::fs::write(root.join("projects.json"), json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[workspace]}}}).to_string()).unwrap();
+                std::fs::write(root.join("projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
                 let config = AppServerConfig { program: root.join("missing-codex"), ..Default::default() };
                 let memory = Arc::new(Memory::default());

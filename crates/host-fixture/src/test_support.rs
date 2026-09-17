@@ -5,9 +5,7 @@ use agent_core::{
 };
 use anyhow::{Context, Result};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{
-    CredentialStore, DesktopProjectStore, HostCredentials, HostRpcService, HostRuntime,
-};
+use host_daemon::{CredentialStore, HostCredentials, HostRpcService, HostRuntime, ProjectStore};
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -74,7 +72,7 @@ impl HostFixture {
             .map_err(|error| error.to_string());
         let service = HostRpcService::new(
             server.clone(),
-            DesktopProjectStore::new(directory.join("projects.json")),
+            ProjectStore::new(directory.join("bex-worktrees.json")),
         );
         if let Some(program) = claude {
             service

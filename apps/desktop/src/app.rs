@@ -675,7 +675,13 @@ impl Desktop {
             Update::Folder(result) => {
                 self.busy = self.busy.saturating_sub(1);
                 match result {
-                    Ok(Some(path)) => self.new_chat(path.to_string_lossy().into_owned()),
+                    Ok(Some(path)) => {
+                        self.tab = Tab::Chat;
+                        self.cancel_recording();
+                        self.dispatch(Intent::AddProject(op::AddProject {
+                            cwd: path.to_string_lossy().into_owned(),
+                        }));
+                    }
                     Ok(None) => {}
                     Err(error) => self.set_error(error),
                 }

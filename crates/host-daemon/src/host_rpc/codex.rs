@@ -2,7 +2,7 @@
 //! completion, native cursors, deferred item hydration and detail reads.
 use super::routing::SessionRouter;
 use super::service::Failure;
-use crate::desktop_projects::ThreadPage;
+use crate::projects::ThreadPage;
 use agent_core::{
     client as op,
     models::{Item, Thread, ThreadResponse, Turn},
@@ -136,6 +136,43 @@ impl Codex {
             _ = self.stopped.cancelled() => return Err(Failure::unknown("codex_unavailable", "Codex event stream is unavailable")),
         }
         Ok(reply.value)
+    }
+
+    pub(super) async fn projects(&self) -> Result<Vec<agent_core::models::Project>, Failure> {
+        let mut projects = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page: HistoryPage<agent_core::models::Project> = self
+                .server()?
+                .request(
+                    "project/list",
+                    &serde_json::json!({"limit":100,"cursor":cursor}),
+                )
+                .await
+                .map_err(Failure::from)?
+                .outcome
+                .map_err(Failure::upstream)?;
+            projects.extend(page.data);
+            match page.next_cursor {
+                None => return Ok(projects),
+                Some(next) if cursor.as_ref() != Some(&next) => cursor = Some(next),
+                Some(_) => {
+                    return Err(Failure::new(
+                        "invalid_project_list",
+                        "project cursor did not advance",
+                    ));
+                }
+            }
+        }
+    }
+
+    pub(super) async fn create_project(&self, root: &std::path::Path) -> Result<(), Failure> {
+        self.server()?.request::<_, Value>("project/create", &serde_json::json!({
+            "idempotencyKey":uuid::Uuid::new_v4().to_string(),
+            "name":root.file_name().map(|name| name.to_string_lossy()).unwrap_or_else(|| root.to_string_lossy()),
+            "roots":[{"path":root}],
+        })).await.map_err(Failure::from)?.outcome.map_err(Failure::upstream)?;
+        Ok(())
     }
 
     pub(super) async fn thread_page(

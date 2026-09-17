@@ -434,8 +434,6 @@ pub struct Project {
     pub created_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

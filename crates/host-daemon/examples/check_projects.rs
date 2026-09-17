@@ -4,12 +4,12 @@ use agent_core::{
     state::operations::ListThreads,
 };
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{DesktopProjectStore, HostRpcService};
+use host_daemon::{HostRpcService, ProjectStore};
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let projects = DesktopProjectStore::from_environment()?;
+    let projects = ProjectStore::from_environment()?;
     let server = Arc::new(CodexAppServer::spawn(AppServerConfig::default()).await?);
     let service = HostRpcService::new(Ok(server.clone()), projects);
     let mut session = service.open_session(128);
@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(response) = RpcResponse::<ThreadList>::parse(&line) {
             let list = response.outcome.map_err(|error| error.get().to_owned())?;
             println!(
-                "Codex Desktop project state is readable: {} visible projects, {} visible conversations",
+                "Codex native project catalog is readable: {} visible projects, {} visible conversations",
                 list.projects.len(),
                 list.data.len()
             );

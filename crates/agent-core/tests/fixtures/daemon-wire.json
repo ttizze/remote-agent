@@ -186,7 +186,7 @@
             "path": "/fixture/workspace"
           }
         ],
-        "source": "codexDesktop",
+        "metadata": {},
         "updatedAt": 0
       }
     ]

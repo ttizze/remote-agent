@@ -290,7 +290,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, StartThread,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, AddProject, StartThread,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt, CloseSubscription,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,

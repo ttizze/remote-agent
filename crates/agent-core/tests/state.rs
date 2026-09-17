@@ -807,3 +807,38 @@ fn terminal_disconnect_keeps_resumption_and_host_switch_drops_old_handles() {
     let (other_host, _) = reduce(&late_failure, Event::StorageScope("other-host".into()));
     assert!(other_host.terminals.is_empty());
 }
+
+#[test]
+fn project_registration_navigates_only_while_current() {
+    use agent_core::state::Intent;
+    let previous = Snapshot {
+        connected: true,
+        ..Default::default()
+    };
+    let operation = op::AddProject {
+        cwd: "/new-project".into(),
+    };
+    let (pending, _) = reduce(
+        &previous,
+        Event::Intent(Intent::AddProject(operation.clone())),
+    );
+    assert_eq!(pending.navigation, previous.navigation);
+    let (opened, effects) = applied(&pending, operation.clone(), "/resolved-project".into());
+    assert_eq!(opened.navigation.cwd, "/resolved-project");
+    assert_eq!(opened.navigation.draft_key, "new:/resolved-project");
+    assert_eq!(effects.len(), 2); // Workspace review and project-list refresh.
+    let (mut elsewhere, _) = reduce(
+        &pending,
+        Event::Intent(Intent::NewChat {
+            cwd: "/elsewhere".into(),
+        }),
+    );
+    let navigation = elsewhere.navigation.clone();
+    assert_eq!(
+        operation
+            .stale(&mut elsewhere, "/resolved-project".into())
+            .len(),
+        1
+    );
+    assert_eq!(elsewhere.navigation, navigation);
+}

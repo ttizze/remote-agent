@@ -1,5 +1,63 @@
 use super::*;
 
+#[derive(Clone)]
+struct SidebarSection {
+    label: &'static str,
+    menu: SidebarMenu,
+    add_project: Option<(WeakEntity<Desktop>, bool)>,
+}
+
+impl Collapsible for SidebarSection {
+    fn is_collapsed(&self) -> bool {
+        self.menu.is_collapsed()
+    }
+
+    fn collapsed(mut self, collapsed: bool) -> Self {
+        self.menu = self.menu.collapsed(collapsed);
+        self
+    }
+}
+
+impl SidebarItem for SidebarSection {
+    fn render(
+        self,
+        id: impl Into<ElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl IntoElement {
+        v_flex()
+            .when(!self.is_collapsed(), |section| {
+                section.child(
+                    h_flex()
+                        .h_8()
+                        .flex_shrink_0()
+                        .px_2()
+                        .text_xs()
+                        .text_color(cx.theme().sidebar_foreground.opacity(0.7))
+                        .child(div().flex_1().child(self.label))
+                        .when_some(self.add_project, |header, (desktop, enabled)| {
+                            header.child(
+                                Button::new("choose-project")
+                                    .icon(IconName::Plus)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("プロジェクトを追加")
+                                    .accessibility_label("プロジェクトを追加")
+                                    .disabled(!enabled)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = desktop.update(cx, |desktop, cx| {
+                                            desktop.pick_folder();
+                                            cx.notify();
+                                        });
+                                    }),
+                            )
+                        }),
+                )
+            })
+            .child(self.menu.render(id, window, cx))
+    }
+}
+
 impl Desktop {
     pub(super) fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let list = self.snapshot.thread_list();
@@ -143,21 +201,7 @@ impl Desktop {
                                 |s, _, _| s.sidebar = false,
                             )),
                     )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .child(div().flex_1().text_lg().font_semibold().child("Bex"))
-                            .child(
-                                self.icon_button(
-                                    "choose-project",
-                                    IconName::FolderOpen,
-                                    "プロジェクトを追加",
-                                    cx,
-                                    |s, _, _| s.pick_folder(),
-                                )
-                                .disabled(!self.snapshot.connected || self.remote.is_some()),
-                            ),
-                    )
+                    .child(div().w_full().text_lg().font_semibold().child("Bex"))
                     .when_some(
                         list.as_ref().and_then(|list| list.notice.clone()),
                         |this, notice| this.child(div().px_3().py_2().text_sm().child(notice)),
@@ -171,8 +215,19 @@ impl Desktop {
                             .aria_label("会話を検索"),
                     ),
             )
-            .child(SidebarGroup::new("プロジェクト").child(projects))
-            .child(SidebarGroup::new("チャット").child(chats))
+            .child(SidebarSection {
+                label: "プロジェクト",
+                menu: projects,
+                add_project: Some((
+                    cx.entity().downgrade(),
+                    self.snapshot.connected && self.remote.is_none(),
+                )),
+            })
+            .child(SidebarSection {
+                label: "チャット",
+                menu: chats,
+                add_project: None,
+            })
             .footer(
                 h_flex()
                     .w_full()

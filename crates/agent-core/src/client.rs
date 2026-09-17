@@ -835,6 +835,12 @@ pub struct TerminalSize {
 }
 
 // Shared Host/Client request records; Store behavior lives in state::operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct AddProject {
+    pub cwd: String,
+}
+
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

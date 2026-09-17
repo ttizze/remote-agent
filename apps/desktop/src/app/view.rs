@@ -9,7 +9,7 @@ use agent_core::state::operations as op;
 use base64::Engine;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
-    sidebar::{Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem},
     tab::{Tab as UiTab, TabBar},
 };
 use std::path::PathBuf;

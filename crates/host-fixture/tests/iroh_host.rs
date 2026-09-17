@@ -6,7 +6,7 @@ use agent_core::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
-use host_daemon::{DesktopProjectStore, HostCredentials, HostRpcService};
+use host_daemon::{HostCredentials, HostRpcService, ProjectStore};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -723,9 +723,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({
                         "settings":{"createOnNewSession":automatic,"worktreeDirectory":destination}
                     })).unwrap()).unwrap();
-                    std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!({
-                        "local-projects":{"default":{"id":"default","name":"Default checkout","rootPaths":[root]}}
-                    })).unwrap()).unwrap();
+                    std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!([{"id":"default","name":"Default checkout","roots":[{"path":root}]}])).unwrap()).unwrap();
                     let source = root.join("photo.png");
                     let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
                     std::fs::write(&source, bytes).unwrap();
@@ -1200,9 +1198,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!({
-            "local-projects": {"workspace": {"id":"workspace", "name":"Workspace", "rootPaths":[directory.path()]}}
-        })).unwrap()).unwrap();
+        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
 
@@ -1280,12 +1276,12 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
 async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        let mut projects = serde_json::Map::new();
+        let mut projects = Vec::new();
         let mut threads = Vec::new();
         for project in 1..=7 {
             let id = format!("project-{project}");
             let cwd = directory.path().join(&id);
-            projects.insert(id.clone(), json!({"id":id,"name":format!("Project {project:02}"),"rootPaths":[cwd]}));
+            projects.push(json!({"id":id,"name":format!("Project {project:02}"),"roots":[{"path":cwd}]}));
             for index in 1..=18 {
                 threads.push(json!({"id":format!("p{project}-{index}"),"cwd":cwd,"name":format!("Project {project:02} conversation {index:02}"),"updatedAt":project*100+index,"preview":"unused history".repeat(1000)}));
             }
@@ -1294,9 +1290,9 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             threads.push(json!({"id":format!("chat-{index}"),"cwd":directory.path().join("unassigned"),"name":format!("Chat {index:02}"),"updatedAt":index}));
         }
         threads.extend([
-            json!({"id":"explicit","cwd":directory.path().join("unassigned"),"name":"Explicit assignment","updatedAt":90000}),
-            json!({"id":"projectless","cwd":directory.path().join("project-7"),"name":"Explicit chat","updatedAt":90001}),
-            json!({"id":"worktree","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
+            json!({"id":"explicit","projectId":"project-3","cwd":directory.path().join("unassigned"),"name":"Explicit assignment","updatedAt":90000}),
+            json!({"id":"projectless","projectId":null,"cwd":directory.path().join("project-7"),"name":"Explicit chat","updatedAt":90001}),
+            json!({"id":"worktree","projectId":"project-5","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
         ]);
         let rollout = directory.path().join("external-rollout.jsonl");
         std::fs::write(&rollout, "initial\n").unwrap();
@@ -1305,12 +1301,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         external["status"] = json!({"type":"notLoaded"});
         external["path"] = json!(rollout);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!({
-            "local-projects":projects,
-            "thread-project-assignments":{"explicit":{"projectId":"project-3"}},
-            "projectless-thread-ids":["projectless"],
-            "thread-workspace-root-hints":{"worktree":directory.path().join("project-5")}
-        })).unwrap()).unwrap();
+        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
 
@@ -1374,11 +1365,9 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
         std::fs::write(workspace.join(".env"), "FIXTURE_VALUE=isolated\n").unwrap();
         let project_state = root.join("projects.json");
-        std::fs::write(&project_state, serde_json::to_vec(&json!({
-            "local-projects":{"workspace":{"id":"workspace","name":"Workspace","rootPaths":[workspace]}}
-        })).unwrap()).unwrap();
+        std::fs::write(&project_state, serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(&project_state));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")));
         let mut session = service.open_session(64);
         async fn request(service: &HostRpcService, session: &mut host_daemon::HostSession, method: &str, params: Value) -> Value {
             service.dispatch(session.id(), &agent_core::peer::RpcMessage::parse(&json!({"id":42,"method":method,"params":params}).to_string()).unwrap()).await.unwrap();
@@ -1427,7 +1416,7 @@ async fn session_worktree_settings_route_both_start_methods_and_preserve_project
                 assert_eq!(global["thread"]["projectId"], Value::Null);
                 chat_ids.push(global["thread"]["id"].clone());
         }
-        let restarted = HostRpcService::new(Ok(server.clone()), DesktopProjectStore::new(&project_state));
+        let restarted = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")));
         let mut restarted_session = restarted.open_session(64);
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
         for id in &chat_ids {
@@ -1502,9 +1491,7 @@ async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
 async fn daemon_model_wire_fixture() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!({
-            "local-projects":{"workspace":{"id":"workspace","name":"Workspace","rootPaths":[directory.path()]}}
-        })).unwrap()).unwrap();
+        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
         let started = rpc(&local.peer, "host/thread/start", json!({"cwd":directory.path()})).await;
@@ -1799,7 +1786,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         );
         let service = HostRpcService::new(
             Ok(server.clone()),
-            DesktopProjectStore::new(root.join("projects.json")),
+            ProjectStore::new(root.join("bex-worktrees.json")),
         );
         let runtime = Arc::new(
             HostRuntime::new(service, host_endpoint, credentials, "shared Host".into()).await,
@@ -2016,7 +2003,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 std::os::unix::fs::symlink(&project, &configured_project).unwrap();
                 #[cfg(not(unix))]
                 let configured_project = project.clone();
-                std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[configured_project]}}})).unwrap()).unwrap();
+                std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
                 let program = host_fixture::fixture::Config { deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();
@@ -2647,4 +2634,94 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
     })
     .await
     .expect("large item transfers exceeded deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adding_a_chat_folder_registers_a_project_before_submission() {
+    use agent_core::{
+        state::{Intent, Snapshot},
+        store::Store,
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let folder = root.join("new-project");
+        std::fs::create_dir(&folder).unwrap();
+        let fixture = start_host(&root).await;
+        let local = fixture.local().await.unwrap();
+        let direct = fixture.local().await.unwrap();
+        let peer = &direct.peer;
+        let store = Store::new(local.peer, Snapshot::default());
+        let mut updates = store.subscribe();
+        updates
+            .wait_for(|snapshot| snapshot.connected && snapshot.threads.is_some())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let registration = store.dispatch(Intent::AddProject(op::AddProject {
+                cwd: folder.to_str().unwrap().into(),
+            }));
+            let duplicate = rpc(peer, "host/project/add", json!({"cwd":folder}));
+            let (registered, duplicate) = tokio::join!(registration, duplicate);
+            registered.unwrap();
+            assert_eq!(duplicate, folder.to_str().unwrap());
+            updates
+                .wait_for(|snapshot| {
+                    snapshot.navigation.cwd == folder.to_str().unwrap()
+                        && snapshot.thread_list().is_some_and(|list| {
+                            list.projects
+                                .iter()
+                                .any(|project| project.name == "new-project")
+                        })
+                })
+                .await
+                .unwrap();
+            let snapshot = store.snapshot();
+            let list = snapshot.thread_list().unwrap();
+            assert_eq!(list.projects.len(), 1);
+            assert!(list.threads.is_empty());
+            assert_eq!(
+                snapshot.navigation.draft_key,
+                format!("new:{}", folder.display())
+            );
+            assert_eq!(snapshot.error, None);
+        }
+        let project_id = store.snapshot().thread_list().unwrap().projects[0]
+            .id
+            .clone();
+        let created = rpc(peer, "host/thread/start", json!({"cwd":folder})).await;
+        assert_eq!(created["thread"]["projectId"], project_id);
+        let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
+        assert!(
+            trace
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|event| event["method"] == "thread/start" && event["hasProjectId"] == true)
+        );
+        assert!(!root.join("bex-projects.json").exists());
+        assert!(!root.join(".codex-global-state.json").exists());
+        store.close().await.unwrap();
+        local.endpoint.close().await;
+        direct.close().await.unwrap();
+        let memory = fixture.memory.clone();
+        fixture.close().await.unwrap();
+        let reopened = HostFixture::start(
+            &root,
+            codex_fixture::config(&root),
+            memory,
+            "isolated Host",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let client = reopened.local().await.unwrap();
+        let list = rpc(&client.peer, "host/thread/list", json!({})).await;
+        assert_eq!(list["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(list["projects"][0]["name"], "new-project");
+        client.close().await.unwrap();
+        reopened.close().await.unwrap();
+    })
+    .await
+    .expect("project registration deadline");
 }

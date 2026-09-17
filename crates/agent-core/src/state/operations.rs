@@ -48,6 +48,7 @@ pub enum Intent {
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
     ListThreads(ListThreads),
+    AddProject(AddProject),
     ExpandThreadList {
         project_id: Option<String>,
         projects: bool,

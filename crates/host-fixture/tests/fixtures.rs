@@ -82,7 +82,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
     tokio::time::timeout(Duration::from_secs(10), async {
         let fixture = tempfile::tempdir().unwrap();
         let root = fixture.path().canonicalize().unwrap();
-        let original = b"{\"local-projects\":{},\"project-order\":[],\"preserve\":true}\n";
+        let original = b"[]\n";
         fs::write(root.join("projects.json"), original).unwrap();
         let host = HostFixture::start(
             &root,

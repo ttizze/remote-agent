@@ -2,7 +2,7 @@ use crate::command_line::StartupConfig;
 use agent_core::transport::{Endpoint, Relays};
 use anyhow::{Context, Result};
 use host_daemon::{
-    DesktopProjectStore, HostCredentials, HostRpcService, HostRuntime,
+    HostCredentials, HostRpcService, HostRuntime, ProjectStore,
     local_host::{HostLease, LocalHostRegistry},
 };
 use std::sync::Arc;
@@ -63,8 +63,8 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         ..Default::default()
     };
     let projects = match &app_server_config.codex_home {
-        Some(home) => DesktopProjectStore::new(home.join(".codex-global-state.json")),
-        None => DesktopProjectStore::from_environment().context("cannot locate project state")?,
+        Some(home) => ProjectStore::new(home.join("bex-worktrees.json")),
+        None => ProjectStore::from_environment().context("cannot locate project state")?,
     };
     let app_server = codex_app_server::CodexAppServer::spawn(app_server_config.clone())
         .await

@@ -1,5 +1,26 @@
 use super::*;
 
+pub use crate::client::AddProject;
+rpc::rpc_method!(AddProject, String, "host/project/add");
+
+impl Operation for AddProject {
+    rpc_operation!();
+    const INVALIDATES: bool = true;
+    fn apply(self, snapshot: &mut Snapshot, cwd: Self::Output) -> Vec<Effect> {
+        let (next, mut effects) = reduce_intent(snapshot, Intent::NewChat { cwd });
+        *snapshot = next;
+        effects.push(Effect::execute(ListThreads::new(
+            (*snapshot.list_query).clone(),
+        )));
+        effects
+    }
+    fn stale(self, snapshot: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
+        vec![Effect::execute(ListThreads::new(
+            (*snapshot.list_query).clone(),
+        ))]
+    }
+}
+
 pub use crate::client::ListThreads;
 impl ListThreads {
     pub fn new(query: ListQuery) -> Self {
