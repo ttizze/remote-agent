@@ -30,7 +30,7 @@ struct BexIOSApp: App {
                         }
                     case .active where wasBackgrounded:
                         wasBackgrounded = false
-                        model.connect()
+                        model.connect(afterForeground: true)
                     default:
                         break
                     }
