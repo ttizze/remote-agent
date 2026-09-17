@@ -1336,7 +1336,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             let cwd = directory.path().join(&id);
             projects.push(json!({"id":id,"name":format!("Project {project:02}"),"roots":[{"path":cwd}]}));
             for index in 1..=18 {
-                threads.push(json!({"id":format!("p{project}-{index}"),"cwd":cwd,"name":format!("Project {project:02} conversation {index:02}"),"updatedAt":project*100+index,"preview":"unused history".repeat(1000)}));
+                threads.push(json!({"id":format!("p{project}-{index}"),"projectId":null,"cwd":cwd,"name":format!("Project {project:02} conversation {index:02}"),"updatedAt":project*100+index,"preview":"unused history".repeat(1000)}));
             }
         }
         for index in 1..=18 {
@@ -1344,7 +1344,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         }
         threads.extend([
             json!({"id":"explicit","projectId":"project-3","cwd":directory.path().join("unassigned"),"name":"Explicit assignment","updatedAt":90000}),
-            json!({"id":"projectless","projectId":null,"cwd":directory.path().join("project-7"),"name":"Explicit chat","updatedAt":90001}),
+            json!({"id":"projectless","projectId":null,"cwd":directory.path().join("bex-chats"),"name":"Explicit chat","updatedAt":90001}),
             json!({"id":"worktree","projectId":"project-5","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
         ]);
         let rollout = directory.path().join("external-rollout.jsonl");
@@ -1391,6 +1391,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(found["data"].as_array().unwrap().len(), 5);
         assert_eq!(found["data"][0]["id"], "p1-18");
         let body = open_session(&mobile.peer, &json!("p5-1"), 5).await.0["response"].clone();
+        assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body["thread"]["turns"][0]["items"][0]["text"], "History for Project 05 conversation 01");
         assert_eq!(body["thread"]["status"]["type"], "notLoaded");
         let item = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":"p5-1","turnId":"turn-p5-1","itemId":"answer-p5-1"})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();

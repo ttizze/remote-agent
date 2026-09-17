@@ -20,9 +20,16 @@ impl Snapshot {
             })
         })
     }
-    pub(crate) fn project_for_directory(&self, cwd: Option<&str>) -> ProjectMembership {
+    pub(crate) fn project_membership(
+        &self,
+        cwd: Option<&str>,
+        assigned: &ProjectMembership,
+    ) -> ProjectMembership {
+        if matches!(assigned, ProjectMembership::Assigned(_)) {
+            return assigned.clone();
+        }
         let Some(cwd) = cwd else {
-            return ProjectMembership::Unknown {};
+            return assigned.clone();
         };
         if self
             .chat_directory
@@ -33,7 +40,7 @@ impl Snapshot {
         } else {
             self.project_for_workspace(cwd)
                 .map(|id| ProjectMembership::Assigned(id.to_owned()))
-                .unwrap_or_default()
+                .unwrap_or_else(|| assigned.clone())
         }
     }
     pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
@@ -124,13 +131,41 @@ mod tests {
         );
     }
     #[test]
-    fn chat_scope_and_relative_roots_do_not_gain_project_membership() {
+    fn null_membership_uses_workspace_without_overriding_native_assignments() {
         let mut snapshot = snapshot();
+        snapshot
+            .worktree_roots
+            .insert("/checkout".into(), "/work/a".into());
         snapshot.chat_directory = Some("/work/a/chats".into());
+        for assigned in [
+            ProjectMembership::Unknown {},
+            ProjectMembership::Unassigned {},
+        ] {
+            for (cwd, expected) in [("/work/a/src", "a"), ("/checkout/packages/app", "nested")] {
+                assert_eq!(
+                    snapshot.project_membership(Some(cwd), &assigned),
+                    ProjectMembership::Assigned(expected.into())
+                );
+            }
+            assert_eq!(
+                snapshot.project_membership(Some("/work/a/chats"), &assigned),
+                ProjectMembership::Unassigned {}
+            );
+            assert_eq!(
+                snapshot.project_membership(Some("/outside"), &assigned),
+                assigned
+            );
+            assert_eq!(snapshot.project_membership(None, &assigned), assigned);
+        }
         assert_eq!(
-            snapshot.project_for_directory(Some("/work/a/chats")),
-            ProjectMembership::Unassigned {}
+            snapshot.project_membership(Some("/work/a"), &ProjectMembership::Assigned("b".into())),
+            ProjectMembership::Assigned("b".into())
         );
+    }
+
+    #[test]
+    fn relative_roots_do_not_gain_project_membership() {
+        let mut snapshot = snapshot();
         snapshot.projects = serde_json::from_value(
             json!([{"id":"relative","name":"Relative","roots":[{"path":"."}]}]),
         )

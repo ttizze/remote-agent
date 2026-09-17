@@ -92,8 +92,10 @@ retrieval and reopening.
 Desktop's project heading has a “＋” action. Both this action and the new-chat
 folder picker use Codex's `project/create` API before opening the chat draft.
 The Host reads `project/list` and supplies `projectId` when starting a chat in
-that project. Native assignments, including an explicit null, are authoritative.
-Claude sessions use the same catalog with Host workspace matching. Bex keeps no
+that project. A non-null native assignment is authoritative. Missing or null
+membership uses Host workspace matching for both Codex and Claude, including
+worktree roots. A null alone does not indicate an intentional projectless chat;
+Bex's dedicated chat directory remains projectless. Bex keeps no
 separate persistent project registry and does not read Desktop's retired JSON
 project metadata. A late registration refreshes the list without changing newer
 navigation.

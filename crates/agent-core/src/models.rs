@@ -37,7 +37,7 @@ pub struct HostStatus {
     pub provider_errors: Option<Map<String, Value>>,
 }
 
-/// Missing provider membership permits cwd fallback; explicit null means a chat.
+/// Provider membership before Host enrichment; null alone does not rule out cwd membership.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProjectMembership {
     Unknown {},

@@ -352,8 +352,9 @@ impl HostRpcService {
             }
             response.thread.id = Some(target.thread_id());
             response.thread.project_id = self
-                .project_membership(response.thread.cwd.as_deref(), &response.thread.project_id)
-                .await?;
+                .project_snapshot()
+                .await?
+                .project_membership(response.thread.cwd.as_deref(), &response.thread.project_id);
             response.thread.capabilities = Some(provider_capabilities(target.provider));
             response.thread.session = Some(target.clone());
             let more = response.thread.history_has_more == Some(true)
@@ -798,17 +799,6 @@ impl HostRpcService {
             .map_err(|error| Failure::new("worktree_remove_failed", error))
     }
 
-    async fn project_membership(
-        &self,
-        cwd: Option<&str>,
-        assigned: &agent_core::models::ProjectMembership,
-    ) -> Result<agent_core::models::ProjectMembership, Failure> {
-        if !matches!(assigned, agent_core::models::ProjectMembership::Unknown {}) {
-            return Ok(assigned.clone());
-        }
-        Ok(self.project_snapshot().await?.project_for_directory(cwd))
-    }
-
     async fn project_snapshot(&self) -> Result<crate::projects::state::Snapshot, Failure> {
         let projects = if self.inner.codex.server().is_ok() {
             Some(self.inner.codex.projects().await?)
@@ -918,20 +908,12 @@ impl HostRpcService {
                 }) {
                     let mut claude = claude_threads.next().unwrap();
                     describe_thread(&mut claude, agent_core::session::ProviderKind::Claude);
-                    if matches!(
-                        claude.project_id,
-                        agent_core::models::ProjectMembership::Unknown {}
-                    ) {
-                        claude.project_id = snapshot.project_for_directory(claude.cwd.as_deref());
-                    }
+                    claude.project_id =
+                        snapshot.project_membership(claude.cwd.as_deref(), &claude.project_id);
                     titles.push(claude);
                 }
-                if matches!(
-                    thread.project_id,
-                    agent_core::models::ProjectMembership::Unknown {}
-                ) {
-                    thread.project_id = snapshot.project_for_directory(thread.cwd.as_deref());
-                }
+                thread.project_id =
+                    snapshot.project_membership(thread.cwd.as_deref(), &thread.project_id);
                 titles.push(thread);
             }
             params.cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
@@ -947,12 +929,8 @@ impl HostRpcService {
         }
         for mut thread in claude_threads {
             describe_thread(&mut thread, agent_core::session::ProviderKind::Claude);
-            if matches!(
-                thread.project_id,
-                agent_core::models::ProjectMembership::Unknown {}
-            ) {
-                thread.project_id = snapshot.project_for_directory(thread.cwd.as_deref());
-            }
+            thread.project_id =
+                snapshot.project_membership(thread.cwd.as_deref(), &thread.project_id);
             titles.push(thread);
         }
         let mut page = titles.finish();
@@ -1045,8 +1023,9 @@ impl HostRpcService {
         };
         describe_thread(&mut response.thread, provider);
         response.thread.project_id = self
-            .project_membership(response.thread.cwd.as_deref(), &response.thread.project_id)
-            .await?;
+            .project_snapshot()
+            .await?
+            .project_membership(response.thread.cwd.as_deref(), &response.thread.project_id);
         Ok(response)
     }
 
