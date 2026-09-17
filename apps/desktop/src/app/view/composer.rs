@@ -449,7 +449,7 @@ impl Desktop {
         {
             body = body.child(div().px_4().py_2().text_sm().child(notice));
         }
-        if self.thread().is_none() && pending_rows(&self.snapshot).next().is_none() {
+        if self.rendered.is_none() {
             body = body.child(
                 v_flex()
                     .flex_1()

@@ -283,8 +283,9 @@ pub fn remaining_submissions<'a>(
     retained
 }
 
-/// Place pending inputs after their saved native anchor. An absent anchor goes
-/// at the tail; repeated native IDs use the latest occurrence, never duplicating
+/// Place pending inputs after their saved native anchor. No anchor means before
+/// the first item; an unloaded anchor goes at the tail. Repeated native IDs use
+/// the latest occurrence, never duplicating
 /// a pending input. Indices >= item_count refer to the pending input slice.
 pub fn source_order<'a>(
     item_count: usize,
@@ -294,26 +295,28 @@ pub fn source_order<'a>(
     let positions: Vec<_> = anchors
         .iter()
         .map(|anchor| {
-            anchor.and_then(|anchor| {
+            anchor.map_or(0, |anchor| {
                 (0..item_count)
                     .rev()
                     .find(|&index| item_id(index) == anchor)
+                    .map_or(item_count, |index| index + 1)
             })
         })
         .collect();
     let mut order = Vec::with_capacity(item_count + anchors.len());
-    for index in 0..item_count {
-        order.push(index);
-        order.extend(positions.iter().enumerate().filter_map(|(pending, after)| {
-            (*after == Some(index)).then_some(item_count + pending)
-        }));
+    for boundary in 0..=item_count {
+        order.extend(
+            positions
+                .iter()
+                .enumerate()
+                .filter_map(|(pending, &position)| {
+                    (position == boundary).then_some(item_count + pending)
+                }),
+        );
+        if boundary < item_count {
+            order.push(boundary);
+        }
     }
-    order.extend(
-        positions
-            .iter()
-            .enumerate()
-            .filter_map(|(pending, after)| after.is_none().then_some(item_count + pending)),
-    );
     order
 }
 
@@ -636,7 +639,7 @@ mod projection_tests {
                 |i| ids[i],
                 &[Some("repeat"), Some("missing"), Some("repeat"), None]
             ),
-            [0, 1, 2, 4, 6, 3, 5, 7]
+            [7, 0, 1, 2, 4, 6, 3, 5]
         );
     }
     #[test]

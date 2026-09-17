@@ -1095,10 +1095,10 @@ impl Desktop {
             .filter(|item| item.kind.as_deref() == Some("userMessage"))
     }
     fn sync_rows(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.rendered = self.thread().map(|thread| {
+        self.rendered = self.snapshot.conversation_source().map(|thread| {
             agent_core::presentation::conversation::project_conversation(
                 &self.snapshot,
-                thread.clone(),
+                thread,
                 &self.rendered,
             )
         });
@@ -1682,13 +1682,6 @@ impl Desktop {
         );
     }
 }
-fn pending_rows(snapshot: &Snapshot) -> impl Iterator<Item = (&String, &Arc<PendingSubmission>)> {
-    snapshot
-        .pending_submissions
-        .iter()
-        .filter(|(_, pending)| pending.draft_key == snapshot.navigation.draft_key)
-}
-
 fn conversation_rows(
     snapshot: &Snapshot,
     rendered: &Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
@@ -1706,11 +1699,6 @@ fn conversation_rows(
                 None
             }
         }));
-    } else {
-        rows.extend(
-            pending_rows(snapshot)
-                .map(|(id, pending)| ConversationRow::Pending(id.clone(), pending.clone())),
-        );
     }
     let projected_requests: HashSet<_> = rendered
         .iter()

@@ -344,6 +344,7 @@ fn local_storage_keeps_user_work_without_host_caches() {
             [(
                 "send-id".into(),
                 Arc::new(PendingSubmission {
+                    sequence: 0,
                     draft_key: "native".into(),
                     draft,
                     turn_id: Some("turn".into()),

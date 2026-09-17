@@ -290,8 +290,9 @@ impl Operation for SendSubmission {
         {
             let pending = Arc::make_mut(pending);
             pending.accepted = true;
-            if pending.turn_id.is_none() {
+            if turn_id.is_some() && pending.turn_id != turn_id {
                 pending.turn_id = turn_id;
+                pending.after_item_id = None;
             }
         }
         reconcile_pending(snapshot, &thread_id);

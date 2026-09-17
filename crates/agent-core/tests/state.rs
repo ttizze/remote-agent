@@ -106,6 +106,7 @@ fn snapshot_preserves_history_drafts_and_navigation() {
     snapshot.pending_submissions = Arc::new(BTreeMap::from([(
         "sent".into(),
         Arc::new(agent_core::state::PendingSubmission {
+            sequence: 0,
             draft_key: "thread".into(),
             draft: snapshot.drafts["thread"].clone(),
             turn_id: Some("latest".into()),
@@ -202,6 +203,52 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
         assert!(finished.pending_submissions.is_empty());
         assert_eq!(pending.pending_submissions.len(), 1);
     }
+}
+
+#[test]
+fn submission_acknowledgement_moves_to_the_returned_turn() {
+    use agent_core::state::Intent;
+    let previous = initial(
+        serde_json::from_value(json!({"id":"thread","turns":[{
+            "id":"old","status":"completed","items":[{"id":"answer","type":"agentMessage"}]
+        }]}))
+        .unwrap(),
+    );
+    let (mut pending, _) = reduce(
+        &previous,
+        Event::Intent(Intent::Submit {
+            thread_id: Some("thread".into()),
+            client_user_message_id: "client".into(),
+        }),
+    );
+    assert_eq!(
+        pending.pending_submissions["client"].turn_id.as_deref(),
+        Some("old")
+    );
+    assert_eq!(
+        pending.pending_submissions["client"]
+            .after_item_id
+            .as_deref(),
+        Some("answer")
+    );
+    op::SendSubmission {
+        thread_id: "thread".into(),
+        client_user_message_id: "client".into(),
+        draft: Arc::default(),
+    }
+    .apply(
+        &mut pending,
+        op::SubmissionProgress::Sent(Some("new".into())),
+    );
+    assert_eq!(
+        pending.pending_submissions["client"].turn_id.as_deref(),
+        Some("new")
+    );
+    assert!(
+        pending.pending_submissions["client"]
+            .after_item_id
+            .is_none()
+    );
 }
 
 #[test]

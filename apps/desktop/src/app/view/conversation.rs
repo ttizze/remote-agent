@@ -1260,6 +1260,7 @@ mod rendering_tests {
                     Arc::make_mut(&mut snapshot.pending_submissions).insert(
                         "pending".into(),
                         Arc::new(agent_core::state::PendingSubmission {
+                            sequence: 0,
                             draft_key: "fixture".into(),
                             draft: Arc::new(agent_core::state::Draft {
                                 text: "caption".into(),

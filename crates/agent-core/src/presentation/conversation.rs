@@ -237,15 +237,18 @@ pub fn project_conversation(
     source: Arc<models::Thread>,
     previous: &Option<Arc<RenderedConversation>>,
 ) -> Arc<RenderedConversation> {
-    let pending = snapshot
+    let mut pending: PendingItems = snapshot
         .pending_submissions
         .iter()
-        .filter(|(_, pending)| source.id.as_deref() == Some(pending.draft_key.as_str()));
+        .filter(|(_, pending)| source.id.as_deref() == Some(pending.draft_key.as_str()))
+        .map(|(id, pending)| (id.clone(), pending.clone()))
+        .collect();
+    pending.sort_by_key(|(_, pending)| pending.sequence);
     let requests = &snapshot.requests;
     if let Some(previous) = previous
         && Arc::ptr_eq(&source, &previous.source)
         && pending
-            .clone()
+            .iter()
             .map(|(id, pending)| (id, Arc::as_ptr(pending)))
             .eq(previous
                 .pending
@@ -255,9 +258,6 @@ pub fn project_conversation(
     {
         return previous.clone();
     }
-    let pending: PendingItems = pending
-        .map(|(id, pending)| (id.clone(), pending.clone()))
-        .collect();
     let previous = previous.as_ref().filter(|old| source.id == old.source.id);
     let cached: HashMap<_, _> = previous
         .into_iter()
@@ -266,12 +266,20 @@ pub fn project_conversation(
         .collect();
     let native = source.turns.as_deref().unwrap_or_default();
     let last_turn = native.last().map(|turn| turn.id.as_str());
+    // A submission made before any history belongs before the first turn once
+    // it arrives. An acknowledged queue entry still waits for its assigned turn.
+    let pending_turn = |pending: &PendingSubmission| match pending.turn_id.as_deref() {
+        Some(id) => native.iter().rposition(|turn| turn.id == id),
+        None if !pending.accepted && !native.is_empty() => Some(0),
+        None => None,
+    };
     let turns = native
         .iter()
-        .map(|turn| {
+        .enumerate()
+        .map(|(index, turn)| {
             let pending = pending
                 .iter()
-                .filter(|(_, p)| p.turn_id.as_deref() == Some(&turn.id));
+                .filter(|(_, p)| pending_turn(p) == Some(index));
             let requests =
                 requests.values().filter(|r| {
                     source.id.as_deref().is_some_and(|id| {
@@ -309,11 +317,7 @@ pub fn project_conversation(
         .collect();
     let queued = pending
         .iter()
-        .filter(|(_, p)| {
-            p.turn_id
-                .as_ref()
-                .is_none_or(|id| !native.iter().any(|turn| &turn.id == id))
-        })
+        .filter(|(_, p)| pending_turn(p).is_none())
         .map(|(id, p)| {
             RenderedItem::pending(
                 id,
@@ -823,11 +827,149 @@ mod tests {
     }
 
     #[test]
+    fn unknown_submissions_keep_send_order_and_position_after_reopening() {
+        use crate::state::{Event, Intent, reduce};
+        for status in ["completed", "inProgress"] {
+            let mut snapshot = Snapshot {
+                conversations: Arc::new(
+                    [(
+                        "thread".into(),
+                        Arc::new(
+                            serde_json::from_value(json!({"id":"thread","capabilities":{"additionalInput":true,"fork":false,"rename":false,"modelChange":false},"turns":[{
+                                "id":"before","status":status,"items":[
+                                    {"id":"answer","type":"agentMessage","text":"before"}
+                                ]
+                            }]}))
+                            .unwrap(),
+                        ),
+                    )]
+                    .into(),
+                ),
+                ..Default::default()
+            };
+            // IDs deliberately disagree with submission order.
+            for id in ["z-first", "a-second", "m-third"] {
+                Arc::make_mut(&mut snapshot.drafts).insert(
+                    "thread".into(),
+                    Arc::new(Draft {
+                        text: id.into(),
+                        ..Default::default()
+                    }),
+                );
+                snapshot = reduce(
+                    &snapshot,
+                    Event::Intent(Intent::Submit {
+                        thread_id: Some("thread".into()),
+                        client_user_message_id: id.into(),
+                    }),
+                )
+                .0;
+                snapshot = reduce(&snapshot, Event::SubmissionUnknown(id.into())).0;
+            }
+            let first = project_snapshot(snapshot.clone(), None);
+            let texts = |rendered: &RenderedConversation| {
+                rendered
+                    .turns
+                    .iter()
+                    .flat_map(|turn| turn.items())
+                    .chain(rendered.queued.iter())
+                    .map(|item| item.data.body.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(texts(&first), ["before", "z-first", "a-second", "m-third"]);
+            assert!(Arc::ptr_eq(
+                &first,
+                &project_snapshot(snapshot.clone(), Some(&first))
+            ));
+            let thread = Arc::make_mut(
+                Arc::make_mut(&mut snapshot.conversations)
+                    .get_mut("thread")
+                    .unwrap(),
+            );
+            thread.turns.as_mut().unwrap().push(Arc::new(
+                serde_json::from_value(json!({
+                    "id":"later","status":"completed","items":[
+                        {"id":"later-user","type":"userMessage","text":"later"}
+                    ]
+                }))
+                .unwrap(),
+            ));
+            let reopened: Snapshot =
+                serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            let rendered = project_snapshot(reopened, Some(&first));
+            assert_eq!(
+                texts(&rendered),
+                ["before", "z-first", "a-second", "m-third", "later"]
+            );
+            assert!(rendered.queued.is_empty());
+        }
+    }
+
+    #[test]
+    fn queued_submissions_keep_send_order_without_history() {
+        use crate::state::{Event, Intent, reduce};
+        let mut snapshot = Snapshot {
+            conversations: Arc::new(
+                [(
+                    "thread".into(),
+                    Arc::new(models::Thread {
+                        id: Some("thread".into()),
+                        ..Default::default()
+                    }),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        for id in ["z-first", "a-second", "m-third"] {
+            snapshot = reduce(
+                &snapshot,
+                Event::Intent(Intent::Submit {
+                    thread_id: Some("thread".into()),
+                    client_user_message_id: id.into(),
+                }),
+            )
+            .0;
+            snapshot = reduce(&snapshot, Event::SubmissionUnknown(id.into())).0;
+        }
+        let rendered = project_snapshot(snapshot.clone(), None);
+        assert_eq!(
+            rendered
+                .queued
+                .iter()
+                .map(|item| item.data.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-first", "a-second", "m-third"]
+        );
+        Arc::make_mut(
+            Arc::make_mut(&mut snapshot.conversations)
+                .get_mut("thread")
+                .unwrap(),
+        )
+        .turns = Some(vec![Arc::new(
+            serde_json::from_value(json!({"id":"later","items":[
+                {"id":"answer","type":"agentMessage","text":"later"}
+            ]}))
+            .unwrap(),
+        )]);
+        let updated = project_snapshot(snapshot, Some(&rendered));
+        assert!(updated.queued.is_empty());
+        assert_eq!(
+            updated.turns[0]
+                .items()
+                .map(|item| item.data.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-first", "a-second", "m-third", "answer"]
+        );
+    }
+
+    #[test]
     fn pending_input_remains_visible_until_its_turn_is_loaded() {
         let mut snapshot = fixture();
         Arc::make_mut(&mut snapshot.pending_submissions).insert(
             "pending".into(),
             Arc::new(PendingSubmission {
+                sequence: 0,
                 draft_key: "thread".into(),
                 draft: Arc::new(Draft {
                     text: "waiting for history".into(),
@@ -920,6 +1062,7 @@ mod tests {
         }
         let pending = |turn_id| {
             Arc::new(PendingSubmission {
+                sequence: 0,
                 draft_key: "thread".into(),
                 draft: Arc::new(Draft {
                     text: "queued text".into(),

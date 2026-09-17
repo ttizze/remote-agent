@@ -75,6 +75,7 @@ pub struct AccountState {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
+    pub sequence: u64,
     pub draft_key: String,
     pub draft: Arc<Draft>,
     pub turn_id: Option<String>,
@@ -910,23 +911,25 @@ fn submission(
                 .any(|sent| sent.path == attachment.path)
         });
     }
-    let active = thread_id
+    let anchor = thread_id
         .as_ref()
         .and_then(|id| previous.conversations.get(id))
         .and_then(|thread| thread.turns.as_ref())
-        .and_then(|turns| {
-            turns
-                .iter()
-                .rev()
-                .find(|turn| turn.status.as_deref() == Some("inProgress"))
-        });
+        .and_then(|turns| turns.last());
+    let sequence = previous
+        .pending_submissions
+        .values()
+        .map(|pending| pending.sequence)
+        .max()
+        .map_or(0, |last| last + 1);
     Arc::make_mut(&mut next.pending_submissions).insert(
         client_user_message_id.clone(),
         Arc::new(PendingSubmission {
+            sequence,
             draft_key: draft_key.clone(),
             draft: draft.clone(),
-            turn_id: active.map(|turn| turn.id.clone()),
-            after_item_id: active
+            turn_id: anchor.map(|turn| turn.id.clone()),
+            after_item_id: anchor
                 .and_then(|turn| turn.items.as_ref())
                 .and_then(|items| items.last())
                 .map(|item| item.id.clone()),

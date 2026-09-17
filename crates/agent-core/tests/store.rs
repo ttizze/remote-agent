@@ -2108,6 +2108,7 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
     saved.pending_submissions = Arc::new(BTreeMap::from([(
         "unsent".into(),
         Arc::new(PendingSubmission {
+            sequence: 0,
             draft_key: "thread".into(),
             draft,
             turn_id: None,
