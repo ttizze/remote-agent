@@ -103,8 +103,7 @@ struct WorktreeSettingsSheet: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         request(.updateWorktreeSettings(UpdateWorktreeSettings(settings: WorktreeSettings(
             createOnNewSession: createOnNewSession, copyOnCreate: copyOnCreate,
-            copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines),
-            extra: settings?.extra ?? [:]
+            copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines)
         )))) { snapshot, result in
             busy = false
             if case let .failure(failure) = result {

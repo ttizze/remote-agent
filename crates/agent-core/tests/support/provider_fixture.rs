@@ -4,7 +4,7 @@ use agent_core::{
     session::{SessionChange, TextField},
 };
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,8 +21,6 @@ struct NotificationParams {
     will_retry: bool,
     review_id: Option<String>,
     review: Option<Value>,
-    #[serde(flatten)]
-    extra: Map<String, Value>,
 }
 
 /// Decode the existing adapters' notification vocabulary once, at the boundary.
@@ -72,7 +70,7 @@ pub(super) fn notification_change(
         }),
         "item/started" | "item/completed" => params.item.map(|item| SessionChange::Item {
             turn_id: turn_id.clone(),
-            item,
+            item: item.into(),
         }),
         "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
             params.review_id.map(|id| {
@@ -86,20 +84,15 @@ pub(super) fn notification_change(
                         item_id: id,
                     }
                 } else {
-                    let mut extra = params.extra;
-                    extra.insert("threadId".into(), Value::String(params.thread_id.clone()));
-                    extra.insert("turnId".into(), Value::String(turn_id.clone()));
-                    if let Some(review) = params.review {
-                        extra.insert("review".into(), review);
-                    }
                     SessionChange::Item {
                         turn_id: turn_id.clone(),
                         item: Item {
                             id,
                             kind: Some("automaticApprovalReview".into()),
-                            extra,
+                            review: params.review,
                             ..Default::default()
-                        },
+                        }
+                        .into(),
                     }
                 }
             })

@@ -1,3 +1,5 @@
+use agent_core::protocol::Body;
+use agent_core::protocol::Call;
 use std::{collections::HashMap, path::PathBuf};
 
 use agent_core::{
@@ -50,39 +52,6 @@ pub(crate) struct Accounts {
     login: Option<Login>,
     completed_login: Option<(String, String)>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "method", content = "params")]
-pub(crate) enum AccountRequest {
-    #[serde(rename = "host/account/list")]
-    List(Empty),
-    #[serde(rename = "host/account/select")]
-    Select(op::SelectAccount),
-    #[serde(rename = "host/account/logout")]
-    Logout(op::LogoutAccount),
-    #[serde(rename = "host/account/login/start")]
-    LoginStart(Empty),
-    #[serde(rename = "host/account/login/status")]
-    LoginStatus(op::ReadAccountLogin),
-    #[serde(rename = "host/account/login/cancel")]
-    LoginCancel(op::CancelAccountLogin),
-}
-#[derive(Serialize)]
-#[serde(untagged, rename_all_fields = "camelCase")]
-pub(crate) enum AccountResponse<'a> {
-    List {
-        accounts: &'a [Account],
-        selected_id: Option<&'a str>,
-        error: Option<String>,
-    },
-    Selected {
-        selected_id: String,
-        persistence_error: Option<String>,
-    },
-    Login(AccountLogin),
-    Status(AccountLoginStatus),
-    Empty(Empty),
 }
 
 impl Accounts {
@@ -184,10 +153,10 @@ impl Accounts {
     pub(crate) async fn request(
         &mut self,
         primary: &CodexAppServer,
-        request: AccountRequest,
-    ) -> Result<AccountResponse<'_>, String> {
+        request: Call,
+    ) -> Result<Body, String> {
         match request {
-            AccountRequest::List(_) => {
+            Call::ListAccounts(_) => {
                 self.discover_desktop().await?;
                 let selected = if self.restoration_error.borrow().is_some() {
                     None
@@ -200,20 +169,31 @@ impl Accounts {
                             .then_some("desktop")
                     })
                 };
-                Ok(AccountResponse::List {
-                    accounts: &self.registry.accounts,
-                    selected_id: selected,
+                Ok(op::Accounts {
+                    accounts: self
+                        .registry
+                        .accounts
+                        .iter()
+                        .map(|account| op::Account {
+                            id: account.id.clone(),
+                            email: Some(account.email.clone()),
+                            plan_type: Some(account.plan_type.clone()),
+                        })
+                        .collect(),
+                    selected_id: selected.map(str::to_owned),
                     error: self.restoration_error.borrow().clone(),
-                })
+                }
+                .into())
             }
-            AccountRequest::Select(params) => {
+            Call::SelectAccount(params) => {
                 self.select(primary, &params.id).await?;
-                Ok(AccountResponse::Selected {
+                Ok(op::AccountSelection {
                     selected_id: params.id,
                     persistence_error: self.save().await.err(),
-                })
+                }
+                .into())
             }
-            AccountRequest::Logout(params) => {
+            Call::LogoutAccount(params) => {
                 if !self
                     .registry
                     .accounts
@@ -257,9 +237,9 @@ impl Accounts {
                     self.registry.selected_id = None;
                 }
                 self.save().await?;
-                Ok(AccountResponse::Empty(Empty {}))
+                Ok(Body::from(Empty {}))
             }
-            AccountRequest::LoginStart(_) => {
+            Call::StartAccountLogin(_) => {
                 if self.login.is_some() {
                     self.cancel_login().await?;
                 }
@@ -296,31 +276,29 @@ impl Accounts {
                     completed: false,
                 });
                 self.completed_login = None;
-                Ok(AccountResponse::Login(response))
+                Ok(Body::from(response))
             }
-            AccountRequest::LoginStatus(params) => self
-                .login_status(&params.id)
-                .await
-                .map(AccountResponse::Status),
-            AccountRequest::LoginCancel(params) => {
+            Call::ReadAccountLogin(params) => self.login_status(&params.id).await.map(Body::from),
+            Call::CancelAccountLogin(params) => {
                 if self
                     .completed_login
                     .as_ref()
                     .is_some_and(|(id, _)| params.id == *id)
                 {
-                    return Ok(AccountResponse::Empty(Empty {}));
+                    return Ok(Body::from(Empty {}));
                 }
                 // A failed/expired status read may already have discarded the helper.
                 // Let clients dismiss that login and start again.
                 let Some(login) = self.login.as_ref() else {
-                    return Ok(AccountResponse::Empty(Empty {}));
+                    return Ok(Body::from(Empty {}));
                 };
                 if params.id != login.id {
                     return Err("ログイン手続きが一致しません。".into());
                 }
                 self.cancel_login().await?;
-                Ok(AccountResponse::Empty(Empty {}))
+                Ok(Body::from(Empty {}))
             }
+            _ => Err("not an account request".into()),
         }
     }
 
@@ -331,7 +309,6 @@ impl Accounts {
             return Ok(AccountLoginStatus {
                 completed: true,
                 account_id: Some(account_id.clone()),
-                extra: Default::default(),
             });
         }
         let login = self.login.as_mut().ok_or("ログイン手続きがありません。")?;
@@ -359,7 +336,6 @@ impl Accounts {
                     return Ok(AccountLoginStatus {
                         completed: false,
                         account_id: None,
-                        extra: Default::default(),
                     });
                 }
                 Ok(PeerEvent::Closed(_)) | Err(_) => {
@@ -390,7 +366,6 @@ impl Accounts {
         Ok(AccountLoginStatus {
             completed: true,
             account_id: Some(id),
-            extra: Default::default(),
         })
     }
 

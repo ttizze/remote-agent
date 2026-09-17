@@ -98,7 +98,7 @@ impl Worktrees {
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
             if let Some(settings) = update {
-                if !settings.extra.is_empty() { return Err(anyhow!("unknown worktree setting")); }
+
                 for entry in &settings.copy_paths { relative_path(entry)?; }
                 if !settings.worktree_directory.is_empty() && !Path::new(&settings.worktree_directory).is_absolute() {
                     return Err(anyhow!("worktree directory must be an absolute path on the Host, or empty for the default"));

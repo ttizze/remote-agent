@@ -41,7 +41,7 @@ fn attachment(text: &mut String, name: &str, path: &str) {
     write!(text, "添付: {name} ({path})").expect("writing a String cannot fail");
 }
 fn message(item: &Item) -> String {
-    let content = item.extra.get("content").unwrap_or(&Value::Null);
+    let content = item.content.as_ref().unwrap_or(&Value::Null);
     let mut result = item.text.clone().unwrap_or_else(|| parts(content, ""));
     if let Some(parts) = content.as_array() {
         for part in parts.iter().filter(|part| part["type"] == "mention") {
@@ -70,8 +70,8 @@ pub fn item_body(item: &Item, presentation: &super::ItemPresentation) -> ItemBod
             .into_iter()
             .collect()
     } else {
-        item.extra
-            .get("content")
+        item.content
+            .as_ref()
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
@@ -106,13 +106,9 @@ pub struct FileChange<'a> {
     pub diff: Cow<'a, str>,
 }
 pub fn file_changes(item: &Item) -> impl Iterator<Item = FileChange<'_>> {
-    let (files, unknown) = match &item.changes {
-        Some(crate::models::ItemChanges::Files(files)) => (files.as_slice(), None),
-        Some(crate::models::ItemChanges::Unknown(value)) => (&[][..], value.as_array()),
-        None => (&[][..], None),
-    };
-    files
+    item.changes
         .iter()
+        .flat_map(|changes| &changes.0)
         .map(|change| {
             let kind = change.kind.as_ref().unwrap_or(&Value::Null);
             FileChange {
@@ -121,11 +117,6 @@ pub fn file_changes(item: &Item) -> impl Iterator<Item = FileChange<'_>> {
                 diff: Cow::Borrowed(change.diff.as_deref().unwrap_or_default()),
             }
         })
-        .chain(unknown.into_iter().flatten().map(|change| FileChange {
-            path: field(change, "path"),
-            kind: text(&change["kind"]).unwrap_or_else(|| field(&change["kind"], "type")),
-            diff: field(change, "diff"),
-        }))
 }
 
 /// Potentially large output is formatted only when its row is expanded.
@@ -133,7 +124,7 @@ pub fn expanded_body(item: &Item) -> String {
     match item.kind.as_deref() {
         Some("userMessage" | "agentMessage") => message(item),
         Some("reasoning") => {
-            let summary = item.extra.get("summary").unwrap_or(&Value::Null);
+            let summary = item.summary.as_ref().unwrap_or(&Value::Null);
             if summary.is_array() {
                 parts(summary, "\n")
             } else {
@@ -144,9 +135,9 @@ pub fn expanded_body(item: &Item) -> String {
         }
         Some("commandExecution") => {
             let mut result = String::new();
-            if let Some(cwd) = item.extra.get("cwd").and_then(text) {
+            if let Some(cwd) = item.cwd.as_deref() {
                 result.push_str("cwd: ");
-                result.push_str(&cwd);
+                result.push_str(cwd);
                 if item.aggregated_output.is_some() {
                     result.push('\n');
                 }
@@ -240,14 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn body_contract_preserves_unknown_payloads_and_generated_image_paths() {
-        let item: Item = serde_json::from_value(
-            json!({"id":"future","type":"futureTool","extraPayload":{"array":[1,true]}}),
-        )
-        .unwrap();
-        let expanded: Value = serde_json::from_str(&expanded_body(&item)).unwrap();
-        assert_eq!(expanded["extraPayload"]["array"], json!([1, true]));
-        assert_eq!(expanded["id"], "future");
+    fn generated_image_paths_are_displayed() {
         let generated: Item = serde_json::from_value(json!({"id":"image","type":"imageGeneration","savedPath":"/saved.png","result":"base64"})).unwrap();
         assert_eq!(
             item_body(&generated, &super::super::item_presentation(&generated)).images,

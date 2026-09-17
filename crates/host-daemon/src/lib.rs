@@ -5,7 +5,6 @@ mod git;
 mod host_identity;
 mod host_rpc;
 mod host_runtime;
-mod jsonl_session;
 pub mod local_host;
 pub mod platform;
 mod projects;
@@ -22,4 +21,4 @@ pub use host_identity::{
 };
 
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
-pub use projects::{HOST_THREAD_LIST_METHOD, HOST_THREAD_START_METHOD, ProjectStore, ThreadPage};
+pub use projects::ProjectStore;

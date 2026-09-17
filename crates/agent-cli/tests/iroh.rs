@@ -1,4 +1,6 @@
-use agent_core::peer::{JsonlReader, JsonlWriter};
+#[allow(dead_code)]
+#[path = "../../agent-core/tests/support/host.rs"]
+mod host_fixture;
 use agent_core::transport::{Endpoint, Identity, Relays, Trust};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, time::Duration};
@@ -25,26 +27,20 @@ async fn exercise(command: &[&str], expected: Value) {
             .unwrap()
             .authorize(&trust)
             .unwrap();
-        let stream = session.accept_stream().await.unwrap();
-        let (read, write) = tokio::io::split(stream);
-        let mut reader = JsonlReader::new(read);
-        let mut writer = JsonlWriter::new(write);
-        assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
+        let (session, mut reader, writer) = host_fixture::accept(session).await;
         let approval =
             (mode == "approve").then(|| serde_json::from_str::<Value>(command[1]).unwrap());
         let mut handled = false;
         let mut reads = 0;
         let mut lists = 0;
         // Connected owns initial reads; the command consumes that same state.
-        while let Ok(Some(line)) = reader.read_line().await {
-            let request: Value = serde_json::from_str(&line).unwrap();
+        while let Ok(Some(request)) = reader.read_request().await {
             let result = match request["method"].as_str() {
                 Some("host/session/scope") => json!("fixture-storage"),
                 Some("host/session/request") => {
                     assert_eq!(request["params"]["requestId"], *approval.as_ref().unwrap());
                     json!({"provider":"codex","id":"fixture-thread"})
                 }
-                Some("host/session/close") => json!({}),
                 Some("host/session/answer") => {
                     assert_eq!(
                         request["params"],
@@ -93,7 +89,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     assert!(!handled);
                     assert_eq!(
                         request["params"],
-                        json!({"threadId":"fixture-thread","clientUserMessageId":"fixture-message","input":[{"type":"text","text":"hello","text_elements":[]}]})
+                        json!({"threadId":"fixture-thread","clientUserMessageId":"fixture-message","model":null,"effort":null,"serviceTierForTurn":null,"input":[{"type":"text","text":"hello"}]})
                     );
                     handled = true;
                     json!({"turn":{"id":"fixture-turn"}})
@@ -103,10 +99,11 @@ async fn exercise(command: &[&str], expected: Value) {
             };
             // Keep QUIC alive until the command consumes its reply and closes.
             writer
-                .write_line(&json!({"id":request["id"],"result":result}).to_string())
+                .reply(&request, json!({"result":result}))
                 .await
                 .unwrap();
         }
+        session.close();
         assert!(handled);
         assert_eq!(reads, usize::from(mode == "send" || mode == "approve"));
         if mode == "list" {
@@ -138,7 +135,14 @@ async fn exercise(command: &[&str], expected: Value) {
     .expect("bounded CLI session");
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        expected
+        if mode == "list" {
+            serde_json::to_value(
+                serde_json::from_value::<agent_core::models::ThreadList>(expected).unwrap(),
+            )
+            .unwrap()
+        } else {
+            expected
+        }
     );
     endpoint.close().await;
 }

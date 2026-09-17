@@ -5,7 +5,9 @@ use super::*;
 pub struct ListFiles {
     pub path: String,
 }
-rpc::rpc_method!(ListFiles, FileList, "host/file/list");
+rpc::rpc_method!(ListFiles, FileList, "host/file/list", ListFiles, |self| {
+    self.clone()
+});
 
 impl Operation for ListFiles {
     rpc_operation!(workspace.directory);
@@ -21,11 +23,10 @@ pub struct ReadFile {
 impl rpc::RpcMethod for ReadFile {
     type Output = FileContent;
     const METHOD: &'static str = "host/file/read";
-    fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut params = serializer.serialize_struct("ReadFile", 1)?;
-        params.serialize_field("path", &self.path)?;
-        params.end()
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::ReadFile(ListFiles {
+            path: self.path.clone(),
+        }))
     }
 }
 
@@ -56,9 +57,9 @@ impl Operation for SaveFile {
             .clone();
         let file = context
             .call(&rpc::WriteFile {
-                path: &self.path,
-                revision: &submitted.revision,
-                text: &submitted.text,
+                path: self.path.clone(),
+                revision: submitted.revision.clone(),
+                text: submitted.text.clone(),
             })
             .await?;
         Ok((submitted, file))
@@ -93,7 +94,13 @@ impl SaveFile {
 }
 
 pub use crate::client::ReviewWorkspace;
-rpc::rpc_method!(ReviewWorkspace, WorkspaceReview, "host/workspace/review");
+rpc::rpc_method!(
+    ReviewWorkspace,
+    WorkspaceReview,
+    "host/workspace/review",
+    ReviewWorkspace,
+    |self| self.clone()
+);
 
 /// Navigation and notifications already belong to an epoch. Their review read
 /// shares it instead of dispatching a second intent that invalidates siblings.
@@ -143,7 +150,9 @@ pub struct ReadWorktreeSettings {}
 rpc::rpc_method!(
     ReadWorktreeSettings,
     super::WorktreeSettings,
-    "host/worktree/settings/read"
+    "host/worktree/settings/read",
+    ReadWorktreeSettings,
+    |self| crate::models::Empty {}
 );
 
 impl Operation for ReadWorktreeSettings {
@@ -159,7 +168,9 @@ pub struct UpdateWorktreeSettings {
 rpc::rpc_method!(
     UpdateWorktreeSettings,
     super::WorktreeSettings,
-    "host/worktree/settings/update"
+    "host/worktree/settings/update",
+    UpdateWorktreeSettings,
+    |self| self.settings.clone()
 );
 
 impl Operation for UpdateWorktreeSettings {
@@ -180,7 +191,7 @@ impl Operation for DownloadFile {
             PeerError::InvalidMessage("binary transfers require an iroh session".into())
         })?;
         crate::transfers::download_file(
-            context.peer,
+            context.client,
             || async { session.open_stream().await.map_err(std::io::Error::other) },
             std::path::Path::new(&self.source),
             std::path::Path::new(&self.destination),
@@ -216,10 +227,14 @@ pub struct ListWorktrees {}
 impl rpc::RpcMethod for ListWorktrees {
     type Output = Vec<crate::models::Worktree>;
     const METHOD: &'static str = "host/worktree/list";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::ListWorktrees(
+            crate::models::Empty {},
+        ))
+    }
 }
 impl Operation for ListWorktrees {
     rpc_operation!();
-    const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, worktrees: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.workspace).worktrees = Some(Arc::new(worktrees));
         Vec::new()
@@ -230,10 +245,12 @@ pub use crate::client::RemoveWorktree;
 impl rpc::RpcMethod for RemoveWorktree {
     type Output = ();
     const METHOD: &'static str = "host/worktree/remove";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::RemoveWorktree(self.clone()))
+    }
 }
 impl Operation for RemoveWorktree {
     rpc_operation!();
-    const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
         if let Some(worktrees) = Arc::make_mut(&mut snapshot.workspace).worktrees.as_mut() {
             Arc::make_mut(worktrees).retain(|worktree| worktree.path != self.path);
@@ -243,7 +260,13 @@ impl Operation for RemoveWorktree {
 }
 
 pub use crate::client::LoadVisualization;
-rpc::rpc_method!(LoadVisualization, String, "host/visualize/read");
+rpc::rpc_method!(
+    LoadVisualization,
+    String,
+    "host/visualize/read",
+    ReadVisualization,
+    |self| self.clone()
+);
 impl Operation for LoadVisualization {
     rpc_operation!();
     fn outcome(output: &mut Self::Output) -> Outcome {

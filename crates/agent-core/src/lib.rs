@@ -1,7 +1,11 @@
+#[cfg(test)]
+extern crate self as agent_core;
+
 pub mod client;
 pub mod diagnostics;
 pub mod models;
 pub mod peer;
+pub mod protocol;
 pub mod session;
 pub mod state;
 pub mod store;

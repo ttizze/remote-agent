@@ -47,10 +47,10 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
     };
     let (snapshot, _) = reduce(
         &snapshot,
-        Event::Notification {
-            method: "host/session/update".into(),
-            params: json!({"subscriptionId":subscription,"change":change}),
-        },
+        Event::SessionUpdate(Box::new(agent_core::session::SessionUpdate {
+            subscription_id: subscription,
+            change,
+        })),
     );
     let thread = &snapshot.conversations["native"];
     let turns = thread.turns.as_ref().unwrap();
@@ -110,7 +110,8 @@ fn a_final_item_replaces_streamed_text_without_mutating_the_input() {
             kind: Some("agentMessage".into()),
             text: Some("final answer".into()),
             ..Default::default()
-        },
+        }
+        .into(),
     }
     .apply(&streamed)
     .unwrap();
@@ -124,7 +125,7 @@ fn a_final_item_replaces_streamed_text_without_mutating_the_input() {
 fn completion_preserves_tool_relationships_and_missing_timing_fields() {
     let mut original = conversation();
     let turn = Arc::make_mut(&mut original.turns.as_mut().unwrap()[0]);
-    turn.started_at = Some(Some(123.into()));
+    turn.started_at = Some(123.);
     turn.error = Some(json!({"message":"retrying", "willRetry":true}));
     turn.items.as_mut().unwrap().push(Arc::new(serde_json::from_value(json!({
         "id":"tool", "type":"mcpToolCall", "result":{"content":[{"type":"image", "data":"fixture"}]}, "parentToolUseId":"parent"
@@ -134,14 +135,14 @@ fn completion_preserves_tool_relationships_and_missing_timing_fields() {
             id: "run".into(),
             status: Some("completed".into()),
             items: Some(vec![]),
-            started_at: Some(None),
+            started_at: None,
             ..Default::default()
         },
         completed: true,
     };
     let completed = final_turn.apply(&original).unwrap();
     let turn = &completed.turns.as_ref().unwrap()[0];
-    assert_eq!(turn.started_at, Some(Some(123.into())));
+    assert_eq!(turn.started_at, Some(123.));
     assert_eq!(turn.error, None);
     assert_eq!(
         turn.items.as_ref().unwrap()[1],

@@ -1,26 +1,8 @@
 use anyhow::{Context as _, Result, anyhow};
 use std::{collections::HashMap, path::PathBuf, process::Command};
 
-use serde::Serialize;
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceReview {
-    branch: String,
-    additions: u64,
-    deletions: u64,
-    files: Vec<WorkspaceFileChange>,
-    diff: String,
-}
-
-#[derive(Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkspaceFileChange {
-    path: String,
-    status: &'static str,
-    additions: Option<u64>,
-    deletions: Option<u64>,
-}
+use agent_core::models::ChangedFile as WorkspaceFileChange;
+pub use agent_core::models::WorkspaceReview;
 
 pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview> {
     tokio::task::spawn_blocking(move || collect_workspace_review(PathBuf::from(cwd)))
@@ -158,7 +140,7 @@ fn parse_git_status(output: &[u8]) -> Vec<WorkspaceFileChange> {
         };
         files.push(WorkspaceFileChange {
             path,
-            status,
+            status: status.into(),
             additions: Some(0),
             deletions: Some(0),
         });
@@ -292,7 +274,7 @@ mod tests {
         ] {
             let file = review.files.iter().find(|file| file.path == path).unwrap();
             assert_eq!(
-                (file.status, file.additions, file.deletions),
+                (file.status.as_str(), file.additions, file.deletions),
                 (status, additions, deletions)
             );
         }

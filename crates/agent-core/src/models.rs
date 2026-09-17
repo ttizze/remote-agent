@@ -1,4 +1,4 @@
-//! Wire data. Missing fields stay missing; null cursors remain explicit nulls.
+//! Shared typed models. Unknown provider fields are ignored.
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{collections::BTreeMap, sync::Arc};
@@ -12,8 +12,6 @@ pub struct Invitation {
     pub endpoint: String,
     pub invitation: uuid::Uuid,
     pub expires_at: u64,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 impl std::fmt::Debug for Invitation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -27,8 +25,6 @@ pub struct RemoteHost {
     pub id: String,
     pub name: String,
     pub ticket: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,52 +32,78 @@ pub struct HostStatus {
     pub node_id: String,
     pub name: String,
     pub devices: Vec<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
+    pub provider_errors: Option<Map<String, Value>>,
+}
+
+/// Missing provider membership permits cwd fallback; explicit null means a chat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ProjectMembership {
+    Unknown {},
+    Unassigned {},
+    Assigned(String),
+}
+impl Default for ProjectMembership {
+    fn default() -> Self {
+        Self::Unknown {}
+    }
+}
+impl ProjectMembership {
+    pub fn as_ref(&self) -> Option<&String> {
+        if let Self::Assigned(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+    pub fn as_deref(&self) -> Option<&str> {
+        self.as_ref().map(String::as_str)
+    }
+    pub fn is_none(&self) -> bool {
+        self.as_ref().is_none()
+    }
+}
+fn project_membership<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<ProjectMembership, D::Error> {
+    if !d.is_human_readable() {
+        return ProjectMembership::deserialize(d);
+    }
+    let value = Value::deserialize(d)?;
+    match value {
+        Value::Null => Ok(ProjectMembership::Unassigned {}),
+        Value::String(id) => Ok(ProjectMembership::Assigned(id)),
+        value => serde_json::from_value(value).map_err(serde::de::Error::custom),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Thread {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_read_state: Option<crate::session::HistoryReadState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<crate::session::SessionRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<crate::session::Capabilities>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub requests: BTreeMap<String, Arc<crate::client::ServerRequest>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_merged: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ThreadStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<Vec<Arc<Turn>>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "double_option"
-    )]
-    pub project_id: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "project_membership")]
+    pub project_id: ProjectMembership,
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<serde_json::Number>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<serde_json::Number>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<f64>,
+    pub updated_at: Option<f64>,
     pub history_mode: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub history_has_more: Option<bool>,
+    pub history_limit: Option<u64>,
+    pub list_stale: Option<bool>,
+    pub agent_id: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -90,188 +112,122 @@ pub enum ThreadStatusKind {
     Idle,
     NotLoaded,
     SystemError,
-    #[serde(untagged)]
-    Other(String),
-}
-impl From<&str> for ThreadStatusKind {
-    fn from(value: &str) -> Self {
-        match value {
-            "active" => Self::Active,
-            "idle" => Self::Idle,
-            "notLoaded" => Self::NotLoaded,
-            "systemError" => Self::SystemError,
-            _ => Self::Other(value.into()),
-        }
-    }
-}
-impl From<String> for ThreadStatusKind {
-    fn from(value: String) -> Self {
-        Self::from(value.as_str())
-    }
+    #[serde(other)]
+    Other,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadStatus {
     #[serde(rename = "type")]
     pub kind: ThreadStatusKind,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
     pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Vec<Arc<Item>>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_view: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_has_more: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_item_ids: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_user_message: Option<Arc<Item>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "double_option"
-    )]
-    pub started_at: Option<Option<serde_json::Number>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "double_option"
-    )]
-    pub completed_at: Option<Option<serde_json::Number>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "double_option"
-    )]
-    pub duration_ms: Option<Option<u64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+    pub completed_at: Option<f64>,
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
     pub error: Option<Value>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub started_at_ms: Option<u64>,
+    pub completed_at_ms: Option<u64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     pub id: String,
-    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type", default)]
     pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregated_output: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub saved_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
     pub result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_changes"
-    )]
+    #[serde(default, deserialize_with = "present_changes")]
     pub changes: Option<ItemChanges>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub phase: Option<String>,
+    pub tool: Option<String>,
+    pub server: Option<String>,
+    pub query: Option<String>,
+    pub path: Option<String>,
+    pub cwd: Option<String>,
+    pub detail_file: Option<String>,
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
+    pub content: Option<Value>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
+    pub summary: Option<Value>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
+    pub arguments: Option<Value>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
+    pub review: Option<Value>,
+    pub exit_code: Option<i32>,
 }
 /// A file activity keeps its affected paths and change kinds while diff bodies
-/// may be fetched separately. Unknown upstream metadata survives full reads.
+/// may be fetched separately.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ItemChange {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
     pub kind: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 
-/// Known file bodies are typed; unrecognized wire shapes remain inspectable.
+/// Only supported file-change fields enter the application model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ItemChanges {
-    Files(Vec<ItemChange>),
-    Unknown(Value),
-}
+#[serde(transparent)]
+pub struct ItemChanges(pub Vec<ItemChange>);
 fn present_changes<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<ItemChanges>, D::Error> {
-    ItemChanges::deserialize(deserializer).map(Some)
+    if deserializer.is_human_readable() {
+        let value = Value::deserialize(deserializer)?;
+        Ok(serde_json::from_value(value).ok())
+    } else {
+        Option::<ItemChanges>::deserialize(deserializer)
+    }
 }
 impl ItemChanges {
     pub fn len(&self) -> usize {
-        match self {
-            Self::Files(files) => files.len(),
-            Self::Unknown(value) => value.as_array().map_or(0, Vec::len),
-        }
+        self.0.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub(crate) fn accepts_delta(&self) -> bool {
-        match self {
-            Self::Files(_) => true,
-            Self::Unknown(value) => value
-                .as_array()
-                .is_some_and(|entries| entries.last().is_none_or(Value::is_object)),
-        }
+        self.0.is_empty()
     }
     pub(crate) fn append_delta(&mut self, delta: &str) {
-        match self {
-            Self::Files(files) => {
-                if files.is_empty() {
-                    files.push(ItemChange {
-                        path: Some(String::new()),
-                        kind: Some(Value::String("update".into())),
-                        diff: None,
-                        extra: Map::new(),
-                    });
-                }
-                files
-                    .last_mut()
-                    .unwrap()
-                    .diff
-                    .get_or_insert_with(String::new)
-                    .push_str(delta);
-            }
-            Self::Unknown(value) => {
-                let entries = value.as_array_mut().expect("validated file delta target");
-                let entry = entries
-                    .last_mut()
-                    .and_then(Value::as_object_mut)
-                    .expect("an empty array decodes as typed files");
-                append_text(entry.entry("diff").or_insert(Value::Null), delta);
-            }
+        if self.0.is_empty() {
+            self.0.push(ItemChange {
+                path: Some(String::new()),
+                kind: Some(Value::String("update".into())),
+                diff: None,
+            });
         }
+        self.0
+            .last_mut()
+            .unwrap()
+            .diff
+            .get_or_insert_with(String::new)
+            .push_str(delta);
     }
     fn retain_headers(&mut self) {
-        match self {
-            Self::Files(files) => {
-                for file in files {
-                    file.diff = None;
-                }
-            }
-            Self::Unknown(value) => {
-                if let Some(entries) = value.as_array_mut() {
-                    for entry in entries {
-                        if let Some(fields) = entry.as_object_mut() {
-                            fields.remove("diff");
-                        }
-                    }
-                }
-            }
+        for file in &mut self.0 {
+            file.diff = None;
         }
     }
 }
@@ -353,40 +309,28 @@ impl Item {
         if let Some(changes) = &mut self.changes {
             changes.retain_headers();
         }
-        self.extra.retain(|key, value| {
-            if matches!(
-                key.as_str(),
-                "detailFile"
-                    | "parentToolUseId"
-                    | "nativeMessageId"
-                    | "agentId"
-                    | "sourceToolUseId"
-            ) {
-                value.as_str().is_some_and(|value| value.len() <= 4096)
-            } else {
-                retain_scalar(value)
+        for value in [
+            &mut self.content,
+            &mut self.summary,
+            &mut self.arguments,
+            &mut self.review,
+        ] {
+            if value.as_mut().is_some_and(|value| !retain_scalar(value)) {
+                *value = None;
             }
-        });
+        }
     }
 }
 
 // Stop counting when the budget is exceeded; never allocate another large body.
 fn fits_inline(value: &impl Serialize, limit: usize) -> bool {
-    struct Budget(usize);
-    impl std::io::Write for Budget {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_sub(bytes.len())
-                .ok_or_else(|| std::io::Error::other("inline budget exceeded"))?;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    serde_json::to_writer(Budget(limit), value).is_ok()
+    postcard::serialize_with_flavor::<_, postcard::ser_flavors::Size, usize>(
+        value,
+        Default::default(),
+    )
+    .is_ok_and(|size| size <= limit)
 }
+
 fn truncate_detail(text: &mut String) {
     let mut end = text.len().min(256);
     while !text.is_char_boundary(end) {
@@ -394,7 +338,7 @@ fn truncate_detail(text: &mut String) {
     }
     text.truncate(end);
 }
-// Extension fields have no known schema. Preserve only their scalar headers.
+// Tool results keep only a short scalar preview until their details are read.
 fn retain_scalar(value: &mut Value) -> bool {
     if let Value::String(text) = value {
         truncate_detail(text);
@@ -405,10 +349,7 @@ fn retain_scalar(value: &mut Value) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadResponse {
     pub thread: Thread,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -418,8 +359,9 @@ pub struct ThreadList {
     pub more_project_ids: Vec<String>,
     pub has_more_chats: bool,
     pub has_more_projects: bool,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
+    pub provider_errors: Option<Map<String, Value>>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -428,21 +370,14 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ProjectRoot {
     pub path: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -453,29 +388,21 @@ pub struct Model {
     pub display_name: String,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<ReasoningEffort>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tiers: Option<Vec<ServiceTier>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_service_tier: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_default: Option<bool>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ServiceTier {
     pub id: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    pub name: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ReasoningEffort {
     pub reasoning_effort: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -504,8 +431,6 @@ pub struct FileList {
     pub path: String,
     pub entries: Vec<FileEntry>,
     pub truncated: bool,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -514,8 +439,6 @@ pub struct FileEntry {
     pub path: String,
     pub directory: bool,
     pub size: u64,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -527,8 +450,6 @@ pub struct FileContent {
     pub bom: bool,
     pub line_ending: String,
     pub size: u64,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -538,8 +459,6 @@ pub struct WorktreeSettings {
     pub copy_on_create: bool,
     pub copy_paths: Vec<String>,
     pub worktree_directory: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -567,8 +486,6 @@ pub struct WorkspaceReview {
     pub deletions: u64,
     pub files: Vec<ChangedFile>,
     pub diff: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangedFile {
@@ -576,45 +493,12 @@ pub struct ChangedFile {
     pub status: String,
     pub additions: Option<u64>,
     pub deletions: Option<u64>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    #[test]
-    fn nullable_update_fields_distinguish_absence_null_and_value() {
-        for field in ["projectId"] {
-            for value in [serde_json::json!(null), serde_json::json!("value")] {
-                let source = serde_json::json!({field:value});
-                let thread: Thread = serde_json::from_value(source.clone()).unwrap();
-                let encoded = serde_json::to_value(thread).unwrap();
-                assert_eq!(encoded[field], value);
-                assert!(encoded.get(field).is_some());
-            }
-            assert!(
-                serde_json::to_value(Thread::default())
-                    .unwrap()
-                    .get(field)
-                    .is_none()
-            );
-        }
-        for field in ["startedAt", "completedAt", "durationMs"] {
-            let source = serde_json::json!({"id":"turn",field:null});
-            let turn: Turn = serde_json::from_value(source).unwrap();
-            assert!(
-                serde_json::to_value(turn)
-                    .unwrap()
-                    .get(field)
-                    .is_some_and(serde_json::Value::is_null)
-            );
-            let absent: Turn = serde_json::from_value(serde_json::json!({"id":"turn"})).unwrap();
-            assert!(serde_json::to_value(absent).unwrap().get(field).is_none());
-        }
-    }
-
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
@@ -653,19 +537,31 @@ mod tests {
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
         typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
         let result = serde_json::to_value(typed).unwrap();
-        assert_eq!(result["thread"]["turns"][0]["items"][0], image);
+        for field in ["result", "savedPath"] {
+            assert_eq!(
+                result["thread"]["turns"][0]["items"][0][field],
+                image[field]
+            );
+        }
         assert!(result["thread"]["turns"][0]["deferredItemIds"].is_null());
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Empty {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferGrant {
-    pub token: String,
+    pub token: [u8; 32],
     pub size: u64,
-    pub sha256: String,
+    pub sha256: [u8; 32],
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadedFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
 }
 
 pub(crate) fn append_text(value: &mut Value, delta: &str) {
@@ -688,21 +584,5 @@ pub(crate) fn append_text(value: &mut Value, delta: &str) {
     }
     if let Value::String(text) = value {
         text.push_str(delta);
-    }
-}
-
-// Preserve omitted fields separately from explicit null in partial updates.
-mod double_option {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<Option<T>>, D::Error> {
-        Option::<T>::deserialize(deserializer).map(Some)
-    }
-    pub fn serialize<T: Serialize, S: Serializer>(
-        value: &Option<Option<T>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        value.serialize(serializer)
     }
 }

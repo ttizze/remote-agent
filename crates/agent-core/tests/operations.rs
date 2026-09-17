@@ -1,4 +1,6 @@
-use agent_core::peer::{JsonlReader, JsonlWriter};
+#[allow(dead_code)]
+#[path = "support/host.rs"]
+mod host_fixture;
 use agent_core::state::operations::{
     CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
     ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings, ReviewWorkspace,
@@ -7,7 +9,7 @@ use agent_core::state::operations::{
 use agent_core::{
     client::*,
     models::{ListQuery, Thread, WorktreeSettings},
-    peer::{PeerError, RpcPeer},
+    peer::PeerError,
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -21,7 +23,7 @@ fn optional<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
     macro_rules! call {
         ($operation:expr) => {
-            serde_json::to_value(client.call(&$operation).await?.value).unwrap()
+            serde_json::to_value(client.call(&$operation).await?).unwrap()
         };
     }
     let result = match text(command, "type") {
@@ -44,7 +46,6 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     ..ReadThread::new(text(command, "threadId").to_owned())
                 })
                 .await?
-                .value
                 .response,
         )
         .unwrap(),
@@ -61,19 +62,18 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             let mut items = Vec::new();
             if !text(input, "text").is_empty() {
                 items.push(Input::Text {
-                    text: text(input, "text"),
-                    text_elements: &[],
+                    text: text(input, "text").to_owned(),
                 });
             }
             for attachment in input["attachments"].as_array().unwrap() {
                 items.push(if attachment["isImage"] == true {
                     Input::LocalImage {
-                        path: text(attachment, "path"),
+                        path: text(attachment, "path").to_owned(),
                     }
                 } else {
                     Input::Mention {
-                        path: text(attachment, "path"),
-                        name: text(attachment, "name"),
+                        path: text(attachment, "path").to_owned(),
+                        name: text(attachment, "name").to_owned(),
                     }
                 });
             }
@@ -91,7 +91,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     target,
                 )
                 .await?;
-            json!(reply.value)
+            json!(reply)
         }
         "interruptTurn" => {
             call!(Interrupt {
@@ -109,10 +109,13 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "transcribe" => json!(
             client
                 .call(&Transcribe {
-                    audio: text(command, "audio")
+                    audio: base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        text(command, "audio")
+                    )
+                    .unwrap()
                 })
                 .await?
-                .value
                 .text
         ),
         "respond" => {
@@ -156,9 +159,9 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             discard_draft: false
         }),
         "writeFile" => call!(WriteFile {
-            path: text(command, "path"),
-            revision: text(command, "revision"),
-            text: text(command, "text")
+            path: text(command, "path").to_owned(),
+            revision: text(command, "revision").to_owned(),
+            text: text(command, "text").to_owned()
         }),
         "reviewWorkspace" => call!(ReviewWorkspace {
             cwd: text(command, "cwd").to_owned()
@@ -194,48 +197,47 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
 }
 
 async fn run_case(case: &Value) {
-    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-    let (read, write) = tokio::io::split(client_io);
-    let peer = Arc::new(
-        RpcPeer::open(
-            JsonlReader::new(read),
-            write,
-            Some(Duration::from_secs(1)),
-            16,
-        )
-        .unwrap(),
-    );
-    let client = Client::new(peer.clone());
+    let ((peer, _events), mut reader, writer) = host_fixture::connect(&Default::default()).await;
+    let peer = Arc::new(peer);
     let server = async {
-        let (read, write) = tokio::io::split(server_io);
-        let mut reader = JsonlReader::new(read);
-        let mut writer = JsonlWriter::new(write);
         for exchange in case["exchanges"].as_array().unwrap() {
-            let line = reader
-                .read_line()
+            let request = reader
+                .read_request()
                 .await
                 .unwrap()
                 .expect("expected exchange");
-            let request: Value = serde_json::from_str(&line).unwrap();
             if let Some(reply) = exchange.get("reply") {
-                assert_eq!(&request, reply, "{}", case["name"]);
+                assert_eq!(&*request, reply, "{}", case["name"]);
             } else {
                 assert_eq!(request["method"], exchange["method"], "{}", case["name"]);
-                assert_eq!(request["params"], exchange["params"], "{}", case["name"]);
-                let mut response = exchange["response"].clone();
-                response["id"] = request["id"].clone();
-                writer.write_line(&response.to_string()).await.unwrap();
+                let method = request["method"].as_str().unwrap();
+                let normalize = |params: Value| {
+                    agent_core::protocol::json_boundary::call(method, params)
+                        .unwrap()
+                        .params_json()
+                        .unwrap()
+                };
+                assert_eq!(
+                    normalize(request["params"].clone()),
+                    normalize(exchange["params"].clone()),
+                    "{}",
+                    case["name"]
+                );
+                writer
+                    .reply(&request, exchange["response"].clone())
+                    .await
+                    .unwrap();
             }
         }
         assert!(
-            reader.read_line().await.unwrap().is_none(),
+            reader.read_request().await.unwrap().is_none(),
             "unexpected additional request: {}",
             case["name"]
         );
     };
     let operation = async {
-        let result = execute(&client, &case["command"]).await;
-        peer.close().await.unwrap();
+        let result = execute(&peer, &case["command"]).await;
+        peer.close().await;
         result
     };
     let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
@@ -244,7 +246,20 @@ async fn run_case(case: &Value) {
     .await
     .expect("bounded operation");
     if let Some(expected) = case.get("result") {
-        assert_eq!(result.unwrap(), *expected, "{}", case["name"]);
+        let expected = match text(&case["command"], "type") {
+            "listThreads" => normalize::<agent_core::models::ThreadList>(expected),
+            "startThread" | "readThread" | "readOlder" | "forkThread" => {
+                normalize::<agent_core::models::ThreadResponse>(expected)
+            }
+            "readItem" => normalize::<ItemResponse>(expected),
+            "models" => normalize::<Vec<agent_core::models::Model>>(expected),
+            "accounts" => normalize::<Accounts>(expected),
+            "selectAccount" => normalize::<AccountSelection>(expected),
+            "startAccountLogin" => normalize::<AccountLogin>(expected),
+            "accountLoginStatus" => normalize::<AccountLoginStatus>(expected),
+            _ => expected.clone(),
+        };
+        assert_eq!(result.unwrap(), expected, "{}", case["name"]);
     } else {
         let error = result.expect_err("expected operation failure");
         let expected = case["errorContains"].as_str().unwrap();
@@ -261,7 +276,13 @@ async fn run_case(case: &Value) {
             };
             assert_eq!(
                 serde_json::from_str::<Value>(&raw).unwrap(),
-                case["errorRaw"],
+                if case["errorRaw"].get("response").is_some() {
+                    normalize::<agent_core::session::OpenedSession>(&case["errorRaw"])
+                } else if case["errorRaw"].get("item").is_some() {
+                    normalize::<ItemResponse>(&case["errorRaw"])
+                } else {
+                    case["errorRaw"].clone()
+                },
                 "{}",
                 case["name"]
             );
@@ -303,4 +324,8 @@ fn submission_corpus() {
         };
         assert_eq!(actual, *expected, "{}", case["name"]);
     }
+}
+
+fn normalize<T: serde::de::DeserializeOwned + serde::Serialize>(value: &Value) -> Value {
+    serde_json::to_value(serde_json::from_value::<T>(value.clone()).unwrap()).unwrap()
 }

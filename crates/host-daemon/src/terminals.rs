@@ -1,12 +1,10 @@
 //! Device-owned PTYs, retained across transport disconnects. The private supervisor pipe carries terminal I/O;
 //! only this owner publishes events and grants access to a process handle.
 use crate::host_rpc::routing::{SessionId, SessionRouter};
+use agent_core::protocol::{Call, Notification};
 use agent_core::{client::TerminalSize, peer::JsonlReader};
 use alacritty_terminal::grid::Dimensions as _;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bex_process::{PtyCommand, PtyEvent};
-use serde::Deserialize;
-use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -84,7 +82,7 @@ impl Terminals {
         handle: String,
         cwd: String,
         size: TerminalSize,
-    ) -> Result<Value, String> {
+    ) -> Result<agent_core::models::Empty, String> {
         if handle.is_empty()
             || handle.len() > 256
             || size.rows == 0
@@ -122,7 +120,7 @@ impl Terminals {
                 .await
                 .map_err(|_| "terminal has exited")?;
             completed.await.map_err(|_| "terminal has exited")??;
-            return Ok(json!({}));
+            return Ok(agent_core::models::Empty {});
         }
         let attached = Arc::new(Mutex::new(Some(owner)));
         let is_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -177,41 +175,58 @@ impl Terminals {
             .map_err(|_| "terminal startup timed out")?
             .map_err(|_| "terminal startup stopped")??;
         cancel_start.disarm();
-        Ok(json!({}))
+        Ok(agent_core::models::Empty {})
     }
     pub(crate) async fn request(
         &self,
         owner: SessionId,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, String> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Params {
-            process_handle: String,
-            size: Option<TerminalSize>,
-            delta_base64: Option<String>,
-        }
-        let params: Params = serde_json::from_value(params).map_err(|error| error.to_string())?;
+        call: &agent_core::protocol::Call,
+    ) -> Result<agent_core::models::Empty, String> {
+        let detach = matches!(call, Call::DetachTerminal(_));
+        let (handle, action) = match call {
+            agent_core::protocol::Call::WriteTerminal(params) => {
+                if params.data.len() > 64 * 1024 {
+                    return Err("terminal input exceeds 64 KiB".into());
+                }
+                (
+                    params.process_handle.clone(),
+                    Some(Action::Write(params.data.clone())),
+                )
+            }
+            agent_core::protocol::Call::ResizeTerminal(params) => {
+                if params.size.rows == 0
+                    || params.size.cols == 0
+                    || params.size.rows > 250
+                    || params.size.cols > 500
+                {
+                    return Err("terminal size must be nonzero".into());
+                }
+                (params.handle.clone(), Some(Action::Resize(params.size)))
+            }
+            Call::DetachTerminal(params) => (params.handle.clone(), None),
+            agent_core::protocol::Call::KillTerminal(params) => {
+                (params.process_handle.clone(), None)
+            }
+            _ => return Err("unknown terminal operation".into()),
+        };
         let (input, stop, mut finished) = {
             let records = self.records.lock().unwrap();
             let record = records.values().find(|record| {
-                record.handle == params.process_handle
-                    && *record.attached.lock().unwrap() == Some(owner)
+                record.handle == handle && *record.attached.lock().unwrap() == Some(owner)
             });
             let Some(record) = record else {
-                return if method == "host/terminal/detach" {
-                    Ok(json!({}))
+                return if detach {
+                    Ok(agent_core::models::Empty {})
                 } else {
                     Err("terminal handle is unavailable".into())
                 };
             };
-            if method == "host/terminal/detach" {
+            if detach {
                 let mut attached = record.attached.lock().unwrap();
                 if *attached == Some(owner) {
                     *attached = None;
                 }
-                return Ok(json!({}));
+                return Ok(agent_core::models::Empty {});
             }
             (
                 record.input.clone(),
@@ -219,7 +234,7 @@ impl Terminals {
                 record.finished.clone(),
             )
         };
-        if method == "process/kill" {
+        if matches!(call, Call::KillTerminal(_)) {
             stop.cancel();
             loop {
                 if let Some(result) = finished.borrow_and_update().clone() {
@@ -231,32 +246,16 @@ impl Terminals {
                     .await
                     .map_err(|_| "terminal cleanup stopped")?;
             }
-            return Ok(json!({}));
+            return Ok(agent_core::models::Empty {});
         }
-        let action = match method {
-            "process/writeStdin" => {
-                let data = params.delta_base64.ok_or("terminal input is required")?;
-                if data.len() > 88 * 1024 {
-                    return Err("terminal input exceeds 64 KiB".into());
-                }
-                Action::Write(STANDARD.decode(data).map_err(|error| error.to_string())?)
-            }
-            "process/resizePty" => {
-                let size = params.size.ok_or("terminal size is required")?;
-                if size.rows == 0 || size.cols == 0 || size.rows > 250 || size.cols > 500 {
-                    return Err("terminal size must be nonzero".into());
-                }
-                Action::Resize(size)
-            }
-            _ => return Err("unknown terminal operation".into()),
-        };
+        let action = action.expect("kill returned above");
         let (complete, completed) = oneshot::channel();
         input
             .send(Command { action, complete })
             .await
             .map_err(|_| "terminal has exited")?;
         completed.await.map_err(|_| "terminal has exited")??;
-        Ok(json!({}))
+        Ok(agent_core::models::Empty {})
     }
     pub(crate) fn revoke_device(&self, principal: &str) {
         let prefix = format!("{principal}:");
@@ -314,14 +313,10 @@ struct Worker {
     ready: Option<Receipt>,
 }
 impl Worker {
-    fn publish(&self, method: &str, mut params: Value) {
-        params["processHandle"] = self.handle.clone().into();
+    fn publish(&self, event: Notification) {
         let mut attached = self.attached.lock().unwrap();
         if let Some(owner) = *attached
-            && self
-                .router
-                .send_line(owner, json!({"method":method,"params":params}).to_string())
-                .is_err()
+            && self.router.send(owner, event).is_err()
         {
             *attached = None;
         }
@@ -353,7 +348,7 @@ impl Worker {
                         line = output.read_line() => {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
                             match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
-                                PtyEvent::Started => { self.publish("host/terminal/restored",json!({"deltaBase64":STANDARD.encode(screen.ansi_checkpoint(None)),"cols":size.cols,"rows":size.rows})); self.started.store(true, std::sync::atomic::Ordering::Release); if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
+                                PtyEvent::Started => { self.publish(Notification::TerminalRestored { handle: self.handle.clone(), data: screen.ansi_checkpoint(None), cols: size.cols, rows: size.rows }); self.started.store(true, std::sync::atomic::Ordering::Release); if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
                                 PtyEvent::Output { data } => {
                                     parser.advance(&mut screen, &data);
                                     // The Host is the sole terminal-query responder, even during disconnects.
@@ -374,7 +369,7 @@ impl Worker {
                                         };
                                         write(&mut stdin,&PtyCommand::Write{id:0,data:data.into_bytes()}).await?;
                                     }
-                                    self.publish("process/outputDelta", json!({"deltaBase64":STANDARD.encode(data)}));
+                                    self.publish(Notification::Output { handle: self.handle.clone(), data });
                                 },
                                 PtyEvent::Ack { id, error } => {
                                     if id == 0 { if let Some(error)=error {return Err(error);} continue; }
@@ -382,7 +377,7 @@ impl Worker {
                                     if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
                                     let _ = complete.send(error.map_or(Ok(()), Err));
                                 }
-                                PtyEvent::Exited { code } => { self.publish("process/exited", json!({"exitCode":i32::try_from(code).unwrap_or(1)})); return Ok(()); }
+                                PtyEvent::Exited { code } => { self.publish(Notification::Exited { handle: self.handle.clone(), code: i32::try_from(code).unwrap_or(1) }); return Ok(()); }
                                 PtyEvent::Failed { message } => return Err(message),
                             }
                         }
@@ -392,7 +387,7 @@ impl Worker {
                                 if let Err(error) = self.router.ensure_session(owner) { let _=command.complete.send(Err(error)); continue; }
                                 let previous=self.attached.lock().unwrap().replace(owner);
                                 if let Some(previous)=previous.filter(|previous|*previous!=owner) {
-                                    let _=self.router.send_line(previous,json!({"method":"host/terminal/detached","params":{"processHandle":self.handle}}).to_string());
+                                    let _=self.router.send(previous, Notification::TerminalDetached { handle: self.handle.clone() });
                                 }
                                 if screen.columns()!=usize::from(size.cols) || screen.screen_lines()!=usize::from(size.rows) {
                                     screen.resize(Dimensions(size));
@@ -400,7 +395,7 @@ impl Worker {
                                 }
                                 let mut data=screen.ansi_checkpoint(parser.preceding_char());
                                 data.extend(parser.checkpoint_tail());
-                                let result=self.router.send_line(owner, json!({"method":"host/terminal/restored","params":{"processHandle":self.handle,"deltaBase64":STANDARD.encode(data),"cols":screen.columns(),"rows":screen.screen_lines()}}).to_string());
+                                let result=self.router.send(owner, Notification::TerminalRestored { handle: self.handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
                                 if result.is_err() { *self.attached.lock().unwrap()=None; }
                                 let _=command.complete.send(result);
                                 continue;
@@ -429,7 +424,7 @@ impl Worker {
                 if status.success() { Ok(()) } else { Err(format!("terminal cleanup failed: {status}")) }
             });
             cleanup.clone()?;
-            if self.stop.is_cancelled() { self.publish("process/exited", json!({"exitCode":0})); }
+            if self.stop.is_cancelled() { self.publish(Notification::Exited { handle: self.handle.clone(), code: 0 }); }
             interaction
         }.await;
         if let Some(ready) = self.ready.take() {
@@ -442,7 +437,10 @@ impl Worker {
             let _ = complete.send(Err("terminal has exited".into()));
         }
         if let Err(message) = result {
-            self.publish("host/terminal/failed", json!({"message":message}));
+            self.publish(Notification::TerminalFailed {
+                handle: self.handle.clone(),
+                reason: message,
+            });
         }
         cleanup
     }
@@ -543,31 +541,31 @@ mod tests {
             for handle in ["one", "two"] {
                 terminals.start(router.clone(), first.id(), handle.into(), cwd.clone(), size).await.unwrap();
             }
-            terminals.request(first.id(), "process/writeStdin", json!({"processHandle":"one","deltaBase64":STANDARD.encode("BEX_RETAINED=survived\n")})).await.unwrap();
-            terminals.request(first.id(), "host/terminal/detach", json!({"processHandle":"one"})).await.unwrap();
-            assert!(terminals.request(first.id(), "process/writeStdin", json!({"processHandle":"one","deltaBase64":"YQ=="})).await.is_err());
-            terminals.request(first.id(), "process/writeStdin", json!({"processHandle":"two","deltaBase64":STANDARD.encode("true\n")})).await.unwrap();
+            terminals.request(first.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: "BEX_RETAINED=survived\n".as_bytes().to_vec() })).await.unwrap();
+            terminals.request(first.id(), &Call::DetachTerminal(agent_core::state::operations::DetachTerminal { handle: "one".into() })).await.unwrap();
+            assert!(terminals.request(first.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: b"a".to_vec() })).await.is_err());
+            terminals.request(first.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "two".into(), data: "true\n".as_bytes().to_vec() })).await.unwrap();
             router.close_session(first.id()); terminals.close_session(first.id());
             let mut second = router.open_authenticated_session(128, Some("phone".into()));
             terminals.start(router.clone(), second.id(), "one".into(), cwd.clone(), size).await.unwrap();
             let mut restored = false;
             while let Some(line) = second.recv().await {
-                if line.contains("host/terminal/restored") { restored=true; break; }
+                if matches!(agent_core::protocol::decode::<Notification>(&line).unwrap(), Notification::TerminalRestored { .. }) { restored=true; break; }
             }
             assert!(restored);
-            terminals.request(second.id(), "process/writeStdin", json!({"processHandle":"one","deltaBase64":STANDARD.encode("printf '%s' \"$BEX_RETAINED\" > retained\n")})).await.unwrap();
+            terminals.request(second.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: "printf '%s' \"$BEX_RETAINED\" > retained\n".as_bytes().to_vec() })).await.unwrap();
             loop {
                 if std::fs::read_to_string(directory.path().join("retained")).ok().as_deref()==Some("survived") {break;}
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            terminals.request(second.id(), "process/writeStdin", json!({"processHandle":"one","deltaBase64":STANDARD.encode("stty -echo -icanon min 0 time 5; printf '\\033[6n'; dd bs=64 count=1 of=query-reply 2>/dev/null; stty sane\n")})).await.unwrap();
+            terminals.request(second.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: "stty -echo -icanon min 0 time 5; printf '\\033[6n'; dd bs=64 count=1 of=query-reply 2>/dev/null; stty sane\n".as_bytes().to_vec() })).await.unwrap();
             loop {
                 if let Ok(bytes)=std::fs::read(directory.path().join("query-reply"))
                     && bytes.starts_with(b"\x1b[") && bytes.ends_with(b"R") {break;}
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             let stranger=router.open_authenticated_session(128,Some("other-phone".into()));
-            assert!(terminals.request(stranger.id(),"process/kill",json!({"processHandle":"one"})).await.is_err());
+            assert!(terminals.request(stranger.id(),&Call::KillTerminal(agent_core::client::TerminalKill { process_handle: "one".into() })).await.is_err());
             terminals.start(router.clone(),stranger.id(),"one".into(),cwd,size).await.unwrap();
             assert_eq!(terminals.records.lock().unwrap().len(),3);
             terminals.shutdown().await;
@@ -588,7 +586,7 @@ mod tests {
                 // Linux validation runs this Host with SHELL=/bin/sh (dash).
                 // Disable interactive history expansion for Bash on macOS.
                 let command = "[ -z \"${BASH_VERSION-}\" ] || set +H\nsleep 120 & first=$!; sleep 120 & printf '%s %s %s\\n' \"$$\" \"$first\" \"$!\" > owned-pids; wait\n";
-                terminals.request(connection.id(), "process/writeStdin", json!({"processHandle":"jobs","deltaBase64":STANDARD.encode(command)})).await.unwrap();
+                terminals.request(connection.id(), &agent_core::protocol::Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "jobs".into(), data: command.as_bytes().to_vec() })).await.unwrap();
                 let pids = loop {
                     if let Ok(text) = std::fs::read_to_string(directory.path().join("owned-pids"))
                         && text.split_whitespace().count() == 3
@@ -610,7 +608,8 @@ mod tests {
                     assert!(terminals.in_use(&cwd));
                     terminals.shutdown().await;
                 } else {
-                    let mut kill = Box::pin(terminals.request(connection.id(), "process/kill", json!({"processHandle":"jobs"})));
+                    let call = agent_core::protocol::Call::KillTerminal(agent_core::client::TerminalKill { process_handle: "jobs".into() });
+                    let mut kill = Box::pin(terminals.request(connection.id(), &call));
                     assert!(futures_util::poll!(&mut kill).is_pending());
                     assert!(terminals.in_use(&cwd));
                     kill.await.unwrap();

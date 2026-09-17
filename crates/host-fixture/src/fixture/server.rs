@@ -425,7 +425,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     };
                     let matches = context.config.expected_cwd.as_ref().is_none_or(|expected| cwd.as_str().is_some_and(|cwd| std::path::Path::new(cwd) == expected));
                     context.trace(method, json!({"hasProjectId":params.get("projectId").is_some(),"cwdMatchesFixture":matches}))?;
-                    if let Some(project_id) = params.get("projectId")
+                    if let Some(project_id) = params.get("projectId").filter(|id| !id.is_null())
                         && !projects(&context.home)?.iter().any(|project| &project["id"] == project_id)
                     { context.error(id, -32600, "project not found")?; continue; }
                     if !matches || !cwd.as_str().is_some_and(|cwd| !cwd.is_empty()) {

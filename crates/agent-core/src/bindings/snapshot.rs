@@ -132,7 +132,7 @@ impl Thread {
         crate::presentation::conversation::history_notice(self)
     }
     pub fn has_more_history(&self) -> bool {
-        self.extra.get("historyHasMore") == Some(&serde_json::Value::Bool(true))
+        self.history_has_more == Some(true)
     }
     pub fn turn_count(&self) -> u64 {
         self.turns.as_ref().map_or(0, |turns| turns.len() as u64)

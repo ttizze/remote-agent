@@ -1,4 +1,4 @@
-use agent_core::models::Project;
+use agent_core::models::{Project, ProjectMembership};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -10,8 +10,8 @@ pub(crate) struct Snapshot {
     pub(super) chat_directory: Option<PathBuf>,
 }
 impl Snapshot {
-    pub(crate) fn project_for_root(&self, path: &Path) -> Option<&Project> {
-        self.projects.iter().find(|project| {
+    pub(crate) fn has_root(&self, path: &Path) -> bool {
+        self.projects.iter().any(|project| {
             project.roots.iter().any(|root| {
                 self.resolved_roots
                     .get(&root.path)
@@ -20,17 +20,20 @@ impl Snapshot {
             })
         })
     }
-    pub(crate) fn project_for_directory(&self, cwd: Option<&str>) -> Option<Option<String>> {
-        let cwd = cwd?;
+    pub(crate) fn project_for_directory(&self, cwd: Option<&str>) -> ProjectMembership {
+        let Some(cwd) = cwd else {
+            return ProjectMembership::Unknown {};
+        };
         if self
             .chat_directory
             .as_deref()
             .is_some_and(|directory| Path::new(cwd) == directory)
         {
-            Some(None)
+            ProjectMembership::Unassigned {}
         } else {
             self.project_for_workspace(cwd)
-                .map(|id| Some(id.to_owned()))
+                .map(|id| ProjectMembership::Assigned(id.to_owned()))
+                .unwrap_or_default()
         }
     }
     pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
@@ -126,7 +129,7 @@ mod tests {
         snapshot.chat_directory = Some("/work/a/chats".into());
         assert_eq!(
             snapshot.project_for_directory(Some("/work/a/chats")),
-            Some(None)
+            ProjectMembership::Unassigned {}
         );
         snapshot.projects = serde_json::from_value(
             json!([{"id":"relative","name":"Relative","roots":[{"path":"."}]}]),

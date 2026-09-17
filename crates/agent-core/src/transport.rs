@@ -1,5 +1,7 @@
-//! iroh is confined to this module. A session is one bidirectional JSONL stream.
-use crate::peer::{PeerError, PeerEvent, RpcPeer};
+//! Authenticated iroh sessions with independent request, subscription, and blob streams.
+use crate::client::Client;
+pub use crate::client::{HostPeer, HostRequest};
+use crate::peer::PeerError;
 use iroh::{EndpointAddr, RelayMode, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::{Deserialize, Serialize};
@@ -14,13 +16,10 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
-    sync::broadcast,
-};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use uuid::Uuid;
 
-const ALPN: &[u8] = b"remote-agent";
+const ALPN: &[u8] = b"remote-agent/streams/2";
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("iroh transport failed: {0}")]
@@ -195,33 +194,19 @@ impl IncomingSession {
     /// Read only the typed pairing request. No RPC peer or stream is exposed
     /// until the owner commits trust and authorizes the request.
     pub async fn pairing(self) -> Result<PairingRequest, TransportError> {
-        let stream = self.0.as_ref().unwrap().accept_stream().await?;
-        let (read, write) = tokio::io::split(stream);
-        let peer = RpcPeer::open(crate::peer::JsonlReader::new(read), write, None, 128)?;
-        let mut events = peer.subscribe();
-        let PeerEvent::Message(message) = events.recv().await.map_err(connection)? else {
+        let session = self.0.as_ref().unwrap();
+        let peer = session.accept_peer().await?;
+        let IncomingRequest::Call(call) = session.accept_request().await? else {
             return Err(TransportError::Unauthorized);
         };
-        #[derive(Deserialize)]
-        struct Request {
-            id: serde_json::Value,
-            method: String,
-            params: Params,
-        }
-        #[derive(Deserialize)]
-        struct Params {
-            invitation: Uuid,
-        }
-        let request: Request = serde_json::from_str(&message.value).map_err(connection)?;
-        if request.method != "host/pair" || !(request.id.is_string() || request.id.is_number()) {
-            return Err(TransportError::Unauthorized);
-        }
+        let crate::protocol::Call::Pair(params) = &call.call else {
+            return Err(connection("expected pairing request"));
+        };
         Ok(PairingRequest {
             incoming: self,
             peer,
-            events,
-            id: request.id,
-            invitation: request.params.invitation,
+            reply: call.send,
+            invitation: params.invitation,
         })
     }
     /// Only an allowlisted identity can become an application session. Pairing
@@ -241,26 +226,24 @@ impl Drop for IncomingSession {
 /// A pairing request whose underlying connection remains inaccessible.
 pub struct PairingRequest {
     incoming: IncomingSession,
-    peer: RpcPeer,
-    events: broadcast::Receiver<PeerEvent>,
-    id: serde_json::Value,
+    peer: HostPeer,
+    reply: iroh::endpoint::SendStream,
     pub invitation: Uuid,
 }
 impl PairingRequest {
     /// Supply the persisted allowlist after consuming `invitation` atomically.
-    pub async fn authorize(
-        self,
-        trust: &Trust,
-    ) -> Result<(Session, RpcPeer, broadcast::Receiver<PeerEvent>), TransportError> {
+    pub async fn authorize(mut self, trust: &Trust) -> Result<(Session, HostPeer), TransportError> {
         let session = scopeguard::guard(self.incoming.authorize(trust)?, |session| session.close());
-        self.peer
-            .send_raw(serde_json::json!({"id":self.id,"result":{}}).to_string())
-            .await?;
-        Ok((
-            scopeguard::ScopeGuard::into_inner(session),
-            self.peer,
-            self.events,
-        ))
+        crate::protocol::write(
+            &mut self.reply,
+            crate::protocol::Response::Success {
+                result: crate::models::Empty {},
+            },
+        )
+        .await
+        .map_err(connection)?;
+        self.reply.finish().map_err(connection)?;
+        Ok((scopeguard::ScopeGuard::into_inner(session), self.peer))
     }
 }
 #[derive(Clone)]
@@ -283,7 +266,10 @@ impl Session {
     pub async fn open_stream(
         &self,
     ) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send + 'static + use<>, TransportError> {
-        let (send, recv) = self.connection.open_bi().await.map_err(connection)?;
+        let (mut send, recv) = self.connection.open_bi().await.map_err(connection)?;
+        send.write_all(&[crate::client::BLOB])
+            .await
+            .map_err(connection)?;
         Ok(Stream {
             send,
             recv,
@@ -291,39 +277,62 @@ impl Session {
             shutdown: None,
         })
     }
-    pub async fn accept_stream(
-        &self,
-    ) -> Result<impl AsyncRead + AsyncWrite + Unpin + Send + 'static + use<>, TransportError> {
-        let (send, recv) = self.connection.accept_bi().await.map_err(connection)?;
-        Ok(Stream {
-            send,
-            recv,
-            _session: self.clone(),
-            shutdown: None,
-        })
+    /// Accept the session's ordered notification feed before dispatching requests.
+    pub async fn accept_peer(&self) -> Result<HostPeer, TransportError> {
+        let (send, mut recv) = self.connection.accept_bi().await.map_err(connection)?;
+        let mut kind = [0u8; 1];
+        recv.read_exact(&mut kind).await.map_err(connection)?;
+        if kind[0] != crate::client::EVENTS {
+            return Err(connection("expected event subscription"));
+        }
+        Ok(send)
+    }
+    /// Hand each accepted stream directly to the resource owner.
+    pub async fn accept_request(&self) -> Result<IncomingRequest, TransportError> {
+        use crate::client::{BLOB, CALL, CLOSE};
+        let (mut send, mut recv) = self.connection.accept_bi().await.map_err(connection)?;
+        let mut kind = [0u8; 1];
+        recv.read_exact(&mut kind).await.map_err(connection)?;
+        match kind[0] {
+            BLOB => Ok(IncomingRequest::Blob(Stream {
+                send,
+                recv,
+                _session: self.clone(),
+                shutdown: None,
+            })),
+            CALL => {
+                let call = crate::protocol::Reader::new(recv)
+                    .read::<crate::protocol::Call>()
+                    .await
+                    .map_err(connection)?
+                    .ok_or_else(|| connection("request stream ended before its request"))?;
+                Ok(IncomingRequest::Call(HostRequest { call, send }))
+            }
+            CLOSE => {
+                send.write_all(&[0]).await.map_err(connection)?;
+                send.finish().map_err(connection)?;
+                Ok(IncomingRequest::Close)
+            }
+            _ => Err(connection("unknown stream kind")),
+        }
     }
     pub async fn open_peer(
         &self,
         timeout: Duration,
         max_requests: usize,
-    ) -> Result<RpcPeer, TransportError> {
-        let mut stream = self.open_stream().await?;
-        // QUIC does not advertise a bidirectional stream until it carries data.
-        // A JSONL blank line registers passive approval clients immediately.
-        stream.write_all(b"\n").await.map_err(connection)?;
-        let (read, write) = tokio::io::split(stream);
-        Ok(RpcPeer::open(
-            crate::peer::JsonlReader::new(read),
-            write,
-            Some(timeout),
-            max_requests,
-        )?)
+    ) -> Result<(Client, crate::protocol::Reader), TransportError> {
+        Ok(Client::connect(self.connection.clone(), timeout, max_requests).await?)
     }
     pub fn close(&self) {
         self.connection.close(0u8.into(), b"session closed");
     }
 }
-struct Stream {
+pub enum IncomingRequest {
+    Call(HostRequest),
+    Blob(Stream),
+    Close,
+}
+pub struct Stream {
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
     _session: Session,

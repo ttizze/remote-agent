@@ -101,12 +101,7 @@ impl Desktop {
         let speed_label = model
             .and_then(|model| model.service_tiers.as_deref())
             .and_then(|tiers| tiers.iter().find(|value| value.id == tier))
-            .map(|tier| {
-                tier.extra
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&tier.id)
-            })
+            .map(|tier| tier.name.as_deref().unwrap_or(&tier.id))
             .unwrap_or("標準");
         let speed = Button::new("model-speed")
             .label(format!("⚡︎ {speed_label}"))
@@ -141,12 +136,7 @@ impl Desktop {
                         {
                             let value = tier.id.clone();
                             let entity = entity.clone();
-                            let label = tier
-                                .extra
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or(&tier.id)
-                                .to_owned();
+                            let label = tier.name.as_deref().unwrap_or(&tier.id).to_owned();
                             menu = menu.item(
                                 PopupMenuItem::new(label)
                                     .checked(

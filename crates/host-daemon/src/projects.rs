@@ -1,7 +1,5 @@
-use agent_core::models::{Project, Thread};
+use agent_core::models::Project;
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use std::{
     env, io,
     path::{Path, PathBuf},
@@ -10,17 +8,6 @@ use std::{
 
 pub(crate) mod state;
 pub(crate) mod titles;
-pub const HOST_THREAD_LIST_METHOD: &str = "host/thread/list";
-pub const HOST_THREAD_START_METHOD: &str = "host/thread/start";
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ThreadPage {
-    pub data: Vec<Thread>,
-    pub next_cursor: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
 /// Host workspace metadata plus the last native project catalog, retained while
 /// Codex is unavailable so Claude sessions can still be grouped.
 #[derive(Debug, Clone)]
@@ -112,14 +99,7 @@ mod tests {
                 {"id":"native","name":"Project","roots":[{"path":alias}]}
             ]))
             .unwrap();
-            assert!(
-                store
-                    .load(Some(projects))
-                    .await
-                    .unwrap()
-                    .project_for_root(&project)
-                    .is_some()
-            );
+            assert!(store.load(Some(projects)).await.unwrap().has_root(&project));
         }
         let checkout = root.join("checkout");
         std::fs::write(

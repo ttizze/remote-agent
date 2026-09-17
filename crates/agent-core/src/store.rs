@@ -1,8 +1,7 @@
-//! The single state owner. RPC work runs concurrently; publication follows wire order.
-use crate::peer::{RpcMessage, RpcMessageKind};
+//! The single state owner. Independent RPC work publishes completed results.
 use crate::{
     client::*,
-    peer::{PeerError, PeerEvent, RpcPeer},
+    peer::PeerError,
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -10,7 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
 };
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -39,18 +38,19 @@ enum Command {
     ResumePeer {
         endpoint: crate::transport::Endpoint,
         remote: crate::transport::NodeId,
-        complete: oneshot::Sender<Option<Arc<RpcPeer>>>,
+        complete: oneshot::Sender<Option<Arc<Client>>>,
     },
     Disconnect(oneshot::Sender<Result<(), PeerError>>),
     Attach {
-        connection: Connection,
+        connection: Box<Connection>,
         attempt: CancellationToken,
         storage_scope: String,
         complete: oneshot::Sender<Result<(), PeerError>>,
     },
 }
 struct Connection {
-    peer: Arc<RpcPeer>,
+    peer: Arc<Client>,
+    events: Updates,
     session: Option<crate::transport::Session>,
 }
 impl Drop for Connection {
@@ -68,7 +68,6 @@ struct Dispatch {
     complete: CompletionSender,
 }
 struct Applied {
-    sequence: Option<u64>,
     application: Box<dyn Application>,
     outcome: Outcome,
 }
@@ -98,11 +97,11 @@ impl Receipt {
     }
 }
 struct Completed {
+    subscriptions: Vec<(uuid::Uuid, crate::client::Updates)>,
     item_read: Option<op::ReadItem>,
     delivery_attempted: bool,
     epoch: u64,
     result: Result<Applied, PeerError>,
-    request_id: Option<u64>,
     failed_submission: Option<String>,
     terminal: Option<String>,
     complete: Option<Receipt>,
@@ -119,22 +118,23 @@ pub struct Store {
     connection_attempt: Mutex<CancellationToken>,
     stop: CancellationToken,
     _close_on_drop: DropGuard,
-    finished: watch::Receiver<Option<Result<(), String>>>,
+    finished: watch::Receiver<bool>,
 }
 impl Store {
-    pub fn new(peer: RpcPeer, snapshot: Snapshot) -> Self {
+    pub fn new(peer: (Client, Updates), snapshot: Snapshot) -> Self {
         Self::start(Some(peer), snapshot)
     }
     pub fn offline(snapshot: Snapshot) -> Self {
         let (snapshot, _) = reduce(&snapshot, Event::Disconnected("Host not connected".into()));
         Self::start(None, snapshot)
     }
-    fn start(peer: Option<RpcPeer>, snapshot: Snapshot) -> Self {
+    fn start(peer: Option<(Client, Updates)>, snapshot: Snapshot) -> Self {
         let (writer, updates) = watch::channel(Arc::new(snapshot));
-        let connection = peer.map(|peer| {
+        let connection = peer.map(|(peer, events)| {
             (
                 Connection {
                     peer: Arc::new(peer),
+                    events,
                     session: None,
                 },
                 apply(&writer, Event::Connected),
@@ -142,15 +142,14 @@ impl Store {
         });
         let (commands, mut incoming) = mpsc::unbounded_channel();
         let stop = CancellationToken::new();
-        let (finished_tx, finished) = watch::channel(None);
+        let (finished_tx, finished) = watch::channel(false);
         let publications = writer.clone();
         let shutdown = stop.clone();
         tokio::spawn(async move {
             let mut connection = connection;
-            let mut result = Ok(());
             loop {
                 if let Some((connection, effects)) = connection.take() {
-                    result = run(
+                    run(
                         connection,
                         publications.clone(),
                         &mut incoming,
@@ -166,7 +165,7 @@ impl Store {
                 }
             }
             apply(&publications, Event::Disconnected("store closed".into()));
-            finished_tx.send_replace(Some(result.map_err(|error| error.to_string())));
+            finished_tx.send_replace(true);
         });
         Self {
             updates,
@@ -298,20 +297,20 @@ impl Store {
             let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| {
                 session.close();
             });
-            let peer = session
+            let (peer, events) = session
                 .open_peer(std::time::Duration::from_secs(30), 64)
                 .await?;
             if let Some(invitation) = invitation {
-                peer.request::<_, <Pair as RpcMethod>::Output>(Pair::METHOD, &Pair { invitation })
-                    .await?;
+                peer.call(&Pair { invitation }).await?;
             }
             let scope = read_storage_scope(&peer).await?;
             let (complete, result) = oneshot::channel();
             let command = Command::Attach {
-                connection: Connection {
+                connection: Box::new(Connection {
                     peer: Arc::new(peer),
+                    events,
                     session: Some(scopeguard::ScopeGuard::into_inner(session)),
-                },
+                }),
                 attempt: attempt.clone(),
                 storage_scope: format!("{}:{scope}", ticket.node_id()),
                 complete,
@@ -404,23 +403,20 @@ impl Store {
         self.stop.cancel();
         self.publications.lock().unwrap().take();
         let mut finished = self.finished.clone();
-        loop {
-            if let Some(result) = finished.borrow_and_update().clone() {
-                break result.map_err(PeerError::ConnectionClosed);
-            }
-            finished
-                .changed()
-                .await
-                .map_err(|_| PeerError::ConnectionClosed("store task stopped".into()))?;
-        }
+        finished
+            .wait_for(|done| *done)
+            .await
+            .map(|_| ())
+            .map_err(|_| PeerError::ConnectionClosed("store task stopped".into()))
     }
 }
 
-async fn read_storage_scope(peer: &RpcPeer) -> Result<String, PeerError> {
+async fn read_storage_scope(peer: &Client) -> Result<String, PeerError> {
     let scope = peer
-        .request::<_, String>("host/session/scope", &serde_json::json!({}))
-        .await?
-        .value;
+        .request::<String>(&crate::protocol::Call::SessionScope(
+            crate::models::Empty {},
+        ))
+        .await?;
     if scope.is_empty() || scope.len() > 256 {
         return Err(PeerError::InvalidMessage(
             "invalid provider storage scope".into(),
@@ -510,24 +506,7 @@ fn publish_locked(
     *current = Arc::new(next);
     (effects, true)
 }
-fn completion_sequence(completed: &Completed) -> Option<u64> {
-    completed.request_id?;
-    match &completed.result {
-        Ok(applied) => applied.sequence,
-        Err(PeerError::Remote { sequence, .. } | PeerError::InvalidResponse { sequence, .. }) => {
-            *sequence
-        }
-        _ => None,
-    }
-}
-fn finish(
-    ordered: &Mutex<BTreeSet<u64>>,
-    updates: &watch::Sender<Arc<Snapshot>>,
-    completed: Completed,
-) -> Vec<Scheduled> {
-    if let Some(id) = completed.request_id {
-        ordered.lock().unwrap().remove(&id);
-    }
+fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<Scheduled> {
     let mut effects = Vec::new();
     let mut scheduled = Vec::new();
     let mut result = Ok(Outcome::Applied);
@@ -616,7 +595,7 @@ fn finish(
     scheduled
 }
 /// Bounded, connection-local item work. A continuation keeps its original
-/// receipt and slot identity, while releasing the wire response barrier.
+/// receipt and slot identity, without blocking unrelated work.
 #[derive(Default)]
 struct ItemReads {
     receipts: BTreeMap<op::ReadItem, Receipt>,
@@ -669,12 +648,11 @@ impl ItemReads {
     }
     fn finish(
         &mut self,
-        ordered: &Mutex<BTreeSet<u64>>,
         updates: &watch::Sender<Arc<Snapshot>>,
         completed: Completed,
     ) -> Vec<Scheduled> {
         let key = completed.item_read.clone();
-        let effects = finish(ordered, updates, completed);
+        let effects = finish(updates, completed);
         if let Some(key) = key
             && !effects
                 .iter()
@@ -686,49 +664,37 @@ impl ItemReads {
         effects
     }
 }
-fn decode_message(line: &str) -> Result<Event, PeerError> {
-    let message =
-        RpcMessage::parse(line).map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    if message.kind() == RpcMessageKind::Request {
-        return Err(PeerError::InvalidMessage(
-            "provider requests must arrive as session updates".into(),
-        ));
-    }
-    #[derive(serde::Deserialize)]
-    struct Notification {
-        method: String,
-        #[serde(default)]
-        params: serde_json::Value,
-    }
-    let notification: Notification =
-        serde_json::from_str(line).map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-    Ok(Event::Notification {
-        method: notification.method,
-        params: notification.params,
-    })
-}
 async fn run(
-    connection: Connection,
+    mut connection: Connection,
     updates: watch::Sender<Arc<Snapshot>>,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     stop: CancellationToken,
     mut effects: Vec<Scheduled>,
-) -> Result<(), PeerError> {
+) {
     let peer = &connection.peer;
     let session = &connection.session;
-    let mut events = peer.subscribe();
-    let client = Client::new(peer.clone());
-    let ordered = Mutex::new(BTreeSet::new());
+    let events = &mut connection.events;
     let mut jobs = FuturesUnordered::new();
-    let mut received = VecDeque::new();
-    let mut completed = BTreeMap::new();
-    let mut stream_open = true;
-    let mut terminal_reason = None;
+    let mut subscriptions = tokio_stream::StreamMap::new();
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
     let mut terminal_running = false;
     let mut disconnected = None;
     let reason = loop {
+        let unused: Vec<_> = subscriptions
+            .keys()
+            .filter(|id| {
+                !updates
+                    .borrow()
+                    .subscriptions
+                    .values()
+                    .any(|current| current == *id)
+            })
+            .copied()
+            .collect();
+        for id in unused {
+            subscriptions.remove(&id);
+        }
         for Scheduled {
             effect,
             snapshot: captured,
@@ -754,9 +720,7 @@ async fn run(
                 continue;
             }
             jobs.push(perform(
-                Some(&client),
                 Some(peer),
-                &ordered,
                 session.as_ref(),
                 captured,
                 effect,
@@ -765,9 +729,7 @@ async fn run(
         }
         while let Some(scheduled) = item_reads.next() {
             jobs.push(perform(
-                Some(&client),
                 Some(peer),
-                &ordered,
                 session.as_ref(),
                 scheduled.snapshot,
                 scheduled.effect,
@@ -783,19 +745,15 @@ async fn run(
         {
             terminal_running = true;
             jobs.push(perform(
-                Some(&client),
                 Some(peer),
-                &ordered,
                 session.as_ref(),
                 captured,
                 effect,
                 complete,
             ));
         }
-        if !stream_open && jobs.is_empty() && completed.is_empty() && received.is_empty() {
-            break terminal_reason.unwrap_or_else(|| "RPC stream closed".into());
-        }
         tokio::select! {
+            biased;
             _ = stop.cancelled() => break "store closed".into(),
             command = commands.recv() => {
                 let Some(command) = command else { break "store closed".into() };
@@ -821,42 +779,25 @@ async fn run(
                 }
             }
             result = jobs.next(), if !jobs.is_empty() => {
-                let result = result.unwrap();
+                let mut result = result.unwrap();
+                for (id, stream) in result.subscriptions.drain(..) { subscriptions.insert(id, futures_util::stream::try_unfold(stream, |mut stream| async {
+                        Ok(stream.read::<crate::session::SessionChange>().await?.map(|line| (line, stream)))
+                    }).chain(futures_util::stream::once(async {
+                    Err(std::io::Error::other("subscription ended"))
+                })).boxed()); }
                 if result.terminal.is_some() { terminal_running = false; }
-                if let Some(sequence) = completion_sequence(&result) { completed.insert(sequence,result); }
-                else { effects.extend(item_reads.finish(&ordered,&updates,result)); }
+                effects.extend(item_reads.finish(&updates, result));
             }
-            event = events.recv(), if stream_open => match event {
-                Ok(event) => received.push_back(event),
-                Err(broadcast::error::RecvError::Lagged(count)) => break format!("lost {count} RPC events; reconnect and reload state"),
-                Err(broadcast::error::RecvError::Closed) => stream_open = false,
-            }
-        }
-        while let Some(event) = received.front() {
-            let ordered_response = match event {
-                PeerEvent::Response {
-                    sequence,
-                    request_id: Some(id),
-                    ..
-                } => ordered.lock().unwrap().contains(id).then_some(*sequence),
-                _ => None,
-            };
-            if let Some(sequence) = ordered_response {
-                let Some(result) = completed.remove(&sequence) else {
-                    break;
-                };
-                effects.extend(item_reads.finish(&ordered, &updates, result));
-            }
-            match received.pop_front().unwrap() {
-                PeerEvent::Message(frame) => {
-                    let event = decode_message(&frame.value)
-                        .unwrap_or_else(|error| Event::Failed(error.to_string()));
-                    effects.extend(apply(&updates, event));
+            Some((id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
+                match update {
+                    Ok(change) => effects.extend(apply(&updates, Event::SessionUpdate(Box::new(crate::session::SessionUpdate { subscription_id: id, change })))),
+                    Err(error) => break error.to_string(),
                 }
-                PeerEvent::Closed(reason) => {
-                    terminal_reason = Some(reason);
-                }
-                PeerEvent::Response { .. } => {}
+            }
+            event = events.read::<crate::protocol::Notification>() => match event {
+                Ok(Some(notification)) => effects.extend(apply(&updates, Event::Notification(notification))),
+                Ok(None) => break "Host event stream ended".into(),
+                Err(error) => break error.to_string(),
             }
         }
     };
@@ -867,14 +808,12 @@ async fn run(
         session.as_ref().unwrap().close();
     }
     drop(jobs);
-    let closed = peer.close().await;
-    let result = if replacing { Ok(()) } else { closed };
+    peer.close().await;
     drop(connection);
     apply(&updates, Event::Disconnected(reason));
     if let Some(complete) = disconnected {
         let _ = complete.send(Ok(()));
     }
-    result
 }
 
 async fn run_offline(
@@ -882,7 +821,6 @@ async fn run_offline(
     commands: &mut mpsc::UnboundedReceiver<Command>,
     stop: &CancellationToken,
 ) -> Option<(Connection, Vec<Scheduled>)> {
-    let ordered = Mutex::new(BTreeSet::new());
     while !stop.is_cancelled() {
         let command = tokio::select! {
             biased;
@@ -915,26 +853,20 @@ async fn run_offline(
                 apply(updates, Event::StorageScope(storage_scope));
                 let effects = apply(updates, Event::Connected);
                 let _ = complete.send(Ok(()));
-                return Some((connection, effects));
+                return Some((*connection, effects));
             }
         };
         let mut complete = Some(Receipt::new(command.complete));
         for effect in command.effects {
-            // Disconnect already removed the subscription on the Host.
-            if effect.0.disconnected_is_complete() {
-                continue;
-            }
             let result = perform(
                 None,
-                None,
-                &ordered,
                 None,
                 command.snapshot.clone(),
                 effect,
                 complete.take(),
             )
             .await;
-            drop(finish(&ordered, updates, result));
+            drop(finish(updates, result));
         }
         if let Some(complete) = complete {
             complete.send(Ok(Outcome::Applied));
@@ -945,8 +877,6 @@ async fn run_offline(
 
 async fn perform(
     client: Option<&Client>,
-    peer: Option<&RpcPeer>,
-    ordered: &Mutex<BTreeSet<u64>>,
     session: Option<&crate::transport::Session>,
     snapshot: Arc<Snapshot>,
     effect: Effect,
@@ -955,30 +885,25 @@ async fn perform(
     let item_read = effect.0.item_read().cloned();
     let terminal = effect.0.terminal_handle().map(str::to_owned);
     let failed_submission = effect.0.submission_id().map(str::to_owned);
-    let mut request_id = None;
+    let mut subscriptions = Vec::new();
     let result = async {
         let client =
             client.ok_or_else(|| PeerError::ConnectionClosed("Host not connected".into()))?;
-        let peer = peer.ok_or_else(|| PeerError::ConnectionClosed("Host not connected".into()))?;
         let mut context = Execution {
             client,
-            peer,
             session,
             snapshot: &snapshot,
-            ordered,
-            request_id: &mut request_id,
-            sequence: None,
-            ordered_call: false,
+            subscriptions: &mut subscriptions,
         };
         effect.0.run(&mut context).await
     }
     .await;
     Completed {
+        subscriptions,
         item_read,
-        delivery_attempted: client.is_some() && peer.is_some(),
+        delivery_attempted: client.is_some(),
         epoch: snapshot.epoch,
         result,
-        request_id,
         failed_submission,
         terminal,
         complete,
@@ -1010,11 +935,11 @@ impl<O: op::Operation> Application for Completion<O> {
     }
 }
 // Intent is replayable data. Only the effect queue erases an operation's type;
-// the same allocation carries its output until the response marker is applied.
+// the same allocation carries its output until its result is applied.
 #[derive(Debug)]
 pub struct Effect(Box<dyn Pending>, bool);
 impl Effect {
-    /// Continue the dispatch receipt after the ordered control step is applied.
+    /// Continue the dispatch receipt after this step is applied.
     pub(crate) fn continuation<O: op::Operation>(operation: O) -> Self {
         let mut effect = Self::execute(operation);
         effect.1 = true;
@@ -1034,7 +959,6 @@ trait Pending: Application {
     fn item_read(&self) -> Option<&op::ReadItem>;
     fn submission_id(&self) -> Option<&str>;
     fn terminal_handle(&self) -> Option<&str>;
-    fn disconnected_is_complete(&self) -> bool;
     fn run<'a>(
         self: Box<Self>,
         context: &'a mut Execution<'_>,
@@ -1050,20 +974,15 @@ impl<O: op::Operation> Pending for Completion<O> {
     fn terminal_handle(&self) -> Option<&str> {
         self.operation.terminal_handle()
     }
-    fn disconnected_is_complete(&self) -> bool {
-        self.operation.disconnected_is_complete()
-    }
     fn run<'a>(
         mut self: Box<Self>,
         context: &'a mut Execution<'_>,
     ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>> {
         Box::pin(async move {
-            context.ordered_call = O::ORDERED;
             let mut output = self.operation.run(context).await?;
             let outcome = O::outcome(&mut output);
             self.output = Some(output);
             Ok(Applied {
-                sequence: context.sequence,
                 outcome,
                 application: self,
             })
@@ -1072,32 +991,21 @@ impl<O: op::Operation> Pending for Completion<O> {
 }
 pub struct Execution<'a> {
     pub(crate) client: &'a Client,
-    pub(crate) peer: &'a RpcPeer,
     pub(crate) session: Option<&'a crate::transport::Session>,
     pub(crate) snapshot: &'a Snapshot,
-    ordered: &'a Mutex<BTreeSet<u64>>,
-    request_id: &'a mut Option<u64>,
-    sequence: Option<u64>,
-    ordered_call: bool,
+    subscriptions: &'a mut Vec<(uuid::Uuid, crate::client::Updates)>,
 }
 impl Execution<'_> {
     pub(crate) async fn call<O: RpcMethod + Sync>(
         &mut self,
         operation: &O,
     ) -> Result<O::Output, PeerError> {
-        let request = self.client.call(operation);
-        if self.ordered_call {
-            // Register before polling: a fast reply cannot overtake publication.
-            *self.request_id = request.wire_id();
-            if let Some(id) = *self.request_id {
-                self.ordered.lock().unwrap().insert(id);
-            }
+        if let Some((output, stream, id)) = self.client.open_subscription(operation).await? {
+            self.subscriptions.push((id, stream));
+            Ok(output)
+        } else {
+            Ok(self.client.call(operation).await?)
         }
-        let reply = request.await?;
-        if self.ordered_call {
-            self.sequence = Some(reply.sequence);
-        }
-        Ok(reply.value)
     }
 }
 
@@ -1141,7 +1049,8 @@ mod tests {
                     more_project_ids: Vec::new(),
                     has_more_chats: false,
                     has_more_projects: false,
-                    extra: Default::default(),
+
+                    provider_errors: None,
                 }))
             }),
             ("epoch", |snapshot| snapshot.epoch += 1),

@@ -59,7 +59,6 @@ pub enum Intent {
     ReadItem(ReadItem),
     ResizeTerminal(ResizeTerminal),
     Interrupt(Interrupt),
-    CloseSubscription(CloseSubscription),
     ShowThreadList,
     WriteTerminal(WriteTerminal),
     AcknowledgeTerminal {
@@ -122,7 +121,6 @@ pub enum Intent {
 /// Only operations with durable side effects apply stale results or override `stale`.
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     type Output: Send + std::fmt::Debug + 'static;
-    const ORDERED: bool = false;
     const INVALIDATES: bool = false;
     const APPLY_WHEN_STALE: bool = false;
     /// Identifies a submission step whose completion and failure belong to the same dispatch.
@@ -134,9 +132,6 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     }
     fn terminal_handle(&self) -> Option<&str> {
         None
-    }
-    fn disconnected_is_complete(&self) -> bool {
-        false
     }
     fn run(
         &self,
@@ -188,15 +183,6 @@ pub use threads::*;
 mod submission;
 pub use submission::*;
 
-struct Base64Bytes<'a>(&'a [u8]);
-impl Serialize for Base64Bytes<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&base64::display::Base64Display::new(
-            self.0,
-            &base64::engine::general_purpose::STANDARD,
-        ))
-    }
-}
 pub(super) fn add_attachment(next: &mut Snapshot, draft_key: String, attachment: Attachment) {
     Arc::make_mut(
         Arc::make_mut(&mut next.drafts)
