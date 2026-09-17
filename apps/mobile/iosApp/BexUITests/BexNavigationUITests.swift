@@ -18,7 +18,9 @@ extension BexLaunchUITests {
         composer.tap(); composer.typeText("Keep my draft")
         let chat = app.descendants(matching: .any)["task.empty"]
         XCTAssertTrue(chat.waitForExistence(timeout: 10))
-        chat.swipeLeft()
+        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0))
+            .withOffset(CGVector(dx: 0, dy: chat.frame.midY - app.frame.minY))
+        edge.press(forDuration: 0.05, thenDragTo: edge.withOffset(CGVector(dx: -200, dy: 0)))
         XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
         let terminal = app.descendants(matching: .any)["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))

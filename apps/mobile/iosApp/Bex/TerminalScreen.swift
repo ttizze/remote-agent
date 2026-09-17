@@ -20,6 +20,7 @@ struct ChatWithTerminalPanel<Chat: View>: View {
                     .accessibilityHidden(isPresented && !wide)
                     .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
                         guard allowsSwipe,
+                              value.startLocation.x >= geometry.size.width - 32,
                               abs(value.translation.width) > abs(value.translation.height) * 1.5,
                               value.translation.width < -60 else { return }
                         isPresented = true

@@ -5,7 +5,7 @@ The Host owns each PTY and its Alacritty terminal state. A terminal is scoped to
 Clients use the existing authenticated iroh connection and agent-core operations:
 
 - Desktop: `alacritty_terminal` with a GPUI element and native text input, selection and clipboard.
-- iOS: SwiftTerm's UIKit view, native selection, IME and keyboard accessory. The terminal lives in a right-hand chat panel: swipe left across chat to open and right across the panel to close. Compact screens slide the chat aside; wide screens keep both panes visible.
+- iOS: SwiftTerm's UIKit view, native selection, IME and keyboard accessory. The terminal lives in a right-hand chat panel: swipe left from the chat's right edge to open and right across the panel to close. Edge activation preserves horizontal scrolling inside chat content such as Markdown tables. Compact screens slide the chat aside; wide screens keep both panes visible.
 - Android: Termux's terminal-emulator and terminal-view with a remote byte-stream `TerminalSession` and a Compose keyboard bar. JNI and the Android-local shell are omitted.
 
 `agent-core` owns stable terminal IDs, lifecycle, output acknowledgement and the native snapshot binding. Each attached client consumes raw bytes; reconnect replaces its screen using an ANSI checkpoint followed by the unfinished UTF-8/VT parser input. Checkpoint and live output are emitted by the same Host worker, in order. The worker's screen is resized before generating the checkpoint for the attaching client's dimensions. Only one connection attaches to a terminal at a time.
