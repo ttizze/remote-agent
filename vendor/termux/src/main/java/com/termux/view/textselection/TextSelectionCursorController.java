@@ -106,7 +106,7 @@ public class TextSelectionCursorController implements CursorController {
             }
         }
     }
-    
+
     public void setActionModeCallBacks() {
         final ActionMode.Callback callback = new ActionMode.Callback() {
             @Override

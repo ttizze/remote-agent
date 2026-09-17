@@ -1661,7 +1661,7 @@ public final class TerminalEmulator {
                 break;
             }
         }
-        
+
         return isValidDcs;
     }
 

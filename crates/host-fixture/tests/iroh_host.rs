@@ -2126,7 +2126,10 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
         rpc(&local.peer, "host/terminal/start", json!({"processHandle":"managed-terminal","cwd":terminal_directory,"size":{"rows":24,"cols":80}})).await;
         assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
         assert!(Path::new(&path).is_dir());
-        assert!(local.peer.request::<_, Value>("host/terminal/start", &json!({"processHandle":"managed-terminal","cwd":path,"size":{"rows":24,"cols":80}})).await.is_err());
+        // Detach retains the PTY and its worktree lease; canonical-path reattach succeeds.
+        rpc(&local.peer, "host/terminal/detach", json!({"processHandle":"managed-terminal"})).await;
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        rpc(&local.peer, "host/terminal/start", json!({"processHandle":"managed-terminal","cwd":path,"size":{"rows":24,"cols":80}})).await;
         assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
         rpc(&local.peer, "process/kill", json!({"processHandle":"managed-terminal"})).await;
         store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();

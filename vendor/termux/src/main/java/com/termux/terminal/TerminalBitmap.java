@@ -131,7 +131,7 @@ public class TerminalBitmap {
 
     protected int mBitmapNum;
     protected Bitmap mBitmap;
-    
+
     protected int mCellWidth;
     protected int mCellHeight;
 
@@ -428,7 +428,7 @@ public class TerminalBitmap {
 
     public static Bitmap resizeBitmap(String logTag, String label, TerminalSessionClient client, Bitmap bitmap,
                                       int bitmapWidth, int bitmapHeight) {
-        
+
         Bitmap newBitmap;
         try {
             int newBitmapSize = bitmapWidth * bitmapHeight * 4;
