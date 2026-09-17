@@ -33,6 +33,7 @@ pub(super) enum Failure {
     Upstream {
         #[serde(rename = "providerError")]
         provider_error: Box<RawValue>,
+        message: String,
         delivery: agent_core::peer::Delivery,
     },
 }
@@ -50,7 +51,15 @@ impl From<AppServerError> for Failure {
 
 impl Failure {
     pub(super) fn upstream(provider_error: Box<RawValue>) -> Self {
+        let value: serde_json::Value =
+            serde_json::from_str(provider_error.get()).unwrap_or_default();
+        let message = value["message"]
+            .as_str()
+            .filter(|message| !message.trim().is_empty())
+            .map(agent_core::diagnostics::sanitize)
+            .unwrap_or_else(|| "接続先で操作に失敗しました。もう一度お試しください。".into());
         Self::Upstream {
+            message,
             provider_error,
             delivery: agent_core::peer::Delivery::Unknown,
         }
@@ -1249,7 +1258,9 @@ fn codex_response(method: &str, line: String) -> Result<Response, RpcMessageErro
     match &mut response {
         Response::Failure { error } => {
             // Provider fields are not Bex delivery evidence.
-            *error = serde_json::json!({"delivery": agent_core::peer::Delivery::Unknown, "providerError": error.take()});
+            return Response::from_result::<(), _>(Err(Failure::upstream(
+                serde_json::value::to_raw_value(error)?,
+            )));
         }
         Response::Success {
             result: agent_core::protocol::Body::Thread(result),
@@ -1275,6 +1286,7 @@ mod tests {
         let response = response.into_value();
         assert_eq!(response["error"]["delivery"], "unknown");
         assert_eq!(response["error"]["providerError"], native);
+        assert_eq!(response["error"]["message"], "not sent");
     }
     #[tokio::test]
     async fn unknown_methods_do_not_require_or_reach_codex() {

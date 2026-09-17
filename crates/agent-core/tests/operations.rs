@@ -331,3 +331,33 @@ fn submission_corpus() {
 fn normalize<T: serde::de::DeserializeOwned + serde::Serialize>(value: &Value) -> Value {
     serde_json::to_value(serde_json::from_value::<T>(value.clone()).unwrap()).unwrap()
 }
+
+#[test]
+fn current_idle_state_overrides_unfinished_history_for_submission() {
+    let mut thread: Thread = serde_json::from_value(json!({
+        "cwd":"/project", "status":{"type":"idle"},
+        "turns":[{"id":"old", "status":"inProgress"}]
+    }))
+    .unwrap();
+    for active in [None, Some(false)] {
+        assert_eq!(
+            submission_target(Some(&thread), None, active).unwrap(),
+            SubmissionTarget::Start {
+                cwd: "/project",
+                resume: false
+            }
+        );
+    }
+    thread.status = Some(serde_json::from_value(json!({"type":"active"})).unwrap());
+    assert_eq!(
+        submission_target(Some(&thread), None, Some(false)).unwrap(),
+        SubmissionTarget::Start {
+            cwd: "/project",
+            resume: false
+        }
+    );
+    assert_eq!(
+        submission_target(Some(&thread), None, Some(true)).unwrap(),
+        SubmissionTarget::Steer("old")
+    );
+}

@@ -452,23 +452,27 @@ pub fn submission_target<'a>(
     listed: Option<&'a crate::models::Thread>,
     active: Option<bool>,
 ) -> Result<SubmissionTarget<'a>, PeerError> {
-    if let Some(turn) = snapshot
-        .and_then(|thread| thread.turns.as_ref())
-        .and_then(|turns| {
-            turns.iter().rev().find(|turn| {
-                turn.status.as_deref() == Some("inProgress") && !turn.id.trim().is_empty()
+    // Current execution state takes precedence over unfinished historical turns.
+    let active = active.or_else(|| {
+        snapshot
+            .and_then(|thread| thread.status.as_ref())
+            .map(|status| status.kind == crate::models::ThreadStatusKind::Active)
+    });
+    if active != Some(false)
+        && let Some(turn) = snapshot
+            .and_then(|thread| thread.turns.as_ref())
+            .and_then(|turns| {
+                turns.iter().rev().find(|turn| {
+                    turn.status.as_deref() == Some("inProgress") && !turn.id.trim().is_empty()
+                })
             })
-        })
     {
         return Ok(SubmissionTarget::Steer(&turn.id));
     }
     if active.unwrap_or_else(|| {
-        [snapshot, listed].into_iter().flatten().any(|thread| {
-            thread
-                .status
-                .as_ref()
-                .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
-        })
+        listed
+            .and_then(|thread| thread.status.as_ref())
+            .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
     }) {
         return Ok(SubmissionTarget::Queue);
     }
