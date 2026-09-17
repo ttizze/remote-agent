@@ -112,24 +112,32 @@ pub struct Terminal {
 pub struct Snapshot {
     pub storage_scope: String,
     pub archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
+    #[serde(default)]
     pub account: Arc<AccountState>,
     #[serde(skip)]
     pub terminals: Arc<BTreeMap<String, Arc<Terminal>>>,
+    #[serde(default)]
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
+    #[serde(default)]
     pub threads: Option<Arc<ThreadList>>,
+    #[serde(default)]
     pub models: Arc<Vec<Model>>,
+    #[serde(default)]
     pub model_errors: Arc<Map<String, Value>>,
     #[serde(skip)]
     pub requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
     pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
+    #[serde(default)]
     pub workspace: Arc<Workspace>,
     pub navigation: Arc<Navigation>,
     pub activity: Arc<Activity>,
+    #[serde(default)]
     pub management: Arc<HostManagement>,
     #[serde(skip)]
     pub list_query: Arc<ListQuery>,
+    #[serde(default)]
     pub epoch: u64,
     #[serde(skip)]
     pub connected: bool,
@@ -165,13 +173,37 @@ use operations::add_attachment;
 /// it separate prevents storage switches from deleting or mixing user drafts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScopedData {
-    pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
-    pub threads: Option<Arc<ThreadList>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
     pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
     pub navigation: Arc<Navigation>,
     pub activity: Arc<Activity>,
+}
+
+/// Durable client-owned data. Host results and connection state stay in memory.
+#[derive(Debug, Serialize)]
+pub struct LocalState<'a> {
+    storage_scope: &'a str,
+    archived_scopes: &'a BTreeMap<String, Arc<ScopedData>>,
+    drafts: &'a BTreeMap<String, Arc<Draft>>,
+    pending_submissions: &'a BTreeMap<String, Arc<PendingSubmission>>,
+    file_drafts: &'a BTreeMap<String, FileDraft>,
+    navigation: &'a Navigation,
+    activity: &'a Activity,
+}
+
+impl Snapshot {
+    pub fn local_state(&self) -> LocalState<'_> {
+        LocalState {
+            storage_scope: &self.storage_scope,
+            archived_scopes: &self.archived_scopes,
+            drafts: &self.drafts,
+            pending_submissions: &self.pending_submissions,
+            file_drafts: &self.file_drafts,
+            navigation: &self.navigation,
+            activity: &self.activity,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,8 +510,6 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
-                    conversations: std::mem::take(&mut next.conversations),
-                    threads: next.threads.take(),
                     drafts: std::mem::take(&mut next.drafts),
                     pending_submissions: std::mem::take(&mut next.pending_submissions),
                     file_drafts: std::mem::take(&mut next.file_drafts),
@@ -489,14 +519,14 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 Arc::make_mut(&mut next.archived_scopes)
                     .insert(next.storage_scope.clone(), Arc::new(archived));
                 if let Some(saved) = Arc::make_mut(&mut next.archived_scopes).remove(&scope) {
-                    next.conversations = saved.conversations.clone();
-                    next.threads = saved.threads.clone();
                     next.drafts = saved.drafts.clone();
                     next.pending_submissions = saved.pending_submissions.clone();
                     next.file_drafts = saved.file_drafts.clone();
                     next.navigation = saved.navigation.clone();
                     next.activity = saved.activity.clone();
                 }
+                next.conversations = Arc::default();
+                next.threads = None;
                 next.workspace = Arc::default();
                 next.account = Arc::default();
                 next.models = Arc::default();

@@ -80,7 +80,7 @@ impl StoreSession {
                     let snapshot = receive.borrow_and_update().clone();
                     let path = path.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        host_daemon::platform::save_private_json(&path, &snapshot)
+                        host_daemon::platform::save_private_json(&path, &snapshot.local_state())
                     })
                     .await
                     .map_err(anyhow::Error::from)

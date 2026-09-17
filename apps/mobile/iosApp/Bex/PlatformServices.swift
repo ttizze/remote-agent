@@ -27,7 +27,7 @@ enum SnapshotFiles {
 
     static func save(_ host: String, snapshot: AgentCore.Snapshot) async throws {
         try await Task.detached(priority: .utility) {
-            try snapshot.serialize().write(to: location(host), options: .atomic)
+            try snapshot.serializeLocalState().write(to: location(host), options: .atomic)
         }.value
     }
 }
