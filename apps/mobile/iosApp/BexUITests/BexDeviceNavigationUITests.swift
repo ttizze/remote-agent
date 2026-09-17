@@ -26,6 +26,17 @@ extension BexLaunchUITests {
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
         terminal.tap(); terminal.typeText("BEX_NATIVE=17\n")
         captureScreen(app, named: "Native terminal with keyboard")
+        XCTAssertFalse(app.buttons["終了"].exists)
+        XCTAssertFalse(app.buttons["terminal.close"].exists)
+        app.buttons["workbench.files"].tap()
+        let file = app.buttons["file.hello.txt"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        captureScreen(app, named: "Files in the chat right panel")
+        file.tap()
+        XCTAssertTrue(app.textViews["file.editor"].waitForExistence(timeout: 10))
+        app.buttons["file.close"].tap()
+        app.buttons["workbench.terminal"].tap()
+        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
         XCTAssertGreaterThan(terminal.frame.minX, 0)
         terminal.swipeRight()
         XCTAssertTrue(app.buttons["task.terminal"].waitForExistence(timeout: 5))
@@ -35,7 +46,7 @@ extension BexLaunchUITests {
         terminal.tap(); terminal.typeText("exit $BEX_NATIVE\n")
         XCTAssertTrue(app.staticTexts["終了 · 17"].waitForExistence(timeout: 10))
         captureScreen(app, named: "Reattached native shell retains state")
-        app.buttons["terminal.close"].tap()
+        closeWorkbench(app)
     }
 
     func testPhysicalDeviceCanPairWithManualPayload() throws {

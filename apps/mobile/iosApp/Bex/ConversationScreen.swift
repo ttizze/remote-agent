@@ -14,8 +14,8 @@ struct ThreadScreen: View {
     @State var selectedPhotos: [PhotosPickerItem] = []
     @State var showingCamera = false
     @State var preparingMedia = false
-    @State var showingFiles = false
-    @State var showingTerminal = false
+    @State var showingPanel = false
+    @State var panel: ConversationPanelTab = .terminal
     @State var showingModelSettings = false
     @State var scrollViewportHeight: CGFloat = 0
     @State var isFollowingLatest = true
@@ -30,9 +30,9 @@ struct ThreadScreen: View {
     @FocusState var composerFocused: Bool
 
     var body: some View {
-        ChatWithTerminalPanel(model: model, isPresented: $showingTerminal,
-                              allowsSwipe: !isSideChat, chat: chatContent)
-            .onChange(of: showingTerminal) {
+        ChatWithWorkbench(model: model, isPresented: $showingPanel, selection: $panel,
+                          showingDiff: $showingDiff, allowsSwipe: !isSideChat, chat: chatContent)
+            .onChange(of: showingPanel) {
                 if $0 {
                     composerFocused = false
                 }
@@ -79,17 +79,6 @@ struct ThreadScreen: View {
                     }
                 }.ignoresSafeArea()
             }
-            .sheet(
-                isPresented: $showingFiles,
-                onDismiss: {
-                    if !model.selectedDirectory.isEmpty {
-                        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd)))
-                    }
-                },
-                content: {
-                    WorkspaceSheet(model: model, root: model.cwd, showingDiff: $showingDiff)
-                }
-            )
             .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
             .onAppear {
                 if model.isNewThread {
@@ -118,7 +107,7 @@ struct ThreadScreen: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     if !isSideChat {
                         if model.isNewThread {
-                            Button { showingTerminal = true } label: { Image(systemName: "terminal") }
+                            Button { panel = .terminal; showingPanel = true } label: { Image(systemName: "terminal") }
                                 .accessibilityLabel("ターミナル").accessibilityIdentifier("task.terminal")
                         } else {
                             conversationActions
@@ -297,12 +286,12 @@ extension ThreadScreen {
                 Image(systemName: "square.and.pencil").font(.title2).frame(width: 44, height: 44)
             }.accessibilityLabel("新しい会話").accessibilityIdentifier("task.new")
             Menu {
-                Button { showingTerminal = true } label: { Label("ターミナル", systemImage: "terminal") }
+                Button { panel = .terminal; showingPanel = true } label: { Label("ターミナル", systemImage: "terminal") }
                     .accessibilityIdentifier("task.terminal")
-                Button { showingDiff = false; showingFiles = true } label: {
+                Button { showingDiff = false; panel = .files; showingPanel = true } label: {
                     Label("ファイル", systemImage: "folder")
                 }.accessibilityIdentifier("task.files")
-                Button { showingDiff = true; showingFiles = true } label: {
+                Button { showingDiff = true; panel = .files; showingPanel = true } label: {
                     Label("変更を表示", systemImage: "plus.forwardslash.minus")
                 }
                 Button {

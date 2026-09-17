@@ -13,7 +13,7 @@ extension ThreadScreen {
                 newThreadContext
             }
             if !model.isNewThread, let review, review.files > 0 {
-                Button { showingDiff = true; showingFiles = true } label: {
+                Button { showingDiff = true; panel = .files; showingPanel = true } label: {
                     HStack(spacing: 10) {
                         Text("\(review.files)件のファイル")
                         Text("+\(review.additions)").foregroundColor(.green)

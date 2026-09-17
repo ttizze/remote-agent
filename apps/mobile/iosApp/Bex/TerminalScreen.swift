@@ -2,90 +2,20 @@ import AgentCore
 import SwiftTerm
 import SwiftUI
 
-/// Owns the chat/panel layout and horizontal navigation without replacing the chat.
-struct ChatWithTerminalPanel<Chat: View>: View {
-    let model: BexAppViewModel
-    @Binding var isPresented: Bool
-    let allowsSwipe: Bool
-    let chat: Chat
-
-    var body: some View {
-        GeometryReader { geometry in
-            let wide = geometry.size.width >= 760
-            let panelWidth = wide ? min(480, geometry.size.width * 0.45) : geometry.size.width - 36
-            HStack(spacing: 0) {
-                chat
-                    .frame(width: wide && isPresented ? geometry.size.width - panelWidth : geometry.size.width)
-                    .allowsHitTesting(!isPresented || wide)
-                    .accessibilityHidden(isPresented && !wide)
-                    .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
-                        guard allowsSwipe,
-                              value.startLocation.x >= geometry.size.width - 32,
-                              abs(value.translation.width) > abs(value.translation.height) * 1.5,
-                              value.translation.width < -60 else { return }
-                        isPresented = true
-                    })
-                if isPresented {
-                    TerminalScreen(model: model, cwd: model.cwd) { isPresented = false }
-                        .id(model.cwd)
-                        .frame(width: panelWidth)
-                        .overlay(alignment: .leading) { Divider() }
-                }
-            }
-            .offset(x: isPresented && !wide ? -panelWidth : 0)
-            .animation(.easeInOut(duration: 0.22), value: isPresented)
-        }
-        .clipped()
-    }
-}
-
 struct TerminalScreen: View {
     @ObservedObject var model: BexAppViewModel
     let cwd: String
-    let close: () -> Void
     private var handle: String {
         terminalHandle(cwd: cwd)
     }
 
-    @State private var terminated = false
-
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Label("ターミナル", systemImage: "terminal")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Button("終了", role: .destructive) {
-                    model.perform(.killTerminal(KillTerminal(handle: handle))) { result in
-                        if case .success = result {
-                            terminated = true
-                            close()
-                        }
-                    }
-                }
-                Button(action: close) { Image(systemName: "xmark").frame(width: 44, height: 44) }
-                    .accessibilityLabel("パネルを閉じる")
-                    .accessibilityIdentifier("terminal.close")
-            }
-            .padding(.leading, 12)
-            .contentShape(Rectangle())
-            Divider()
             Text(model.snapshot.terminalView(handle: handle)?.status ?? "接続中…")
                 .font(.caption).foregroundStyle(.secondary)
             NativeTerminalView(model: model, handle: handle, cwd: cwd)
         }
-        .background(Color(UIColor.systemBackground))
-        .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
-            if value.translation.width > 60,
-               abs(value.translation.width) > abs(value.translation.height) * 1.5 {
-                close()
-            }
-        })
-        .onDisappear {
-            if !terminated {
-                model.perform(.detachTerminal(DetachTerminal(handle: handle)))
-            }
-        }
+        .onDisappear { model.perform(.detachTerminal(DetachTerminal(handle: handle))) }
     }
 }
 
