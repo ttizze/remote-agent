@@ -1725,13 +1725,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let request = read(&mut reader).await;
-    writer
-        .reply(
-            &request,
-            json!({"result":{"accounts":[{"id":"a"}],"selectedId":"a","error":null}}),
-        )
-        .await
-        .unwrap();
+    writer.reply(&request, json!({"result":{"accounts":[{"provider":"codex","id":"a"},{"provider":"claude","id":"claude:c"}],"selectedClaudeId":"claude:c","selectedId":"a","error":null}})).await.unwrap();
     listing.await.unwrap();
     assert_eq!(
         store
@@ -1747,13 +1741,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount { id: "b".into() }));
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["accountId"], "b");
-    writer
-        .reply(
-            &request,
-            json!({"result":{"selectedId":"b","persistenceError":"store unavailable"}}),
-        )
-        .await
-        .unwrap();
+    writer.reply(&request, json!({"result":{"provider":"codex","selectedId":"b","persistenceError":"store unavailable"}})).await.unwrap();
     selecting.await.unwrap();
     assert_eq!(
         store
@@ -1767,13 +1755,24 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
         Some("b")
     );
     assert_eq!(store.snapshot().error.as_deref(), Some("store unavailable"));
+    assert_eq!(
+        store
+            .snapshot()
+            .account
+            .accounts
+            .as_ref()
+            .unwrap()
+            .selected_claude_id
+            .as_deref(),
+        Some("claude:c")
+    );
     // Selecting a newly logged-in account invalidates the login completion's
     // pending list request, so selection must fetch the new entry itself.
     for _ in 0..2 {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/account/list" => {
-                json!({"accounts":[{"id":"a"},{"id":"b"}],"selectedId":"b","error":null})
+                json!({"accounts":[{"provider":"codex","id":"a"},{"provider":"codex","id":"b"},{"provider":"claude","id":"claude:c"}],"selectedClaudeId":"claude:c","selectedId":"b","error":null})
             }
             "model/list" => json!({"data":[]}),
             method => panic!("unexpected account refresh: {method}"),
@@ -1796,7 +1795,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 #[tokio::test]
 async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_late_status() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
-    let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {}));
+    let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
+        provider: agent_core::session::ProviderKind::Codex,
+    }));
     let request = read(&mut reader).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let list = read(&mut reader).await;
@@ -1808,7 +1809,7 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
         .await
         .unwrap();
     listing.await.unwrap();
-    writer.reply(&request, json!({"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"loginId":"login","userCode":"fixture-only","requiresCodeSubmission":false,"verificationUrl":"https://example.invalid"}})).await.unwrap();
     starting.await.unwrap();
     assert_eq!(
         store.snapshot().account.login.as_ref().unwrap().login_id,
@@ -1835,7 +1836,6 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
     polling.await.unwrap();
     let state = store.snapshot();
     assert!(state.account.login.is_none());
-    assert!(state.account.login_status.is_none());
     assert!(state.account.accounts.as_ref().unwrap().accounts.is_empty());
     store.close().await.unwrap();
 }
@@ -2519,4 +2519,58 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         client.close().await;
         host.close().await;
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_login_selects_its_account_before_refreshing_without_client_logic() {
+    for (provider, id) in [("codex", "added"), ("claude", "claude:added")] {
+        let (store, mut reader, writer) = setup(Snapshot::default()).await;
+        let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
+            id: "login".into(),
+        }));
+        let request = read(&mut reader).await;
+        writer
+            .reply(
+                &request,
+                json!({"result":{"completed":true,"accountId":id}}),
+            )
+            .await
+            .unwrap();
+        polling.await.unwrap();
+        let select = read(&mut reader).await;
+        assert_eq!(select["method"], "host/account/select");
+        assert_eq!(select["params"], json!({"accountId":id}));
+        writer
+            .reply(
+                &select,
+                json!({"result":{"provider":provider,"selectedId":id}}),
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let request = read(&mut reader).await;
+            let result = match request["method"].as_str().unwrap() {
+                "host/account/list" => {
+                    json!({"accounts":[{"provider":provider,"id":id}],"selectedId":if provider == "codex" {Some(id)} else {None},"selectedClaudeId":if provider == "claude" {Some(id)} else {None},"error":null})
+                }
+                "model/list" => json!({"data":[]}),
+                method => panic!("unexpected login effect: {method}"),
+            };
+            writer
+                .reply(&request, json!({"result":result}))
+                .await
+                .unwrap();
+        }
+        wait_for(&store, |snapshot| {
+            snapshot.account.accounts.as_ref().is_some_and(|accounts| {
+                accounts
+                    .accounts
+                    .iter()
+                    .any(|account| account.id == id && accounts.is_selected(account))
+            })
+        })
+        .await;
+        assert!(store.snapshot().account.login.is_none());
+        store.close().await.unwrap();
+    }
 }

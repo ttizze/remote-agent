@@ -72,8 +72,6 @@ pub struct AccountState {
     pub accounts: Option<Arc<crate::client::Accounts>>,
     #[serde(skip)]
     pub login: Option<Arc<crate::client::AccountLogin>>,
-    #[serde(skip)]
-    pub login_status: Option<Arc<crate::client::AccountLoginStatus>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
@@ -289,7 +287,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
         ListAccounts, SelectAccount, LogoutAccount, StartAccountLogin,
-        ReadAccountLogin, CancelAccountLogin, ForkThread,
+        ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkThread,
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,

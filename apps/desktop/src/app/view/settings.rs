@@ -409,7 +409,7 @@ impl Desktop {
                             thread.name
                         ),
                         cx,
-                        move |s, _, _| s.open_chat(id.clone()),
+                        move |s, window, cx| s.open_chat(id.clone(), window, cx),
                     )
                     .icon(IconName::FileText)
                     .disabled(!self.snapshot.connected || self.worktree_busy),
@@ -467,23 +467,39 @@ impl Desktop {
                     div()
                         .text_xl()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Codex アカウント"),
+                        .child("アカウント"),
                 )
                 .child(
                     Button::new("account-start-login")
-                        .label("アカウントを追加")
+                        .label("Codex アカウントを追加")
                         .icon(IconName::Plus)
                         .primary()
                         .bg(rgb(0x087ff5))
                         .text_color(rgb(0xffffff))
                         .disabled(disabled || self.snapshot.account.login.is_some())
                         .on_click(cx.listener(|s, _, _, cx| {
-                            s.account_operation(Intent::StartAccountLogin(
-                                op::StartAccountLogin {},
-                            ));
+                            s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
+                                provider: agent_core::session::ProviderKind::Codex,
+                            }));
                             cx.notify();
                         })),
                 ),
+        );
+        body = body.child(
+            self.button(
+                "account-start-claude-login",
+                "Claude アカウントを追加",
+                cx,
+                |s, window, cx| {
+                    s.account_code
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
+                        provider: agent_core::session::ProviderKind::Claude,
+                    }));
+                },
+            )
+            .icon(IconName::Plus)
+            .disabled(disabled || self.snapshot.account.login.is_some()),
         );
         if let Some(accounts) = &self.snapshot.account.accounts {
             let mut rows = v_flex()
@@ -525,7 +541,13 @@ impl Desktop {
                                 .text_xl()
                                 .child(initial),
                         )
-                        .child(div().flex_1().min_w_0().text_ellipsis().child(email))
+                        .child(div().flex_1().min_w_0().text_ellipsis().child(format!(
+                            "{} · {email}",
+                            match account.provider {
+                                agent_core::session::ProviderKind::Codex => "Codex",
+                                agent_core::session::ProviderKind::Claude => "Claude",
+                            }
+                        )))
                         .child(
                             Button::new(format!("settings-account-logout-{index}"))
                                 .label("ログアウト")
@@ -560,20 +582,35 @@ impl Desktop {
             let code = login.user_code.clone();
             let url = login.verification_url.clone();
             let cancel_id = login.login_id.clone();
+            if login.requires_code_submission {
+                let submit_id = login.login_id.clone();
+                body = body.child("ブラウザで Claude にログインし、表示された認証コードを貼り付けてください。")
+                    .child(Input::new(&self.account_code))
+                    .child(self.button("account-submit-code", "認証コードを送信", cx, move |s, window, cx| {
+                        let code = s.account_code.read(cx).value().to_string();
+                        if code.trim().is_empty() { return; }
+                        s.account_operation(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: submit_id.clone(), code }));
+                        s.account_code.update(cx, |input, cx| input.set_value("", window, cx));
+                    }).disabled(disabled));
+            }
             body = body
-                .child("ブラウザでログインし、次のコードを入力してください。")
+                .when(!login.requires_code_submission, |body| {
+                    body.child("ブラウザでログインし、次のコードを入力してください。")
+                })
                 .child(div().text_xl().child(login.user_code.clone()))
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(self.button(
-                            "account-copy-code",
-                            "コードをコピー",
-                            cx,
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                            },
-                        ))
+                        .when(!login.requires_code_submission, |row| {
+                            row.child(self.button(
+                                "account-copy-code",
+                                "コードをコピー",
+                                cx,
+                                move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                                },
+                            ))
+                        })
                         .child(self.button(
                             "account-open-login",
                             "ブラウザでログイン",

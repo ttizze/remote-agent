@@ -29,6 +29,7 @@ pub enum Intent {
     SelectAccount(SelectAccount),
     LogoutAccount(LogoutAccount),
     StartAccountLogin(StartAccountLogin),
+    SubmitAccountLogin(SubmitAccountLogin),
     ReadAccountLogin(ReadAccountLogin),
     CancelAccountLogin(CancelAccountLogin),
     ForkThread(ForkThread),

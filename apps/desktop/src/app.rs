@@ -53,7 +53,6 @@ enum OperationCompletion {
     Dictation(uuid::Uuid),
     RemoveWorktree,
     Account,
-    AccountLoginStatus,
     Gallery(uuid::Uuid),
 }
 enum Update {
@@ -205,6 +204,7 @@ pub(crate) struct Desktop {
     worktree_save_pending: bool,
     worktree_removal: Option<String>,
     worktree_busy: bool,
+    account_code: Entity<InputState>,
     account_busy: bool,
     account_polling: bool,
     expanded_projects: HashSet<String>,
@@ -276,7 +276,7 @@ impl Desktop {
                             view.account_busy = true;
                             view.perform(
                                 Intent::ReadAccountLogin(op::ReadAccountLogin { id }),
-                                OperationCompletion::AccountLoginStatus,
+                                OperationCompletion::Account,
                             );
                         }
                         if let Some(id) = view.thread().and_then(|thread| thread.active_turn_id()) {
@@ -488,6 +488,11 @@ impl Desktop {
             worktree_save_pending: false,
             worktree_removal: None,
             worktree_busy: false,
+            account_code: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("ブラウザに表示された認証コード")
+                    .masked(true)
+            }),
             account_busy: false,
             account_polling: false,
             expanded_projects: HashSet::new(),
@@ -787,9 +792,8 @@ impl Desktop {
                 }
                 return;
             }
-            OperationCompletion::Account | OperationCompletion::AccountLoginStatus => {
+            OperationCompletion::Account => {
                 self.account_busy = false;
-                let polling = matches!(kind, OperationCompletion::AccountLoginStatus);
                 if let Err(error) = result {
                     self.account_polling = false;
                     self.set_error(error);
@@ -797,15 +801,6 @@ impl Desktop {
                 } else {
                     self.accept_snapshot(window, cx);
                     self.account_polling = self.snapshot.account.login.is_some();
-                    if polling
-                        && let Some(status) = &self.snapshot.account.login_status
-                        && status.completed
-                        && let Some(id) = &status.account_id
-                    {
-                        self.account_operation(Intent::SelectAccount(op::SelectAccount {
-                            id: id.clone(),
-                        }));
-                    }
                 }
                 return;
             }
@@ -1202,12 +1197,13 @@ impl Desktop {
             }
         }
     }
-    fn new_chat(&mut self, cwd: String) {
+    fn new_chat(&mut self, cwd: String, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Chat;
         self.cancel_recording();
         self.dispatch(Intent::NewChat { cwd });
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
-    fn open_chat(&mut self, id: String) {
+    fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Chat;
         self.cancel_recording();
         self.busy += 1;
@@ -1215,6 +1211,7 @@ impl Desktop {
             Intent::ReadThread(op::ReadThread::open(id)),
             OperationCompletion::Busy,
         );
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
     fn older(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.history_loading {

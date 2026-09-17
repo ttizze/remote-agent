@@ -27,6 +27,10 @@ impl Process {
         let mut command = bex_process::command(program).map_err(|error| error.to_string())?;
         command
             .env("CLAUDE_CONFIG_DIR", native_home)
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+            .env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
             .current_dir(cwd)
             .args([
                 "-p",
