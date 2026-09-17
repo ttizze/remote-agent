@@ -44,7 +44,7 @@ private struct WorkspaceNavigation: UIViewControllerRepresentable {
 
         func open(_ directory: String) {
             let page = UIHostingController(rootView: screen(directory))
-            page.title = directory == page.rootView.root ? "ファイル" : URL(fileURLWithPath: directory).lastPathComponent
+            page.title = directory == page.rootView.root ? "" : URL(fileURLWithPath: directory).lastPathComponent
             page.navigationItem.largeTitleDisplayMode = .never
             navigation.pushViewController(page, animated: !navigation.viewControllers.isEmpty)
         }

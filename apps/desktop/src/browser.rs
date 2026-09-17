@@ -1,3 +1,4 @@
+use agent_core::presentation::browser::browser_url;
 #[cfg(target_os = "macos")]
 use gpui_kit::component::{
     Disableable,
@@ -282,30 +283,6 @@ impl Browser {
                 });
             })
     }
-}
-
-fn browser_url(input: &str) -> Result<String, String> {
-    let input = input.trim();
-    if input == "about:blank" {
-        return Ok(input.into());
-    }
-    if input.is_empty() {
-        return Err("URL を入力してください".into());
-    }
-    let source = if input.contains("://") {
-        input.to_owned()
-    } else {
-        format!("https://{input}")
-    };
-    let url = url::Url::parse(&source).map_err(|_| "URL が不正です")?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err("http または https の URL を入力してください".into());
-    }
-    Ok(url.into())
 }
 
 impl Render for Browser {

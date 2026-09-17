@@ -14,15 +14,14 @@ final class BexLaunchUITests: XCTestCase {
     }
 
     func openFiles(_ app: XCUIApplication) {
+        app.buttons["task.tools"].tap()
         let files = app.buttons["workbench.files"]
         XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
         app.buttons["files.all"].tap()
     }
 
     func closeWorkbench(_ app: XCUIApplication) {
-        let chat = app.buttons["workbench.chat"]
-        XCTAssertTrue(chat.waitForExistence(timeout: 5))
-        chat.tap()
+        app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 5))
     }
 

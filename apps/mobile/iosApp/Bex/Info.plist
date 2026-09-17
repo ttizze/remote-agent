@@ -24,6 +24,11 @@
     <true/>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
+    </dict>
     <key>NSCameraUsageDescription</key>
     <string>PCのペアリング用QRコードの読み取りと、チャットに添付する写真・動画の撮影にカメラを使用します。</string>
     <key>NSPhotoLibraryAddUsageDescription</key>

@@ -8,6 +8,7 @@ use crate::models::{Item, Turn};
 use serde::Serialize;
 use serde_json::Value;
 pub mod body;
+pub mod browser;
 pub mod conversation;
 pub mod list;
 pub mod markdown;

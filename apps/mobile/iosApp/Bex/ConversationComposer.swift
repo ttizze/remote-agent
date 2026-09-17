@@ -12,8 +12,8 @@ extension ThreadScreen {
             if model.isNewThread {
                 newThreadContext
             }
-            if !model.isNewThread, let review, review.files > 0 {
-                Button { showingDiff = true; page = .files } label: {
+            if !isSideChat, !model.isNewThread, let review, review.files > 0 {
+                Button { openTools?(.files, true) } label: {
                     HStack(spacing: 10) {
                         Text("\(review.files)件のファイル")
                         Text("+\(review.additions)").foregroundColor(.green)

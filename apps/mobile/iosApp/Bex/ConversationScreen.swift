@@ -7,6 +7,7 @@ struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
     let conversation: ConversationPresentation?
     var isSideChat = false
+    var openTools: ((WorkspaceTab?, Bool) -> Void)?
     @StateObject var dictation = DictationRecorder()
     @State var sendRecordedText = false
     @State var importing = false
@@ -14,7 +15,6 @@ struct ThreadScreen: View {
     @State var selectedPhotos: [PhotosPickerItem] = []
     @State var showingCamera = false
     @State var preparingMedia = false
-    @State var page: ConversationPage = .chat
     @State var showingModelSettings = false
     @State var scrollViewportHeight: CGFloat = 0
     @State var isFollowingLatest = true
@@ -25,95 +25,92 @@ struct ThreadScreen: View {
     @State var historyRequestPending = false
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
-    @State var showingDiff = false
     @FocusState var composerFocused: Bool
 
     var body: some View {
-        Group {
-            if isSideChat {
-                chatContent
-            } else {
-                ConversationPages(model: model, selection: $page, showingDiff: $showingDiff, chat: chatContent)
-            }
-        }
-        .onChange(of: page) {
-            if $0 != .chat {
-                composerFocused = false
-            }
-        }
-        .onDisappear { dictation.cancel() }
-        .onChange(of: model.composerFocusRequest) { _ in
-            if (model.sideChatRequest != nil) == isSideChat {
-                composerFocused = true
-            }
-        }
-        .onChange(of: model.draftKey) { _ in dictation.cancel() }
-        .onChange(of: model.isConnected) {
-            if !$0 {
-                dictation.cancel()
-            }
-        }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
-            Task {
-                do { try await model.attach(result.get()) } catch {
-                    model.transferError = error.localizedDescription
+        chatContent
+            .onDisappear { dictation.cancel() }
+            .onChange(of: model.composerFocusRequest) { _ in
+                if (model.sideChatRequest != nil) == isSideChat {
+                    composerFocused = true
                 }
             }
-        }
-        .photosPicker(isPresented: $showingPhotos, selection: $selectedPhotos,
-                      selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
-                      preferredItemEncoding: .compatible)
-        .onChange(of: selectedPhotos) { _, items in
-            guard !items.isEmpty else { return }
-            selectedPhotos = []
-            preparingMedia = true
-            model.transferError = nil
-            let draftKey = model.draftKey
-            Task { await importPhotos(items, draftKey: draftKey) }
-        }
-        .fullScreenCover(isPresented: $showingCamera) {
-            ChatCameraPicker { result in
-                showingCamera = false
+            .onChange(of: model.draftKey) { _ in dictation.cancel() }
+            .onChange(of: model.isConnected) {
+                if !$0 {
+                    dictation.cancel()
+                }
+            }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
                 Task {
-                    do {
-                        if let url = try result.get() {
-                            try await model.attach(url, temporaryDirectory: url.deletingLastPathComponent())
-                        }
-                    } catch { model.transferError = error.localizedDescription }
-                }
-            }.ignoresSafeArea()
-        }
-        .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
-        .onAppear {
-            if model.isNewThread {
-                composerFocused = true
-            }
-        }
-        .onChange(of: model.isNewThread) {
-            if $0 {
-                composerFocused = true
-            }
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                if !isSideChat, !model.isNewThread {
-                    Button {
-                        scrollToTopRequest += 1
-                    } label: {
-                        conversationTitle
+                    do { try await model.attach(result.get()) } catch {
+                        model.transferError = error.localizedDescription
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("会話の先頭へ")
-                    .accessibilityIdentifier("task.top")
                 }
             }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                if !isSideChat, !model.isNewThread {
-                    conversationActions
+            .photosPicker(isPresented: $showingPhotos, selection: $selectedPhotos,
+                          selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
+                          preferredItemEncoding: .compatible)
+            .onChange(of: selectedPhotos) { _, items in
+                guard !items.isEmpty else { return }
+                selectedPhotos = []
+                preparingMedia = true
+                model.transferError = nil
+                let draftKey = model.draftKey
+                Task { await importPhotos(items, draftKey: draftKey) }
+            }
+            .fullScreenCover(isPresented: $showingCamera) {
+                ChatCameraPicker { result in
+                    showingCamera = false
+                    Task {
+                        do {
+                            if let url = try result.get() {
+                                try await model.attach(url, temporaryDirectory: url.deletingLastPathComponent())
+                            }
+                        } catch { model.transferError = error.localizedDescription }
+                    }
+                }.ignoresSafeArea()
+            }
+            .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
+            .onAppear {
+                if model.isNewThread {
+                    composerFocused = true
                 }
             }
-        }
+            .onChange(of: model.isNewThread) {
+                if $0 {
+                    composerFocused = true
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    if !isSideChat, !model.isNewThread {
+                        Button {
+                            scrollToTopRequest += 1
+                        } label: {
+                            conversationTitle
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("会話の先頭へ")
+                        .accessibilityIdentifier("task.top")
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if !isSideChat {
+                        HStack(spacing: 0) {
+                            Button { composerFocused = false; openTools?(nil, false) } label: {
+                                Image(systemName: "square.grid.2x2").frame(width: 44, height: 44)
+                            }
+                            .accessibilityLabel("ツールを開く")
+                            .accessibilityIdentifier("task.tools")
+                            if !model.isNewThread {
+                                conversationActions
+                            }
+                        }
+                    }
+                }
+            }
     }
 
     private var chatContent: some View {
@@ -285,7 +282,7 @@ extension ThreadScreen {
                 Image(systemName: "square.and.pencil").font(.title2).frame(width: 44, height: 44)
             }.accessibilityLabel("新しい会話").accessibilityIdentifier("task.new")
             Menu {
-                Button { showingDiff = true; page = .files } label: {
+                Button { openTools?(.files, true) } label: {
                     Label("変更を表示", systemImage: "plus.forwardslash.minus")
                 }
                 Button {

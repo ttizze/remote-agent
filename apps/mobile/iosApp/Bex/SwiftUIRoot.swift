@@ -72,10 +72,7 @@ private struct BexScreen: View {
                     }
                 }
             )) {
-                ThreadScreen(
-                    model: model,
-                    conversation: model.sideChatRequest?.originalConversation ?? model.conversation
-                )
+                ConversationDestination(model: model)
             }
     }
 }

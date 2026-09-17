@@ -13,6 +13,7 @@ fi
 if [[ $# == 0 ]]; then
     set -- \
         testSimulatorNativeTerminalRetainsShellAfterReopening \
+        testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
         testSimulatorEditsHostWorktreeSettingsFromTaskMenu \
         testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject \

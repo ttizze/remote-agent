@@ -35,6 +35,7 @@ android-e2e:
 conversation-ui:
     scripts/ios-e2e.sh \
         testSimulatorNativeTerminalRetainsShellAfterReopening \
+        testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \

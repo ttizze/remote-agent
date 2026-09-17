@@ -7,6 +7,7 @@ extension BexLaunchUITests {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.new.project.simulator-project"].tap()
         func openTerminal() {
+            app.buttons["task.tools"].tap()
             let action = app.buttons["workbench.terminal"]
             XCTAssertTrue(action.waitForExistence(timeout: 10)); action.tap()
             XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
@@ -25,18 +26,20 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Native terminal with keyboard")
         XCTAssertFalse(app.buttons["終了"].exists)
         XCTAssertFalse(app.buttons["terminal.close"].exists)
-        terminal.swipeLeft()
+        app.buttons["workbench.files"].tap()
         let file = app.buttons["file.hello.txt"]
         XCTAssertTrue(file.waitForExistence(timeout: 10))
         captureScreen(app, named: "Full-screen files")
         file.tap()
         XCTAssertTrue(app.textViews["file.editor"].waitForExistence(timeout: 10))
         app.buttons["file.close"].tap()
-        app.textFields["絶対パス"].swipeRight()
+        app.buttons["workbench.terminal"].tap()
         XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
         XCTAssertEqual(terminal.frame.width, app.frame.width, accuracy: 2)
-        terminal.swipeRight()
-        XCTAssertTrue(app.buttons["workbench.terminal"].waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.22))
+            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.22)))
+        XCTAssertTrue(app.buttons["task.tools"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["workbench.terminal"].exists)
         XCTAssertFalse(terminal.exists)
         XCTAssertEqual(composer.value as? String, "Keep my draft")
         openTerminal()
@@ -45,8 +48,13 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Reattached native shell retains state")
         closeWorkbench(app)
         XCTAssertFalse(app.staticTexts["notice"].exists)
+        verifyUnassignedTools(app)
+    }
+
+    private func verifyUnassignedTools(_ app: XCUIApplication) {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         app.buttons["tasks.new.chat"].tap()
+        app.buttons["task.tools"].tap()
         for page in ["terminal", "files"] {
             app.buttons["workbench.\(page)"].tap()
             XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "フォルダを選択すると"))
@@ -104,6 +112,33 @@ extension BexLaunchUITests {
             XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
             XCTAssertFalse(child.exists)
         }
+    }
+
+    func testSimulatorBrowserIsSeparateFromConversationAndPreservesPage() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        XCTAssertFalse(app.buttons["workbench.browser"].exists)
+        app.buttons["task.tools"].tap()
+        app.buttons["workbench.browser"].tap()
+        let address = app.textFields["browser.address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 10))
+        address.tap(); address.typeText("file:///etc/passwd")
+        app.buttons["browser.open"].tap()
+        XCTAssertTrue(app.staticTexts["http または https の URL を入力してください"].waitForExistence(timeout: 5))
+        address.tap(); address.typeKey("a", modifierFlags: .command); address.typeText("about:blank")
+        app.buttons["browser.open"].tap()
+        XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 10))
+        captureScreen(app, named: "Separate browser workspace")
+        closeWorkbench(app)
+        XCTAssertFalse(app.buttons["workbench.browser"].exists)
+        app.buttons["task.tools"].tap()
+        app.buttons["workbench.browser"].tap()
+        XCTAssertTrue(address.waitForExistence(timeout: 10))
+        XCTAssertEqual(address.value as? String, "about:blank")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.4))
+            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
+        XCTAssertTrue(app.buttons["task.tools"].waitForExistence(timeout: 5))
+        XCTAssertFalse(address.exists)
     }
 
     func testPhysicalDeviceCanPairWithManualPayload() throws {
