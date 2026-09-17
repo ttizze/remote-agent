@@ -104,6 +104,7 @@ pub enum SessionChange {
     },
     Error {
         turn_id: String,
+        #[serde(with = "crate::protocol::json")]
         error: Value,
         will_retry: bool,
     },

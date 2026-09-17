@@ -10,6 +10,33 @@ fn conversation() -> Thread {
 }
 
 #[test]
+fn session_error_survives_binary_transport_and_updates_the_turn() {
+    for error in [
+        json!({"message":"provider failed", "details":{"code":429,"retryAfter":null}}),
+        json!("provider failed"),
+    ] {
+        for will_retry in [false, true] {
+            let change = SessionChange::Error {
+                turn_id: "run".into(),
+                error: error.clone(),
+                will_retry,
+            };
+            let bytes = agent_core::protocol::encode(&change).unwrap();
+            let decoded: SessionChange = agent_core::protocol::decode(&bytes).unwrap();
+            assert_eq!(decoded, change);
+            let updated = decoded.apply(&conversation()).unwrap();
+            let actual = updated.turns.as_ref().unwrap()[0].error.as_ref().unwrap();
+            assert_eq!(actual["message"], "provider failed");
+            assert_eq!(actual["willRetry"], will_retry);
+            assert_eq!(
+                serde_json::to_value(&decoded).unwrap()["error"]["error"],
+                error
+            );
+        }
+    }
+}
+
+#[test]
 fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
     use agent_core::{
         session::OpenedSession,
