@@ -164,6 +164,12 @@ fn main() {
                     );
                 }
             }
+            "control_request" if value["request"]["subtype"] == "get_usage" => {
+                assert_eq!(value["request"]["skip_behaviors"], true);
+                emit(
+                    json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"rate_limits":{"five_hour":{"utilization":72,"resets_at":"2033-05-18T03:33:20Z"},"seven_day":{"utilization":39,"resets_at":"2033-05-24T03:33:20Z"}}}}}),
+                );
+            }
             "user" => {
                 assert_ne!(session, "catalog");
                 assert_eq!(value["session_id"], session);

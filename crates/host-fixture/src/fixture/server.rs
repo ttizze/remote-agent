@@ -326,7 +326,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     context.respond(id, &json!({"userAgent":"remote-agent-simulator-fixture",
                         "platformFamily":"unix","platformOs":"macos","codexHome":context.home}))?;
                 },
-                "account/read" | "getAuthStatus" | "account/login/start" | "account/login/cancel" | "account/logout" | "fixture/account/current" | "fixture/account/refresh" => accounts.request(&context, id, method, params)?,
+                "account/read" | "account/rateLimits/read" | "getAuthStatus" | "account/login/start" | "account/login/cancel" | "account/logout" | "fixture/account/current" | "fixture/account/refresh" => accounts.request(&context, id, method, params)?,
                 "model/list" => {
                     let models = json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
                             "defaultReasoningEffort":"medium","supportedReasoningEfforts":[

@@ -22,7 +22,6 @@ impl AssetSource for DesktopAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
             "bex/microphone.svg" => include_bytes!("../assets/microphone.svg"),
-            "bex/gauge.svg" => include_bytes!("../assets/gauge.svg"),
             "bex/merge.svg" => include_bytes!("../assets/merge.svg"),
             "bex/branch.svg" => include_bytes!("../assets/branch.svg"),
             "bex/pencil.svg" => include_bytes!("../assets/pencil.svg"),
@@ -36,7 +35,6 @@ impl AssetSource for DesktopAssets {
         paths.extend(
             [
                 "bex/microphone.svg",
-                "bex/gauge.svg",
                 "bex/stop.svg",
                 "bex/pencil.svg",
                 "bex/branch.svg",

@@ -103,6 +103,8 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"][0]["email"], "desktop@example.invalid");
         assert_eq!(list["result"]["selectedId"], "desktop");
+        assert_eq!(list["result"]["accounts"][0]["usage"]["windows"][0]["remainingPercent"], 72);
+        assert_eq!(list["result"]["accounts"][0]["usage"]["windows"][1]["remainingPercent"], 86);
         let started = call(&service, &mut session, "host/thread/start", json!({"cwd":home})).await;
         let thread = started["result"]["thread"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;

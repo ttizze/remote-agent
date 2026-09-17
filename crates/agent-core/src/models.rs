@@ -392,6 +392,14 @@ pub struct Model {
     pub default_service_tier: Option<String>,
     pub is_default: Option<bool>,
 }
+pub fn model_provider(model: &str) -> crate::session::ProviderKind {
+    if model.starts_with("claude:") {
+        crate::session::ProviderKind::Claude
+    } else {
+        crate::session::ProviderKind::Codex
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ServiceTier {

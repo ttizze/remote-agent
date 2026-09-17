@@ -27,6 +27,8 @@ if [[ $# == 0 ]]; then
         testSimulatorUpdatesAnOpenConversationFromAnotherClient \
         testSimulatorReviewsTheOpenSessionsWorktree \
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
+        testSimulatorOpensAccountManagementFromSettingsAndModelPicker \
+        testSimulatorAccountOwnsModelEffortAndSpeed \
         testSimulatorSwitchesCodexAccountsAndForksConversation \
         testSimulatorAddsClaudeAccountAndKeepsCodexSelected \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \

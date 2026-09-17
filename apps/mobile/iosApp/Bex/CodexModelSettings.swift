@@ -41,16 +41,4 @@ extension BexAppViewModel {
     func chooseServiceTier(_ value: String) {
         perform(.selectServiceTier(threadId: coreDraftKey, serviceTier: value))
     }
-
-    func loadAccounts(selecting id: String? = nil) {
-        perform(.listAccounts(ListAccounts())) { [weak self] result in
-            if case .success = result, let id {
-                self?.chooseAccount(id)
-            }
-        }
-    }
-
-    func chooseAccount(_ id: String) {
-        perform(.selectAccount(SelectAccount(id: id)))
-    }
 }

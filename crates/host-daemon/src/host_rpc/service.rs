@@ -634,7 +634,7 @@ impl HostRpcService {
                     });
                     if first_page {
                         match self.inner.claude.get().unwrap().models().await {
-                            Ok(models) => page.data.extend_from_slice(models),
+                            Ok(models) => page.data.extend(models),
                             Err(error) => {
                                 let errors = page.provider_errors.get_or_insert_default();
                                 errors

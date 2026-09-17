@@ -72,9 +72,9 @@ impl Desktop {
             SettingsPage::Accounts => (
                 "アカウント",
                 if self.remote.is_some() {
-                    "接続先に保存した Codex アカウントを管理します。"
+                    "接続先に保存した Codex・Claude アカウントを管理します。"
                 } else {
-                    "この端末に保存した Codex アカウントを管理します。"
+                    "この端末に保存した Codex・Claude アカウントを管理します。"
                 },
             ),
             SettingsPage::Connections => {
@@ -459,46 +459,10 @@ impl Desktop {
 
     fn account_settings(&self, cx: &Context<Self>) -> AnyElement {
         let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
-        let mut body = v_flex().gap_4().pt_4().child(
-            h_flex()
-                .justify_between()
-                .gap_4()
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("アカウント"),
-                )
-                .child(
-                    Button::new("account-start-login")
-                        .label("Codex アカウントを追加")
-                        .icon(IconName::Plus)
-                        .primary()
-                        .bg(rgb(0x087ff5))
-                        .text_color(rgb(0xffffff))
-                        .disabled(disabled || self.snapshot.account.login.is_some())
-                        .on_click(cx.listener(|s, _, _, cx| {
-                            s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
-                                provider: agent_core::session::ProviderKind::Codex,
-                            }));
-                            cx.notify();
-                        })),
-                ),
-        );
-        body = body.child(
-            self.button(
-                "account-start-claude-login",
-                "Claude アカウントを追加",
-                cx,
-                |s, window, cx| {
-                    s.account_code
-                        .update(cx, |input, cx| input.set_value("", window, cx));
-                    s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
-                        provider: agent_core::session::ProviderKind::Claude,
-                    }));
-                },
-            )
-            .icon(IconName::Plus)
+        let mut body = v_flex().gap_4().child(
+            self.button("accounts-refresh", "再読み込み", cx, |s, _, _| {
+                s.dispatch(Intent::ListAccounts(op::ListAccounts {}));
+            })
             .disabled(disabled || self.snapshot.account.login.is_some()),
         );
         if let Some(accounts) = &self.snapshot.account.accounts {
@@ -516,12 +480,6 @@ impl Desktop {
             for (index, account) in accounts.accounts.iter().enumerate() {
                 let logout_id = account.id.clone();
                 let email = account.email.clone().unwrap_or_else(|| account.id.clone());
-                let initial = email
-                    .chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_uppercase()
-                    .to_string();
                 rows = rows.child(
                     h_flex()
                         .gap_4()
@@ -530,24 +488,24 @@ impl Desktop {
                             row.border_t_1().border_color(rgb(0x383838))
                         })
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(44.))
-                                .flex_shrink_0()
-                                .rounded(px(8.))
-                                .bg(rgb(0x333333))
-                                .text_xl()
-                                .child(initial),
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_3()
+                                .child(div().child(format!(
+                                    "{} · {email}",
+                                    match account.provider {
+                                        agent_core::session::ProviderKind::Codex => "Codex",
+                                        agent_core::session::ProviderKind::Claude => "Claude",
+                                    }
+                                )))
+                                .when(accounts.is_selected(account), |row| {
+                                    row.child(
+                                        div().text_xs().text_color(rgb(0x8acfac)).child("選択中"),
+                                    )
+                                })
+                                .child(account_usage_view(account.usage.as_ref(), true)),
                         )
-                        .child(div().flex_1().min_w_0().text_ellipsis().child(format!(
-                            "{} · {email}",
-                            match account.provider {
-                                agent_core::session::ProviderKind::Codex => "Codex",
-                                agent_core::session::ProviderKind::Claude => "Claude",
-                            }
-                        )))
                         .child(
                             Button::new(format!("settings-account-logout-{index}"))
                                 .label("ログアウト")
@@ -578,6 +536,32 @@ impl Desktop {
                     }),
             );
         }
+        let mut add = h_flex().gap_3().flex_wrap();
+        for (id, label, provider) in [
+            (
+                "account-start-login",
+                "Codex アカウントを追加",
+                agent_core::session::ProviderKind::Codex,
+            ),
+            (
+                "account-start-claude-login",
+                "Claude アカウントを追加",
+                agent_core::session::ProviderKind::Claude,
+            ),
+        ] {
+            add = add.child(
+                self.button(id, label, cx, move |s, window, cx| {
+                    s.account_code
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
+                        provider,
+                    }));
+                })
+                .icon(IconName::Plus)
+                .disabled(disabled || self.snapshot.account.login.is_some()),
+            );
+        }
+        body = body.child(add);
         if let Some(login) = &self.snapshot.account.login {
             let code = login.user_code.clone();
             let url = login.verification_url.clone();

@@ -13,11 +13,15 @@ impl Desktop {
             .anchor(Anchor::BottomRight)
             .trigger(
                 Button::new("model-select")
-                    .icon(Icon::default().path("bex/gauge.svg").size(px(23.)))
+                    .label(
+                        self.selected_model()
+                            .map_or("モデル".to_owned(), |model| model.display_name.clone()),
+                    )
+                    .dropdown_caret(true)
                     .accessibility_label("アカウントとモデル")
                     .tooltip("アカウントとモデル")
                     .large()
-                    .w(px(44.))
+                    .max_w(px(220.))
                     .h(px(44.))
                     .ghost(),
             )
@@ -36,7 +40,7 @@ impl Desktop {
             })
             .into_any_element()
     }
-    pub(super) fn model_controls(&self, cx: &Context<Self>) -> AnyElement {
+    fn account_model_controls(&self, account_id: String, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         let model = self.selected_model();
         let effort = self
@@ -56,10 +60,9 @@ impl Desktop {
             "ultra" => "最高",
             value => value,
         };
-        let model_label = format!(
-            "{} {effort_label}",
-            model.map_or("モデル", |model| model.display_name.as_str())
-        );
+        let model_label = model
+            .map_or("モデル", |model| model.display_name.as_str())
+            .to_owned();
         let models = Button::new("model-choice")
             .label(model_label)
             .dropdown_caret(true)
@@ -68,7 +71,7 @@ impl Desktop {
             .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
                 if let Some(owner) = entity.upgrade() {
                     let view = owner.read(cx);
-                    for model in view.snapshot.models.iter() {
+                    for model in view.snapshot.account_models(account_id.clone()) {
                         let value = model.model.clone();
                         let entity = entity.clone();
                         menu = menu.item(
@@ -161,52 +164,113 @@ impl Desktop {
                 }
                 menu
             });
+        v_flex()
+            .gap_2()
+            .child(div().text_sm().child("モデル"))
+            .child(
+                h_flex().justify_between().child(models).when(
+                    model
+                        .and_then(|model| model.service_tiers.as_ref())
+                        .is_some_and(|tiers| !tiers.is_empty()),
+                    |row| row.child(speed),
+                ),
+            )
+            .when(
+                model.is_some_and(|model| !model.supported_reasoning_efforts.is_empty()),
+                |column| {
+                    column
+                        .child(
+                            div()
+                                .text_xs()
+                                .child(format!("推論の強度 · {effort_label}")),
+                        )
+                        .child(model_effort_slider(
+                            &self.effort_slider,
+                            model.unwrap().supported_reasoning_efforts.len(),
+                            cx,
+                        ))
+                },
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn model_controls(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         let accounts = self.snapshot.account.accounts.clone();
+        let active = accounts
+            .as_ref()
+            .and_then(|accounts| {
+                accounts.accounts.iter().find(|account| {
+                    self.snapshot
+                        .account_is_active_for_draft(account.id.clone(), self.draft_key().into())
+                })
+            })
+            .filter(|_| !self.account_busy)
+            .map(|account| {
+                (
+                    account.id.clone(),
+                    self.account_model_controls(account.id.clone(), cx),
+                )
+            });
         let account_error = accounts
             .as_ref()
             .and_then(|accounts| accounts.error.clone());
         v_flex()
-            .w(px(280.))
-            .gap_2()
-            .child(div().text_sm().child("アカウント"))
+            .id("model-account-controls")
+            .w(px(360.))
+            .max_h(px(560.))
+            .overflow_y_scroll()
+            .gap_3()
+            .child(div().text_lg().child("モデルとアカウント"))
             .child(account_selector(
                 accounts,
                 self.busy > 0
                     || self.account_busy
                     || self.snapshot.account.login.is_some()
                     || !self.snapshot.connected,
-                move |intent, _, cx| {
+                active,
+                move |account_id, _, cx| {
                     let _ = entity.update(cx, |view, cx| {
                         if view.busy > 0 || view.snapshot.account.login.is_some() {
                             return;
                         }
-                        view.account_operation(intent);
+                        view.account_operation(Intent::SelectAccountForDraft(
+                            op::SelectAccountForDraft {
+                                id: account_id,
+                                thread_id: view.draft_key().into(),
+                            },
+                        ));
                         cx.notify();
                     });
                 },
             ))
-            .child(self.button(
-                "manage-accounts",
-                "アカウントを管理",
-                cx,
-                |s, _, _| s.open_settings(),
-            ))
+            .when(self.account_busy, |column| {
+                column.child("アカウントを切り替え中…")
+            })
             .when_some(account_error, |column, error| {
                 column.child(div().text_xs().text_color(rgb(0xff7777)).child(error))
             })
-            .child(h_flex().justify_between().child(speed).child(models))
             .children(
                 self.snapshot
                     .model_error_messages()
                     .into_iter()
                     .map(|error| div().text_xs().text_color(rgb(0xff7777)).child(error)),
             )
-            .child(model_effort_slider(
-                &self.effort_slider,
-                model.map_or(0, |model| model.supported_reasoning_efforts.len()),
-                cx,
-            ))
+            .child(
+                self.button(
+                    "manage-accounts",
+                    "アカウントを管理",
+                    cx,
+                    |s, _, _| s.open_settings(),
+                )
+                .icon(IconName::Settings),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("アカウント選択はサービスごとに接続先のHostで共有されます。"),
+            )
             .into_any_element()
     }
 
@@ -627,75 +691,56 @@ impl Desktop {
 fn account_selector(
     accounts: Option<Arc<agent_core::client::Accounts>>,
     disabled: bool,
-    on_select: impl Fn(Intent, &mut Window, &mut App) + 'static,
+    mut active: Option<(String, AnyElement)>,
+    on_select: impl Fn(String, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let selected = accounts
-        .as_ref()
-        .map(|accounts| {
-            accounts
-                .accounts
-                .iter()
-                .filter(|account| accounts.is_selected(account))
-                .map(|account| account.email.as_deref().unwrap_or(&account.id))
-                .collect::<Vec<_>>()
-                .join(" / ")
-        })
-        .unwrap_or_default();
-    let label = if selected.is_empty() {
-        "アカウントを選択"
-    } else {
-        &selected
-    };
     let on_select = Rc::new(on_select);
-    Button::new("account-select")
-        .debug_selector(|| "account-select".into())
-        .label(label.to_owned())
-        .accessibility_label("アカウントを変更")
-        .dropdown_caret(true)
-        .w_full()
-        .small()
-        .ghost()
-        .disabled(
-            disabled
-                || accounts
-                    .as_ref()
-                    .is_none_or(|accounts| accounts.accounts.is_empty()),
-        )
-        .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-            if let Some(accounts) = &accounts {
-                for account in &accounts.accounts {
-                    let id = account.id.clone();
-                    let select = on_select.clone();
-                    let email = account.email.as_deref().unwrap_or(&account.id);
-                    let label = account.plan_type.as_ref().map_or_else(
-                        || email.to_owned(),
-                        |plan| format!("{email} · {}", plan.to_uppercase()),
-                    );
-                    let provider = match account.provider {
-                        agent_core::session::ProviderKind::Codex => "Codex",
-                        agent_core::session::ProviderKind::Claude => "Claude",
-                    };
-                    menu = menu.item(
-                        PopupMenuItem::new(format!("{provider} · {label}"))
-                            .checked(accounts.is_selected(account))
-                            .on_click(move |_, window, cx| {
-                                select(
-                                    Intent::SelectAccount(op::SelectAccount { id: id.clone() }),
-                                    window,
-                                    cx,
-                                );
-                            }),
-                    );
-                }
-            }
-            menu
-        })
+    let mut rows = v_flex().gap_2();
+    if let Some(accounts) = accounts {
+        for (index, account) in accounts.accounts.iter().enumerate() {
+            let selected = active.as_ref().is_some_and(|(id, _)| id == &account.id);
+            let id = account.id.clone();
+            let select = on_select.clone();
+            let provider = match account.provider {
+                agent_core::session::ProviderKind::Codex => "Codex",
+                agent_core::session::ProviderKind::Claude => "Claude",
+            };
+            rows = rows.child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(10.))
+                    .bg(rgb(0x333333))
+                    .child(
+                        Button::new(format!("account-choice-{index}"))
+                            .debug_selector(move || format!("account-choice-{index}"))
+                            .label(format!(
+                                "{provider} · {}",
+                                account.email.as_deref().unwrap_or(&account.id)
+                            ))
+                            .accessibility_label(format!("{provider} アカウントを変更"))
+                            .when(selected, |button| button.icon(IconName::Check))
+                            .w_full()
+                            .ghost()
+                            .disabled(disabled)
+                            .on_click(move |_, window, cx| select(id.clone(), window, cx)),
+                    )
+                    .child(account_usage_view(account.usage.as_ref(), false))
+                    .when(selected, |row| row.child(active.take().unwrap().1)),
+            );
+        }
+        if accounts.accounts.is_empty() {
+            rows = rows.child("アカウントを管理から追加してください。");
+        }
+    } else {
+        rows = rows.child("アカウントを読み込み中…");
+    }
+    rows
 }
 
 #[cfg(test)]
 mod tests {
     use super::account_selector;
-    use agent_core::state::Intent;
     use gpui_kit as gpui;
     use gpui_kit::{
         AppContext, Context, IntoElement, Modifiers, ParentElement, Render, Styled, TestAppContext,
@@ -714,11 +759,9 @@ mod tests {
             div().size_full().child(account_selector(
                 Some(self.accounts.clone()),
                 self.disabled,
-                move |intent, _, _| {
-                    let Intent::SelectAccount(account) = intent else {
-                        panic!("wrong account operation")
-                    };
-                    selected.borrow_mut().push(account.id);
+                None,
+                move |account_id, _, _| {
+                    selected.borrow_mut().push(account_id);
                 },
             ))
         }
@@ -748,12 +791,11 @@ mod tests {
         let rendered = picker.clone();
         let (_, window) = cx.add_window_view(|window, cx| Root::new(rendered, window, cx));
         window.run_until_parked();
-        let bounds = window.debug_bounds("account-select").unwrap();
+        let bounds = window.debug_bounds("account-choice-1").unwrap();
         window.simulate_click(bounds.center(), Modifiers::default());
-        window.simulate_keystrokes("down down enter");
         assert_eq!(*selected.borrow(), ["second"]);
+        let bounds = window.debug_bounds("account-choice-2").unwrap();
         window.simulate_click(bounds.center(), Modifiers::default());
-        window.simulate_keystrokes("down down down enter");
         assert_eq!(*selected.borrow(), ["second", "claude:third"]);
         window.update(|_, cx| {
             picker.update(cx, |picker, cx| {
@@ -762,9 +804,8 @@ mod tests {
             })
         });
         window.run_until_parked();
-        let bounds = window.debug_bounds("account-select").unwrap();
+        let bounds = window.debug_bounds("account-choice-0").unwrap();
         window.simulate_click(bounds.center(), Modifiers::default());
-        window.simulate_keystrokes("down enter");
         assert_eq!(
             *selected.borrow(),
             ["second", "claude:third"],

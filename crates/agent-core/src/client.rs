@@ -347,6 +347,35 @@ pub struct Account {
     pub provider: crate::session::ProviderKind,
     pub email: Option<String>,
     pub plan_type: Option<String>,
+    pub usage: Option<AccountUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct AccountUsage {
+    pub windows: Vec<UsageWindow>,
+    pub fetched_at: i64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct UsageWindow {
+    pub label: String,
+    pub remaining_percent: u32,
+    pub resets_at: Option<i64>,
+}
+
+impl UsageWindow {
+    pub fn from_used(label: String, used: f64, resets_at: Option<i64>) -> Option<Self> {
+        used.is_finite().then(|| Self {
+            label,
+            remaining_percent: (100.0 - used.clamp(0.0, 100.0)).floor() as u32,
+            resets_at,
+        })
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

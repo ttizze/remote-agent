@@ -33,6 +33,78 @@ fn file_name(path: &str) -> String {
 
 const CHAT_WIDTH: f32 = 780.;
 
+fn account_usage_view(
+    usage: Option<&agent_core::client::AccountUsage>,
+    details: bool,
+) -> AnyElement {
+    let mut body = v_flex().gap_2().text_xs();
+    let Some(usage) = usage else {
+        return body
+            .text_color(rgb(0xa3a3a3))
+            .child("使用量は未取得です")
+            .into_any_element();
+    };
+    if let Some(error) = &usage.error {
+        return body
+            .text_color(rgb(0xa3a3a3))
+            .child(error.clone())
+            .into_any_element();
+    }
+    for window in &usage.windows {
+        body = body.child(
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(window.label.clone())
+                        .child(format!("残り {}%", window.remaining_percent)),
+                )
+                .child(
+                    div()
+                        .h(px(4.))
+                        .w_full()
+                        .rounded(px(4.))
+                        .bg(rgb(0x474747))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(window.remaining_percent as f32 / 100.))
+                                .rounded(px(4.))
+                                .bg(if window.remaining_percent <= 20 {
+                                    rgb(0xe9b56f)
+                                } else {
+                                    rgb(0x8acfac)
+                                }),
+                        ),
+                )
+                .when_some(
+                    window
+                        .resets_at
+                        .filter(|_| details)
+                        .and_then(|at| chrono::DateTime::from_timestamp(at, 0)),
+                    |body, at| {
+                        body.child(div().text_color(rgb(0xa3a3a3)).child(format!(
+                            "{} にリセット",
+                            at.with_timezone(&chrono::Local).format("%m/%d %H:%M")
+                        )))
+                    },
+                ),
+        );
+    }
+    body.when_some(
+        chrono::DateTime::from_timestamp(usage.fetched_at, 0).filter(|_| details),
+        |body, at| {
+            body.child(div().text_color(rgb(0xa3a3a3)).child(format!(
+                "{} 時点",
+                at.with_timezone(&chrono::Local).format("%H:%M")
+            )))
+        },
+    )
+    .into_any_element()
+}
+
 fn fitted_image(source: ImageSource, height: f32) -> Img {
     img(source)
         .w_full()

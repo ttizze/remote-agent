@@ -6,6 +6,7 @@ struct ThreadsScreen: View {
     @State private var search = ""
     @State private var expandedProjectIds = Set<String>()
     @State private var worktreeHost: WorktreeSettingsHost?
+    @State private var showingSettings = false
 
     var body: some View {
         let groupedThreads = Dictionary(grouping: model.list?.threads ?? [], by: \.projectId)
@@ -193,6 +194,9 @@ struct ThreadsScreen: View {
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
+                    Button { showingSettings = true } label: { Label("設定", systemImage: "gearshape") }
+                        .disabled(!model.isConnected)
+                        .accessibilityIdentifier("tasks.settings")
                     Button { model.refreshTaskList() } label: { Label("更新", systemImage: "arrow.clockwise") }
                         .disabled(model.threadLoadState == .loading)
                         .accessibilityIdentifier("tasks.refresh")
@@ -209,6 +213,7 @@ struct ThreadsScreen: View {
                     .accessibilityIdentifier("tasks.menu")
             }
         }
+        .sheet(isPresented: $showingSettings) { AppSettingsSheet(model: model) }
         .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(
             connected: model.isConnected && model.selectedProfileId == host.id,
             request: model.requestSnapshot,

@@ -406,3 +406,40 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 - Desktop `chat_images_stay_inside_the_bubble_at_different_window_sizes` now
   checks thumbnail size, right alignment and separation above the text bubble
   for both pending and persisted messages, as well as viewport containment.
+
+
+## Account selection and usage
+
+- Desktop and iPhone open model/account selection from the composer. The trigger
+  shows the model name (or モデル before a model is known), rather than an unlabeled
+  gauge. No account controls are added to the conversation header.
+- Model and reasoning/speed controls belong inside the active account card.
+  Only that account's provider models are offered; inactive accounts show no
+  independent model or effort controls. Selecting an account fetches its current
+  catalog and chooses supported model/effort/speed defaults together. A catalog
+  refresh must not silently switch a draft to another provider. Models without
+  effort or speed options show no such controls.
+- Account choices use provider, email and plan; no invented 個人/仕事 labels.
+  Each account shows its own reported quota windows as remaining percentages.
+  The management view also shows reset times and the time fetched; picker rows
+  stay compact so the model controls and management link remain easy to reach. Unknown/failed usage stays unavailable rather
+  than appearing as zero usage or full remaining capacity.
+- アカウントを管理 in the model picker and アカウント in Settings reach the same
+  management view, including add/login/logout. iPhone login is owned by that view,
+  not duplicated in the model picker. Existing worktree settings navigation remains.
+- Account selections retain the existing Host-wide, per-provider scope; the UI
+  states that scope instead of promising conversation-local account selection.
+  Model and reasoning selections remain draft-specific. Existing in-flight work
+  is not restarted by selecting an account.
+- Host reads Codex account/rateLimits/read through the account's helper and Claude
+  get_usage with skip_behaviors through the account's native configuration. It
+  sends normalized quota data only, never authentication responses, to clients.
+  Usage is cached for 60 seconds per account; failed reads replace expired data
+  with an unavailable state. Logged-out accounts lose their cached usage.
+
+Acceptance: account picker desktop interaction test, Host account integration
+checks for both providers, and iOS
+`testSimulatorOpensAccountManagementFromSettingsAndModelPicker`,
+`testSimulatorAccountOwnsModelEffortAndSpeed`,
+`testSimulatorSwitchesCodexAccountsAndForksConversation`, and
+`testSimulatorAddsClaudeAccountAndKeepsCodexSelected`.

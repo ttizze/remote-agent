@@ -34,6 +34,7 @@ impl Accounts {
                 id,
                 &json!({"account":self.current,"requiresOpenaiAuth":true}),
             ),
+            "account/rateLimits/read" => context.respond(id, &json!({"rateLimits":{"primary":{"usedPercent":28,"windowDurationMins":300,"resetsAt":2000000000},"secondary":{"usedPercent":14,"windowDurationMins":10080,"resetsAt":2000500000}}})),
             "getAuthStatus" => {
                 let token = if self.current.is_null()
                     || context.home.join("auth-token-unavailable").exists()
