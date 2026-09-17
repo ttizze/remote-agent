@@ -134,8 +134,8 @@ extension BexLaunchUITests {
     }
 
     func testSimulatorUsesClaudeWithoutCodexAndRestoresConversation() throws {
-        let app = try connectedSimulatorApp()
-        app.buttons["tasks.new.project.simulator-project"].tap()
+        let app = try connectedSimulatorApp(expandProject: false)
+        app.buttons["tasks.new.chat"].tap()
         XCTAssertTrue(app.buttons["model.settings"].waitForExistence(timeout: 10))
         app.buttons["model.settings"].tap()
         openAccountManagement(app)
@@ -159,7 +159,6 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.staticTexts["notice"].exists)
         app.terminate()
         app.launch()
-        expandSimulatorProject(app)
         let row = prefixedElement(app, prefix: "tasks.row.claude:")
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         XCTAssertTrue(answer.waitForExistence(timeout: 20))

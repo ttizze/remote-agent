@@ -164,7 +164,11 @@ extension BexLaunchUITests {
         XCTAssertTrue(desktop.waitForExistence(timeout: 10))
         XCTAssertEqual(desktop.value as? String, "選択中")
         openAccountManagement(app)
-        app.buttons["model.account.add"].tap()
+        let add = app.buttons["model.account.add"]
+        for _ in 0 ..< 5 where !add.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(add.isHittable); add.tap()
         XCTAssertTrue(app.staticTexts["model.login.code"].waitForExistence(timeout: 10))
         XCUIDevice.shared.press(.home)
         app.activate()
