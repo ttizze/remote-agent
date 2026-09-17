@@ -13,8 +13,11 @@ use std::{
 };
 
 use agent_core::{
-    models::{Item, Model, ReasoningEffort, Thread, ThreadResponse, ThreadStatus, Turn},
-    peer::RpcMessage,
+    client as op,
+    models::{
+        Item, Model, ReasoningEffort, Thread, ThreadResponse, ThreadStatus, ThreadStatusKind, Turn,
+    },
+    protocol::{Body, Call},
     session::{ProviderKind, SessionChange, SessionRef, TextField},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -206,7 +209,6 @@ impl Claude {
                                         .as_str()
                                         .ok_or("invalid Claude effort level")?
                                         .into(),
-                                    extra: Default::default(),
                                 })
                             })
                             .collect::<Result<Vec<_>, String>>()?;
@@ -226,7 +228,6 @@ impl Claude {
                             service_tiers: Some(Vec::new()),
                             default_service_tier: None,
                             is_default: Some(false),
-                            extra: Default::default(),
                         })
                     })
                     .collect::<Result<Vec<Model>, String>>()
@@ -261,14 +262,15 @@ impl Claude {
                     id: session_id.to_string(),
                 }),
                 cwd: Some(cwd.to_string_lossy().into_owned()),
-                status: Some(status("idle")),
+                status: Some(ThreadStatus {
+                    kind: ThreadStatusKind::Idle,
+                }),
                 turns: Some(Vec::new()),
-                created_at: Some(now().into()),
-                updated_at: Some(now().into()),
+                created_at: Some(now() as f64),
+                updated_at: Some(now() as f64),
                 ..Default::default()
             },
             model: Some(model.into()),
-            extra: Default::default(),
         };
         let record = Record {
             cwd: cwd.to_string_lossy().into_owned(),
@@ -356,7 +358,9 @@ impl Claude {
                                 }
                             }),
                             name: Some("Claude履歴を読み取れません".into()),
-                            status: Some(status("notLoaded")),
+                            status: Some(ThreadStatus {
+                                kind: ThreadStatusKind::NotLoaded,
+                            }),
                             ..Default::default()
                         };
                         thread.history_read_state =
@@ -379,7 +383,9 @@ impl Claude {
                     .iter_mut()
                     .find(|thread| thread.id.as_deref() == Some(&id))
                 {
-                    thread.status = Some(status("active"));
+                    thread.status = Some(ThreadStatus {
+                        kind: ThreadStatusKind::Active,
+                    });
                 } else {
                     threads.push(Thread {
                         id: Some(id),
@@ -388,7 +394,9 @@ impl Claude {
                             id: record.session_id.to_string(),
                         }),
                         cwd: Some(record.cwd.clone()),
-                        status: Some(status("active")),
+                        status: Some(ThreadStatus {
+                            kind: ThreadStatusKind::Active,
+                        }),
                         ..Default::default()
                     });
                 }
@@ -435,7 +443,6 @@ impl Claude {
                     Ok(ThreadResponse {
                         thread,
                         model: None,
-                        extra: Default::default(),
                     })
                 }
             }
@@ -477,85 +484,88 @@ impl Claude {
                 Ok(ThreadResponse {
                     thread,
                     model: Some(record.model.clone()),
-                    extra: Default::default(),
                 })
             }
         }
     }
 
-    pub(crate) async fn request(
+    pub(crate) async fn read_item(
         &self,
         id: &str,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, OperationError> {
-        if matches!(method, "thread/resume" | "host/thread/resume") {
-            self.record(id).await?;
-            return Ok(json!({}));
-        }
-        if method == "host/thread/item/read" {
-            let requested = params["historyLimit"]
-                .as_u64()
-                .map_or(usize::MAX, |limit| limit as usize);
-            let response = self.read(id, requested).await?;
-            let item = response
-                .thread
-                .turns
-                .iter()
-                .flatten()
-                .find(|turn| Some(turn.id.as_str()) == params["turnId"].as_str())
-                .and_then(|turn| turn.items.as_ref())
-                .into_iter()
-                .flatten()
-                .find(|item| Some(item.id.as_str()) == params["itemId"].as_str())
-                .ok_or("Claude native history item is unavailable")?;
-            let mut item = (**item).clone();
-            if let Some(path) = item.extra.get("detailFile").and_then(Value::as_str) {
-                use tokio::io::AsyncReadExt;
-                let file = tokio::fs::File::open(path)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let mut bytes = Vec::new();
-                file.take(history::MAX_FILE_BYTES + 1)
-                    .read_to_end(&mut bytes)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if bytes.len() as u64 > history::MAX_FILE_BYTES {
-                    return Err("native output exceeds parser read budget".into());
-                }
-                item.result = Some(Value::String(
-                    String::from_utf8(bytes).map_err(|error| error.to_string())?,
-                ));
-            }
-            if let Some(agent_id) = item.extra.get("agentId").and_then(Value::as_str) {
-                let home = self.native_home.clone();
-                let session_id = Uuid::parse_str(id).map_err(|_| "invalid Claude ID")?;
-                let agent_id = agent_id.to_owned();
-                let related = tokio::task::spawn_blocking(move || {
-                    history::read_related(&home, session_id, &agent_id, usize::MAX)
-                })
+        params: &op::ReadItem,
+    ) -> Result<op::ItemResponse, OperationError> {
+        let response = self.read(id, usize::MAX).await?;
+        let item = response
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .find(|turn| turn.id == params.turn_id)
+            .and_then(|turn| turn.items.as_ref())
+            .into_iter()
+            .flatten()
+            .find(|item| item.id == params.item_id)
+            .ok_or("Claude native history item is unavailable")?;
+        let mut item = (**item).clone();
+        if let Some(path) = item.detail_file.as_deref() {
+            use tokio::io::AsyncReadExt;
+            let file = tokio::fs::File::open(path)
                 .await
                 .map_err(|error| error.to_string())?;
-                item.result = Some(match related {
-                    Ok(response) => json!({"output":item.result,"subagent":response.thread}),
-                    Err(error) => {
-                        json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":format!("{error:#}")}})
-                    }
-                });
+            let mut bytes = Vec::new();
+            file.take(history::MAX_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|error| error.to_string())?;
+            if bytes.len() as u64 > history::MAX_FILE_BYTES {
+                return Err("native output exceeds parser read budget".into());
             }
-            return Ok(json!({"item": item}));
+            item.result = Some(Value::String(
+                String::from_utf8(bytes).map_err(|error| error.to_string())?,
+            ));
+        }
+        if let Some(agent_id) = item.agent_id.as_deref() {
+            let home = self.native_home.clone();
+            let session_id = Uuid::parse_str(id).map_err(|_| "invalid Claude ID")?;
+            let agent_id = agent_id.to_owned();
+            let related = tokio::task::spawn_blocking(move || {
+                history::read_related(&home, session_id, &agent_id, usize::MAX)
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            item.result = Some(match related {
+                Ok(response) => json!({"output":item.result,"subagent":response.thread}),
+                Err(error) => {
+                    json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":format!("{error:#}")}})
+                }
+            });
+        }
+        Ok(op::ItemResponse {
+            item,
+            transfer: None,
+        })
+    }
+
+    pub(crate) async fn request(&self, id: &str, request: &Call) -> Result<Body, OperationError> {
+        let method = request.method();
+        if matches!(request, Call::ResumeThread(_)) {
+            self.record(id).await?;
+            return Ok(agent_core::models::Empty {}.into());
         }
         let record = self.record(id).await?;
-        match method {
-            "turn/start" => self.start_turn(id, record, &params).await,
-            "turn/interrupt" => {
+        match request {
+            Call::StartTurn(params) => self
+                .start_turn(id, record, params.clone())
+                .await
+                .map(Into::into),
+            Call::Interrupt(params) => {
                 let (input, mut interrupt) = {
                     let record = record.lock().await;
                     let running = record
                         .running
                         .as_ref()
                         .ok_or("Claudeは実行中ではありません。")?;
-                    if params["turnId"].as_str() != Some(running.turn_id.as_str()) {
+                    if params.turn_id != running.turn_id {
                         return Err(
                             "Claudeの実行対象が変わりました。会話を更新してください。".into()
                         );
@@ -578,9 +588,9 @@ impl Claude {
                 })
                 .await
                 .map_err(|_| "Claude Codeの停止要求がタイムアウトしました。")??;
-                Ok(json!({}))
+                Ok(agent_core::models::Empty {}.into())
             }
-            "turn/steer" | "thread/queue/add" => Err(
+            Call::SteerTurn(_) | Call::QueueTurn(_) => Err(
                 "Claudeの実行中は追加送信できません。完了を待つか、停止してから送信してください。"
                     .into(),
             ),
@@ -592,30 +602,17 @@ impl Claude {
         &self,
         id: &str,
         record: Arc<AsyncMutex<Record>>,
-        params: &Value,
-    ) -> Result<Value, OperationError> {
-        for field in [
-            "model",
-            "effort",
-            "serviceTierForTurn",
-            "clientUserMessageId",
-        ] {
-            if !params[field].is_null() && !params[field].is_string() {
-                return Err(format!("{field} must be a string").into());
-            }
-        }
+        params: op::StartTurn,
+    ) -> Result<op::StartedTurn, OperationError> {
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
-        let content = input_content(&params["input"]).await?;
+        let content = input_content(&params.input).await?;
         let mut state = record.lock().await;
         if state.running.is_some() {
             return Err("Claudeはすでに実行中です。".into());
         }
-        let model = params["model"]
-            .as_str()
-            .or(Some(state.model.as_str()))
-            .ok_or("Claude model is required")?;
+        let model = params.model.as_deref().unwrap_or(&state.model);
         let model_name = model
             .strip_prefix(MODEL_PREFIX)
             .ok_or("Codexへ切り替える場合は新しい会話を作成してください。")?;
@@ -626,7 +623,7 @@ impl Claude {
             .iter()
             .find(|entry| entry.model == model)
             .ok_or("Claude model is no longer available")?;
-        let effort = params["effort"].as_str();
+        let effort = params.effort.as_deref();
         if effort.is_some_and(|effort| {
             !selected
                 .supported_reasoning_efforts
@@ -637,8 +634,9 @@ impl Claude {
         }
         // Core's "default" means the backend's normal service. Claude has no
         // equivalent of Codex's explicit priority/flex tiers.
-        if params["serviceTierForTurn"]
-            .as_str()
+        if params
+            .service_tier
+            .as_deref()
             .is_some_and(|tier| tier != "default")
         {
             return Err("ClaudeではCodexのサービス階層を指定できません。".into());
@@ -685,12 +683,18 @@ impl Claude {
             process
         };
         let turn_id = Uuid::new_v4().to_string();
-        let user: Item = serde_json::from_value(json!({"id":Uuid::new_v4().to_string(),"type":"userMessage","content":params["input"],"clientId":params["clientUserMessageId"]})).map_err(|error| error.to_string())?;
+        let user = Item {
+            id: Uuid::new_v4().to_string(),
+            kind: Some("userMessage".into()),
+            content: Some(op::Input::content(&params.input)),
+            client_id: Some(params.client_user_message_id),
+            ..Default::default()
+        };
         let turn = Turn {
             id: turn_id.clone(),
             status: Some("inProgress".into()),
             items: Some(vec![Arc::new(user)]),
-            started_at: Some(Some(now().into())),
+            started_at: Some(now() as f64),
             ..Default::default()
         };
         if let Err(error) = process.write(&json!({"type":"user","uuid":turn_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
@@ -737,24 +741,18 @@ impl Claude {
             }
         }
         workers.spawn(worker.run(process, receiver));
-        Ok(json!({"turn":{"id":turn_id}}))
+        Ok(op::StartedTurn {
+            turn: op::TurnIdentity { id: turn_id },
+        })
     }
 
-    pub(crate) async fn respond(&self, message: &RpcMessage<'_>) -> Result<bool, String> {
-        let Some(raw_id) = message.raw_id() else {
-            return Ok(false);
-        };
-        let id: String = serde_json::from_str(raw_id).map_err(|error| error.to_string())?;
-        let pending = self.pending.lock().unwrap().remove(&id);
-        let Some(pending) = pending else {
-            return Ok(false);
-        };
-        let result: Value = message
-            .raw_result()
-            .map(|raw| serde_json::from_str(raw.get()))
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or(Value::Null);
+    pub(crate) async fn respond(&self, id: &str, result: &Value) -> Result<(), String> {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap()
+            .remove(id)
+            .ok_or("Claude request is no longer pending")?;
         let response = if result["decision"] == "accept" {
             json!({"behavior":"allow","updatedInput":pending.input})
         } else if let Some(answers) = result["answers"].as_object() {
@@ -789,7 +787,7 @@ impl Claude {
             .map_err(|_| "Claude exited before confirming the answer write")??;
         self.router
             .resolve_native_request(ProviderKind::Claude, &id.into());
-        Ok(true)
+        Ok(())
     }
 }
 
@@ -888,8 +886,7 @@ impl Worker {
                 &self.session,
                 SessionChange::Status {
                     status: ThreadStatus {
-                        kind: "notLoaded".into(),
-                        extra: Default::default(),
+                        kind: ThreadStatusKind::NotLoaded,
                     },
                 },
             );
@@ -905,7 +902,7 @@ impl Worker {
             }
             .into(),
         );
-        turn.completed_at = Some(Some(now().into()));
+        turn.completed_at = Some(now() as f64);
         if let Some(items) = &mut turn.items {
             for item in items
                 .iter_mut()
@@ -1017,8 +1014,11 @@ impl Worker {
                 native_request_id: None,
                 id: id.clone().into(),
                 method: method.into(),
-                params: serde_json::from_value(params).map_err(|error| error.to_string())?,
-                extra: Default::default(),
+                params: std::mem::take(
+                    params
+                        .as_object_mut()
+                        .expect("request parameters are an object"),
+                ),
             },
         );
         if result.is_err() {
@@ -1077,14 +1077,7 @@ impl Worker {
                         .unwrap_or("tool-result")
                 )
             };
-            let value = match block["type"].as_str() {
-                Some("text") if kind == "assistant" => {
-                    json!({"id":id,"type":"agentMessage","text":block["text"]})
-                }
-                Some("thinking") => json!({"id":id,"type":"reasoning","text":block["thinking"]}),
-                Some("tool_use") => {
-                    json!({"id":block["id"],"type":"mcpToolCall","server":"Claude Code","tool":block["name"],"arguments":block["input"],"status":"inProgress"})
-                }
+            let item = match block["type"].as_str() {
                 Some("tool_result") => {
                     let item = items
                         .iter_mut()
@@ -1104,23 +1097,24 @@ impl Worker {
                         &self.session,
                         SessionChange::Item {
                             turn_id: self.turn_id.clone(),
-                            item: item.clone(),
+                            item: item.clone().into(),
                         },
                     );
                     continue;
                 }
-                _ => continue,
+                Some("text") if kind != "assistant" => continue,
+                _ => match content_item(id, block, "inProgress")
+                    .map_err(|error| error.to_string())?
+                {
+                    Some(item) => item,
+                    None => continue,
+                },
             };
-            let mut item: Item =
-                serde_json::from_value(value).map_err(|error| error.to_string())?;
-            if let Some(parent) = message["parent_tool_use_id"].as_str() {
-                item.extra.insert("parentToolUseId".into(), parent.into());
-            }
             self.router.session_change(
                 &self.session,
                 SessionChange::Item {
                     turn_id: self.turn_id.clone(),
-                    item: item.clone(),
+                    item: item.clone().into(),
                 },
             );
             if let Some(existing) = items.iter_mut().find(|existing| existing.id == item.id) {
@@ -1159,20 +1153,17 @@ impl Worker {
                     Some("thinking") => "reasoning",
                     _ => return Ok(()),
                 };
-                let mut item = Item {
+                let item = Item {
                     id: format!("{message}:{index}"),
                     kind: Some(kind.into()),
                     text: Some(String::new()),
                     ..Default::default()
                 };
-                if !scope.is_empty() {
-                    item.extra.insert("parentToolUseId".into(), scope.into());
-                }
                 self.router.session_change(
                     &self.session,
                     SessionChange::Item {
                         turn_id: self.turn_id.clone(),
-                        item,
+                        item: item.into(),
                     },
                 );
             }
@@ -1209,43 +1200,80 @@ impl Worker {
     }
 }
 
-async fn input_content(input: &Value) -> Result<Vec<Value>, String> {
-    let input = input
-        .as_array()
-        .filter(|input| !input.is_empty())
-        .ok_or("メッセージを入力してください。")?;
+fn content_item(
+    id: String,
+    block: &Value,
+    tool_status: &str,
+) -> Result<Option<Item>, serde_json::Error> {
+    let mut item = Item {
+        id,
+        ..Default::default()
+    };
+    match block["type"].as_str() {
+        Some("text" | "thinking") => {
+            let thinking = block["type"] == "thinking";
+            item.kind = Some(
+                if thinking {
+                    "reasoning"
+                } else {
+                    "agentMessage"
+                }
+                .into(),
+            );
+            item.text =
+                serde_json::from_value(block[if thinking { "thinking" } else { "text" }].clone())?;
+        }
+        Some("tool_use") => {
+            item.id = serde_json::from_value(block["id"].clone())?;
+            item.kind = Some("mcpToolCall".into());
+            item.server = Some("Claude Code".into());
+            item.tool = serde_json::from_value(block["name"].clone())?;
+            item.arguments = (!block["input"].is_null()).then(|| block["input"].clone());
+            item.status = Some(tool_status.into());
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(item))
+}
+
+async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
+    if input.is_empty() {
+        return Err("メッセージを入力してください。".into());
+    }
     let mut content = Vec::with_capacity(input.len());
     for input in input {
-        match input["type"].as_str() {
-            Some("text") => content.push(json!({"type":"text","text":input["text"].as_str().ok_or("message text is missing")?})),
-            Some("mention") => content.push(json!({"type":"text","text":format!("添付ファイル: {}", input["path"].as_str().ok_or("attachment path is missing")?)})),
-            Some("localImage") => {
-                let path = input["path"].as_str().ok_or("image path is missing")?;
-                let bytes = tokio::fs::read(path).await.map_err(|error| format!("画像を読み込めません: {error}"))?;
-                let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { "image/png" }
-                    else if bytes.starts_with(&[0xff, 0xd8, 0xff]) { "image/jpeg" }
-                    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { "image/gif" }
-                    else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") { "image/webp" }
-                    else { return Err("Claudeに送る画像はPNG・JPEG・GIF・WebPを使用してください。".into()); };
+        match input {
+            op::Input::Text { text, .. } => content.push(json!({"type":"text","text":text})),
+            op::Input::Mention { path, .. } => {
+                content.push(json!({"type":"text","text":format!("添付ファイル: {path}")}))
+            }
+            op::Input::LocalImage { path } => {
+                let bytes = tokio::fs::read(path)
+                    .await
+                    .map_err(|error| format!("画像を読み込めません: {error}"))?;
+                let media_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    "image/png"
+                } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+                    "image/jpeg"
+                } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+                    "image/gif"
+                } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+                    "image/webp"
+                } else {
+                    return Err("Claudeに送る画像はPNG・JPEG・GIF・WebPを使用してください。".into());
+                };
                 content.push(json!({"type":"image","source":{"type":"base64","media_type":media_type,"data":STANDARD.encode(bytes)}}));
             }
-            _ => return Err("Claudeが対応していない入力形式です。".into()),
         }
     }
     Ok(content)
 }
 
-fn status(kind: &str) -> ThreadStatus {
-    ThreadStatus {
-        kind: kind.into(),
-        extra: Default::default(),
-    }
-}
 pub(crate) fn updated_at(thread: &Thread) -> u64 {
     thread
         .updated_at
         .as_ref()
-        .and_then(|number| number.as_u64())
+        .map(|number| *number as u64)
         .unwrap_or_default()
 }
 fn now() -> u64 {

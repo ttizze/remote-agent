@@ -22,9 +22,7 @@ impl Operation for Dictate {
         Ok((
             draft,
             context
-                .call(&rpc::Transcribe {
-                    audio: Base64Bytes(&self.audio),
-                })
+                .call(&rpc::Transcribe { audio: &self.audio })
                 .await?,
         ))
     }
@@ -107,7 +105,6 @@ impl Operation for StartSubmission {
         Some(&self.client_user_message_id)
     }
     type Output = crate::models::ThreadResponse;
-    const ORDERED: bool = true;
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         self.complete(snapshot, output.thread, false)
     }
@@ -193,7 +190,6 @@ pub enum SubmissionProgress {
     Sent(Option<String>),
 }
 impl Operation for SendSubmission {
-    const ORDERED: bool = true;
     const APPLY_WHEN_STALE: bool = true;
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
@@ -244,19 +240,18 @@ impl Operation for SendSubmission {
         );
         if !self.draft.text.is_empty() {
             input.push(Input::Text {
-                text: &self.draft.text,
-                text_elements: &[],
+                text: self.draft.text.clone(),
             });
         }
         for attachment in &self.draft.attachments {
             input.push(if attachment.is_image {
                 Input::LocalImage {
-                    path: &attachment.path,
+                    path: attachment.path.clone(),
                 }
             } else {
                 Input::Mention {
-                    path: &attachment.path,
-                    name: &attachment.name,
+                    path: attachment.path.clone(),
+                    name: attachment.name.clone(),
                 }
             });
         }
@@ -274,7 +269,7 @@ impl Operation for SendSubmission {
                 target,
             )
             .await?;
-        Ok(SubmissionProgress::Sent(reply.value))
+        Ok(SubmissionProgress::Sent(reply))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let turn_id = match output {
@@ -359,7 +354,7 @@ impl Operation for UploadAttachment {
             PeerError::InvalidMessage("binary transfers require an iroh session".into())
         })?;
         let uploaded = crate::transfers::upload_file(
-            context.peer,
+            context.client,
             || async { session.open_stream().await.map_err(std::io::Error::other) },
             std::path::Path::new(&self.attachment.path),
             std::path::Path::new(&self.directory),
@@ -367,12 +362,6 @@ impl Operation for UploadAttachment {
         )
         .await
         .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        #[derive(Deserialize)]
-        struct Uploaded {
-            path: String,
-        }
-        let uploaded: Uploaded = serde_json::from_value(uploaded)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
         Ok(uploaded.path)
     }
     fn apply(mut self, snapshot: &mut Snapshot, path: Self::Output) -> Vec<Effect> {

@@ -87,6 +87,22 @@ retrieval and reopening.
   `testSimulatorKeepsSmallOlderScrollDuringLiveUpdate`, Android
   `ConversationNavigationTest` exercise the production native conversation views.
 
+## Project registration
+
+Desktop's project heading has a “＋” action. Both this action and the new-chat
+folder picker use Codex's `project/create` API before opening the chat draft.
+The Host reads `project/list` and supplies `projectId` when starting a chat in
+that project. Native assignments, including an explicit null, are authoritative.
+Claude sessions use the same catalog with Host workspace matching. Bex keeps no
+separate persistent project registry and does not read Desktop's retired JSON
+project metadata. A late registration refreshes the list without changing newer
+navigation.
+
+Acceptance: `adding_a_chat_folder_registers_a_project_before_submission` and
+`project_registration_navigates_only_while_current` cover registration, restart,
+duplicate selections, and navigation races. Native assignment and workspace
+matching are covered by `projects::state` tests.
+
 ## Workspace folder labels
 
 New managed worktrees use `<original-repository>/.worktree/session-XXXXX/<repository-name>`.

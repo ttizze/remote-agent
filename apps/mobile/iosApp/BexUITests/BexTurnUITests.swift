@@ -245,7 +245,7 @@ extension BexLaunchUITests {
         let savedDiff = app.staticTexts
             .matching(NSPredicate(format: "label BEGINSWITH '+' AND label CONTAINS 'Saved from iPhone'")).firstMatch
         XCTAssertTrue(savedDiff.waitForExistence(timeout: 10))
-        app.buttons["files.close"].tap()
+        closeWorkbench(app)
         XCTAssertEqual(message.value as? String, "Keep this draft")
 
         app.terminate()

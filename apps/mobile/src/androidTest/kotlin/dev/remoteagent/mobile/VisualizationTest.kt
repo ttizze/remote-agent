@@ -90,7 +90,11 @@ class VisualizationTest {
                 val second = device.findObject(By.text("02 ブランチ＋チェックをプレビュー"))
                 assertNotNull("The second option must be accessible in the native WebView", second)
                 second.click()
-                compose.waitUntil(5_000) { device.hasObject(By.text("02 · ブランチ＋チェック")) }
+                compose.waitUntil(5_000) {
+                    // A reopened WebView can leave the previous DOM text in UiAutomation's cache.
+                    instrumentation.uiAutomation.clearCache()
+                    device.hasObject(By.text("02 · ブランチ＋チェック"))
+                }
                 assertTrue(device.takeScreenshot(File(base.getExternalFilesDir(null), name)))
             }
             verify("visualize-selected.png")

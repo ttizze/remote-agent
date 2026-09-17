@@ -8,19 +8,57 @@ extension FileEntry: @retroactive Identifiable {
     }
 }
 
-struct WorkspaceSheet: View {
+/// Own directory navigation independently of the conversation's navigation stack.
+private struct WorkspaceNavigation: UIViewControllerRepresentable {
+    let root: String
+    let content: (String, @escaping (String) -> Void) -> WorkspaceDirectoryScreen
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(content: content)
+    }
+
+    func makeUIViewController(context: Context) -> UINavigationController {
+        context.coordinator.open(root)
+        return context.coordinator.navigation
+    }
+
+    func updateUIViewController(_ controller: UINavigationController, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.content = content
+        for case let page as UIHostingController<WorkspaceDirectoryScreen> in controller.viewControllers {
+            page.rootView = coordinator.screen(page.rootView.directory)
+        }
+    }
+
+    final class Coordinator {
+        let navigation = UINavigationController()
+        var content: (String, @escaping (String) -> Void) -> WorkspaceDirectoryScreen
+
+        init(content: @escaping (String, @escaping (String) -> Void) -> WorkspaceDirectoryScreen) {
+            self.content = content
+        }
+
+        func screen(_ directory: String) -> WorkspaceDirectoryScreen {
+            content(directory) { [weak self] in self?.open($0) }
+        }
+
+        func open(_ directory: String) {
+            let page = UIHostingController(rootView: screen(directory))
+            page.title = directory == page.rootView.root ? "ファイル" : URL(fileURLWithPath: directory).lastPathComponent
+            page.navigationItem.largeTitleDisplayMode = .never
+            navigation.pushViewController(page, animated: !navigation.viewControllers.isEmpty)
+        }
+    }
+}
+
+struct WorkspacePanel: View {
     @ObservedObject var model: BexAppViewModel
     let root: String
     @Binding var showingDiff: Bool
-    @Environment(\.dismiss) private var dismiss
+    let close: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("作業中の変更").font(.headline)
-                Spacer()
-                Button("閉じる") { dismiss() }.accessibilityIdentifier("files.close")
-            }.padding()
             Picker("表示", selection: $showingDiff) {
                 Text("変更済み").tag(true).accessibilityIdentifier("files.diff")
                 Text("すべてのファイル").tag(false).accessibilityIdentifier("files.all")
@@ -48,16 +86,21 @@ struct WorkspaceSheet: View {
                     }
                 }
             } else {
-                NavigationStack {
-                    WorkspaceDirectoryScreen(snapshot: model.snapshot, root: root, directory: root,
+                WorkspaceNavigation(root: root) { directory, openDirectory in
+                    WorkspaceDirectoryScreen(snapshot: model.snapshot, root: root, directory: directory,
                                              perform: model.requestSnapshot, fileDraft: fileDraft,
                                              downloadFile: model.download,
                                              aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
-                                             close: { dismiss() })
+                                             close: close, openDirectory: openDirectory)
                 }
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
+        .onDisappear {
+            if !root.isEmpty {
+                model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root)))
+            }
+        }
     }
 
     private func fileDraft(_ path: String) -> Binding<String> {
@@ -77,7 +120,7 @@ private struct WorkspaceDirectoryScreen: View {
     let downloadFile: @MainActor (String) async throws -> URL
     let aiEdit: (String) -> Void
     let close: () -> Void
-    @State private var destinationPath: String?
+    let openDirectory: (String) -> Void
     @State private var path = ""
     @State private var entries: [FileEntry] = []
     @State private var error: String?
@@ -97,28 +140,18 @@ private struct WorkspaceDirectoryScreen: View {
                 TextField("絶対パス", text: $path)
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
                     .textFieldStyle(.roundedBorder)
-                Button("開く") { destinationPath = path }
+                Button("開く") { openDirectory(path) }
                     .accessibilityIdentifier("files.open-path")
             }.padding()
             List {
-                NavigationLink("親ディレクトリ") {
-                    WorkspaceDirectoryScreen(
-                        snapshot: snapshot,
-                        root: root,
-                        directory: (path as NSString).deletingLastPathComponent,
-                        perform: perform, fileDraft: fileDraft, downloadFile: downloadFile, aiEdit: aiEdit, close: close
-                    )
-                }
+                Button("親ディレクトリ") { openDirectory((path as NSString).deletingLastPathComponent) }
                 ForEach(entries) { entry in
                     HStack {
                         if entry.directory {
-                            NavigationLink {
-                                WorkspaceDirectoryScreen(snapshot: snapshot, root: root, directory: entry.path,
-                                                         perform: perform, fileDraft: fileDraft,
-                                                         downloadFile: downloadFile, aiEdit: aiEdit,
-                                                         close: close)
-                            } label: { Label(entry.name, systemImage: "folder") }
-                                .accessibilityIdentifier("file.\(entry.name)")
+                            Button { openDirectory(entry.path) } label: {
+                                Label(entry.name, systemImage: "folder")
+                            }
+                            .accessibilityIdentifier("file.\(entry.name)")
                         } else {
                             Button { selected = entry } label: { Label(entry.name, systemImage: "doc") }
                                 .buttonStyle(.borderless)
@@ -133,13 +166,6 @@ private struct WorkspaceDirectoryScreen: View {
                 }
             }
         }
-        .navigationDestination(item: $destinationPath) { destination in
-            WorkspaceDirectoryScreen(snapshot: snapshot, root: root, directory: destination,
-                                     perform: perform, fileDraft: fileDraft, downloadFile: downloadFile,
-                                     aiEdit: aiEdit, close: close)
-        }
-        .navigationTitle(directory == root ? "ファイル" : URL(fileURLWithPath: directory).lastPathComponent)
-        .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             if path.isEmpty {
                 load(directory)

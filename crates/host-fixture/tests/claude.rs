@@ -1,3 +1,4 @@
+use agent_core::{client as rpc, models};
 use std::{path::Path, sync::Arc, time::Duration};
 
 use agent_core::{
@@ -99,7 +100,7 @@ async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snap
                 .snapshot()
                 .requests
                 .values()
-                .map(|request| (&request.id, &request.extra))
+                .map(|request| (&request.id, &request.params))
                 .collect::<Vec<_>>()
         )
     })
@@ -151,7 +152,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                     std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
                     git(&workspace, &["add", "tracked.txt"]);
                     git(&workspace, &["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","-c","commit.gpgsign=false","commit","--quiet","-m","fixture"]);
-                    std::fs::write(root.join("projects.json"), json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[workspace]}}}).to_string()).unwrap();
+                    std::fs::write(root.join("projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
                     std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
                     let memory = Arc::new(Memory::default());
                     let mut fixture = host(&root, memory.clone(), fixture_program()).await;
@@ -197,7 +198,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                         assert!(responses[0].text.as_ref().unwrap().starts_with(&format!("reply {}: message {number}", number + 1)));
                         let user = items.iter().find(|item| item.kind.as_deref() == Some("userMessage")).unwrap();
                         assert_eq!(user.client_id.as_deref(), Some(format!("client-{number}").as_str()));
-                        assert_eq!(user.extra["content"][0]["text"], format!("message {number}"));
+                        assert_eq!(user.content.as_ref().unwrap()[0]["text"], format!("message {number}"));
                         let session = id.strip_prefix("claude:").unwrap();
                         let inputs: Value = serde_json::from_slice(&std::fs::read(Path::new(&cwd).join(format!("claude-session-{session}.json"))).unwrap()).unwrap();
                         assert_eq!(inputs.as_array().unwrap().len(), number + 1);
@@ -350,9 +351,11 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
         assert!(
             local
                 .peer
-                .request::<_, Value>(
-                    "turn/interrupt",
-                    &json!({"threadId": id, "turnId": previous_turn}),
+                .call(
+                    &serde_json::from_value::<op::Interrupt>(
+                        json!({"threadId": id, "turnId": previous_turn}),
+                    )
+                    .unwrap()
                 )
                 .await
                 .is_err(),
@@ -519,7 +522,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                 std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
                 git(&workspace, &["add", "tracked.txt"]);
                 git(&workspace, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
-                std::fs::write(root.join("projects.json"), json!({"local-projects":{"project":{"id":"project","name":"Project","rootPaths":[workspace]}}}).to_string()).unwrap();
+                std::fs::write(root.join("projects.json"), json!([{"id":"project","name":"Project","roots":[{"path":workspace}]}]).to_string()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), json!({"settings":{"createOnNewSession":automatic,"worktreeDirectory":root.join("worktrees")}}).to_string()).unwrap();
                 let config = AppServerConfig { program: root.join("missing-codex"), ..Default::default() };
                 let memory = Arc::new(Memory::default());
@@ -556,33 +559,33 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                     let snapshot = store.snapshot();
                     let list = snapshot.threads.as_ref().unwrap();
                     assert!(list.data.iter().any(|thread| thread.id.as_deref() == Some(&id)));
-                    assert!(list.extra["providerErrors"]["codex"]["message"].is_string());
+                    assert!(list.provider_errors.as_ref().unwrap()["codex"]["message"].is_string());
                     let management = fixture.local().await.unwrap();
-                    let status = management.peer.request::<_, Value>("host/status", &json!({})).await.unwrap().value;
+                    let status = management.peer.call(&rpc::ReadHostStatus {}).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                     assert!(status["providerErrors"]["codex"]["message"].is_string());
                     if selected {
                         let path = Path::new(&current).join("tracked.txt");
-                        let listed = management.peer.request::<_, Value>("host/file/list", &json!({"path":current})).await.unwrap().value;
+                        let listed = management.peer.call(&serde_json::from_value::<op::ListFiles>(json!({"path":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         assert!(listed["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "tracked.txt"));
-                        let read = management.peer.request::<_, Value>("host/file/read", &json!({"path":path})).await.unwrap().value;
+                        let read = management.peer.request::<models::FileContent>(&agent_core::protocol::Call::ReadFile(serde_json::from_value::<op::ListFiles>(json!({"path":path})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         let contents = format!("workspace edit {index}\n");
-                        let saved_file = management.peer.request::<_, Value>("host/file/write", &json!({"path":path,"revision":read["revision"],"text":contents})).await.unwrap().value;
+                        let saved_file = management.peer.call(&serde_json::from_value::<rpc::WriteFile>(json!({"path":path,"revision":read["revision"],"text":contents})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         assert_eq!(saved_file["text"], contents);
                         assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
-                        let review = management.peer.request::<_, Value>("host/workspace/review", &json!({"cwd":current})).await.unwrap().value;
+                        let review = management.peer.call(&serde_json::from_value::<rpc::ReviewWorkspace>(json!({"cwd":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         assert!(review["files"].as_array().unwrap().iter().any(|file| file["path"] == "tracked.txt"));
                     }
                     let drafts = store.snapshot().drafts.clone();
-                    let dictation = management.peer.request::<_, Value>("host/dictation/transcribe", &json!({"audio":"AAA="})).await;
+                    let dictation = management.peer.request::<rpc::Transcription>(&agent_core::protocol::Call::Transcribe(serde_json::from_value::<rpc::Transcribe>(json!({"audio":"AAA="})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap());
                     assert!(dictation.is_err());
                     assert_eq!(*store.snapshot().drafts, *drafts);
-                    assert!(management.peer.request::<_, Value>("host/worktree/settings/read", &json!({})).await.is_ok());
+                    assert!(management.peer.call(&op::ReadWorktreeSettings {}).await.is_ok());
                     let count_worktrees = || std::fs::read_dir(root.join("worktrees")).map(|entries| entries.count()).unwrap_or_default();
                     let before = count_worktrees();
-                    assert!(management.peer.request::<_, Value>("host/thread/start", &json!({"model":"fixture-model","cwd":current})).await.is_err());
+                    assert!(management.peer.call(&serde_json::from_value::<op::StartThread>(json!({"model":"fixture-model","cwd":current})).unwrap()).await.is_err());
                     assert_eq!(count_worktrees(), before, "an unavailable backend must not create a worktree");
-                    assert!(management.peer.request::<_, Value>("host/status", &json!({})).await.is_ok());
-                    management.close().await.unwrap();
+                    assert!(management.peer.call(&rpc::ReadHostStatus {}).await.is_ok());
+                    management.close().await;
                     saved = serde_json::from_slice(&serde_json::to_vec(snapshot.as_ref()).unwrap()).unwrap();
                     thread_id = Some(id);
                     cwd = Some(current);
@@ -640,7 +643,12 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         assert!(
             local
                 .peer
-                .request::<_, Value>("thread/list", &json!({}))
+                .request::<agent_core::protocol::json_boundary::Opaque>(
+                    &agent_core::protocol::Call::Provider(agent_core::protocol::ProviderCall {
+                        method: "thread/list".into(),
+                        params: json!({})
+                    })
+                )
                 .await
                 .is_err()
         );
@@ -696,14 +704,8 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         let snapshot = completed(&store, &id, 2, "completed").await;
         assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
         assert!(snapshot.drafts[&id].text.is_empty());
-        assert!(
-            local
-                .peer
-                .request::<_, Value>("host/status", &json!({}))
-                .await
-                .is_ok()
-        );
-        local.close().await.unwrap();
+        assert!(local.peer.call(&rpc::ReadHostStatus {}).await.is_ok());
+        local.close().await;
         store.close().await.unwrap();
         endpoint.close().await;
         fixture.close().await.unwrap();
@@ -896,8 +898,6 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resize_and_kill() {
-    use agent_core::peer::PeerEvent;
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
     tokio::time::timeout(Duration::from_secs(30), async {
         let root = tempfile::tempdir().unwrap();
         let fixture = HostFixture::start(
@@ -913,101 +913,83 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
         )
         .await
         .unwrap();
-        let owner = fixture.local().await.unwrap();
+        let mut owner = fixture.local().await.unwrap();
         let stranger = fixture.local().await.unwrap();
-        let mut events = owner.peer.subscribe();
         owner
             .peer
-            .request::<_, Value>(
-                "host/terminal/start",
-                &json!({"processHandle":"owned","cwd":root.path(),"size":{"rows":24,"cols":80}}),
-            )
+            .call(&rpc::StartTerminal {
+                handle: "owned".into(),
+                cwd: root.path().to_str().unwrap().into(),
+                size: rpc::TerminalSize { rows: 24, cols: 80 },
+            })
             .await
             .unwrap();
-        for (method, params) in [
-            (
-                "process/writeStdin",
-                json!({"processHandle":"owned","deltaBase64":STANDARD.encode(b"exit\n")}),
-            ),
-            (
-                "process/resizePty",
-                json!({"processHandle":"owned","size":{"rows":39,"cols":97}}),
-            ),
-            ("process/kill", json!({"processHandle":"owned"})),
-        ] {
-            assert!(
-                stranger
-                    .peer
-                    .request::<_, Value>(method, &params)
-                    .await
-                    .is_err(),
-                "another connection must not control a PTY"
-            );
-        }
-        owner
-            .peer
-            .request::<_, Value>(
-                "process/resizePty",
-                &json!({"processHandle":"owned","size":{"rows":39,"cols":97}}),
-            )
-            .await
-            .unwrap();
+        let resize = op::ResizeTerminal {
+            handle: "owned".into(),
+            size: rpc::TerminalSize { rows: 39, cols: 97 },
+        };
+        let kill = rpc::TerminalKill {
+            process_handle: "owned".into(),
+        };
         #[cfg(unix)]
         let input = b"printf 'BEX_%s\\n' 'PTY_READY'; stty size\n".as_slice();
         #[cfg(windows)]
         let input = b"echo BEX_PTY_READY\r\n".as_slice();
+        let write = rpc::TerminalWrite {
+            process_handle: "owned".into(),
+            data: input.to_vec(),
+        };
+        assert!(
+            stranger
+                .peer
+                .request::<models::Empty>(&agent_core::protocol::Call::WriteTerminal(write.clone()))
+                .await
+                .is_err()
+        );
+        assert!(stranger.peer.call(&resize).await.is_err());
+        assert!(
+            stranger
+                .peer
+                .request::<models::Empty>(&agent_core::protocol::Call::KillTerminal(kill.clone()))
+                .await
+                .is_err()
+        );
+        owner.peer.call(&resize).await.unwrap();
         owner
             .peer
-            .request::<_, Value>(
-                "process/writeStdin",
-                &json!({"processHandle":"owned","deltaBase64":STANDARD.encode(input)}),
-            )
+            .request::<models::Empty>(&agent_core::protocol::Call::WriteTerminal(write))
             .await
             .unwrap();
         let mut output = Vec::new();
         loop {
-            if let PeerEvent::Message(message) = events.recv().await.unwrap() {
-                let message: Value = serde_json::from_str(&message.value).unwrap();
-                if message["method"] == "process/outputDelta" {
-                    output.extend(
-                        STANDARD
-                            .decode(message["params"]["deltaBase64"].as_str().unwrap())
-                            .unwrap(),
-                    );
-                    let text = String::from_utf8_lossy(&output);
-                    if text.contains("BEX_PTY_READY") {
-                        #[cfg(unix)]
-                        if !text.contains("39 97") {
-                            continue;
-                        }
-                        break;
+            let message = owner
+                .events
+                .read::<agent_core::protocol::Notification>()
+                .await
+                .unwrap()
+                .expect("Host event stream ended");
+            if let agent_core::protocol::Notification::Output { data, .. } = message {
+                output.extend(data);
+                let text = String::from_utf8_lossy(&output);
+                if text.contains("BEX_PTY_READY") {
+                    #[cfg(unix)]
+                    if !text.contains("39 97") {
+                        continue;
                     }
+                    break;
                 }
             }
         }
         owner
             .peer
-            .request::<_, Value>("process/kill", &json!({"processHandle":"owned"}))
+            .request::<models::Empty>(&agent_core::protocol::Call::KillTerminal(kill))
             .await
             .unwrap();
         // A successful kill includes process cleanup and ownership release.
-        assert!(
-            owner
-                .peer
-                .request::<_, Value>(
-                    "process/resizePty",
-                    &json!({"processHandle":"owned","size":{"rows":24,"cols":80}})
-                )
-                .await
-                .is_err()
-        );
-        owner
-            .peer
-            .request::<_, Value>("host/status", &json!({}))
-            .await
-            .unwrap();
-        stranger.close().await.unwrap();
-        owner.close().await.unwrap();
+        assert!(owner.peer.call(&resize).await.is_err());
+        owner.peer.call(&rpc::ReadHostStatus {}).await.unwrap();
+        stranger.close().await;
+        owner.close().await;
         fixture.close().await.unwrap();
     })
     .await

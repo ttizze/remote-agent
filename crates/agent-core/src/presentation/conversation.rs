@@ -970,17 +970,10 @@ mod tests {
 }
 
 fn progress_label(turn: &models::Turn, action: Option<&str>, now_seconds: f64) -> String {
-    let started = turn
-        .started_at
-        .as_ref()
-        .and_then(Option::as_ref)
-        .and_then(serde_json::Number::as_f64)
-        .or_else(|| {
-            turn.extra
-                .get("startedAtMs")?
-                .as_f64()
-                .map(|milliseconds| milliseconds / 1000.)
-        });
+    let started = turn.started_at.as_ref().copied().or_else(|| {
+        turn.started_at_ms
+            .map(|milliseconds| milliseconds as f64 / 1000.)
+    });
     let elapsed = started
         .map(|started| format!("{}秒 ", (now_seconds - started).max(0.) as u64))
         .unwrap_or_default();

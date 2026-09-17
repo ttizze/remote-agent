@@ -26,7 +26,7 @@ impl Dictation {
     }
     pub(crate) async fn transcribe(
         &self,
-        params: &agent_core::client::Transcribe<&str>,
+        audio: &[u8],
     ) -> Result<agent_core::client::Transcription, String> {
         let app_server = self
             .backend
@@ -34,7 +34,7 @@ impl Dictation {
             .map_err(|error| format!("音声入力のCodexバックエンドを利用できません: {error}"))?;
         tokio::time::timeout(
             Duration::from_secs(25),
-            transcribe_request(app_server, params),
+            transcribe_request(app_server, audio),
         )
         .await
         .map_err(|_| "文字起こしがタイムアウトしました。")?
@@ -43,34 +43,26 @@ impl Dictation {
 
 async fn transcribe_request(
     app_server: &CodexAppServer,
-    params: &agent_core::client::Transcribe<&str>,
+    pcm: &[u8],
 ) -> Result<agent_core::client::Transcription, String> {
-    let audio = params.audio;
-    let pcm = Zeroizing::new(
-        STANDARD
-            .decode(audio)
-            .map_err(|_| "録音データが無効です。")?,
-    );
-    if pcm.is_empty() || pcm.len() % 2 != 0 {
+    if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
         return Err("録音データが無効です。".into());
     }
 
     // Keep the desktop account token on the Host. Neither the RPC response nor
     // an error contains the token or the authenticated WebSocket request.
     let token = crate::codex_accounts::access_token(app_server, false).await?;
+    let audio = Zeroizing::new(STANDARD.encode(pcm));
     let text = transcribe_authenticated(
         &token,
         &app_server.initialize_response().user_agent,
-        audio,
-        &pcm,
+        &audio,
+        pcm,
         DICTATION_URL,
         TRANSCRIBE_URL,
     )
     .await?;
-    Ok(agent_core::client::Transcription {
-        text,
-        extra: Default::default(),
-    })
+    Ok(agent_core::client::Transcription { text })
 }
 
 async fn transcribe_authenticated(

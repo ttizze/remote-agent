@@ -9,7 +9,7 @@ use agent_core::state::operations as op;
 use base64::Engine;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
-    sidebar::{Sidebar, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem},
     tab::{Tab as UiTab, TabBar},
 };
 use std::path::PathBuf;
@@ -19,9 +19,6 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
 }
 fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or_default()
-}
-fn extra<'a>(item: &'a Item, key: &str) -> &'a Value {
-    item.extra.get(key).unwrap_or(&Value::Null)
 }
 fn field<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> &'a Value {
     map.get(key).unwrap_or(&Value::Null)
@@ -257,11 +254,6 @@ impl Render for Desktop {
         if let Some(view) = self.browser.clone() {
             view.update(cx, |v, cx| {
                 v.set_visible(active && self.panel == Panel::Browser, cx)
-            });
-        }
-        if let Some(view) = self.terminal.clone() {
-            view.update(cx, |v, cx| {
-                v.set_visible(active && self.panel == Panel::Terminal, cx)
             });
         }
         if self.image_gallery.is_some() {

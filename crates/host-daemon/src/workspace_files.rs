@@ -1,3 +1,5 @@
+use agent_core::protocol::Body;
+use agent_core::protocol::Call;
 use anyhow::{Context as _, Result, anyhow};
 use std::{
     collections::HashMap,
@@ -9,13 +11,13 @@ use std::{
 };
 
 use agent_core::models::{FileContent, FileEntry, FileList, TransferGrant};
+#[cfg(test)]
+use agent_core::{client::Upload, state::operations::ListFiles as PathParams};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
     digest::{self, Context, SHA256},
     rand::{SecureRandom, SystemRandom},
 };
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::SessionId;
@@ -33,7 +35,7 @@ pub(crate) struct WorkspaceFiles {
     upload_directory: Arc<Path>,
     // Serialize our compare-and-replace writes across all authenticated peers.
     writes: Arc<Mutex<()>>,
-    grants: Arc<Mutex<HashMap<String, Grant>>>,
+    grants: Arc<Mutex<HashMap<[u8; 32], Grant>>>,
 }
 
 struct Grant {
@@ -41,7 +43,7 @@ struct Grant {
     expires: Instant,
     file: GrantFile,
     size: u64,
-    digest: String,
+    digest: [u8; 32],
 }
 
 enum GrantFile {
@@ -50,49 +52,6 @@ enum GrantFile {
         file_name: String,
     },
     Download(File),
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "method", content = "params")]
-pub(crate) enum FileRequest {
-    #[serde(rename = "host/file/list")]
-    List(PathParams),
-    #[serde(rename = "host/visualize/read")]
-    Visualization(agent_core::client::LoadVisualization),
-    #[serde(rename = "host/file/read")]
-    Read(PathParams),
-    #[serde(rename = "host/file/write")]
-    Write(Save),
-    #[serde(rename = "host/blob/upload")]
-    Upload(Upload),
-    #[serde(rename = "host/blob/download")]
-    Download(PathParams),
-}
-#[derive(Deserialize)]
-pub(crate) struct PathParams {
-    path: PathBuf,
-}
-#[derive(Deserialize)]
-pub(crate) struct Save {
-    path: PathBuf,
-    revision: String,
-    text: String,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Upload {
-    directory: PathBuf,
-    file_name: String,
-    size: u64,
-    sha256: String,
-}
-#[derive(Serialize)]
-#[serde(untagged)]
-pub(crate) enum FileResponse {
-    List(FileList),
-    Visualization(String),
-    Content(FileContent),
-    Grant(TransferGrant),
 }
 
 impl WorkspaceFiles {
@@ -104,11 +63,7 @@ impl WorkspaceFiles {
         }
     }
 
-    pub(crate) async fn request(
-        &self,
-        session: SessionId,
-        request: FileRequest,
-    ) -> Result<FileResponse> {
+    pub(crate) async fn request(&self, session: SessionId, request: Call) -> Result<Body> {
         let files = self.clone();
         tokio::task::spawn_blocking(move || files.dispatch(session, request)).await?
     }
@@ -141,15 +96,18 @@ impl WorkspaceFiles {
                 expires: Instant::now() + GRANT_LIFETIME,
                 file: GrantFile::Download(file),
                 size: bytes.len() as u64,
-                digest: hash(&bytes),
+                digest: digest::digest(&SHA256, &bytes)
+                    .as_ref()
+                    .try_into()
+                    .expect("SHA-256 length"),
             })
         })
         .await?
     }
 
-    fn dispatch(&self, session: SessionId, request: FileRequest) -> Result<FileResponse> {
+    fn dispatch(&self, session: SessionId, request: Call) -> Result<Body> {
         match request {
-            FileRequest::Visualization(params) => {
+            Call::ReadVisualization(params) => {
                 use agent_core::presentation::visualize::{
                     visualization_document, visualization_path,
                 };
@@ -174,11 +132,9 @@ impl WorkspaceFiles {
                 };
                 let fragment =
                     std::str::from_utf8(&bytes).context("visualize HTML is not UTF-8")?;
-                Ok(FileResponse::Visualization(visualization_document(
-                    fragment,
-                )))
+                Ok(Body::from(visualization_document(fragment)))
             }
-            FileRequest::List(params) => {
+            Call::ListFiles(params) => {
                 let path = absolute_path(&params.path)?.canonicalize()?;
                 let mut entries = Vec::new();
                 let mut truncated = false;
@@ -198,22 +154,20 @@ impl WorkspaceFiles {
                             .into(),
                         directory: metadata.is_dir(),
                         size: metadata.len(),
-                        extra: Default::default(),
                     });
                 }
                 entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.name.cmp(&b.name)));
-                Ok(FileResponse::List(FileList {
+                Ok(Body::from(FileList {
                     path: path.to_str().context("directory path is not UTF-8")?.into(),
                     entries,
                     truncated,
-                    extra: Default::default(),
                 }))
             }
-            FileRequest::Read(params) => {
+            Call::ReadFile(params) => {
                 let path = absolute_path(&params.path)?.canonicalize()?;
-                read_editable(&path).map(FileResponse::Content)
+                read_editable(&path).map(Body::from)
             }
-            FileRequest::Write(params) => {
+            Call::WriteFile(params) => {
                 let path = absolute_path(&params.path)?.canonicalize()?;
                 let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
                 let original = read_bounded(&path, EDIT_LIMIT)?;
@@ -256,12 +210,12 @@ impl WorkspaceFiles {
                         atomicwrites::Error::Internal(error) => anyhow::Error::new(error),
                         atomicwrites::Error::User(error) => error,
                     })?;
-                read_editable(&path).map(FileResponse::Content)
+                read_editable(&path).map(Body::from)
             }
-            FileRequest::Upload(params) => {
+            Call::Upload(params) => {
                 // New chats have no workspace yet. Keep their attachments in
                 // Host-owned storage; explicit destinations remain absolute.
-                let directory = if params.directory.as_os_str().is_empty() {
+                let directory = if params.directory.is_empty() {
                     let directory = absolute_path(&self.upload_directory)?;
                     crate::platform::create_state_directory(directory)?;
                     directory
@@ -282,7 +236,6 @@ impl WorkspaceFiles {
                 {
                     return Err(anyhow!("invalid attachment display name"));
                 }
-                validate_digest(&params.sha256)?;
                 self.grant(Grant {
                     session,
                     expires: Instant::now() + GRANT_LIFETIME,
@@ -293,9 +246,9 @@ impl WorkspaceFiles {
                     size: params.size,
                     digest: params.sha256,
                 })
-                .map(FileResponse::Grant)
+                .map(Body::from)
             }
-            FileRequest::Download(params) => {
+            Call::Download(params) => {
                 let path = absolute_path(&params.path)?;
                 let mut file = File::open(path)?;
                 if !file.metadata()?.is_file() {
@@ -311,8 +264,9 @@ impl WorkspaceFiles {
                     size,
                     digest,
                 })
-                .map(FileResponse::Grant)
+                .map(Body::from)
             }
+            _ => Err(anyhow::anyhow!("not a file request")),
         }
     }
 
@@ -335,11 +289,11 @@ impl WorkspaceFiles {
         SystemRandom::new()
             .fill(&mut random)
             .map_err(|_| anyhow!("secure random generation failed"))?;
-        let token = URL_SAFE_NO_PAD.encode(random);
+        let token = random;
         let response = TransferGrant {
-            token: token.clone(),
+            token,
             size: grant.size,
-            sha256: grant.digest.clone(),
+            sha256: grant.digest,
         };
         grants.insert(token, grant);
         Ok(response)
@@ -350,20 +304,15 @@ impl WorkspaceFiles {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         tokio::time::timeout(Duration::from_secs(120), async {
-            let length = stream.read_u32().await?;
-            if length != 43 {
-                return Err(anyhow!("invalid transfer token length"));
-            }
-            let mut token = [0; 43];
+            let mut token = [0; 32];
             stream.read_exact(&mut token).await?;
-            let token = std::str::from_utf8(&token).context("invalid transfer token")?;
             let grant = {
                 let mut grants = self.grants.lock().unwrap_or_else(|e| e.into_inner());
-                let grant = grants.get(token).context("unknown or consumed transfer")?;
+                let grant = grants.get(&token).context("unknown or consumed transfer")?;
                 if grant.session != session || grant.expires <= Instant::now() {
                     return Err(anyhow!("transfer is not authorized for this session"));
                 }
-                grants.remove(token).unwrap()
+                grants.remove(&token).unwrap()
             };
             match grant.file {
                 GrantFile::Upload {
@@ -389,7 +338,7 @@ impl WorkspaceFiles {
                     if stream.read(&mut end).await? != 0 {
                         return Err(anyhow!("upload exceeds declared size"));
                     }
-                    if URL_SAFE_NO_PAD.encode(digest.finish().as_ref()) != grant.digest {
+                    if digest.finish().as_ref() != grant.digest {
                         return Err(anyhow!("upload digest mismatch"));
                     }
                     writer.sync_all().await?;
@@ -402,9 +351,12 @@ impl WorkspaceFiles {
                     let path =
                         directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name));
                     output.persist_noclobber(&path)?;
-                    let response = serde_json::to_vec(
-                        &json!({"path":path,"size":grant.size,"sha256":grant.digest}),
-                    )?;
+                    let response =
+                        agent_core::protocol::encode(agent_core::models::UploadedFile {
+                            path: path.to_str().context("upload path is not UTF-8")?.into(),
+                            size: grant.size,
+                            sha256: grant.digest,
+                        })?;
                     stream.write_u32(response.len() as u32).await?;
                     stream.write_all(&response).await?;
                     stream.shutdown().await?;
@@ -429,23 +381,12 @@ impl WorkspaceFiles {
     }
 }
 
-fn absolute_path(path: &Path) -> Result<&Path> {
+fn absolute_path(path: &impl AsRef<Path>) -> Result<&Path> {
+    let path = path.as_ref();
     if path.is_absolute() {
         Ok(path)
     } else {
         Err(anyhow!("an absolute filesystem path is required"))
-    }
-}
-fn validate_digest(value: &str) -> Result<()> {
-    let mut bytes = [0; 32];
-    if value.len() == 43
-        && URL_SAFE_NO_PAD
-            .decode_slice(value, &mut bytes)
-            .is_ok_and(|n| n == 32)
-    {
-        Ok(())
-    } else {
-        Err(anyhow!("invalid SHA-256 digest"))
     }
 }
 fn hash(bytes: &[u8]) -> String {
@@ -480,7 +421,6 @@ fn read_editable(path: &Path) -> Result<FileContent> {
         bom,
         line_ending: line_ending(text).into(),
         size: bytes.len() as u64,
-        extra: Default::default(),
     })
 }
 fn line_ending(text: &str) -> &'static str {
@@ -502,7 +442,7 @@ fn line_ending(text: &str) -> &'static str {
         "lf"
     }
 }
-fn digest_file(file: &mut File) -> Result<(u64, String)> {
+fn digest_file(file: &mut File) -> Result<(u64, [u8; 32])> {
     let mut digest = Context::new(&SHA256);
     let mut buffer = [0; 32768];
     let mut size = 0;
@@ -517,20 +457,22 @@ fn digest_file(file: &mut File) -> Result<(u64, String)> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok((size, URL_SAFE_NO_PAD.encode(digest.finish().as_ref())))
+    Ok((
+        size,
+        digest.finish().as_ref().try_into().expect("SHA-256 length"),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    async fn send_token(stream: &mut tokio::io::DuplexStream, grant: &FileResponse) {
-        let FileResponse::Grant(grant) = grant else {
+    async fn send_token(stream: &mut tokio::io::DuplexStream, grant: &Body) {
+        let Body::Grant(grant) = grant else {
             panic!("expected transfer grant")
         };
         let token = &grant.token;
-        stream.write_u32(token.len() as u32).await.unwrap();
-        stream.write_all(token.as_bytes()).await.unwrap();
+        stream.write_all(token).await.unwrap();
     }
 
     #[test]
@@ -543,19 +485,19 @@ mod tests {
         )
         .unwrap();
         let request = || {
-            FileRequest::Visualization(agent_core::client::LoadVisualization {
+            Call::ReadVisualization(agent_core::client::LoadVisualization {
                 path: "comparison.html".into(),
                 cwd: directory.path().to_str().unwrap().into(),
             })
         };
         let files = WorkspaceFiles::new(directory.path().join("attachments"));
-        let FileResponse::Visualization(original) = files.dispatch(1, request()).unwrap() else {
+        let Body::Text(original) = files.dispatch(1, request()).unwrap() else {
             panic!("expected HTML")
         };
         fs::remove_file(&source).unwrap();
         drop(files);
         let files = WorkspaceFiles::new(directory.path().join("attachments"));
-        let FileResponse::Visualization(reopened) = files.dispatch(2, request()).unwrap() else {
+        let Body::Text(reopened) = files.dispatch(2, request()).unwrap() else {
             panic!("expected archive")
         };
         assert_eq!(original, reopened);
@@ -579,7 +521,12 @@ mod tests {
             fs::write(&path, b"private").unwrap();
             let files = WorkspaceFiles::new(dir.path().join("attachments"));
             let grant = files
-                .dispatch(1, FileRequest::Download(PathParams { path: path.clone() }))
+                .dispatch(
+                    1,
+                    Call::Download(PathParams {
+                        path: path.to_str().unwrap().into(),
+                    }),
+                )
                 .unwrap();
             let (mut client, server) = tokio::io::duplex(1024);
             send_token(&mut client, &grant).await;
@@ -608,14 +555,19 @@ mod tests {
                     .contains("consumed")
             );
             let grant = files
-                .dispatch(1, FileRequest::Download(PathParams { path: path.clone() }))
+                .dispatch(
+                    1,
+                    Call::Download(PathParams {
+                        path: path.to_str().unwrap().into(),
+                    }),
+                )
                 .unwrap();
             files
                 .grants
                 .lock()
                 .unwrap()
                 .get_mut(match &grant {
-                    FileResponse::Grant(grant) => &grant.token,
+                    Body::Grant(grant) => &grant.token,
                     _ => panic!("expected transfer grant"),
                 })
                 .unwrap()
@@ -639,11 +591,14 @@ mod tests {
                 let grant = files
                     .dispatch(
                         1,
-                        FileRequest::Upload(Upload {
-                            directory: directory.path().into(),
+                        Call::Upload(Upload {
+                            directory: directory.path().to_str().unwrap().into(),
                             file_name: "safe.txt".into(),
                             size: 5,
-                            sha256: hash(b"valid"),
+                            sha256: digest::digest(&SHA256, b"valid")
+                                .as_ref()
+                                .try_into()
+                                .unwrap(),
                         }),
                     )
                     .unwrap();
@@ -658,22 +613,22 @@ mod tests {
                 files
                     .dispatch(
                         1,
-                        FileRequest::Upload(Upload {
-                            directory: directory.path().into(),
+                        Call::Upload(Upload {
+                            directory: directory.path().to_str().unwrap().into(),
                             file_name: "../escape".into(),
                             size: 0,
-                            sha256: hash(b"")
+                            sha256: digest::digest(&SHA256, b"").as_ref().try_into().unwrap()
                         })
                     )
                     .is_err()
             );
             for path in ["relative", ".", ".."] {
                 assert!(matches!(
-                    files.dispatch(1, FileRequest::Upload(Upload {
+                    files.dispatch(1, Call::Upload(Upload {
                         directory: path.into(),
                         file_name: "safe.txt".into(),
                         size: 0,
-                        sha256: hash(b""),
+                        sha256: digest::digest(&SHA256, b"").as_ref().try_into().unwrap(),
                     })),
                     Err(error) if error.to_string() == "an absolute filesystem path is required"
                 ));

@@ -19,6 +19,14 @@ final class BexLaunchUITests: XCTestCase {
         XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
     }
 
+    func closeWorkbench(_ app: XCUIApplication) {
+        let tab = app.buttons["workbench.terminal"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 5))
+        let start = tab.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 220, dy: 0)))
+        XCTAssertFalse(tab.exists)
+    }
+
     func expandSimulatorProject(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let project = app.buttons["tasks.project.simulator-project"]
         guard project.waitForExistence(timeout: 10) else {

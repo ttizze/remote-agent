@@ -31,7 +31,9 @@ impl Snapshot {
                     .find(|thread| thread.id.as_ref() == Some(id))
             })
         });
-        if thread.is_some_and(|thread| thread.project_id == Some(None)) {
+        if thread.is_some_and(|thread| {
+            thread.project_id == (crate::models::ProjectMembership::Unassigned {})
+        }) {
             String::new()
         } else {
             self.navigation.cwd.clone()
@@ -41,11 +43,7 @@ impl Snapshot {
     pub fn thread_list(&self) -> Option<ThreadList> {
         let list = self.threads.as_ref()?;
         let mut notices = Vec::new();
-        if let Some(errors) = list
-            .extra
-            .get("providerErrors")
-            .and_then(serde_json::Value::as_object)
-        {
+        if let Some(errors) = list.provider_errors.as_ref() {
             notices.push(format!("会話一覧は部分結果です（{}）。取得できない提供元の保存済み表示は最新とは限りません。", errors.keys().cloned().collect::<Vec<_>>().join("、")));
         }
         if !self.archived_scopes.is_empty() {
@@ -78,17 +76,15 @@ impl Snapshot {
                             })
                             .unwrap_or("無題のタスク")
                             .to_owned()
-                            + if thread.extra.get("listStale")
-                                == Some(&serde_json::Value::Bool(true))
-                            {
+                            + if thread.list_stale == Some(true) {
                                 "（保存済み・未確認）"
                             } else {
                                 ""
                             },
                         project_id: thread
                             .project_id
-                            .clone()
-                            .flatten()
+                            .as_ref()
+                            .cloned()
                             .filter(|id| list.projects.iter().any(|project| &project.id == id)),
                         active,
                         unread,

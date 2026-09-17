@@ -1,19 +1,15 @@
 use std::{future::Future, path::Path};
 
 use crate::models::TransferGrant;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::digest::{Context, SHA256};
-use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
-use crate::peer::{PeerError, RpcPeer};
+use crate::{client::Client, peer::PeerError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransferError {
     #[error("transfer I/O failed: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid transfer JSON: {0}")]
-    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Peer(#[from] PeerError),
     #[error("transfer protocol violation: {0}")]
@@ -22,37 +18,17 @@ pub enum TransferError {
 
 const LIMIT: u64 = 512 * 1024 * 1024;
 
-impl TransferGrant {
-    fn validate(self) -> Result<Self, TransferError> {
-        let grant = self;
-        let mut digest = [0; 32];
-        let mut token = [0; 32];
-        if grant.size > LIMIT
-            || grant.token.len() != 43
-            || grant.sha256.len() != 43
-            || URL_SAFE_NO_PAD
-                .decode_slice(&grant.sha256, &mut digest)
-                .ok()
-                != Some(32)
-            || URL_SAFE_NO_PAD.decode_slice(&grant.token, &mut token).ok() != Some(32)
-        {
-            return Err(TransferError::Protocol("invalid transfer grant".into()));
-        }
-        Ok(grant)
-    }
-}
-
 /// Uploads a picked local file to a directory on the paired Host. An empty
 /// directory selects Host-owned attachment storage for chats without a workspace.
 /// The Host assigns the actual filename and never trusts the display name
 /// as a destination path. No file payload is embedded in JSON-RPC.
 pub async fn upload_file<S, F, Fut>(
-    peer: &RpcPeer,
+    peer: &Client,
     open_stream: F,
     source: &Path,
     directory: &Path,
     file_name: &str,
-) -> Result<Value, TransferError>
+) -> Result<crate::models::UploadedFile, TransferError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: FnOnce() -> Fut,
@@ -78,24 +54,26 @@ where
         }
         digest.update(&buffer[..read]);
     }
-    let sha256 = URL_SAFE_NO_PAD.encode(digest.finish().as_ref());
+    let sha256: [u8; 32] = digest.finish().as_ref().try_into().expect("SHA-256 length");
     file.rewind().await?;
     let grant = peer
-        .request::<_, TransferGrant>(
-            "host/blob/upload",
-            &json!({"directory":directory,"fileName":file_name,"size":size,"sha256":sha256}),
-        )
-        .await?
-        .value
-        .validate()?;
+        .request::<TransferGrant>(&crate::protocol::Call::Upload(crate::client::Upload {
+            directory: directory
+                .to_str()
+                .ok_or_else(|| TransferError::Protocol("directory is not UTF-8".into()))?
+                .into(),
+            file_name: file_name.into(),
+            size,
+            sha256,
+        }))
+        .await?;
     if grant.size != size || grant.sha256 != sha256 {
         return Err(TransferError::Protocol(
             "upload grant changed content metadata".into(),
         ));
     }
     let mut stream = open_stream().await?;
-    stream.write_u32(grant.token.len() as u32).await?;
-    stream.write_all(grant.token.as_bytes()).await?;
+    stream.write_all(&grant.token).await?;
     // Copy through EOF so growing input cannot be silently truncated.
     // The Host checks both the declared size and content digest.
     tokio::io::copy(&mut file.take(LIMIT + 1), &mut stream).await?;
@@ -113,12 +91,10 @@ where
             "upload acknowledgement has trailing data".into(),
         ));
     }
-    let response: Value = serde_json::from_slice(&response)?;
-    if response["sha256"] != sha256
-        || response["size"] != size
-        || !response["path"]
-            .as_str()
-            .is_some_and(|path| Path::new(path).is_absolute())
+    let response: crate::models::UploadedFile = crate::protocol::decode(&response)?;
+    if response.sha256 != sha256
+        || response.size != size
+        || !Path::new(&response.path).is_absolute()
     {
         return Err(TransferError::Protocol(
             "upload acknowledgement changed content metadata".into(),
@@ -130,7 +106,7 @@ where
 /// Writes only a fully received, digest-checked download. A failed transfer
 /// drops its temporary file; an existing destination is never overwritten.
 pub async fn download_file<S, F, Fut>(
-    peer: &RpcPeer,
+    peer: &Client,
     open_stream: F,
     source: &Path,
     destination: &Path,
@@ -141,10 +117,15 @@ where
     Fut: Future<Output = std::io::Result<S>>,
 {
     let grant = peer
-        .request::<_, TransferGrant>("host/blob/download", &json!({"path":source}))
-        .await?
-        .value
-        .validate()?;
+        .request::<TransferGrant>(&crate::protocol::Call::Download(
+            crate::state::operations::ListFiles {
+                path: source
+                    .to_str()
+                    .ok_or_else(|| TransferError::Protocol("path is not UTF-8".into()))?
+                    .into(),
+            },
+        ))
+        .await?;
     let parent = destination
         .parent()
         .ok_or_else(|| TransferError::Protocol("download destination has no parent".into()))?;
@@ -182,9 +163,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let grant = grant.validate()?;
-    stream.write_u32(grant.token.len() as u32).await?;
-    stream.write_all(grant.token.as_bytes()).await?;
+    if grant.size > LIMIT {
+        return Err(TransferError::Protocol("transfer exceeds 512 MiB".into()));
+    }
+    stream.write_all(&grant.token).await?;
     let mut digest = Context::new(&SHA256);
     let mut remaining = grant.size;
     let mut buffer = [0; 32768];
@@ -195,9 +177,7 @@ where
         output.write_all(&buffer[..length]).await?;
         remaining -= length as u64;
     }
-    if stream.read(&mut buffer[..1]).await? != 0
-        || URL_SAFE_NO_PAD.encode(digest.finish().as_ref()) != grant.sha256
-    {
+    if stream.read(&mut buffer[..1]).await? != 0 || digest.finish().as_ref() != grant.sha256 {
         return Err(TransferError::Protocol(
             "download content digest or length mismatch".into(),
         ));

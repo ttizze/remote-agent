@@ -564,7 +564,7 @@ impl Desktop {
                 ));
                 let mut snapshot: Snapshot = match tokio::fs::read(&path).await {
                     Ok(bytes) => serde_json::from_slice(&bytes)
-                        .map_err(|error| format!("下書きを読み込めません: {error}"))?,
+                        .map_err(|error| format!("保存した入力状態を読み込めません: {error}"))?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         Snapshot::default()
                     }
@@ -680,7 +680,13 @@ impl Desktop {
             Update::Folder(result) => {
                 self.busy = self.busy.saturating_sub(1);
                 match result {
-                    Ok(Some(path)) => self.new_chat(path.to_string_lossy().into_owned()),
+                    Ok(Some(path)) => {
+                        self.tab = Tab::Chat;
+                        self.cancel_recording();
+                        self.dispatch(Intent::AddProject(op::AddProject {
+                            cwd: path.to_string_lossy().into_owned(),
+                        }));
+                    }
                     Ok(None) => {}
                     Err(error) => self.set_error(error),
                 }
@@ -891,8 +897,8 @@ impl Desktop {
                 .iter()
                 .find(|thread| thread.id == snapshot.navigation.thread_id)?
                 .project_id
-                .clone()
-                .flatten()
+                .as_ref()
+                .cloned()
         };
         if (navigated || project_for_selected(&previous) != project_for_selected(&self.snapshot))
             && let Some(project) = project_for_selected(&self.snapshot)
@@ -1005,7 +1011,7 @@ impl Desktop {
                 .map(|attachment| attachment.path.as_str())
                 .collect();
             for item in self.user_items() {
-                if let Some(parts) = item.extra.get("content").and_then(Value::as_array) {
+                if let Some(parts) = item.content.as_ref().and_then(Value::as_array) {
                     paths.extend(
                         parts
                             .iter()
@@ -1076,9 +1082,8 @@ impl Desktop {
         self.remote.as_ref().map_or("local", |remote| &remote.id)
     }
     fn has_older_history(&self) -> bool {
-        self.thread().is_some_and(|thread| {
-            thread.extra.get("historyHasMore") == Some(&serde_json::Value::Bool(true))
-        })
+        self.thread()
+            .is_some_and(|thread| thread.history_has_more == Some(true))
     }
     fn user_items(&self) -> impl Iterator<Item = &Arc<Item>> {
         self.thread()
@@ -1410,13 +1415,15 @@ impl Desktop {
                 }));
                 Ok(())
             }
-            Panel::Terminal if self.terminal.is_none() => crate::terminal::Terminal::new(
-                self.remote.as_ref().map_or("", |remote| &remote.ticket),
-                self.snapshot.navigation.cwd.clone(),
-                window,
-                cx,
-            )
-            .map(|view| self.terminal = Some(view)),
+            Panel::Terminal if self.terminal.is_none() => {
+                self.terminal = Some(crate::terminal::Terminal::new(
+                    self.remote.as_ref().map_or("", |remote| &remote.ticket),
+                    self.snapshot.navigation.cwd.clone(),
+                    window,
+                    cx,
+                ));
+                Ok(())
+            }
             Panel::Browser if self.browser.is_none() => crate::browser::Browser::new(
                 wry::WebViewBuilder::new(),
                 #[cfg(target_os = "macos")]

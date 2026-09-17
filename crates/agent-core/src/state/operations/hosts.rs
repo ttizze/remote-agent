@@ -3,7 +3,13 @@ use super::*;
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInvitation {}
-rpc::rpc_method!(CreateInvitation, Invitation, "host/invite");
+rpc::rpc_method!(
+    CreateInvitation,
+    Invitation,
+    "host/invite",
+    Invite,
+    |self| crate::models::Empty {}
+);
 
 impl Operation for CreateInvitation {
     rpc_operation!(management.invitation);
@@ -14,7 +20,13 @@ impl Operation for CreateInvitation {
 pub struct RemoveRemoteHost {
     pub id: String,
 }
-rpc::rpc_method!(RemoveRemoteHost, Map<String, Value>, "host/removeRemote");
+rpc::rpc_method!(
+    RemoveRemoteHost,
+    crate::models::Empty,
+    "host/removeRemote",
+    RemoveRemote,
+    |self| self.clone()
+);
 
 impl Operation for RemoveRemoteHost {
     rpc_operation!();
@@ -33,7 +45,13 @@ pub struct RevokeDevice {
     #[serde(rename = "nodeId")]
     pub id: String,
 }
-rpc::rpc_method!(RevokeDevice, Map<String, Value>, "host/revoke");
+rpc::rpc_method!(
+    RevokeDevice,
+    crate::models::Empty,
+    "host/revoke",
+    Revoke,
+    |self| self.clone()
+);
 
 impl Operation for RevokeDevice {
     rpc_operation!();
@@ -57,7 +75,7 @@ impl Operation for LoadHostManagement {
             context.client.call(&rpc::ReadHostStatus {}),
             context.client.call(&rpc::ListRemoteHosts {})
         )?;
-        Ok((status.value, remotes.value))
+        Ok((status, remotes))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let management = Arc::make_mut(&mut snapshot.management);
@@ -99,23 +117,20 @@ impl Operation for PairRemoteHost {
                     .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?,
                 |session| session.close(),
             );
-            let peer = remote
+            let (peer, _events) = remote
                 .open_peer(std::time::Duration::from_secs(20), 8)
                 .await
                 .map_err(|error| PeerError::ConnectionClosed(error.to_string()))?;
-            peer.request::<_, <rpc::Pair as rpc::RpcMethod>::Output>(
-                <rpc::Pair as rpc::RpcMethod>::METHOD,
-                &rpc::Pair {
-                    invitation: self.invitation.invitation,
-                },
-            )
+            peer.call(&rpc::Pair {
+                invitation: self.invitation.invitation,
+            })
             .await?;
-            peer.close().await?;
+            peer.close().await;
         }
         context
             .call(&rpc::RegisterRemoteHost {
-                ticket: &self.invitation.endpoint,
-                name: &self.name,
+                ticket: self.invitation.endpoint.clone(),
+                name: self.name.clone(),
             })
             .await
     }

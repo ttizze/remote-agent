@@ -87,47 +87,80 @@ pub struct PendingSubmission {
     pub clear_draft: Option<Arc<Draft>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum TerminalPhase {
+    Suspended,
+    Detached,
     Starting,
     Running,
     Exited(i32),
     Failed(String),
 }
+impl TerminalPhase {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Starting => "起動中".into(),
+            Self::Running => "実行中".into(),
+            Self::Suspended => "再接続を待っています".into(),
+            Self::Detached => "切断済み".into(),
+            Self::Exited(code) => format!("終了 · {code}"),
+            Self::Failed(error) => error.clone(),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TerminalOutput {
     pub sequence: u64,
-    pub data: String,
-    pub cap_reached: bool,
+    #[serde(with = "crate::protocol::bytes")]
+    pub data: Vec<u8>,
+    pub reset_size: Option<crate::client::TerminalSize>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Terminal {
+    pub cwd: String,
+    pub size: crate::client::TerminalSize,
     pub phase: TerminalPhase,
     pub output: VecDeque<Arc<TerminalOutput>>,
     pub sequence: u64,
+}
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct TerminalView {
+    pub status: String,
+    pub output: Vec<TerminalOutput>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     pub storage_scope: String,
     pub archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
+    #[serde(default)]
     pub account: Arc<AccountState>,
     #[serde(skip)]
     pub terminals: Arc<BTreeMap<String, Arc<Terminal>>>,
+    #[serde(default)]
     pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
+    #[serde(default)]
     pub threads: Option<Arc<ThreadList>>,
+    #[serde(default)]
     pub models: Arc<Vec<Model>>,
+    #[serde(default)]
     pub model_errors: Arc<Map<String, Value>>,
     #[serde(skip)]
     pub requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
     pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
+    #[serde(default)]
     pub workspace: Arc<Workspace>,
     pub navigation: Arc<Navigation>,
     pub activity: Arc<Activity>,
+    #[serde(default)]
     pub management: Arc<HostManagement>,
     #[serde(skip)]
     pub list_query: Arc<ListQuery>,
+    #[serde(default)]
     pub epoch: u64,
     #[serde(skip)]
     pub connected: bool,
@@ -138,6 +171,17 @@ pub struct Snapshot {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn terminal_view(&self, handle: String) -> Option<TerminalView> {
+        self.terminals.get(&handle).map(|terminal| TerminalView {
+            status: terminal.phase.label(),
+            output: terminal
+                .output
+                .iter()
+                .map(|chunk| (**chunk).clone())
+                .collect(),
+        })
+    }
+
     pub fn model_error_messages(&self) -> Vec<String> {
         self.model_errors
             .iter()
@@ -163,13 +207,37 @@ use operations::add_attachment;
 /// it separate prevents storage switches from deleting or mixing user drafts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScopedData {
-    pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
-    pub threads: Option<Arc<ThreadList>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
     pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
     pub navigation: Arc<Navigation>,
     pub activity: Arc<Activity>,
+}
+
+/// Durable client-owned data. Host results and connection state stay in memory.
+#[derive(Debug, Serialize)]
+pub struct LocalState<'a> {
+    storage_scope: &'a str,
+    archived_scopes: &'a BTreeMap<String, Arc<ScopedData>>,
+    drafts: &'a BTreeMap<String, Arc<Draft>>,
+    pending_submissions: &'a BTreeMap<String, Arc<PendingSubmission>>,
+    file_drafts: &'a BTreeMap<String, FileDraft>,
+    navigation: &'a Navigation,
+    activity: &'a Activity,
+}
+
+impl Snapshot {
+    pub fn local_state(&self) -> LocalState<'_> {
+        LocalState {
+            storage_scope: &self.storage_scope,
+            archived_scopes: &self.archived_scopes,
+            drafts: &self.drafts,
+            pending_submissions: &self.pending_submissions,
+            file_drafts: &self.file_drafts,
+            navigation: &self.navigation,
+            activity: &self.activity,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,7 +248,8 @@ pub enum Event {
     SubmissionFailed(String),
     SubmissionUnknown(String),
 
-    Notification { method: String, params: Value },
+    Notification(crate::protocol::Notification),
+    SessionUpdate(Box<crate::session::SessionUpdate>),
     Connected,
     Disconnected(String),
     Failed(String),
@@ -200,7 +269,8 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     match event {
         Event::Intent(intent) => reduce_intent(previous, intent),
 
-        Event::Notification { method, params } => notification(previous, &method, params),
+        Event::Notification(message) => notification(previous, message),
+        Event::SessionUpdate(update) => notifications::session_update(previous, *update),
         event => reduce_event(previous, event),
     }
 }
@@ -218,19 +288,19 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     prepare_operations!(intent, previous, next, [
         ListAccounts, SelectAccount, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkThread,
-        StartTerminal, CreateInvitation, RemoveRemoteHost,
+        StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, StartThread,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, AddProject, StartThread,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
-        Interrupt, CloseSubscription,
+        Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
         LoadHostManagement, LoadModels,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
         Intent::ReadOlder { thread_id } => {
             let limit = u32::try_from(previous.conversations.get(&thread_id).map_or(5, |thread| {
-                thread.extra.get("historyLimit").and_then(Value::as_u64)
+                thread.history_limit
                     .unwrap_or_else(|| thread.turns.as_ref().map_or(5, |turns| turns.len() as u64))
             })).unwrap_or(u32::MAX).saturating_add(5);
             return prepare(previous, next, op::ReadThread { limit, ..op::ReadThread::new(thread_id) });
@@ -294,8 +364,8 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
 
         Intent::ShowThreadList => {
             next.epoch += 1;
-            let effects = navigate(&mut next, Navigation::default());
-            return (next, effects);
+            navigate(&mut next, Navigation::default());
+            return (next, Vec::new());
         }
         Intent::NewChat { cwd } => {
             next.epoch += 1;
@@ -311,12 +381,12 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 };
                 Arc::make_mut(&mut next.drafts).insert(key.clone(), Arc::new(draft));
             }
-            let mut effects = navigate(&mut next, Navigation {
+            navigate(&mut next, Navigation {
                 cwd,
                 draft_key: key,
                 ..Default::default()
             });
-            effects.extend(op::review_workspace(&mut next));
+            let effects = op::review_workspace(&mut next).into_iter().collect();
             return (next, effects);
         }
 
@@ -417,9 +487,9 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     });
     (next, Vec::new())
 }
-fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
+fn navigate(snapshot: &mut Snapshot, navigation: Navigation) {
     let previous_id = snapshot.navigation.thread_id.clone();
-    let close = previous_id
+    let _ = previous_id
         .filter(|id| navigation.thread_id.as_ref() != Some(id))
         .filter(|id| {
             snapshot.activity.active.get(id) != Some(&true)
@@ -438,14 +508,6 @@ fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.activity).unread.remove(id);
     }
     snapshot.navigation = Arc::new(navigation);
-    close
-        .into_iter()
-        .map(|id| {
-            Effect::execute(op::CloseSubscription {
-                subscription_id: id.to_string(),
-            })
-        })
-        .collect()
 }
 
 fn prepare<O: operations::Operation>(
@@ -465,7 +527,13 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     match event {
         Event::TerminalFailed { handle, reason } => {
-            if let Some(terminal) = shared_mut(&mut next.terminals, &handle) {
+            if previous.connected
+                && let Some(terminal) = shared_mut(&mut next.terminals, &handle)
+                && matches!(
+                    terminal.phase,
+                    TerminalPhase::Starting | TerminalPhase::Running | TerminalPhase::Suspended
+                )
+            {
                 terminal.phase = TerminalPhase::Failed(reason);
             }
         }
@@ -474,10 +542,9 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             if next.storage_scope == scope {
                 return (next, Vec::new());
             }
+            next.terminals = Arc::default();
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
-                    conversations: std::mem::take(&mut next.conversations),
-                    threads: next.threads.take(),
                     drafts: std::mem::take(&mut next.drafts),
                     pending_submissions: std::mem::take(&mut next.pending_submissions),
                     file_drafts: std::mem::take(&mut next.file_drafts),
@@ -487,14 +554,14 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 Arc::make_mut(&mut next.archived_scopes)
                     .insert(next.storage_scope.clone(), Arc::new(archived));
                 if let Some(saved) = Arc::make_mut(&mut next.archived_scopes).remove(&scope) {
-                    next.conversations = saved.conversations.clone();
-                    next.threads = saved.threads.clone();
                     next.drafts = saved.drafts.clone();
                     next.pending_submissions = saved.pending_submissions.clone();
                     next.file_drafts = saved.file_drafts.clone();
                     next.navigation = saved.navigation.clone();
                     next.activity = saved.activity.clone();
                 }
+                next.conversations = Arc::default();
+                next.threads = None;
                 next.workspace = Arc::default();
                 next.account = Arc::default();
                 next.models = Arc::default();
@@ -540,6 +607,15 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             } else {
                 effects.extend(op::review_workspace(&mut next));
             }
+            for (handle, terminal) in next.terminals.iter() {
+                if terminal.phase == TerminalPhase::Suspended {
+                    effects.push(Effect::execute(op::StartTerminal {
+                        handle: handle.clone(),
+                        cwd: terminal.cwd.clone(),
+                        size: terminal.size,
+                    }));
+                }
+            }
             return (next, effects);
         }
         Event::Disconnected(reason) => {
@@ -551,13 +627,13 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     terminal.phase,
                     TerminalPhase::Starting | TerminalPhase::Running
                 ) {
-                    Arc::make_mut(terminal).phase = TerminalPhase::Failed(reason.clone());
+                    Arc::make_mut(terminal).phase = TerminalPhase::Suspended;
                 }
             }
             next.error = Some(reason);
         }
         Event::Failed(error) => next.error = Some(error),
-        Event::Intent(_) | Event::Notification { .. } => {
+        Event::Intent(_) | Event::Notification(_) | Event::SessionUpdate(_) => {
             unreachable!("handled by the reducer router")
         }
     }
@@ -726,7 +802,7 @@ fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) 
     if let Some(thread) = previous.conversations.get(thread_id) {
         match (crate::session::SessionChange::Item {
             turn_id: turn_id.into(),
-            item,
+            item: item.into(),
         })
         .apply(thread)
         {

@@ -16,6 +16,14 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+fn projects(home: &std::path::Path) -> crate::Result<Vec<Value>> {
+    match fs::read(home.join("projects.json")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(super) type SharedThread = Rc<RefCell<Thread>>;
 pub(super) type Turn = Rc<RefCell<Value>>;
 
@@ -374,6 +382,34 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     struct Page<'a> { data: &'a [ThreadView<'a>], next_cursor: Option<String> }
                     context.respond(id, &Page { data: &page, next_cursor: (end < ordered.len()).then(|| end.to_string()) })?;
                 }
+                "project/list" => {
+                    let mut projects = projects(&context.home)?;
+                    for (index, project) in projects.iter_mut().enumerate() {
+                        let fields = project.as_object_mut().ok_or("fixture project must be an object")?;
+                        fields.entry("createdAt").or_insert(json!(0));
+                        fields.entry("updatedAt").or_insert(json!(0));
+                        fields.entry("position").or_insert(json!(index));
+                        fields.entry("metadata").or_insert(json!({}));
+                    }
+                    let offset = offset(params);
+                    let end = offset.saturating_add(limit(params, 100));
+                    context.respond(id, &json!({"data":projects.iter().skip(offset).take(end-offset).collect::<Vec<_>>(),
+                        "nextCursor":(end < projects.len()).then(|| end.to_string())}))?;
+                }
+                "project/create" => {
+                    let mut projects = projects(&context.home)?;
+                    let project = if let Some(project) = projects.iter().find(|project| project["metadata"]["fixtureIdempotencyKey"] == params["idempotencyKey"]) {
+                        project.clone()
+                    } else {
+                        let project = json!({"id":format!("fixture-project-{}", projects.len()+1),"name":params["name"],
+                            "roots":params["roots"],"metadata":{"fixtureIdempotencyKey":params["idempotencyKey"]},
+                            "position":projects.len(),"createdAt":1,"updatedAt":1});
+                        projects.push(project.clone());
+                        fs::write(context.home.join("projects.json"), serde_json::to_vec(&projects)?)?;
+                        project
+                    };
+                    context.respond(id, &json!({"project":project}))?;
+                }
                 "thread/start" => {
                     let failure = context.home.join("fail-next-thread-start");
                     if failure.exists() {
@@ -389,13 +425,16 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     };
                     let matches = context.config.expected_cwd.as_ref().is_none_or(|expected| cwd.as_str().is_some_and(|cwd| std::path::Path::new(cwd) == expected));
                     context.trace(method, json!({"hasProjectId":params.get("projectId").is_some(),"cwdMatchesFixture":matches}))?;
-                    if params.get("projectId").is_some() { context.error(id, -32600, "project not found: desktop-project")?; continue; }
+                    if let Some(project_id) = params.get("projectId").filter(|id| !id.is_null())
+                        && !projects(&context.home)?.iter().any(|project| &project["id"] == project_id)
+                    { context.error(id, -32600, "project not found")?; continue; }
                     if !matches || !cwd.as_str().is_some_and(|cwd| !cwd.is_empty()) {
                         context.error(id, -32602, "invalid cwd")?; continue;
                     }
                     next_thread += 1;
                     let thread_id = format!("fixture-thread-{next_thread}");
                     let mut thread = Thread::new(thread_id.clone(), cwd);
+                    if let Some(project_id) = params.get("projectId") { thread.metadata.insert("projectId".into(), project_id.clone()); }
                     if context.config.deferred_thread_metadata { thread.metadata.insert("name".into(), Value::Null); }
                     thread.metadata.insert("path".into(), context.home.join(format!("{thread_id}.jsonl")).into_os_string().into_string().unwrap().into());
                     thread.metadata.insert("historyMode".into(), "paginated".into());

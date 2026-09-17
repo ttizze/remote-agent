@@ -31,6 +31,7 @@ tempfile = "3"
 scopeguard = "1.2"
 atomicwrites = "0.4.4"
 anyhow.workspace = true
+alacritty_terminal = "=0.26.0"
 
 [dev-dependencies]
 # Match desktop builds even when CI tests only the headless packages. With both

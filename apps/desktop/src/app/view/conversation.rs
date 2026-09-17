@@ -232,8 +232,11 @@ impl Desktop {
             "userMessage" => {
                 let mut body = user_message_bubble();
                 let mut images = projected.data.image_sources.iter();
-                if extra(item, "content").is_array() {
-                    for (i, part) in array(extra(item, "content")).iter().enumerate() {
+                if item.content.as_ref().unwrap_or(&Value::Null).is_array() {
+                    for (i, part) in array(item.content.as_ref().unwrap_or(&Value::Null))
+                        .iter()
+                        .enumerate()
+                    {
                         body = body.child(match text(part, "type") {
                             "text" => TextView::markdown(
                                 SharedString::from(format!("{id}-{i}")),
@@ -278,7 +281,7 @@ impl Desktop {
                 let edit = self.button(format!("edit-{id}"), "", cx, move |s, window, cx| {
                     selection::set_composer_text(&s.composer, text.clone().into(), window, cx);
                 });
-                let timestamp = turn.and_then(|turn| turn.started_at.as_ref()?.as_ref()?.as_i64());
+                let timestamp = turn.and_then(|turn| turn.started_at.map(|time| time as i64));
                 user_message_row(&id, &projected.data.body, body, timestamp, edit)
                     .into_any_element()
             }
@@ -335,7 +338,7 @@ impl Desktop {
                         .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
                                 "{} {}",
                                 item.status.as_deref().unwrap_or_default(),
-                                item.extra.get("exitCode")
+                                item.exit_code
                                     .map(|v| format!("exit {v}"))
                                     .unwrap_or_default()
                             )));
@@ -950,7 +953,6 @@ mod rendering_tests {
                                 id: "fixture".into(),
                                 name: "fixture".into(),
                                 ticket: "invalid-fixture-ticket".into(),
-                                extra: Default::default(),
                             }),
                             cwd: "/fixture".into(),
                         },

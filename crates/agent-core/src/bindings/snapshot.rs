@@ -55,8 +55,12 @@ impl Snapshot {
             serde_json::from_slice(&bytes).map_err(error)?
         }))
     }
+    /// Full in-memory snapshot for inspection; use serialize_local_state for durable storage.
     pub fn serialize(&self) -> Result<Vec<u8>, AgentError> {
         serde_json::to_vec(self).map_err(error)
+    }
+    pub fn serialize_local_state(&self) -> Result<Vec<u8>, AgentError> {
+        serde_json::to_vec(&self.local_state()).map_err(error)
     }
     pub fn connected(&self) -> bool {
         self.connected
@@ -134,7 +138,7 @@ impl Thread {
         crate::presentation::conversation::history_notice(self)
     }
     pub fn has_more_history(&self) -> bool {
-        self.extra.get("historyHasMore") == Some(&serde_json::Value::Bool(true))
+        self.history_has_more == Some(true)
     }
     pub fn turn_count(&self) -> u64 {
         self.turns.as_ref().map_or(0, |turns| turns.len() as u64)

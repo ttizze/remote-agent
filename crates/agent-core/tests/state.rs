@@ -13,7 +13,8 @@ use std::{collections::BTreeMap, sync::Arc};
 #[path = "support/provider_fixture.rs"]
 mod provider_fixture;
 fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
-    if let Event::Notification { method, params } = &event
+    if let Event::Notification(agent_core::protocol::Notification::Provider { method, params }) =
+        &event
         && let Ok(Some((id, change))) =
             provider_fixture::notification_change(method, params.clone())
     {
@@ -27,10 +28,11 @@ fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             };
             return agent_core::state::reduce(
                 previous,
-                Event::Notification {
-                    method: "host/session/activity".into(),
-                    params: json!({"session":{"provider":"codex","id":id},"active":active,"finished":matches!(&change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed"))}),
-                },
+                Event::Notification(agent_core::protocol::Notification::Activity {
+                    session: agent_core::session::SessionRef::from_thread_id(&id).unwrap(),
+                    active,
+                    finished: matches!(&change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed")),
+                }),
             );
         }
         let mut source = previous.clone();
@@ -38,10 +40,10 @@ fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Arc::make_mut(&mut source.subscriptions).insert(id.clone(), subscription);
         let (mut next, effects) = agent_core::state::reduce(
             &source,
-            Event::Notification {
-                method: "host/session/update".into(),
-                params: json!({"subscriptionId":subscription,"change":change}),
-            },
+            Event::SessionUpdate(Box::new(agent_core::session::SessionUpdate {
+                subscription_id: subscription,
+                change,
+            })),
         );
         next.subscriptions = previous.subscriptions.clone();
         return (next, effects);
@@ -76,7 +78,6 @@ fn reply(thread: Thread) -> agent_core::session::OpenedSession {
         response: ThreadResponse {
             thread,
             model: None,
-            extra: Default::default(),
         },
     }
 }
@@ -181,10 +182,10 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
         let mut finished = pending.clone();
         for (index, echo) in [echo_first, !echo_first].into_iter().enumerate() {
             if echo {
-                finished = reduce(&finished, Event::Notification {
+                finished = reduce(&finished, Event::Notification(agent_core::protocol::Notification::Provider {
                     method: "item/completed".into(),
                     params: json!({"threadId":"thread","turnId":"turn","item":{"id":"native","type":"userMessage","clientId":"client","content":[]}}),
-                }).0;
+                })).0;
             } else {
                 op::SendSubmission {
                     thread_id: "thread".into(),
@@ -250,10 +251,10 @@ fn event_corpus() {
         for event in case["events"].as_array().unwrap() {
             let (next, effects) = reduce(
                 &state,
-                Event::Notification {
+                Event::Notification(agent_core::protocol::Notification::Provider {
                     method: event["method"].as_str().unwrap().into(),
                     params: event["params"].clone(),
-                },
+                }),
             );
             assert!(effects.is_empty());
             assert_eq!(next.error, None, "{}", case["name"]);
@@ -261,7 +262,10 @@ fn event_corpus() {
         }
         assert_eq!(
             serde_json::to_value(&state.conversations[&id]).unwrap(),
-            case["expected"],
+            serde_json::to_value(
+                serde_json::from_value::<Thread>(case["expected"].clone()).unwrap()
+            )
+            .unwrap(),
             "{}",
             case["name"]
         );
@@ -304,10 +308,10 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     );
     let (next, _) = reduce(
         &state,
-        Event::Notification {
+        Event::Notification(agent_core::protocol::Notification::Provider {
             method: "item/agentMessage/delta".into(),
             params: json!({"threadId":"thread","turnId":"live","itemId":"changed","delta":" after"}),
-        },
+        }),
     );
     assert!(Arc::ptr_eq(
         &state.conversations["other"],
@@ -342,10 +346,10 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
         for event in case["events"].as_array().unwrap() {
             snapshot = reduce(
                 &snapshot,
-                Event::Notification {
+                Event::Notification(agent_core::protocol::Notification::Provider {
                     method: event["method"].as_str().unwrap().into(),
                     params: event["params"].clone(),
-                },
+                }),
             )
             .0;
         }
@@ -505,36 +509,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
 }
 
 #[test]
-fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
-    for changes in [
-        json!([false]),
-        json!([[]]),
-        json!([null]),
-        json!({}),
-        json!(null),
-    ] {
-        let previous = initial(
-            serde_json::from_value(json!({
-                "id":"thread", "turns":[{"id":"turn", "items":[{
-                    "id":"file", "type":"fileChange", "changes":changes
-                }]}]
-            }))
-            .unwrap(),
-        );
-        let (next, effects) = reduce(
-            &previous,
-            Event::Notification {
-                method: "item/fileChange/outputDelta".into(),
-                params: json!({"threadId":"thread","turnId":"turn","itemId":"file","delta":"tail"}),
-            },
-        );
-        assert_eq!(
-            next.error.as_deref(),
-            Some("会話の更新を適用できないため再取得しています: invalid file change delta target")
-        );
-        assert_eq!(effects.len(), 2, "invalidate and reopen malformed updates");
-        assert!(Arc::ptr_eq(&previous.conversations, &next.conversations));
-    }
+fn file_change_delta_appends_to_known_changes() {
     for changes in [json!([]), json!([{}]), json!([{"diff":"prefix"}])] {
         let expected = if changes[0]["diff"].is_string() {
             "prefixtail"
@@ -551,10 +526,10 @@ fn file_change_delta_rejects_invalid_targets_without_mutating_history() {
         );
         let (next, _) = reduce(
             &previous,
-            Event::Notification {
+            Event::Notification(agent_core::protocol::Notification::Provider {
                 method: "item/fileChange/outputDelta".into(),
                 params: json!({"threadId":"thread","turnId":"turn","itemId":"file","delta":"tail"}),
-            },
+            }),
         );
         assert_eq!(next.error, None);
         assert_eq!(
@@ -597,10 +572,10 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
     assert!(effects.is_empty());
     let (completed, _) = reduce(
         &listed,
-        Event::Notification {
+        Event::Notification(agent_core::protocol::Notification::Provider {
             method: "turn/completed".into(),
             params: json!({"threadId":"thread","turn":{"id":"turn","status":"completed","items":[]}}),
-        },
+        }),
     );
     assert!(completed.activity.unread.contains("thread"));
     assert_eq!(completed.drafts["thread"].text, "下書き");
@@ -758,12 +733,12 @@ fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
         snapshot.connected = connected;
         let (next, effects) = reduce(
             &snapshot,
-            Event::Notification {
+            Event::Notification(agent_core::protocol::Notification::Provider {
                 method: "item/completed".into(),
                 params: json!({"threadId":"task","turnId":"turn","item":{
                     "id":"merge","type":"commandExecution","command":"git merge task","status":"completed","exitCode":0
                 }}),
-            },
+            }),
         );
         assert_eq!(effects.len(), usize::from(connected));
         assert_eq!(
@@ -774,4 +749,71 @@ fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
         );
         assert_eq!(next.error, None);
     }
+}
+
+#[test]
+fn terminal_disconnect_keeps_resumption_and_host_switch_drops_old_handles() {
+    use agent_core::state::{Event, Intent, Snapshot, TerminalPhase, operations as op, reduce};
+    let snapshot = Snapshot {
+        connected: true,
+        storage_scope: "first-host".into(),
+        ..Default::default()
+    };
+    let (starting, _) = reduce(
+        &snapshot,
+        Event::Intent(Intent::StartTerminal(op::StartTerminal {
+            handle: "test".into(),
+            cwd: "/fixture".into(),
+            size: agent_core::client::TerminalSize { cols: 80, rows: 24 },
+        })),
+    );
+    let (disconnected, _) = reduce(&starting, Event::Disconnected("offline".into()));
+    let (late_failure, _) = reduce(
+        &disconnected,
+        Event::TerminalFailed {
+            handle: "test".into(),
+            reason: "cancelled".into(),
+        },
+    );
+    assert_eq!(
+        late_failure.terminals["test"].phase,
+        TerminalPhase::Suspended
+    );
+    let (other_host, _) = reduce(&late_failure, Event::StorageScope("other-host".into()));
+    assert!(other_host.terminals.is_empty());
+}
+
+#[test]
+fn project_registration_navigates_only_while_current() {
+    use agent_core::state::Intent;
+    let previous = Snapshot {
+        connected: true,
+        ..Default::default()
+    };
+    let operation = op::AddProject {
+        cwd: "/new-project".into(),
+    };
+    let (pending, _) = reduce(
+        &previous,
+        Event::Intent(Intent::AddProject(operation.clone())),
+    );
+    assert_eq!(pending.navigation, previous.navigation);
+    let (opened, effects) = applied(&pending, operation.clone(), "/resolved-project".into());
+    assert_eq!(opened.navigation.cwd, "/resolved-project");
+    assert_eq!(opened.navigation.draft_key, "new:/resolved-project");
+    assert_eq!(effects.len(), 2); // Workspace review and project-list refresh.
+    let (mut elsewhere, _) = reduce(
+        &pending,
+        Event::Intent(Intent::NewChat {
+            cwd: "/elsewhere".into(),
+        }),
+    );
+    let navigation = elsewhere.navigation.clone();
+    assert_eq!(
+        operation
+            .stale(&mut elsewhere, "/resolved-project".into())
+            .len(),
+        1
+    );
+    assert_eq!(elsewhere.navigation, navigation);
 }

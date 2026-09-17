@@ -13,13 +13,6 @@ pub mod list;
 pub mod markdown;
 pub mod visualize;
 
-fn field<'a>(item: &'a Item, key: &str) -> &'a str {
-    item.extra
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-}
-
 /// Borrow only the fields used for grouping; pending input can supply metadata
 /// without allocating a native item or copying its message and attachments.
 #[derive(Clone, Copy, Default)]
@@ -36,7 +29,7 @@ impl<'a> From<&'a Item> for ItemMetadata<'a> {
             id: &item.id,
             client_id: item.client_id.as_deref(),
             kind: item.kind.as_deref().unwrap_or_default(),
-            phase: item.extra.get("phase").and_then(Value::as_str),
+            phase: item.phase.as_deref(),
             file_count: item
                 .changes
                 .as_ref()
@@ -220,12 +213,9 @@ fn work_summary(turn: &Turn) -> String {
     if turn.status.as_deref() == Some("inProgress") {
         return "作業中…".into();
     }
-    let duration = turn.duration_ms.flatten().or_else(|| {
-        turn.extra
-            .get("completedAtMs")?
-            .as_u64()?
-            .checked_sub(turn.extra.get("startedAtMs")?.as_u64()?)
-    });
+    let duration = turn
+        .duration_ms
+        .or_else(|| turn.completed_at_ms?.checked_sub(turn.started_at_ms?));
     let mut summary = String::new();
     if let Some(ms) = duration {
         use std::fmt::Write;
@@ -345,7 +335,7 @@ pub fn item_presentation(item: &Item) -> ItemPresentation {
     let (kind, title, collapsible) = match item.kind.as_deref().unwrap_or_default() {
         "userMessage" => ("user", "You".into(), false),
         "agentMessage" => (
-            if field(item, "phase") == "commentary" {
+            if item.phase.as_deref().unwrap_or_default() == "commentary" {
                 "commentary"
             } else {
                 "agent"
@@ -375,11 +365,11 @@ pub fn item_presentation(item: &Item) -> ItemPresentation {
     }
 }
 fn tool_title(item: &Item) -> String {
-    let tool = field(item, "tool");
+    let tool = item.tool.as_deref().unwrap_or_default();
     match item.kind.as_deref().unwrap_or_default() {
         "hookPrompt" => "追加指示".into(),
         "plan" => "計画を更新しました".into(),
-        "mcpToolCall" => match (field(item, "server"), tool) {
+        "mcpToolCall" => match (item.server.as_deref().unwrap_or_default(), tool) {
             ("", "") => "MCPツールを実行しました".into(),
             (server, "") => format!("{}の連携を使用しました", compact_title(server)),
             ("", tool) => compact_title(tool),
@@ -404,11 +394,11 @@ fn tool_title(item: &Item) -> String {
             }
         }
         "subAgentActivity" => "サブエージェントが作業しました".into(),
-        "webSearch" => match field(item, "query") {
+        "webSearch" => match item.query.as_deref().unwrap_or_default() {
             "" => "Webを検索しました".into(),
             query => format!("Webを検索: {}", compact_title(query)),
         },
-        "imageView" => match field(item, "path") {
+        "imageView" => match item.path.as_deref().unwrap_or_default() {
             "" => "画像を確認しました".into(),
             path => format!("画像を確認: {}", compact_title(path)),
         },
@@ -420,8 +410,8 @@ fn tool_title(item: &Item) -> String {
         .into(),
         "contextCompaction" => "コンテキストを圧縮しました".into(),
         "automaticApprovalReview" => match item
-            .extra
-            .get("review")
+            .review
+            .as_ref()
             .and_then(|review| review.get("status"))
             .and_then(Value::as_str)
             .unwrap_or_default()

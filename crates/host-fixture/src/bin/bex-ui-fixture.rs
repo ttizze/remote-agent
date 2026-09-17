@@ -60,7 +60,7 @@ async fn main() {
         .unwrap()
     };
     let projects = directory.join("projects.json");
-    std::fs::write(&projects,serde_json::to_vec(&serde_json::json!({"local-projects":{"simulator-project":{"id":"simulator-project","name":"検証プロジェクト","rootPaths":[workspace],"createdAt":1,"updatedAt":1}},"project-order":["simulator-project"]})).unwrap()).unwrap();
+    std::fs::write(&projects,serde_json::to_vec(&serde_json::json!([{"id":"simulator-project","name":"検証プロジェクト","roots":[{"path":workspace}],"createdAt":1,"updatedAt":1}])).unwrap()).unwrap();
     std::fs::write(directory.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
     let config = codex_app_server::AppServerConfig {
         program,

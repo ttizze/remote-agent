@@ -1,11 +1,8 @@
-//! Transport-independent, bidirectional JSONL with one ordered receive stream.
+//! RPC correlation and ordering for external provider JSONL processes.
 mod jsonl;
 mod message;
-
 pub use jsonl::{DEFAULT_MAX_MESSAGE_BYTES, JsonlError, JsonlReader, JsonlWriter};
-pub use message::{
-    RpcMessage, RpcMessageError, RpcMessageKind, RpcResponse, raw_object, rewrite_top_level_id,
-};
+pub use message::{RpcMessage, RpcMessageError, RpcMessageKind, RpcResponse};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::value::RawValue;
 use std::{
@@ -36,7 +33,7 @@ pub enum Delivery {
     Unknown,
 }
 impl Delivery {
-    fn from_error(error: &serde_json::value::RawValue) -> Self {
+    pub(crate) fn from_error(error: &serde_json::value::RawValue) -> Self {
         #[derive(serde::Deserialize)]
         struct Evidence {
             #[serde(default)]
@@ -72,7 +69,7 @@ mod delivery_tests {
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PeerError {
-    #[error("invalid JSONL message: {0}")]
+    #[error("invalid RPC message: {0}")]
     InvalidMessage(String),
     #[error("Invalid {method} response: {reason}")]
     InvalidResponse {
@@ -84,7 +81,7 @@ pub enum PeerError {
     #[error("connection closed: {0}")]
     ConnectionClosed(String),
     #[error("request {method} timed out")]
-    RequestTimeout { method: String, id: u64 },
+    RequestTimeout { method: String },
     #[error("request ID space exhausted")]
     RequestIdExhausted,
     #[error("remote RPC error: {error}")]
@@ -94,7 +91,7 @@ pub enum PeerError {
         sequence: Option<u64>,
     },
 }
-/// Wire position shared by replies and the receive stream.
+/// Position in the external provider’s JSONL stream.
 #[derive(Clone, Debug)]
 pub struct Reply<T> {
     pub sequence: u64,
@@ -104,7 +101,7 @@ pub struct Reply<T> {
 pub enum PeerEvent {
     /// Notifications and server requests retain their complete envelopes.
     Message(Reply<Arc<str>>),
-    /// A response marker lets Store order a typed completion with surrounding events.
+    /// Provider adapters can wait until preceding stdio events have been processed.
     Response {
         sequence: u64,
         request_id: Option<u64>,
@@ -139,6 +136,25 @@ impl<F: Future> Future for Request<F> {
         self.project().response.poll(cx)
     }
 }
+impl<T, F: Future<Output = Result<Reply<RpcResponse<T>>, PeerError>> + Send> Request<F> {
+    fn result(self) -> Request<impl Future<Output = Result<Reply<T>, PeerError>> + Send> {
+        let response = self;
+        Request {
+            wire_id: response.wire_id(),
+            response: async move {
+                let reply = response.await?;
+                Ok(Reply {
+                    sequence: reply.sequence,
+                    value: reply.value.outcome.map_err(|error| PeerError::Remote {
+                        delivery: Delivery::from_error(&error),
+                        error: error.get().into(),
+                        sequence: Some(reply.sequence),
+                    })?,
+                })
+            },
+        }
+    }
+}
 struct Outbound {
     line: String,
     written: oneshot::Sender<()>,
@@ -155,6 +171,8 @@ struct State {
     events: Option<broadcast::Sender<PeerEvent>>,
     initial: Option<broadcast::Receiver<PeerEvent>>,
 }
+type WriterStatus = Option<Result<(), String>>;
+
 pub struct RpcPeer {
     next_id: AtomicU64,
     outbound: mpsc::Sender<Outbound>,
@@ -163,10 +181,42 @@ pub struct RpcPeer {
     stop: CancellationToken,
     _close_on_drop: DropGuard,
     request_timeout: Option<Duration>,
-    writer_done: watch::Receiver<Option<Result<(), String>>>,
+    writer_done: watch::Receiver<WriterStatus>,
 }
 
 impl RpcPeer {
+    fn new(
+        timeout: Option<Duration>,
+        max_requests: usize,
+        outbound: mpsc::Sender<Outbound>,
+    ) -> Result<(Self, watch::Sender<WriterStatus>), PeerError> {
+        if max_requests == 0 {
+            return Err(invalid("max_requests must be positive"));
+        }
+        let (events, initial) = broadcast::channel(QUEUE_CAPACITY);
+        let (finished, writer_done) = watch::channel(None);
+        let stop = CancellationToken::new();
+        Ok((
+            Self {
+                next_id: AtomicU64::new(1),
+                outbound,
+                state: Arc::new(Mutex::new(State {
+                    sequence: 0,
+                    pending: HashMap::new(),
+                    closed: None,
+                    events: Some(events),
+                    initial: Some(initial),
+                })),
+                permits: Arc::new(Semaphore::new(max_requests)),
+                _close_on_drop: stop.clone().drop_guard(),
+                stop,
+                request_timeout: timeout,
+                writer_done,
+            },
+            finished,
+        ))
+    }
+
     pub fn open<R, W>(
         reader: JsonlReader<R>,
         writer: W,
@@ -183,48 +233,24 @@ impl RpcPeer {
                 "max_message_bytes must be positive".into(),
             ));
         }
-        if max_requests == 0 {
-            return Err(PeerError::InvalidMessage(
-                "max_requests must be positive".into(),
-            ));
-        }
-        let (events, initial) = broadcast::channel(QUEUE_CAPACITY);
-        let state = Arc::new(Mutex::new(State {
-            sequence: 0,
-            pending: HashMap::new(),
-            closed: None,
-            events: Some(events),
-            initial: Some(initial),
-        }));
-        let permits = Arc::new(Semaphore::new(max_requests));
-        let stop = CancellationToken::new();
         let (outbound, outgoing) = mpsc::channel(QUEUE_CAPACITY);
-        let (writer_finished, writer_done) = watch::channel(None);
+        let (peer, writer_finished) = Self::new(request_timeout, max_requests, outbound)?;
         tokio::spawn(read_loop(
             reader,
-            state.clone(),
-            permits.clone(),
-            stop.clone(),
+            peer.state.clone(),
+            peer.permits.clone(),
+            peer.stop.clone(),
         ));
         tokio::spawn(write_loop(
             writer,
             outgoing,
-            state.clone(),
-            permits.clone(),
-            stop.clone(),
+            peer.state.clone(),
+            peer.permits.clone(),
+            peer.stop.clone(),
             maximum,
             writer_finished,
         ));
-        Ok(Self {
-            next_id: AtomicU64::new(1),
-            outbound,
-            state,
-            permits,
-            _close_on_drop: stop.clone().drop_guard(),
-            stop,
-            request_timeout,
-            writer_done,
-        })
+        Ok(peer)
     }
     /// Lag is explicit through `RecvError::Lagged`; consumers must refresh state.
     pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
@@ -278,12 +304,7 @@ impl RpcPeer {
             .ok_or_else(|| invalid("request method is missing"))?
             .to_owned();
         let id = allocate_id(&self.next_id)?;
-        let id_text = id.to_string();
-        let line = if original_id == id_text {
-            line.to_owned()
-        } else {
-            message.rewrite_id(&id_text).map_err(invalid)?
-        };
+        let line = message.rewrite_id(&id.to_string()).map_err(invalid)?;
         Ok(PreparedRequest {
             original_id: Some(original_id),
             method,
@@ -309,7 +330,7 @@ impl RpcPeer {
             permit = self.permits.acquire() => permit.map_err(|_| self.closed_error())?,
             _ = &mut expiration => {
                 tracing::error!(target: "bex", operation = %(&method), message = "RPC request timed out waiting for capacity");
-                return Err(PeerError::RequestTimeout { method, id });
+                return Err(PeerError::RequestTimeout { method });
             },
         };
         let (tx, mut rx) = oneshot::channel();
@@ -360,7 +381,7 @@ impl RpcPeer {
                         } else {
                             tracing::error!(target: "bex", operation = %(&method), message = "RPC request timed out waiting for response");
                         }
-                        PeerError::RequestTimeout { method, id }
+                        PeerError::RequestTimeout { method }
                     }
                     _ => unreachable!(),
                 };
@@ -372,7 +393,7 @@ impl RpcPeer {
             }
         }
     }
-    /// Send a typed request while retaining the response envelope for forwarding.
+    /// Decode the provider result while preserving its error payload.
     pub fn request_envelope<'a, P: Serialize, T: DeserializeOwned>(
         &'a self,
         method: &'a str,
@@ -417,20 +438,7 @@ impl RpcPeer {
         params: &P,
     ) -> Request<impl Future<Output = Result<Reply<T>, PeerError>> + Send + use<'a, P, T>> {
         let response = self.request_envelope(method, params);
-        Request {
-            wire_id: response.wire_id(),
-            response: async move {
-                let reply = response.await?;
-                Ok(Reply {
-                    sequence: reply.sequence,
-                    value: reply.value.outcome.map_err(|error| PeerError::Remote {
-                        delivery: Delivery::from_error(&error),
-                        error: error.get().into(),
-                        sequence: Some(reply.sequence),
-                    })?,
-                })
-            },
-        }
+        response.result()
     }
     pub async fn send_raw(&self, line: impl Into<String>) -> Result<(), PeerError> {
         let line = line.into();
@@ -570,9 +578,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     crate::diagnostics::rpc_error(&pending.method, id, error);
                 }
                 let response = match pending.original_id {
-                    Some(original_id) if message.raw_id() != Some(original_id.as_str()) => {
-                        message.rewrite_id(&original_id).map_err(invalid)
-                    }
+                    Some(original_id) => message.rewrite_id(&original_id).map_err(invalid),
                     _ => Ok(line),
                 };
                 let _ = pending
@@ -598,7 +604,7 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     permits: Arc<Semaphore>,
     stop: CancellationToken,
     maximum: usize,
-    finished: watch::Sender<Option<Result<(), String>>>,
+    finished: watch::Sender<WriterStatus>,
 ) {
     let mut writer = JsonlWriter::with_max_message_bytes(writer, maximum);
     let reason = loop {
@@ -698,7 +704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_requests_assign_ids_before_serialization_and_preserve_envelopes() {
+    async fn typed_requests_assign_ids_before_serialization() {
         let (peer, server_reader, mut writer) = make_peer();
         let params = json!({"nested":{"id":0}});
         let request = peer.request_envelope::<_, u64>("typed", &params);
@@ -713,12 +719,7 @@ mod tests {
         };
         let (reply, _writer) = tokio::join!(request, server);
         let reply = reply.unwrap();
-        let envelope = serde_json::to_value(&reply.value).unwrap();
         assert_eq!(reply.value.outcome.unwrap(), 7);
-        assert_eq!(
-            envelope,
-            json!({"jsonrpc":"2.0","id":wire_id,"result":7,"extension":{"id":0}})
-        );
     }
 
     #[tokio::test]
@@ -793,7 +794,7 @@ mod tests {
         let id_b = request_b["id"].as_u64().unwrap();
         assert_ne!(id_a, id_b);
         assert_eq!(request_a["params"]["nested"]["id"], 1);
-        assert_eq!(request_a["future"]["keep"], true);
+        assert!(request_a.get("future").is_none());
         assert_eq!(request_b["params"]["unknown"], json!([1, 2, 3]));
 
         server_writer
@@ -819,10 +820,10 @@ mod tests {
         let second: Value = serde_json::from_str(&second.await.unwrap().unwrap().value).unwrap();
         assert_eq!(first["id"], "mobile-a");
         assert_eq!(first["error"]["futureError"]["id"], 7);
-        assert_eq!(first["extension"]["keep"], true);
+        assert!(first.get("extension").is_none());
         assert_eq!(second["id"], 42);
         assert_eq!(second["result"]["futureResult"]["id"], 99);
-        assert_eq!(second["unknown"], json!([true]));
+        assert!(second.get("unknown").is_none());
     }
 
     #[tokio::test]
@@ -1050,7 +1051,8 @@ mod envelope_tests {
         let raw: &RawValue = serde_json::from_str(params).unwrap();
         let method = "custom/\"日本語\\method";
         let line = request_line(method, &raw).unwrap();
-        let object = raw_object(&line).unwrap();
+        let object: std::collections::BTreeMap<String, &RawValue> =
+            serde_json::from_str(&line).unwrap();
         assert_eq!(object["params"].get(), params);
         assert_eq!(
             serde_json::from_str::<String>(object["method"].get()).unwrap(),
@@ -1058,7 +1060,8 @@ mod envelope_tests {
         );
         let error = r#"{ "code": -1, "message": "失敗", "data": [null,{"id":7}] }"#;
         let response = response_line(r#""request-7""#, "error", error).unwrap();
-        let object = raw_object(&response).unwrap();
+        let object: std::collections::BTreeMap<String, &RawValue> =
+            serde_json::from_str(&response).unwrap();
         assert_eq!(object["id"].get(), r#""request-7""#);
         assert_eq!(object["error"].get(), error);
         assert!(response_line("7 8", "result", "null").is_err());

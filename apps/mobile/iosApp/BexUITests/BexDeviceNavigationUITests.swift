@@ -3,6 +3,52 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorNativeTerminalRetainsShellAfterReopening() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        func openTerminal() {
+            if app.buttons["task.more"].exists {
+                app.buttons["task.more"].tap()
+            }
+            let action = app.buttons["task.terminal"]
+            XCTAssertTrue(action.waitForExistence(timeout: 10)); action.tap()
+            XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        }
+        let composer = app.textFields["task.message"]
+        composer.tap(); composer.typeText("Keep my draft")
+        let chat = app.descendants(matching: .any)["task.empty"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 10))
+        let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0))
+            .withOffset(CGVector(dx: 0, dy: chat.frame.midY - app.frame.minY))
+        edge.press(forDuration: 0.05, thenDragTo: edge.withOffset(CGVector(dx: -200, dy: 0)))
+        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        let terminal = app.descendants(matching: .any)["terminal.screen"]
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.tap(); terminal.typeText("BEX_NATIVE=17\n")
+        captureScreen(app, named: "Native terminal with keyboard")
+        XCTAssertFalse(app.buttons["終了"].exists)
+        XCTAssertFalse(app.buttons["terminal.close"].exists)
+        app.buttons["workbench.files"].tap()
+        let file = app.buttons["file.hello.txt"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        captureScreen(app, named: "Files in the chat right panel")
+        file.tap()
+        XCTAssertTrue(app.textViews["file.editor"].waitForExistence(timeout: 10))
+        app.buttons["file.close"].tap()
+        app.buttons["workbench.terminal"].tap()
+        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        XCTAssertGreaterThan(terminal.frame.minX, 0)
+        terminal.swipeRight()
+        XCTAssertTrue(app.buttons["task.terminal"].waitForExistence(timeout: 5))
+        XCTAssertFalse(terminal.exists)
+        XCTAssertEqual(composer.value as? String, "Keep my draft")
+        openTerminal()
+        terminal.tap(); terminal.typeText("exit $BEX_NATIVE\n")
+        XCTAssertTrue(app.staticTexts["終了 · 17"].waitForExistence(timeout: 10))
+        captureScreen(app, named: "Reattached native shell retains state")
+        closeWorkbench(app)
+    }
+
     func testPhysicalDeviceCanPairWithManualPayload() throws {
         guard let payload = ProcessInfo.processInfo.environment["BEX_PAIRING_PAYLOAD"],
               !payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

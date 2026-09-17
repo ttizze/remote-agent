@@ -108,8 +108,10 @@ pub(super) fn summary(path: &Path) -> Result<Thread> {
             .modified()
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|time| time.as_secs().into()),
-        status: Some(super::status("notLoaded")),
+            .map(|time| time.as_secs() as f64),
+        status: Some(agent_core::models::ThreadStatus {
+            kind: agent_core::models::ThreadStatusKind::NotLoaded,
+        }),
         ..Default::default()
     };
     for line in head.split(|byte| *byte == b'\n').chain(
@@ -199,7 +201,7 @@ pub(super) fn read_related(
         path: Some(path.to_string_lossy().into()),
         ..Default::default()
     };
-    thread.extra.insert("agentId".into(), agent_id.into());
+    thread.agent_id = Some(agent_id.into());
     read_with_summary(&path, thread, limit)
 }
 
@@ -268,7 +270,7 @@ fn convert(
         {
             return Err(anyhow!("Claude transcript session identity changed"));
         }
-        if let Some(agent_id) = thread.extra.get("agentId").and_then(Value::as_str) {
+        if let Some(agent_id) = thread.agent_id.as_deref() {
             if node["agentId"].as_str().is_some_and(|id| id != agent_id) {
                 return Err(anyhow!("native subagent identity changed"));
             }
@@ -376,7 +378,13 @@ fn convert(
         let turn = Arc::make_mut(turns.last_mut().unwrap());
         let items = turn.items.as_mut().unwrap();
         if user_input {
-            items.push(Arc::new(serde_json::from_value(json!({"id":node["uuid"],"type":"userMessage","content":input_blocks(blocks),"clientId":node["uuid"]}))?));
+            items.push(Arc::new(Item {
+                id: serde_json::from_value(node["uuid"].clone())?,
+                kind: Some("userMessage".into()),
+                content: Some(Value::Array(input_blocks(blocks))),
+                client_id: serde_json::from_value(node["uuid"].clone())?,
+                ..Default::default()
+            }));
         }
         let message_id = node["message"]["id"]
             .as_str()
@@ -388,14 +396,7 @@ fn convert(
             .unwrap_or(*block_indices.get(message_id).unwrap_or(&0));
         for (index, block) in blocks.iter().enumerate() {
             let id = format!("{message_id}:{}", base + index);
-            let value = match block["type"].as_str() {
-                Some("text") if kind == "assistant" => {
-                    json!({"id":id,"type":"agentMessage","text":block["text"]})
-                }
-                Some("thinking") => json!({"id":id,"type":"reasoning","text":block["thinking"]}),
-                Some("tool_use") => {
-                    json!({"id":block["id"],"type":"mcpToolCall","server":"Claude Code","tool":block["name"],"arguments":block["input"],"status":"interrupted"})
-                }
+            let item = match block["type"].as_str() {
                 Some("tool_result") => {
                     if let Some(item) = items
                         .iter_mut()
@@ -411,35 +412,25 @@ fn convert(
                             .into(),
                         );
                         item.result = Some(block["content"].clone());
-                        for (native, field) in [
-                            ("persistedOutputPath", "detailFile"),
-                            ("agentId", "agentId"),
-                            ("resumedAgentId", "resumedAgentId"),
-                        ] {
-                            if let Some(value) = node["toolUseResult"].get(native) {
-                                item.extra.insert(field.into(), value.clone());
-                            }
-                        }
-                        if let Some(parent) = node.get("sourceToolUseID") {
-                            item.extra.insert("sourceToolUseId".into(), parent.clone());
-                        }
+                        item.detail_file = node["toolUseResult"]["persistedOutputPath"]
+                            .as_str()
+                            .map(str::to_owned);
+                        item.agent_id =
+                            node["toolUseResult"]["agentId"].as_str().map(str::to_owned);
                     } else {
                         warnings.push("tool result has no available tool call");
                     }
                     continue;
                 }
                 Some("text" | "image") if kind == "user" => continue,
-                _ => {
-                    warnings.push("unsupported message block");
-                    continue;
-                }
+                _ => match super::content_item(id, block, "interrupted")? {
+                    Some(item) => item,
+                    None => {
+                        warnings.push("unsupported message block");
+                        continue;
+                    }
+                },
             };
-            let mut item: Item = serde_json::from_value(value)?;
-            item.extra
-                .insert("nativeMessageId".into(), node["uuid"].clone());
-            if let Some(parent) = node.get("parentUuid") {
-                item.extra.insert("parentMessageId".into(), parent.clone());
-            }
             items.push(Arc::new(item));
         }
         block_indices.insert(message_id.into(), base + blocks.len());
@@ -450,9 +441,7 @@ fn convert(
     }
     warnings.sort_unstable();
     warnings.dedup();
-    thread
-        .extra
-        .insert("historyHasMore".into(), has_more.into());
+    thread.history_has_more = Some(has_more);
     use agent_core::session::{HistoryReadKind, HistoryReadState};
     thread.history_read_state = Some(HistoryReadState::new(
         if warnings.is_empty() {
@@ -467,11 +456,7 @@ fn convert(
         warnings.into_iter().map(str::to_owned).collect(),
     ));
     thread.turns = Some(turns);
-    Ok(ThreadResponse {
-        thread,
-        model,
-        extra: Default::default(),
-    })
+    Ok(ThreadResponse { thread, model })
 }
 
 #[cfg(test)]
@@ -565,7 +550,7 @@ mod tests {
         let path = directory.join("agent-agent-fixture.jsonl");
         fs::write(&path, &source).unwrap();
         let related = read_related(root.path(), session, "agent-fixture", 1000).unwrap();
-        assert_eq!(related.thread.extra["agentId"], "agent-fixture");
+        assert_eq!(related.thread.agent_id.as_deref(), Some("agent-fixture"));
         assert!(
             related
                 .thread

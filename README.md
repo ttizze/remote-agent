@@ -34,7 +34,7 @@ When a new major becomes generally available, verify the vendor release, update 
 | `crates/agent-cli` | Headless client for scripts and integration tests. |
 | `crates/host-fixture` | Deterministic Codex and Claude subprocess fixtures and isolated iroh Host for tests. |
 | `crates/xtask` | Background quality worker driven by Lefthook. |
-| `apps/desktop` | Mac app (GPUI). xterm.js assets under `web/` are fetched at build time; no Node runtime ships. |
+| `apps/desktop` | Mac app (GPUI), with a native Alacritty terminal. |
 | `apps/mobile` | iOS (SwiftUI, `iosApp/`) and Android (Compose, `src/`) over the UniFFI Store. |
 
 Clients render immutable `Snapshot` values and never re-derive presentation: `agent-core::presentation` produces `RenderedConversation` rows for GPUI directly and for mobile through the bindings. Add logic to core, not to a client. See [ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md).

@@ -1,12 +1,16 @@
 //! Credentials stay in Claude Code's own storage. Only account labels and the
 //! selection are persisted here; all profiles share the native transcript tree.
-use crate::host_rpc::AccountRequest;
+use agent_core::{
+    client::AccountSelection,
+    models::Empty,
+    protocol::{Body, Call},
+};
 use agent_core::{
     client::{Account, AccountLogin, AccountLoginStatus},
     session::ProviderKind,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -137,7 +141,6 @@ impl Accounts {
             provider: ProviderKind::Claude,
             email: value["email"].as_str().map(str::to_owned),
             plan_type: value["subscriptionType"].as_str().map(str::to_owned),
-            extra: Default::default(),
         }))
     }
 
@@ -165,10 +168,10 @@ impl Accounts {
         Ok((self.registry.accounts.clone(), selected))
     }
 
-    pub(crate) async fn request(&mut self, request: AccountRequest) -> Result<Value, String> {
+    pub(crate) async fn request(&mut self, request: Call) -> Result<Body, String> {
         match request {
-            AccountRequest::List(_) => unreachable!("listing is merged by Host"),
-            AccountRequest::Select(params) => {
+            Call::ListAccounts(_) => unreachable!("listing is merged by Host"),
+            Call::SelectAccount(params) => {
                 let home = self.account_home(&params.id)?;
                 self.info(&home, params.id.clone())
                     .await?
@@ -179,9 +182,14 @@ impl Accounts {
                     return Err(error);
                 }
                 self.revision += 1;
-                Ok(json!({"provider":"claude","selectedId":params.id}))
+                Ok(AccountSelection {
+                    provider: ProviderKind::Claude,
+                    selected_id: params.id,
+                    persistence_error: None,
+                }
+                .into())
             }
-            AccountRequest::Logout(params) => {
+            Call::LogoutAccount(params) => {
                 let home = self.account_home(&params.id)?;
                 if self.registry.selected_id.as_ref() == Some(&params.id) {
                     self.registry.selected_id = None;
@@ -199,9 +207,9 @@ impl Accounts {
                     .accounts
                     .retain(|account| account.id != params.id);
                 self.save().await?;
-                Ok(json!({}))
+                Ok(Empty {}.into())
             }
-            AccountRequest::LoginStart(_) => {
+            Call::StartAccountLogin(_) => {
                 self.cancel().await?;
                 let id = format!("claude:{}", uuid::Uuid::new_v4());
                 let home = self.directory.join(id.strip_prefix("claude:").unwrap());
@@ -241,16 +249,15 @@ impl Accounts {
                         return Err(error);
                     }
                 };
-                serde_json::to_value(AccountLogin {
+                Ok(AccountLogin {
                     login_id: id,
                     user_code: String::new(),
                     verification_url,
                     requires_code_submission: true,
-                    extra: Default::default(),
-                })
-                .map_err(|error| error.to_string())
+                }
+                .into())
             }
-            AccountRequest::LoginSubmit(params) => {
+            Call::SubmitAccountLogin(params) => {
                 let login = self
                     .login
                     .as_mut()
@@ -278,16 +285,20 @@ impl Accounts {
                     .flush()
                     .await
                     .map_err(|_| "認証コードを送信できません。")?;
-                Ok(json!({}))
+                Ok(Empty {}.into())
             }
-            AccountRequest::LoginStatus(params) => {
+            Call::ReadAccountLogin(params) => {
                 if self
                     .registry
                     .accounts
                     .iter()
                     .any(|account| account.id == params.id)
                 {
-                    return Ok(json!({"completed":true,"accountId":params.id}));
+                    return Ok(AccountLoginStatus {
+                        completed: true,
+                        account_id: Some(params.id),
+                    }
+                    .into());
                 }
                 let login = self
                     .login
@@ -306,7 +317,11 @@ impl Accounts {
                     .try_wait()
                     .map_err(|_| "Claude の認証状態を確認できません。")?
                 else {
-                    return Ok(json!({"completed":false}));
+                    return Ok(AccountLoginStatus {
+                        completed: false,
+                        account_id: None,
+                    }
+                    .into());
                 };
                 if !status.success() {
                     self.cancel().await?;
@@ -323,14 +338,13 @@ impl Accounts {
                     return Err(error);
                 }
                 self.login = None;
-                serde_json::to_value(AccountLoginStatus {
+                Ok(AccountLoginStatus {
                     completed: true,
                     account_id: Some(params.id),
-                    extra: Default::default(),
-                })
-                .map_err(|error| error.to_string())
+                }
+                .into())
             }
-            AccountRequest::LoginCancel(params) => {
+            Call::CancelAccountLogin(params) => {
                 if self
                     .login
                     .as_ref()
@@ -339,8 +353,9 @@ impl Accounts {
                     return Err("ログイン手続きが一致しません。".into());
                 }
                 self.cancel().await?;
-                Ok(json!({}))
+                Ok(Empty {}.into())
             }
+            _ => Err("not an account request".into()),
         }
     }
 
