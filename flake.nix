@@ -78,7 +78,6 @@
               cargo-ndk
               lefthook
               kotlin-language-server
-              nodejs_22
               androidSdk
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               pkgs.swiftlint

@@ -84,6 +84,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":terminal-native"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.11.2")
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.11.2")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")

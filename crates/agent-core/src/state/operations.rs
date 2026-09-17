@@ -33,6 +33,8 @@ pub enum Intent {
     CancelAccountLogin(CancelAccountLogin),
     ForkThread(ForkThread),
     StartTerminal(StartTerminal),
+    DetachTerminal(DetachTerminal),
+    KillTerminal(KillTerminal),
     Transcribe(Dictate),
     CreateInvitation(CreateInvitation),
     RemoveRemoteHost(RemoveRemoteHost),

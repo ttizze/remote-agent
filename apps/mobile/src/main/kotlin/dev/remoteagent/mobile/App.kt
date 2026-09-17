@@ -448,25 +448,7 @@ internal fun RemoteAgentApp(
                             },
                             Modifier.weight(1f),
                         )
-                    else -> androidx.compose.runtime.key(model.selectionKey) {
-                        var scrollToTopRequest by remember { mutableStateOf(0) }
-                        ConversationHeader(
-                            model.snapshot.navigation().threadId?.let(model.snapshot::conversation)?.title(),
-                            model::showThreads,
-                        ) { scrollToTopRequest += 1 }
-                        ThreadDetailScreen(
-                            model.snapshot,
-                            model.conversation,
-                            model::perform,
-                            if (model.loadingHistory) null else model::older,
-                            Modifier.weight(1f),
-                            scrollToTopRequest = scrollToTopRequest,
-                        ) { onSend ->
-                            ThreadComposer(model.snapshot, model::perform, onSend) {
-                                AttachmentButton(model.selectionKey, model::attach)
-                            }
-                        }
-                    }
+                    else -> ConversationPane(model)
                 }
             }
         }
@@ -517,4 +499,30 @@ private fun ConnectionStatus(notice: String?, busy: Boolean, reconnect: Boolean,
     notice?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     if (reconnect) Button(onClick = connect, enabled = !busy) { Text("再接続") }
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.ColumnScope.ConversationPane(model: AndroidAppModel) {
+    androidx.compose.runtime.key(model.selectionKey) {
+
+        var scrollToTopRequest by remember { mutableStateOf(0) }
+        ConversationHeader(
+            model.snapshot.navigation().threadId?.let(model.snapshot::conversation)?.title(),
+            model::showThreads,
+        ) { scrollToTopRequest += 1 }
+        TerminalLauncher(model.snapshot, model::perform)
+        ThreadDetailScreen(
+            model.snapshot,
+            model.conversation,
+            model::perform,
+            if (model.loadingHistory) null else model::older,
+            Modifier.weight(1f),
+            scrollToTopRequest = scrollToTopRequest,
+        ) { onSend ->
+            ThreadComposer(model.snapshot, model::perform, onSend) {
+                AttachmentButton(model.selectionKey, model::attach)
+            }
+        }
+
+    }
 }

@@ -15,6 +15,7 @@ struct ThreadScreen: View {
     @State var showingCamera = false
     @State var preparingMedia = false
     @State var showingFiles = false
+    @State var showingTerminal = false
     @State var showingModelSettings = false
     @State var scrollViewportHeight: CGFloat = 0
     @State var isFollowingLatest = true
@@ -28,20 +29,106 @@ struct ThreadScreen: View {
     @State var showingDiff = false
     @FocusState var composerFocused: Bool
 
-    var review: WorkspaceReviewSummary? {
-        model.snapshot.review().map { WorkspaceReviewSummary(
-            files: Int($0.fileCount()),
-            additions: Int($0.additions()),
-            deletions: Int($0.deletions())
-        ) }
-    }
-
-    private var project: Project? {
-        let directory = model.selectedDirectory
-        return model.list?.projects.first { $0.roots.contains { $0.path == directory } }
-    }
-
     var body: some View {
+        ChatWithTerminalPanel(model: model, isPresented: $showingTerminal,
+                              allowsSwipe: !isSideChat, chat: chatContent)
+            .onChange(of: showingTerminal) {
+                if $0 {
+                    composerFocused = false
+                }
+            }
+            .onDisappear { dictation.cancel() }
+            .onChange(of: model.composerFocusRequest) { _ in
+                if (model.sideChatRequest != nil) == isSideChat {
+                    composerFocused = true
+                }
+            }
+            .onChange(of: model.draftKey) { _ in dictation.cancel() }
+            .onChange(of: model.isConnected) {
+                if !$0 {
+                    dictation.cancel()
+                }
+            }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
+                Task {
+                    do { try await model.attach(result.get()) } catch {
+                        model.transferError = error.localizedDescription
+                    }
+                }
+            }
+            .photosPicker(isPresented: $showingPhotos, selection: $selectedPhotos,
+                          selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
+                          preferredItemEncoding: .compatible)
+            .onChange(of: selectedPhotos) { _, items in
+                guard !items.isEmpty else { return }
+                selectedPhotos = []
+                preparingMedia = true
+                model.transferError = nil
+                let draftKey = model.draftKey
+                Task { await importPhotos(items, draftKey: draftKey) }
+            }
+            .fullScreenCover(isPresented: $showingCamera) {
+                ChatCameraPicker { result in
+                    showingCamera = false
+                    Task {
+                        do {
+                            if let url = try result.get() {
+                                try await model.attach(url, temporaryDirectory: url.deletingLastPathComponent())
+                            }
+                        } catch { model.transferError = error.localizedDescription }
+                    }
+                }.ignoresSafeArea()
+            }
+            .sheet(
+                isPresented: $showingFiles,
+                onDismiss: {
+                    if !model.selectedDirectory.isEmpty {
+                        model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd)))
+                    }
+                },
+                content: {
+                    WorkspaceSheet(model: model, root: model.cwd, showingDiff: $showingDiff)
+                }
+            )
+            .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
+            .onAppear {
+                if model.isNewThread {
+                    composerFocused = true
+                }
+            }
+            .onChange(of: model.isNewThread) {
+                if $0 {
+                    composerFocused = true
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    if !isSideChat, !model.isNewThread {
+                        Button {
+                            scrollToTopRequest += 1
+                        } label: {
+                            conversationTitle
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("会話の先頭へ")
+                        .accessibilityIdentifier("task.top")
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    if !isSideChat {
+                        if model.isNewThread {
+                            Button { showingTerminal = true } label: { Image(systemName: "terminal") }
+                                .accessibilityLabel("ターミナル").accessibilityIdentifier("task.terminal")
+                        } else {
+                            conversationActions
+                        }
+                    }
+                }
+            }
+    }
+
+    private var chatContent: some View {
         VStack(spacing: 0) {
             if let notice = model.notice {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
@@ -165,93 +252,24 @@ struct ThreadScreen: View {
         }
         .background(Color(UIColor.systemBackground))
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-        .onDisappear { dictation.cancel() }
-        .onChange(of: model.composerFocusRequest) { _ in
-            if (model.sideChatRequest != nil) == isSideChat {
-                composerFocused = true
-            }
-        }
-        .onChange(of: model.draftKey) { _ in dictation.cancel() }
-        .onChange(of: model.isConnected) {
-            if !$0 {
-                dictation.cancel()
-            }
-        }
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
-            Task {
-                do { try await model.attach(result.get()) } catch { model.transferError = error.localizedDescription }
-            }
-        }
-        .photosPicker(isPresented: $showingPhotos, selection: $selectedPhotos,
-                      selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
-                      preferredItemEncoding: .compatible)
-        .onChange(of: selectedPhotos) { _, items in
-            guard !items.isEmpty else { return }
-            selectedPhotos = []
-            preparingMedia = true
-            model.transferError = nil
-            let draftKey = model.draftKey
-            Task { await importPhotos(items, draftKey: draftKey) }
-        }
-        .fullScreenCover(isPresented: $showingCamera) {
-            ChatCameraPicker { result in
-                showingCamera = false
-                Task {
-                    do {
-                        if let url = try result.get() {
-                            try await model.attach(url, temporaryDirectory: url.deletingLastPathComponent())
-                        }
-                    } catch { model.transferError = error.localizedDescription }
-                }
-            }.ignoresSafeArea()
-        }
-        .sheet(
-            isPresented: $showingFiles,
-            onDismiss: {
-                if !model.selectedDirectory.isEmpty {
-                    model.perform(.reviewWorkspace(ReviewWorkspace(cwd: model.cwd)))
-                }
-            },
-            content: {
-                WorkspaceSheet(model: model, root: model.cwd, showingDiff: $showingDiff)
-            }
-        )
-        .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
-        .onAppear {
-            if model.isNewThread {
-                composerFocused = true
-            }
-        }
-        .onChange(of: model.isNewThread) {
-            if $0 {
-                composerFocused = true
-            }
-        }
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                if !isSideChat, !model.isNewThread {
-                    Button {
-                        scrollToTopRequest += 1
-                    } label: {
-                        conversationTitle
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("会話の先頭へ")
-                    .accessibilityIdentifier("task.top")
-                }
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                if !isSideChat, !model.isNewThread {
-                    conversationActions
-                }
-            }
-        }
     }
 }
 
 /// Conversation navigation
 extension ThreadScreen {
+    var review: WorkspaceReviewSummary? {
+        model.snapshot.review().map { WorkspaceReviewSummary(
+            files: Int($0.fileCount()),
+            additions: Int($0.additions()),
+            deletions: Int($0.deletions())
+        ) }
+    }
+
+    private var project: Project? {
+        let directory = model.selectedDirectory
+        return model.list?.projects.first { $0.roots.contains { $0.path == directory } }
+    }
+
     var conversationTitle: some View {
         let directory = model.selectedDirectory
         return VStack(alignment: .leading, spacing: 3) {
@@ -279,6 +297,8 @@ extension ThreadScreen {
                 Image(systemName: "square.and.pencil").font(.title2).frame(width: 44, height: 44)
             }.accessibilityLabel("新しい会話").accessibilityIdentifier("task.new")
             Menu {
+                Button { showingTerminal = true } label: { Label("ターミナル", systemImage: "terminal") }
+                    .accessibilityIdentifier("task.terminal")
                 Button { showingDiff = false; showingFiles = true } label: {
                     Label("ファイル", systemImage: "folder")
                 }.accessibilityIdentifier("task.files")

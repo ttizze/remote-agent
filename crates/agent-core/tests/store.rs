@@ -1418,9 +1418,9 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         retained.terminals["terminal"]
             .output
             .iter()
-            .map(|chunk| chunk.data.as_str())
+            .map(|chunk| chunk.data.as_slice())
             .collect::<Vec<_>>(),
-        ["YQ==", "Yg=="]
+        [b"a".as_slice(), b"b".as_slice()]
     );
     store
         .dispatch(Intent::AcknowledgeTerminal {

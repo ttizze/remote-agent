@@ -77,6 +77,7 @@ pub(crate) struct SessionRouter {
 const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone)]
 struct Outbound {
+    principal: String,
     sender: mpsc::Sender<String>,
     bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -156,6 +157,22 @@ impl SessionRouter {
     }
 
     pub(crate) fn open_session(&self, capacity: usize) -> HostSession {
+        self.open_authenticated_session(capacity, None)
+    }
+
+    pub(crate) fn principal(&self, session: SessionId) -> Result<String, String> {
+        lock_state(&self.state)
+            .sessions
+            .get(&session)
+            .map(|outbound| outbound.principal.clone())
+            .ok_or_else(|| "connection is closed".into())
+    }
+
+    pub(crate) fn open_authenticated_session(
+        &self,
+        capacity: usize,
+        principal: Option<String>,
+    ) -> HostSession {
         assert!(capacity > 0, "a Host session queue must have capacity");
         let (sender, receiver) = mpsc::channel(capacity);
         let mut state = lock_state(&self.state);
@@ -164,6 +181,7 @@ impl SessionRouter {
         state.sessions.insert(
             id,
             Outbound {
+                principal: principal.unwrap_or_else(|| format!("session:{id}")),
                 sender,
                 bytes: queued_bytes.clone(),
             },

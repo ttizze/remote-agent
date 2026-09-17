@@ -15,3 +15,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "remote-agent"
 include(":apps:mobile")
+
+include(":terminal-native")
+project(":terminal-native").projectDir = file("vendor/termux")

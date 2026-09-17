@@ -119,7 +119,7 @@ xcrun simctl bootstatus "$simulator" -b
 xcrun swift apps/mobile/iosApp/BexUITests/Fixtures/create-video.swift "$fixture/attachment-video.mov"
 xcrun simctl addmedia "$simulator" apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png "$fixture/attachment-video.mov"
 result_bundle=${BEX_RELAY_RESULT_BUNDLE:-"$target/qa/Bex-$(date +%s)-$$.xcresult"}
-xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex -sdk iphonesimulator \
+xcodebuild -skipPackagePluginValidation -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex -destination "platform=iOS Simulator,id=$simulator" \
     -configuration Debug -derivedDataPath "$build" CODE_SIGNING_ALLOWED=YES \
     CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=YES BEX_CARGO_TARGET_DIR="$target" build-for-testing
 products="$build/Build/Products"

@@ -157,7 +157,9 @@ impl HostRuntime {
             if !record.trust.allowed.contains(&node) {
                 return Err(anyhow::anyhow!("peer is not authorized"));
             }
-            let session = self.service.open_session(128);
+            let session = self
+                .service
+                .open_authenticated_session(128, node.to_string());
             self.active
                 .lock()
                 .unwrap()
@@ -302,6 +304,7 @@ impl HostRuntime {
                 let mut next = record.clone();
                 next.trust.allowed.remove(&params.node_id);
                 *record = self.credentials.persist(next).await?;
+                self.service.revoke_terminals(&params.node_id.to_string());
                 for connection in self.active.lock().unwrap().values() {
                     if connection.node_id() == params.node_id {
                         connection.close();

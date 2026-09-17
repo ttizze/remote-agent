@@ -34,3 +34,7 @@ tokio = { version = "1.47.1", features = ["io-util", "macros", "process", "rt-mu
 tokio-util = { version = "0.7.16", features = ["codec"] }
 url = "2.5.4"
 zeroize = "1.8.1"
+
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
+vte = { path = "vendor/vte" }

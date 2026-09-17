@@ -152,7 +152,13 @@ pub(super) fn notification(
             },
         );
     }
-    if matches!(method, "process/outputDelta" | "process/exited") {
+    if matches!(
+        method,
+        "process/outputDelta"
+            | "process/exited"
+            | "host/terminal/restored"
+            | "host/terminal/detached"
+    ) {
         return process(previous, method, params);
     }
     if method == "thread/name/updated" {
@@ -177,8 +183,9 @@ fn process(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, Vec<E
     struct ProcessEvent {
         process_handle: String,
         delta_base64: Option<String>,
-        cap_reached: Option<bool>,
         exit_code: Option<i32>,
+        cols: Option<u16>,
+        rows: Option<u16>,
     }
     let params: ProcessEvent = match serde_json::from_value(params) {
         Ok(params) => params,
@@ -199,7 +206,9 @@ fn process(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, Vec<E
     let Some(terminal) = shared_mut(&mut next.terminals, &params.process_handle) else {
         return (next, Vec::new());
     };
-    if method == "process/exited" {
+    if method == "host/terminal/detached" {
+        terminal.phase = TerminalPhase::Detached;
+    } else if method == "process/exited" {
         let Some(code) = params.exit_code else {
             return reduce(
                 previous,
@@ -211,11 +220,35 @@ fn process(previous: &Snapshot, method: &str, params: Value) -> (Snapshot, Vec<E
         let Some(data) = params.delta_base64 else {
             return reduce(previous, Event::Failed("process output is missing".into()));
         };
+        use base64::Engine as _;
+        let data = match base64::engine::general_purpose::STANDARD.decode(data) {
+            Ok(data) => data,
+            Err(error) => {
+                return reduce(
+                    previous,
+                    Event::Failed(format!("invalid terminal bytes: {error}")),
+                );
+            }
+        };
+        let reset_size = if method == "host/terminal/restored" {
+            let (Some(cols), Some(rows)) = (params.cols, params.rows) else {
+                return reduce(
+                    previous,
+                    Event::Failed("terminal restoration size is missing".into()),
+                );
+            };
+            terminal.output.clear();
+            terminal.phase = TerminalPhase::Running;
+            terminal.size = crate::client::TerminalSize { cols, rows };
+            Some(terminal.size)
+        } else {
+            None
+        };
         terminal.sequence += 1;
         terminal.output.push_back(Arc::new(TerminalOutput {
             sequence: terminal.sequence,
             data,
-            cap_reached: params.cap_reached.unwrap_or(false),
+            reset_size,
         }));
     }
     (next, Vec::new())

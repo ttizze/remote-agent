@@ -33,7 +33,6 @@ if [[ $product == host ]]; then
     exit
 fi
 [[ $(uname -m) == arm64 ]] || { echo 'The GPUI Mac bundle requires Apple Silicon.' >&2; exit 2; }
-npm --prefix apps/desktop/web ci --ignore-scripts --no-audit --no-fund
 cargo build --locked --package host-daemon --package codex-app-server --package bex-process --package bex-desktop --release
 staging=$(mktemp -d "$target/.Bex-build.XXXXXX")
 destination="$target/Bex.app"
@@ -54,15 +53,11 @@ trap 'exit 143' TERM
 bundle="$staging/Bex.app"
 executables="$bundle/Contents/MacOS"
 resources="$bundle/Contents/Resources"
-mkdir -p "$executables" "$resources/terminal"
+mkdir -p "$executables" "$resources"
 cp apps/desktop/assets/icon.icns "$resources/Bex.icns"
 cp "$target/release/bex-desktop" "$executables/Bex"
 cp "$target/release/host-daemon" "$executables/host-daemon"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
-modules=apps/desktop/web/node_modules/@xterm
-cp "$modules/xterm/lib/xterm.js" "$modules/xterm/css/xterm.css" "$modules/addon-fit/lib/addon-fit.js" "$resources/terminal/"
-cp "$modules/xterm/LICENSE" "$resources/terminal/LICENSE-xterm"
-cp "$modules/addon-fit/LICENSE" "$resources/terminal/LICENSE-addon-fit"
 dictation="$resources/Bex Dictation.app"
 mkdir -p "$dictation/Contents/MacOS"
 xcrun swiftc -target arm64-apple-macosx26.0 -O apps/desktop/macos/Dictation.swift -o "$dictation/Contents/MacOS/Dictation"

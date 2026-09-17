@@ -184,9 +184,23 @@ impl HostRpcService {
         }
     }
 
+    pub(crate) fn revoke_terminals(&self, principal: &str) {
+        self.inner.terminals.revoke_device(principal);
+    }
     pub fn open_session(&self, capacity: usize) -> HostSession {
         self.start_codex_event_pump();
         self.inner.router.open_session(capacity)
+    }
+
+    pub(crate) fn open_authenticated_session(
+        &self,
+        capacity: usize,
+        principal: String,
+    ) -> HostSession {
+        self.start_codex_event_pump();
+        self.inner
+            .router
+            .open_authenticated_session(capacity, Some(principal))
     }
 
     pub fn close_session(&self, session: SessionId) {
@@ -735,7 +749,7 @@ impl HostRpcService {
                     let params: op::StartTerminal = request.params()?;
                     request.response(self.inner.terminals.start(self.inner.router.clone(), session, params.handle, params.cwd, params.size).await.map_err(|error| Failure::new("terminal_start_failed", error)))?
                 }
-                "process/writeStdin" | "process/resizePty" | "process/kill" => request.response(self.inner.terminals.request(session, method, request.params()?).await.map_err(|error| Failure::new("terminal_operation_failed", error)))?,
+                "process/writeStdin" | "process/resizePty" | "process/kill" | "host/terminal/detach" => request.response(self.inner.terminals.request(session, method, request.params()?).await.map_err(|error| Failure::new("terminal_operation_failed", error)))?,
                 "host/dictation/transcribe" => request.response(
                     run_handler(
                         request.params().map_err(|_| "録音データがありません。"),

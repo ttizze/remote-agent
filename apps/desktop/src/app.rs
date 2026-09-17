@@ -1415,13 +1415,15 @@ impl Desktop {
                 }));
                 Ok(())
             }
-            Panel::Terminal if self.terminal.is_none() => crate::terminal::Terminal::new(
-                self.remote.as_ref().map_or("", |remote| &remote.ticket),
-                self.snapshot.navigation.cwd.clone(),
-                window,
-                cx,
-            )
-            .map(|view| self.terminal = Some(view)),
+            Panel::Terminal if self.terminal.is_none() => {
+                self.terminal = Some(crate::terminal::Terminal::new(
+                    self.remote.as_ref().map_or("", |remote| &remote.ticket),
+                    self.snapshot.navigation.cwd.clone(),
+                    window,
+                    cx,
+                ));
+                Ok(())
+            }
             Panel::Browser if self.browser.is_none() => crate::browser::Browser::new(
                 wry::WebViewBuilder::new(),
                 #[cfg(target_os = "macos")]

@@ -89,23 +89,47 @@ pub struct PendingSubmission {
     pub clear_draft: Option<Arc<Draft>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum TerminalPhase {
+    Suspended,
+    Detached,
     Starting,
     Running,
     Exited(i32),
     Failed(String),
 }
+impl TerminalPhase {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Starting => "起動中".into(),
+            Self::Running => "実行中".into(),
+            Self::Suspended => "再接続を待っています".into(),
+            Self::Detached => "切断済み".into(),
+            Self::Exited(code) => format!("終了 · {code}"),
+            Self::Failed(error) => error.clone(),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TerminalOutput {
     pub sequence: u64,
-    pub data: String,
-    pub cap_reached: bool,
+    pub data: Vec<u8>,
+    pub reset_size: Option<crate::client::TerminalSize>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Terminal {
+    pub cwd: String,
+    pub size: crate::client::TerminalSize,
     pub phase: TerminalPhase,
     pub output: VecDeque<Arc<TerminalOutput>>,
     pub sequence: u64,
+}
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct TerminalView {
+    pub status: String,
+    pub output: Vec<TerminalOutput>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
@@ -140,6 +164,17 @@ pub struct Snapshot {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn terminal_view(&self, handle: String) -> Option<TerminalView> {
+        self.terminals.get(&handle).map(|terminal| TerminalView {
+            status: terminal.phase.label(),
+            output: terminal
+                .output
+                .iter()
+                .map(|chunk| (**chunk).clone())
+                .collect(),
+        })
+    }
+
     pub fn model_error_messages(&self) -> Vec<String> {
         self.model_errors
             .iter()
@@ -220,7 +255,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     prepare_operations!(intent, previous, next, [
         ListAccounts, SelectAccount, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, ForkThread,
-        StartTerminal, CreateInvitation, RemoveRemoteHost,
+        StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, StartThread,
@@ -467,7 +502,13 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     match event {
         Event::TerminalFailed { handle, reason } => {
-            if let Some(terminal) = shared_mut(&mut next.terminals, &handle) {
+            if previous.connected
+                && let Some(terminal) = shared_mut(&mut next.terminals, &handle)
+                && matches!(
+                    terminal.phase,
+                    TerminalPhase::Starting | TerminalPhase::Running | TerminalPhase::Suspended
+                )
+            {
                 terminal.phase = TerminalPhase::Failed(reason);
             }
         }
@@ -476,6 +517,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             if next.storage_scope == scope {
                 return (next, Vec::new());
             }
+            next.terminals = Arc::default();
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
                     conversations: std::mem::take(&mut next.conversations),
@@ -542,6 +584,15 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             } else {
                 effects.extend(op::review_workspace(&mut next));
             }
+            for (handle, terminal) in next.terminals.iter() {
+                if terminal.phase == TerminalPhase::Suspended {
+                    effects.push(Effect::execute(op::StartTerminal {
+                        handle: handle.clone(),
+                        cwd: terminal.cwd.clone(),
+                        size: terminal.size,
+                    }));
+                }
+            }
             return (next, effects);
         }
         Event::Disconnected(reason) => {
@@ -553,7 +604,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     terminal.phase,
                     TerminalPhase::Starting | TerminalPhase::Running
                 ) {
-                    Arc::make_mut(terminal).phase = TerminalPhase::Failed(reason.clone());
+                    Arc::make_mut(terminal).phase = TerminalPhase::Suspended;
                 }
             }
             next.error = Some(reason);
