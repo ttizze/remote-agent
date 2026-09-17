@@ -103,7 +103,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         scope.launch(Dispatchers.IO) {
             for ((id, current) in writes) {
                 try {
-                    repository.save(id, current.serialize())
+                    repository.save(id, current.serializeLocalState())
                 } catch (error: IOException) {
                     withContext(Dispatchers.Main) { notice = error.message }
                 }

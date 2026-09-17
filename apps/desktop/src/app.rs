@@ -559,7 +559,7 @@ impl Desktop {
                 ));
                 let mut snapshot: Snapshot = match tokio::fs::read(&path).await {
                     Ok(bytes) => serde_json::from_slice(&bytes)
-                        .map_err(|error| format!("下書きを読み込めません: {error}"))?,
+                        .map_err(|error| format!("保存した入力状態を読み込めません: {error}"))?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         Snapshot::default()
                     }

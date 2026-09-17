@@ -288,7 +288,7 @@ mod tests {
                 navigation: Arc::new(crate::state::Navigation { thread_id: Some("thread".into()), draft_key: "thread".into(), ..Default::default() }),
                 ..Default::default()
             };
-            let mut saved = serde_json::to_value(&cached).unwrap();
+            let mut saved: serde_json::Value = serde_json::from_slice(&cached.serialize_local_state().unwrap()).unwrap();
             assert!(saved.get("list_query").is_none());
             saved["list_query"] = serde_json::to_value(&cached.list_query).unwrap();
             let restored = AgentStore::offline(serde_json::to_vec(&saved).unwrap()).await.unwrap();
