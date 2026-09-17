@@ -28,17 +28,40 @@ extension ThreadScreen {
             if let error = model.transferError {
                 BexNotice(text: error)
             }
-            ForEach(Array(attachments.enumerated()), id: \.offset) { index, attachment in
-                HStack {
-                    Label(attachment.name, systemImage: attachment.isImage ? "photo" : "doc")
-                        .lineLimit(1)
-                    Button { model.removeAttachment(index) } label: { Image(systemName: "xmark.circle.fill") }
-                        .accessibilityLabel("\(attachment.name)を外す")
-                }
-                .font(.subheadline).padding(10)
-                .background(Color(UIColor.secondarySystemBackground), in: Capsule())
-            }
             VStack(alignment: .leading, spacing: 8) {
+                if !attachments.isEmpty {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
+                            ForEach(Array(attachments.enumerated()), id: \.element.path) { index, attachment in
+                                Group {
+                                    if attachment.isImage {
+                                        ConversationImage(source: SessionImage(reference: attachment.path),
+                                                          label: attachment.name,
+                                                          identifier: "composer.attachment.\(index)",
+                                                          media: model.mediaAccess)
+                                            .frame(width: 104, height: 104).clipped()
+                                    } else {
+                                        Label(attachment.name, systemImage: "doc")
+                                            .lineLimit(1).padding(12).padding(.trailing, 24)
+                                    }
+                                }
+                                .background(Color(UIColor.secondarySystemBackground),
+                                            in: RoundedRectangle(cornerRadius: 12))
+                                .overlay(alignment: .topTrailing) {
+                                    Button { model.removeAttachment(index) } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .symbolRenderingMode(.palette)
+                                            .foregroundStyle(.white, .black.opacity(0.75))
+                                            .font(.system(size: 24))
+                                            .frame(width: 44, height: 44)
+                                    }
+                                    .accessibilityLabel("\(attachment.name)を外す")
+                                }
+                            }
+                        }
+                    }
+                    .frame(height: attachments.contains(where: { $0.isImage }) ? 104 : 44)
+                }
                 Group {
                     if dictation.isRecording {
                         Canvas { context, size in

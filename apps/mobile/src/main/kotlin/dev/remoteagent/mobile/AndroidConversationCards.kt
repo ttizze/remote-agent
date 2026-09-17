@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Alignment
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -44,14 +46,29 @@ import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.RenderedItem
 
 @Composable
-internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String = "",
-    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)? = null) {
+internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit) {
     val content = remember(item) { item.presentation() }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start) {
-        Card {
-            Column(Modifier.padding(12.dp)) {
-                if (isUser) Text(content.body) else ConversationBody(content.body, cwd, perform)
-                content.imageSources.forEach { Text("画像: $it", style = MaterialTheme.typography.bodySmall) }
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (isUser && content.imageSources.isNotEmpty()) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                content.imageSources.forEach { source ->
+                    AttachmentThumbnail(source, "添付画像", perform, Modifier.size(80.dp))
+                }
+            }
+        }
+        if (content.body.isNotEmpty() || !isUser) {
+            Card {
+                Column(Modifier.padding(12.dp)) {
+                    if (isUser) Text(content.body) else ConversationBody(content.body, cwd, perform)
+                    if (!isUser) {
+                        content.imageSources.forEach { Text("画像: $it", style = MaterialTheme.typography.bodySmall) }
+                    }
+                }
             }
         }
     }

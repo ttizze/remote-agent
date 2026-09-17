@@ -151,31 +151,40 @@ struct ThreadMessageRow: View {
     @State private var copied = false
     @State private var selectingText = false
 
+    @ViewBuilder private var images: some View {
+        let sources = item.data.imageSources
+        let thumbnails = ForEach(sources.indices, id: \.self) { index in
+            ConversationImage(source: SessionImage(reference: sources[index]),
+                              label: item.data.kind == "imageGeneration" ? "生成画像" : "添付画像",
+                              identifier: "message.image.\(item.data.id).\(index)", media: media)
+                .frame(width: isUser ? 80 : nil, height: isUser ? 80 : nil)
+                .clipped()
+        }
+        if isUser, !sources.isEmpty {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { thumbnails }
+                ScrollView(.horizontal) { HStack(spacing: 8) { thumbnails } }.frame(height: 80)
+            }
+        } else {
+            thumbnails
+        }
+    }
+
     var body: some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
-                let sources = item.data.imageSources
-                ForEach(sources.indices, id: \.self) { index in
-                    ConversationImage(
-                        source: SessionImage(reference: sources[index]),
-                        label: item.data.kind == "imageGeneration" ? "生成画像" : "添付画像",
-                        identifier: "message.image.\(item.data.id).\(index)",
-                        media: media
-                    )
-                }
+                images
                 if !item.data.body.isEmpty {
                     if isUser {
                         Text(item.data.body).font(.system(size: 18))
+                            .padding(14)
+                            .background(Color(UIColor.secondarySystemBackground),
+                                        in: RoundedRectangle(cornerRadius: 22))
                     } else {
                         ConversationMarkdown(blocks: item.markdown, media: media, selection: selection)
                     }
                 }
             }
-            .padding(isUser ? 14 : 0)
-            .background(
-                isUser ? Color(UIColor.secondarySystemBackground) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 22)
-            )
             .padding(.leading, isUser ? 42 : 0)
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
             .accessibilityElement(children: .contain)

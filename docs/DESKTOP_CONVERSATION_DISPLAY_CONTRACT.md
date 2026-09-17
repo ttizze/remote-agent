@@ -372,3 +372,23 @@ results after navigation.
 - 作成直後、main 自体、detached HEAD、Git の確認失敗、作成履歴を確認できない場合は表示しない。ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。squash/rebase による別コミットへの置換は判定対象外。
 - 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定し、未マージの追加コミットがあればマークを消す。Git の状態をプロジェクト設定のキャッシュに保存しない。
 - 受け入れ確認: core の `list_preserves_merge_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `mergeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。
+
+## Image preview and draft attachments
+
+- Desktop image previews expose decrease, percentage/reset, and increase controls
+  (25–400% of the fitted view). Enlarged images scroll in both directions; selecting
+  another gallery image resets the scale.
+- Desktop, iPhone and Android show draft image thumbnails inside the composer,
+  above the text. Each attachment has a top-right remove button. Removing an
+  attachment preserves the text and other attachments. Non-image files retain
+  their filenames. Mobile thumbnails use the authenticated Host download.
+- iOS `testSimulatorCanAddASecondPhoto` verifies decoded thumbnails, removal
+  placement and draft preservation in addition to separate photo selections.
+
+- Sent user images appear as 80 px thumbnails aligned to the right above the
+  text bubble, including pending/queued messages. Image-only messages have no
+  empty text bubble. Desktop wraps additional thumbnails; mobile scrolls them
+  horizontally. Desktop/iPhone retain image preview on activation.
+- Desktop `chat_images_stay_inside_the_bubble_at_different_window_sizes` now
+  checks thumbnail size, right alignment and separation above the text bubble
+  for both pending and persisted messages, as well as viewport containment.

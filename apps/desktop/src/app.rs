@@ -107,6 +107,7 @@ struct RequestInputs {
     sent: bool,
 }
 struct ImageGallery {
+    zoom: f32,
     id: uuid::Uuid,
     entries: Vec<(Arc<String>, bool)>,
     initial: (Arc<String>, bool),

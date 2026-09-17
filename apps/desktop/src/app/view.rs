@@ -46,6 +46,7 @@ fn fitted_image(source: ImageSource, height: f32) -> Img {
 
 fn user_message_bubble() -> Div {
     v_flex()
+        .debug_selector(|| "user-message-bubble".into())
         .gap_3()
         .min_w_0()
         .max_w(px(560.))
