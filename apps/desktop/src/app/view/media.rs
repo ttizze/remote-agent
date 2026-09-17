@@ -477,7 +477,6 @@ mod file_panel_tests {
                             id: "fixture".into(),
                             name: "fixture".into(),
                             ticket: "invalid-fixture-ticket".into(),
-                            extra: Default::default(),
                         }),
                         cwd: "/fixture".into(),
                     },

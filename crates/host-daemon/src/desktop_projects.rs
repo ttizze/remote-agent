@@ -7,7 +7,6 @@ use std::{
 
 use agent_core::models::Thread;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use tokio::io::AsyncReadExt;
 
 pub(crate) mod state;
@@ -20,8 +19,6 @@ pub const HOST_THREAD_START_METHOD: &str = "host/thread/start";
 pub struct ThreadPage {
     pub data: Vec<Thread>,
     pub next_cursor: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 
 const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
@@ -251,7 +248,7 @@ mod tests {
                 .enrich_threads(std::slice::from_mut(&mut chat))
                 .await
                 .unwrap();
-            assert_eq!(chat.project_id, Some(None));
+            assert!(chat.project_id.is_none());
         }
         let mut assigned: Thread =
             serde_json::from_value(json!({"id":"assigned","cwd":cwd})).unwrap();
@@ -259,7 +256,10 @@ mod tests {
             .enrich_threads(std::slice::from_mut(&mut assigned))
             .await
             .unwrap();
-        assert_eq!(assigned.project_id, Some(Some("parent".into())));
+        assert_eq!(
+            assigned.project_id,
+            agent_core::models::ProjectMembership::Assigned("parent".into())
+        );
     }
 
     #[tokio::test]
@@ -317,14 +317,17 @@ mod tests {
             .enrich_threads(std::slice::from_mut(&mut thread))
             .await
             .unwrap();
-        assert_eq!(thread.project_id, Some(Some("p".into())));
+        assert_eq!(
+            thread.project_id,
+            agent_core::models::ProjectMembership::Assigned("p".into())
+        );
         std::fs::remove_file(roots).unwrap();
-        thread.project_id = None;
+        thread.project_id = agent_core::models::ProjectMembership::Unassigned {};
         store
             .enrich_threads(std::slice::from_mut(&mut thread))
             .await
             .unwrap();
-        assert_eq!(thread.project_id, None);
+        assert!(thread.project_id.is_none());
         std::fs::write(&path, "invalid JSON").unwrap();
         assert!(matches!(
             store.load().await,
@@ -357,6 +360,9 @@ mod tests {
             .await;
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
         result.unwrap();
-        assert_eq!(thread.project_id, Some(Some("saved".into())));
+        assert_eq!(
+            thread.project_id,
+            agent_core::models::ProjectMembership::Assigned("saved".into())
+        );
     }
 }

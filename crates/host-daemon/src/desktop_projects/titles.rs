@@ -43,8 +43,7 @@ impl<'a> TitleList<'a> {
     pub(crate) fn push(&mut self, mut thread: Thread) {
         let project_id = thread
             .project_id
-            .as_ref()
-            .and_then(Option::as_deref)
+            .as_deref()
             .and_then(|id| self.known_projects.get(id).copied());
         let target = if let Some(project_id) = project_id {
             let position = match self.recent_projects.iter().position(|id| *id == project_id) {
@@ -96,7 +95,9 @@ impl<'a> TitleList<'a> {
         thread.path = None;
         thread.preview = None;
         thread.history_mode = None;
-        thread.extra.clear();
+        thread.history_has_more = None;
+        thread.history_limit = None;
+        thread.agent_id = None;
         target.push(thread);
     }
 
@@ -149,6 +150,7 @@ impl<'a> TitleList<'a> {
         self.chats.truncate(self.chat_limit);
         data.extend(self.chats);
         ThreadList {
+            provider_errors: None,
             data,
             projects: projects
                 .into_iter()
@@ -162,7 +164,6 @@ impl<'a> TitleList<'a> {
             more_project_ids,
             has_more_projects: more_projects,
             has_more_chats: more_chats,
-            extra: Default::default(),
         }
     }
 }
@@ -197,7 +198,9 @@ mod tests {
             list.push(thread(json!({"id":format!("chat-{index}"),"preview":"\nFirst line\nprivate body","cwd":"/other"})));
         }
         assert!(list.complete());
-        let result = serde_json::to_value(list.finish()).unwrap();
+        let page = list.finish();
+        assert!(agent_core::protocol::encode(&page).unwrap().len() < 4096);
+        let result = serde_json::to_value(page).unwrap();
         let data = result["data"].as_array().unwrap();
         assert_eq!(data.len(), 30);
         assert_eq!(data[0]["id"], "p7-0");
@@ -207,14 +210,13 @@ mod tests {
         assert_eq!(data[25]["name"], "First line");
         assert!(
             data.iter()
-                .all(|thread| thread.get("preview").is_none() && thread.get("turns").is_none())
+                .all(|thread| thread["preview"].is_null() && thread["turns"].is_null())
         );
         assert_eq!(result["projects"][0]["id"], "p7");
         assert_eq!(result["projects"].as_array().unwrap().len(), 5);
         assert_eq!(result["hasMoreProjects"], true);
         assert_eq!(result["moreProjectIds"].as_array().unwrap().len(), 5);
         assert_eq!(result["hasMoreChats"], true);
-        assert!(serde_json::to_vec(&result).unwrap().len() < 4096);
     }
 
     #[test]

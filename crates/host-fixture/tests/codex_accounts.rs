@@ -21,35 +21,30 @@ async fn call(
     method: &str,
     params: Value,
 ) -> Value {
-    service
+    let reply = service
         .dispatch(
             session.id(),
-            &agent_core::peer::RpcMessage::parse(
-                &json!({"id":42,"method":method,"params":params}).to_string(),
-            )
-            .unwrap(),
+            &agent_core::protocol::json_boundary::call(method, params).unwrap(),
         )
         .await
         .unwrap();
-    loop {
-        let line = session.recv().await.expect("RPC session closed");
-        assert!(
-            !line.contains("invalid-test-signature"),
-            "Host leaked a credential into the mobile session"
-        );
-        assert!(
-            !line.contains("account/chatgptAuthTokens/refresh"),
-            "Host forwarded a private credential request to mobile"
-        );
-        let result: Value = serde_json::from_str(&line).unwrap();
-        if result["id"] == 42 {
-            let mut result = result;
-            if method == "host/session/open" && result.get("error").is_none() {
-                result["result"] = result["result"]["response"].take();
-            }
-            return result;
-        }
+    let line = agent_core::protocol::json_boundary::reply(method, &reply.initial)
+        .unwrap()
+        .to_string();
+    assert!(
+        !line.contains("invalid-test-signature"),
+        "Host leaked a credential into the mobile session"
+    );
+    assert!(
+        !line.contains("account/chatgptAuthTokens/refresh"),
+        "Host forwarded a private credential request to mobile"
+    );
+    let mut result: Value = serde_json::from_str(&line).unwrap();
+    assert!(result.get("result").is_some() || result.get("error").is_some());
+    if method == "host/session/open" && result.get("error").is_none() {
+        result["result"] = result["result"]["response"].take();
     }
+    result
 }
 
 async fn completed_turn(
@@ -58,13 +53,15 @@ async fn completed_turn(
     thread: &str,
     text: &str,
 ) -> String {
-    call(
-        service,
-        session,
-        "host/session/open",
-        json!({"session":{"provider":"codex","id":thread},"limit":5}),
-    )
-    .await;
+    let open = agent_core::protocol::Call::OpenSession(agent_core::session::OpenSession {
+        session: agent_core::session::SessionRef {
+            provider: agent_core::session::ProviderKind::Codex,
+            id: thread.into(),
+        },
+        limit: 5,
+    });
+    let reply = service.dispatch(session.id(), &open).await.unwrap();
+    let mut updates = reply.updates.unwrap();
     let result = call(
         service,
         session,
@@ -75,11 +72,15 @@ async fn completed_turn(
     assert!(result.get("error").is_none(), "{result}");
     let id = result["result"]["turn"]["id"].as_str().unwrap().to_owned();
     loop {
-        let event: Value = serde_json::from_str(&session.recv().await.unwrap()).unwrap();
-        if event["method"] == "host/session/update"
-            && event["params"]["change"]["type"] == "turn"
-            && event["params"]["change"]["completed"] == true
-            && event["params"]["change"]["turn"]["id"] == id
+        let event = agent_core::protocol::decode::<agent_core::session::SessionChange>(
+            &updates.recv().await.unwrap(),
+        )
+        .unwrap();
+        if let agent_core::session::SessionChange::Turn {
+            turn,
+            completed: true,
+        } = event
+            && turn.id == id
         {
             return id;
         }
@@ -102,7 +103,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"][0]["email"], "desktop@example.invalid");
         assert_eq!(list["result"]["selectedId"], "desktop");
-        let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
+        let started = call(&service, &mut session, "host/thread/start", json!({"cwd":home})).await;
         let thread = started["result"]["thread"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;
         let before = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
@@ -174,7 +175,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert!(call(&service, &mut session, "thread/list", json!({})).await.get("error").is_none());
         assert_eq!(call(&service, &mut session, "turn/start", json!({"threadId":"any","clientUserMessageId":"unavailable-account","input":[{"type":"text","text":"must not use a different account"}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
-        let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
+        let started = call(&service, &mut session, "host/thread/start", json!({"cwd":home})).await;
         completed_turn(&service, &mut session, started["result"]["thread"]["id"].as_str().unwrap(), "recovered account").await;
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":second})).await;
         assert!(logged_out.get("error").is_none(), "{logged_out}");
@@ -205,7 +206,13 @@ async fn helper_initialization_does_not_block_completed_turns() {
             .await
             .unwrap();
         let mut session = service.open_session(256);
-        let started = call(&service, &mut session, "thread/start", json!({"cwd":home})).await;
+        let started = call(
+            &service,
+            &mut session,
+            "host/thread/start",
+            json!({"cwd":home}),
+        )
+        .await;
         let thread = started["result"]["thread"]["id"].as_str().unwrap();
         let gate = home.join("initialize-release");
         std::fs::write(

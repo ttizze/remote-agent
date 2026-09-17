@@ -2,10 +2,7 @@
 //! only this owner publishes events and grants access to a process handle.
 use crate::host_rpc::routing::{SessionId, SessionRouter};
 use agent_core::{client::TerminalSize, peer::JsonlReader};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bex_process::{PtyCommand, PtyEvent};
-use serde::Deserialize;
-use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -52,7 +49,7 @@ impl Terminals {
         handle: String,
         cwd: String,
         size: TerminalSize,
-    ) -> Result<Value, String> {
+    ) -> Result<agent_core::models::Empty, String> {
         if handle.is_empty() || handle.len() > 256 || size.rows == 0 || size.cols == 0 {
             return Err("invalid terminal handle or size".into());
         }
@@ -110,26 +107,39 @@ impl Terminals {
             .map_err(|_| "terminal startup timed out")?
             .map_err(|_| "terminal startup stopped")??;
         cancel_start.disarm();
-        Ok(json!({}))
+        Ok(agent_core::models::Empty {})
     }
     pub(crate) async fn request(
         &self,
         owner: SessionId,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, String> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Params {
-            process_handle: String,
-            size: Option<TerminalSize>,
-            delta_base64: Option<String>,
-        }
-        let params: Params = serde_json::from_value(params).map_err(|error| error.to_string())?;
+        call: &agent_core::protocol::Call,
+    ) -> Result<agent_core::models::Empty, String> {
+        let method = call.method();
+        let (handle, action) = match call {
+            agent_core::protocol::Call::WriteTerminal(params) => {
+                if params.data.len() > 64 * 1024 {
+                    return Err("terminal input exceeds 64 KiB".into());
+                }
+                (
+                    params.process_handle.clone(),
+                    Some(Action::Write(params.data.clone())),
+                )
+            }
+            agent_core::protocol::Call::ResizeTerminal(params) => {
+                if params.size.rows == 0 || params.size.cols == 0 {
+                    return Err("terminal size must be nonzero".into());
+                }
+                (params.handle.clone(), Some(Action::Resize(params.size)))
+            }
+            agent_core::protocol::Call::KillTerminal(params) => {
+                (params.process_handle.clone(), None)
+            }
+            _ => return Err("unknown terminal operation".into()),
+        };
         let (input, stop, mut finished) = {
             let records = self.records.lock().unwrap();
             let record = records
-                .get(&params.process_handle)
+                .get(&handle)
                 .ok_or("terminal handle is unavailable")?;
             if record.owner != owner {
                 return Err("terminal belongs to another connection".into());
@@ -152,32 +162,16 @@ impl Terminals {
                     .await
                     .map_err(|_| "terminal cleanup stopped")?;
             }
-            return Ok(json!({}));
+            return Ok(agent_core::models::Empty {});
         }
-        let action = match method {
-            "process/writeStdin" => {
-                let data = params.delta_base64.ok_or("terminal input is required")?;
-                if data.len() > 88 * 1024 {
-                    return Err("terminal input exceeds 64 KiB".into());
-                }
-                Action::Write(STANDARD.decode(data).map_err(|error| error.to_string())?)
-            }
-            "process/resizePty" => {
-                let size = params.size.ok_or("terminal size is required")?;
-                if size.rows == 0 || size.cols == 0 {
-                    return Err("terminal size must be nonzero".into());
-                }
-                Action::Resize(size)
-            }
-            _ => return Err("unknown terminal operation".into()),
-        };
+        let action = action.expect("kill returned above");
         let (complete, completed) = oneshot::channel();
         input
             .send(Command { action, complete })
             .await
             .map_err(|_| "terminal has exited")?;
         completed.await.map_err(|_| "terminal has exited")??;
-        Ok(json!({}))
+        Ok(agent_core::models::Empty {})
     }
     pub(crate) fn close_session(&self, owner: SessionId) {
         for record in self
@@ -226,13 +220,6 @@ struct Worker {
     ready: Option<Receipt>,
 }
 impl Worker {
-    fn publish(&self, method: &str, mut params: Value) -> Result<(), String> {
-        params["processHandle"] = self.handle.clone().into();
-        self.router.send_line(
-            self.owner,
-            json!({"method":method,"params":params}).to_string(),
-        )
-    }
     async fn run(mut self, cwd: PathBuf, size: TerminalSize) -> Result<(), String> {
         let mut pending: Option<(u64, Receipt)> = None;
         let mut cleanup = Ok(());
@@ -254,13 +241,13 @@ impl Worker {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
                             match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
                                 PtyEvent::Started => { if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
-                                PtyEvent::Output { data } => self.publish("process/outputDelta", json!({"deltaBase64":STANDARD.encode(data),"capReached":false}))?,
+                                PtyEvent::Output { data } => self.router.send(self.owner, agent_core::protocol::Notification::Output { handle: self.handle.clone(), data, cap_reached: false })?,
                                 PtyEvent::Ack { id, error } => {
                                     let (expected, complete) = pending.take().ok_or("unexpected terminal acknowledgement")?;
                                     if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
                                     let _ = complete.send(error.map_or(Ok(()), Err));
                                 }
-                                PtyEvent::Exited { code } => { self.publish("process/exited", json!({"exitCode":i32::try_from(code).unwrap_or(1)}))?; return Ok(()); }
+                                PtyEvent::Exited { code } => { self.router.send(self.owner, agent_core::protocol::Notification::Exited { handle: self.handle.clone(), code: i32::try_from(code).unwrap_or(1) })?; return Ok(()); }
                                 PtyEvent::Failed { message } => return Err(message),
                             }
                         }
@@ -289,7 +276,7 @@ impl Worker {
                 if status.success() { Ok(()) } else { Err(format!("terminal cleanup failed: {status}")) }
             });
             cleanup.clone()?;
-            if self.stop.is_cancelled() { let _ = self.publish("process/exited", json!({"exitCode":0})); }
+            if self.stop.is_cancelled() { let _ = self.router.send(self.owner, agent_core::protocol::Notification::Exited { handle: self.handle.clone(), code: 0 }); }
             interaction
         }.await;
         if let Some(ready) = self.ready.take() {
@@ -302,7 +289,13 @@ impl Worker {
             let _ = complete.send(Err("terminal has exited".into()));
         }
         if let Err(message) = result {
-            let _ = self.publish("host/terminal/failed", json!({"message":message}));
+            let _ = self.router.send(
+                self.owner,
+                agent_core::protocol::Notification::TerminalFailed {
+                    handle: self.handle.clone(),
+                    reason: message,
+                },
+            );
         }
         cleanup
     }
@@ -336,7 +329,7 @@ mod tests {
                 // Linux validation runs this Host with SHELL=/bin/sh (dash).
                 // Disable interactive history expansion for Bash on macOS.
                 let command = "[ -z \"${BASH_VERSION-}\" ] || set +H\nsleep 120 & first=$!; sleep 120 & printf '%s %s %s\\n' \"$$\" \"$first\" \"$!\" > owned-pids; wait\n";
-                terminals.request(connection.id(), "process/writeStdin", json!({"processHandle":"jobs","deltaBase64":STANDARD.encode(command)})).await.unwrap();
+                terminals.request(connection.id(), &agent_core::protocol::Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "jobs".into(), data: command.as_bytes().to_vec() })).await.unwrap();
                 let pids = loop {
                     if let Ok(text) = std::fs::read_to_string(directory.path().join("owned-pids"))
                         && text.split_whitespace().count() == 3
@@ -358,7 +351,8 @@ mod tests {
                     assert!(terminals.in_use(&cwd));
                     terminals.shutdown().await;
                 } else {
-                    let mut kill = Box::pin(terminals.request(connection.id(), "process/kill", json!({"processHandle":"jobs"})));
+                    let call = agent_core::protocol::Call::KillTerminal(agent_core::client::TerminalKill { process_handle: "jobs".into() });
+                    let mut kill = Box::pin(terminals.request(connection.id(), &call));
                     assert!(futures_util::poll!(&mut kill).is_pending());
                     assert!(terminals.in_use(&cwd));
                     kill.await.unwrap();

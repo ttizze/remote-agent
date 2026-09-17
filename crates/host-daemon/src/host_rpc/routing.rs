@@ -6,10 +6,12 @@ use std::{
 
 use super::session_actor::SessionActor;
 use agent_core::client::ServerRequest;
+#[cfg(test)]
 use agent_core::peer::RpcMessage;
+use agent_core::protocol::{self, Notification};
 use agent_core::{
     models::ThreadResponse,
-    session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef, SessionUpdate},
+    session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef},
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -35,9 +37,48 @@ pub type SessionId = u64;
 /// A live authenticated session's bounded outbound queue.
 pub struct HostSession {
     id: SessionId,
-    receiver: mpsc::Receiver<String>,
+    receiver: mpsc::Receiver<Vec<u8>>,
     queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
     state: Weak<Mutex<State>>,
+}
+
+/// The response stream owns its subscription; dropping it unsubscribes.
+pub struct HostSubscription {
+    id: uuid::Uuid,
+    receiver: mpsc::Receiver<Vec<u8>>,
+    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    state: Weak<Mutex<State>>,
+}
+impl HostSubscription {
+    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+        let line = self.receiver.recv().await?;
+        self.queued_bytes
+            .fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+        Some(line)
+    }
+}
+impl Drop for HostSubscription {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            lock_state(&state).subscriptions.remove(&self.id);
+        }
+        while let Ok(line) = self.receiver.try_recv() {
+            self.queued_bytes
+                .fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+pub struct HostReply {
+    pub initial: Vec<u8>,
+    pub updates: Option<HostSubscription>,
+}
+impl From<protocol::Response> for HostReply {
+    fn from(initial: protocol::Response) -> Self {
+        Self {
+            initial: protocol::response_frame(initial).expect("response encodes"),
+            updates: None,
+        }
+    }
 }
 
 impl HostSession {
@@ -45,7 +86,7 @@ impl HostSession {
         self.id
     }
 
-    pub async fn recv(&mut self) -> Option<String> {
+    pub async fn recv(&mut self) -> Option<Vec<u8>> {
         let line = self.receiver.recv().await?;
         self.queued_bytes
             .fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
@@ -77,11 +118,11 @@ pub(crate) struct SessionRouter {
 const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Clone)]
 struct Outbound {
-    sender: mpsc::Sender<String>,
+    sender: mpsc::Sender<Vec<u8>>,
     bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Outbound {
-    fn try_send(&self, line: String) -> Result<(), mpsc::error::TrySendError<String>> {
+    fn try_send(&self, line: Vec<u8>) -> Result<(), mpsc::error::TrySendError<Vec<u8>>> {
         use std::sync::atomic::Ordering::Relaxed;
         let length = line.len();
         if self
@@ -105,7 +146,7 @@ struct State {
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
     executions: HashMap<SessionRef, SessionActor>,
-    subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId)>,
+    subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId, Outbound)>,
 }
 
 impl Default for State {
@@ -255,9 +296,8 @@ impl SessionRouter {
         &self,
         read: SessionRead,
         session: SessionId,
-        request: &RpcMessage<'_>,
         mut response: ThreadResponse,
-    ) -> Result<(), String> {
+    ) -> Result<HostReply, String> {
         let mut state = lock_state(&self.state);
         if !state.sessions.contains_key(&session) {
             return Err("connection closed during session open".into());
@@ -274,46 +314,48 @@ impl SessionRouter {
         let subscription_id = uuid::Uuid::new_v4();
         let mut opened = OpenedSession {
             session: read.target.clone(),
-            subscription_id,
+            subscription_id: uuid::Uuid::nil(),
             response,
         };
-        let mut line = request
-            .response::<_, ()>(Ok(&opened))
+        let mut line = protocol::encode(protocol::Response::Success { result: &opened })
             .map_err(|error| error.to_string())?;
         if line.len() > MAX_QUEUED_BYTES {
             // Many individually small items can also exceed one physical RPC.
             // Defer bodies without discarding turns or keeping a Host snapshot.
             opened.response.thread.defer_item_details(0);
-            line = request
-                .response::<_, ()>(Ok(&opened))
+            line = protocol::encode(protocol::Response::Success { result: &opened })
                 .map_err(|error| error.to_string())?;
         }
         if line.len() > MAX_QUEUED_BYTES {
-            let error = request
-                .error(
-                    "response_too_large",
-                    &"Session metadata exceeds the RPC limit; request fewer turns",
-                )
-                .map_err(|error| error.to_string())?;
-            deliver_locked(&mut state, vec![(session, error)]);
-            return Ok(());
+            let error = protocol::Response::error(
+                "response_too_large",
+                &"Session metadata exceeds the RPC limit; request fewer turns",
+            )
+            .map_err(|error| error.to_string())?;
+            return Ok(error.into());
         }
-        state
-            .subscriptions
-            .insert(subscription_id, (read.target.clone(), session));
-        deliver_locked(&mut state, vec![(session, line)]);
-        Ok(())
-    }
-
-    pub(super) fn close_subscription(&self, session: SessionId, subscription: uuid::Uuid) {
-        let mut state = lock_state(&self.state);
-        if state
-            .subscriptions
-            .get(&subscription)
-            .is_some_and(|(_, owner)| *owner == session)
-        {
-            state.subscriptions.remove(&subscription);
-        }
+        let (sender, receiver) = mpsc::channel(state.sessions[&session].sender.max_capacity());
+        let queued_bytes = state.sessions[&session].bytes.clone();
+        state.subscriptions.insert(
+            subscription_id,
+            (
+                read.target.clone(),
+                session,
+                Outbound {
+                    sender,
+                    bytes: queued_bytes.clone(),
+                },
+            ),
+        );
+        Ok(HostReply {
+            initial: line,
+            updates: Some(HostSubscription {
+                id: subscription_id,
+                receiver,
+                queued_bytes,
+                state: Arc::downgrade(&self.state),
+            }),
+        })
     }
 
     pub(crate) fn close_session(&self, session: SessionId) {
@@ -371,18 +413,17 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn send_line(&self, session: SessionId, mut line: String) -> Result<(), String> {
-        if line.len() > MAX_QUEUED_BYTES
-            && let Ok(message) = RpcMessage::parse(&line)
-            && message.kind() == agent_core::peer::RpcMessageKind::Response
-        {
-            line = message
-                .error(
-                    "response_too_large",
-                    &"RPC response exceeds the transfer limit",
-                )
-                .map_err(|error| error.to_string())?;
-        }
+    pub(crate) fn send(
+        &self,
+        session: SessionId,
+        notification: Notification,
+    ) -> Result<(), String> {
+        self.send_frame(
+            session,
+            protocol::encode(notification).map_err(|error| error.to_string())?,
+        )
+    }
+    fn send_frame(&self, session: SessionId, line: Vec<u8>) -> Result<(), String> {
         let mut state = lock_state(&self.state);
         let sender = state
             .sessions
@@ -461,12 +502,13 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn broadcast(&self, line: &str) {
+    pub(crate) fn broadcast(&self, notification: Notification) {
+        let line = protocol::encode(notification).expect("notification serializes");
         let mut state = lock_state(&self.state);
         let deliveries = state
             .sessions
             .keys()
-            .map(|id| (*id, line.to_owned()))
+            .map(|id| (*id, line.clone()))
             .collect();
         deliver_locked(&mut state, deliveries);
     }
@@ -553,8 +595,8 @@ fn change_locked(
         let connections: Vec<_> = state
             .subscriptions
             .values()
-            .filter(|(id, _)| id == target)
-            .map(|(_, connection)| *connection)
+            .filter(|(id, _, _)| id == target)
+            .map(|(_, connection, _)| *connection)
             .collect();
         for connection in connections {
             remove_session_locked(state, connection);
@@ -562,21 +604,19 @@ fn change_locked(
         state.executions.retain(|_, actor| actor.release());
         return;
     }
-    let deliveries = state
-        .subscriptions
-        .iter()
-        .filter(|(_, (id, _))| id == target)
-        .map(|(subscription, (_, connection))| {
-            (
-                *connection,
-                serde_json::json!({"method":"host/session/update", "params":SessionUpdate {
-                    subscription_id: *subscription, change: change.clone(),
-                }})
-                .to_string(),
-            )
-        })
-        .collect();
-    deliver_locked(state, deliveries);
+    let mut failed = Vec::new();
+    let line = protocol::encode(change).expect("change encodes");
+    for (id, connection, output) in state.subscriptions.values() {
+        if id != target {
+            continue;
+        }
+        if output.try_send(line.clone()).is_err() {
+            failed.push(*connection);
+        }
+    }
+    for connection in failed {
+        remove_session_locked(state, connection);
+    }
     // Background navigation needs activity, not copies of
     // provider turn/item payloads outside a subscription.
     let active = match change {
@@ -596,7 +636,10 @@ fn change_locked(
         _ => None,
     };
     if let Some(active) = active {
-        let line = serde_json::json!({"method":"host/session/activity", "params":{"session":target,"active":active,"finished":!active && matches!(change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed"))}}).to_string();
+        let line = protocol::encode(Notification::Activity {
+            session: target.clone(), active,
+            finished: !active && matches!(change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed")),
+        }).expect("activity encodes");
         let deliveries = state
             .sessions
             .keys()
@@ -607,7 +650,7 @@ fn change_locked(
     state.executions.retain(|_, actor| actor.release());
 }
 
-fn deliver_locked(state: &mut State, deliveries: Vec<(SessionId, String)>) {
+fn deliver_locked(state: &mut State, deliveries: Vec<(SessionId, Vec<u8>)>) {
     // Keep transitions, delivery, and failure cleanup under the same lock.
     // A concurrent response cannot observe aliases for a failed delivery.
     for delivery in deliveries {
@@ -649,7 +692,7 @@ fn remove_session_locked(state: &mut State, session: SessionId) {
     state.sessions.remove(&session);
     state
         .subscriptions
-        .retain(|_, (_, owner)| *owner != session);
+        .retain(|_, (_, owner, _)| *owner != session);
 }
 
 #[cfg(test)]
@@ -687,7 +730,7 @@ mod tests {
     #[tokio::test]
     async fn history_is_not_retained_or_trimmed_and_subscriptions_do_not_pin_execution() {
         let router = SessionRouter::new();
-        let mut connection = router.open_session(16);
+        let connection = router.open_session(16);
         let mut turns: Vec<_> = (0..1001)
             .map(|id| {
                 Arc::new(Turn {
@@ -709,19 +752,15 @@ mod tests {
                 ..Default::default()
             },
             model: None,
-            extra: Default::default(),
         };
-        let request =
-            RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
-        router
-            .finish_session_read(
-                open(&router, "native", 1001),
-                connection.id(),
-                &request,
-                response,
-            )
+        let response = router
+            .finish_session_read(open(&router, "native", 1001), connection.id(), response)
             .unwrap();
-        let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
+        let reply = agent_core::protocol::decode::<
+            agent_core::protocol::Response<agent_core::session::OpenedSession>,
+        >(&response.initial)
+        .unwrap()
+        .into_value();
         assert_eq!(
             reply["result"]["response"]["thread"]["turns"]
                 .as_array()
@@ -752,7 +791,7 @@ mod tests {
     #[tokio::test]
     async fn aggregate_item_bodies_are_deferred_to_fit_one_rpc() {
         let router = SessionRouter::new();
-        let mut connection = router.open_session(16);
+        let connection = router.open_session(16);
         let mut items: Vec<_> = (0..40).map(|id| json!({"id":id.to_string(),"type":"agentMessage","text":"x".repeat(512 * 1024)})).collect();
         items.push(
             json!({"id":"tool","type":"commandExecution","aggregatedOutput":"z".repeat(8192)}),
@@ -761,19 +800,15 @@ mod tests {
             json!({"thread":{"id":"native","turns":[{"id":"turn","items":items}]}}),
         )
         .unwrap();
-        let request =
-            RpcMessage::parse(r#"{"id":6,"method":"host/session/open","params":{}}"#).unwrap();
-        router
-            .finish_session_read(
-                open(&router, "native", 5),
-                connection.id(),
-                &request,
-                response,
-            )
+        let response = router
+            .finish_session_read(open(&router, "native", 5), connection.id(), response)
             .unwrap();
-        let line = connection.recv().await.unwrap();
+        let line = response.initial;
         assert!(line.len() < 64 * 1024);
-        let reply: Value = serde_json::from_str(&line).unwrap();
+        let reply =
+            protocol::decode::<protocol::Response<agent_core::session::OpenedSession>>(&line)
+                .unwrap()
+                .into_value();
         let turn = &reply["result"]["response"]["thread"]["turns"][0];
         assert_eq!(turn["items"].as_array().unwrap().len(), 41);
         assert_eq!(turn["deferredItemIds"].as_array().unwrap().len(), 41);
@@ -784,45 +819,31 @@ mod tests {
     #[tokio::test]
     async fn oversized_rpc_returns_an_error_without_dropping_the_connection_or_subscribing() {
         let router = SessionRouter::new();
-        let mut connection = router.open_session(16);
-        let request =
-            RpcMessage::parse(r#"{"id":7,"method":"host/session/open","params":{}}"#).unwrap();
+        let connection = router.open_session(16);
         for _ in 0..2 {
             let response = serde_json::from_value(
-                json!({"thread":{"id":"native","metadata":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
+                json!({"thread":{"id":"native","name":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
             )
             .unwrap();
-            router
-                .finish_session_read(
-                    open(&router, "native", 5),
-                    connection.id(),
-                    &request,
-                    response,
-                )
+            let response = router
+                .finish_session_read(open(&router, "native", 5), connection.id(), response)
                 .unwrap();
-            let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
-            assert_eq!(reply["id"], 7);
+            let reply = agent_core::protocol::decode::<
+                agent_core::protocol::Response<agent_core::session::OpenedSession>,
+            >(&response.initial)
+            .unwrap()
+            .into_value();
             assert_eq!(reply["error"]["code"], "response_too_large");
             router.ensure_session(connection.id()).unwrap();
         }
         assert!(lock_state(&router.state).subscriptions.is_empty());
         assert!(lock_state(&router.state).executions.is_empty());
-        router
-            .send_line(
-                connection.id(),
-                json!({"id":8,"result":"x".repeat(MAX_QUEUED_BYTES + 1)}).to_string(),
-            )
-            .unwrap();
-        let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
-        assert_eq!(reply["error"]["code"], "response_too_large");
-        router.send_line(connection.id(), "healthy".into()).unwrap();
-        assert_eq!(connection.recv().await.as_deref(), Some("healthy"));
     }
 
     #[tokio::test]
     async fn completion_during_native_read_is_overlaid_before_live_updates() {
         let router = SessionRouter::new();
-        let mut connection = router.open_session(16);
+        let connection = router.open_session(16);
         let read = open(&router, "native", 5);
         turn(&router, false);
         router.session_change(
@@ -837,7 +858,8 @@ mod tests {
                     kind: Some("agentMessage".into()),
                     text: Some("start".into()),
                     ..Default::default()
-                },
+                }
+                .into(),
             },
         );
         router.session_change(
@@ -853,27 +875,21 @@ mod tests {
             },
         );
         turn(&router, true);
-        let request =
-            RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
-        router
+        let response = router
             .finish_session_read(
                 read,
                 connection.id(),
-                &request,
                 serde_json::from_value(json!({
                     "thread":{"id":"native","turns":[{"id":"run","status":"inProgress","items":[]}]}
                 }))
                 .unwrap(),
             )
             .unwrap();
-        // Background activity messages can precede the response; subscription updates cannot.
-        let reply = loop {
-            let reply: Value = serde_json::from_str(&connection.recv().await.unwrap()).unwrap();
-            assert_ne!(reply["method"], "host/session/update");
-            if reply["id"] == 1 {
-                break reply;
-            }
-        };
+        let reply = agent_core::protocol::decode::<
+            agent_core::protocol::Response<agent_core::session::OpenedSession>,
+        >(&response.initial)
+        .unwrap()
+        .into_value();
         let current = &reply["result"]["response"]["thread"]["turns"][0];
         assert_eq!(current["status"], "completed");
         assert_eq!(current["items"][0]["text"], "start final");
@@ -905,23 +921,24 @@ mod tests {
         let slow = router.open_session(100);
         let mut healthy = router.open_session(100);
         router
-            .send_line(slow.id(), "x".repeat(MAX_QUEUED_BYTES))
+            .send_frame(slow.id(), vec![0; MAX_QUEUED_BYTES])
             .unwrap();
-        assert!(router.send_line(slow.id(), "overflow".into()).is_err());
-        router.send_line(healthy.id(), "current".into()).unwrap();
-        assert_eq!(healthy.recv().await.as_deref(), Some("current"));
+        assert!(router.send_frame(slow.id(), b"overflow".to_vec()).is_err());
+        router
+            .send_frame(healthy.id(), b"current".to_vec())
+            .unwrap();
+        assert_eq!(healthy.recv().await.as_deref(), Some(b"current".as_slice()));
     }
 
     #[test]
     fn slow_session_subscribers_do_not_block_other_devices_or_destroy_current_state() {
         let router = SessionRouter::new();
-        let mut slow = router.open_session(1);
-        let mut healthy = router.open_session(8);
+        let slow = router.open_session(1);
+        let healthy = router.open_session(8);
         let response: ThreadResponse =
             serde_json::from_value(serde_json::json!({"thread":{"id":"native","turns":[]}}))
                 .unwrap();
-        let request =
-            RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
+        let mut streams = Vec::new();
         for connection in [slow.id(), healthy.id()] {
             let read = router
                 .begin_session_read(OpenSession {
@@ -929,28 +946,85 @@ mod tests {
                     limit: 5,
                 })
                 .unwrap();
-            router
-                .finish_session_read(read, connection, &request, response.clone())
+            let response = router
+                .finish_session_read(read, connection, response.clone())
                 .unwrap();
+            streams.push(response);
         }
         let notification = RpcMessage::parse(r#"{"method":"thread/status/changed","params":{"threadId":"native","status":{"type":"active"}}}"#).unwrap();
         crate::host_rpc::codex::event(&router, &notification).unwrap();
+        crate::host_rpc::codex::event(&router, &notification).unwrap();
         assert!(router.ensure_session(slow.id()).is_err());
         assert!(router.ensure_session(healthy.id()).is_ok());
-        let initial: Value = serde_json::from_str(&healthy.receiver.try_recv().unwrap()).unwrap();
-        let update: Value = serde_json::from_str(&healthy.receiver.try_recv().unwrap()).unwrap();
-        assert_eq!(initial["id"], 1);
-        assert_eq!(update["method"], "host/session/update");
-        assert_eq!(
-            update["params"]["subscriptionId"],
-            initial["result"]["subscriptionId"]
+        let initial = protocol::decode::<protocol::Response<agent_core::session::OpenedSession>>(
+            &streams[1].initial,
+        )
+        .unwrap()
+        .into_value();
+        let update = protocol::decode::<SessionChange>(
+            &streams[1]
+                .updates
+                .as_mut()
+                .unwrap()
+                .receiver
+                .try_recv()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(initial.get("result").is_some());
+        assert!(initial["result"].get("subscriptionId").is_none());
+        assert!(matches!(update, SessionChange::Status { .. }));
+        assert!(
+            streams[0]
+                .updates
+                .as_mut()
+                .unwrap()
+                .receiver
+                .try_recv()
+                .is_ok()
         );
-        assert!(slow.receiver.try_recv().is_ok());
         assert!(matches!(
-            slow.receiver.try_recv(),
+            streams[0].updates.as_mut().unwrap().receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
         assert!(lock_state(&router.state).executions.is_empty());
+    }
+
+    #[test]
+    fn subscriptions_share_the_connection_budget_and_drop_releases_unread_bytes() {
+        let router = SessionRouter::new();
+        let connection = router.open_session(8);
+        let response: ThreadResponse =
+            serde_json::from_value(json!({"thread":{"id":"native","turns":[]}})).unwrap();
+        let first = router
+            .finish_session_read(
+                open(&router, "native", 5),
+                connection.id(),
+                response.clone(),
+            )
+            .unwrap()
+            .updates
+            .unwrap();
+        let second = router
+            .finish_session_read(open(&router, "native", 5), connection.id(), response)
+            .unwrap()
+            .updates
+            .unwrap();
+        let (a, b, budget) = {
+            let state = lock_state(&router.state);
+            (
+                state.subscriptions[&first.id].2.clone(),
+                state.subscriptions[&second.id].2.clone(),
+                state.sessions[&connection.id()].bytes.clone(),
+            )
+        };
+        a.try_send(vec![0; MAX_QUEUED_BYTES / 2]).unwrap();
+        assert!(b.try_send(vec![0; MAX_QUEUED_BYTES / 2 + 1]).is_err());
+        drop(first);
+        b.try_send(vec![0; MAX_QUEUED_BYTES / 2 + 1]).unwrap();
+        drop(second);
+        assert_eq!(budget.load(std::sync::atomic::Ordering::Relaxed), 0);
+        router.ensure_session(connection.id()).unwrap();
     }
 
     #[test]
@@ -981,7 +1055,6 @@ mod tests {
 fn identical_native_request_ids_keep_their_provider_owner() {
     let router = SessionRouter::new();
     let connection = router.open_session(32);
-    let open = RpcMessage::parse(r#"{"id":1,"method":"host/session/open","params":{}}"#).unwrap();
     let native = serde_json::json!("claude-permission:shared-native-id");
     let mut ids = Vec::new();
     for thread in ["codex-native", "claude:claude-native"] {
@@ -995,8 +1068,8 @@ fn identical_native_request_ids_keep_their_provider_owner() {
         let response = serde_json::from_value(serde_json::json!({"thread":{"id":thread,
                 "turns":[{"id":"turn","status":"inProgress","items":[]}]}}))
         .unwrap();
-        router
-            .finish_session_read(read, connection.id(), &open, response)
+        let _response = router
+            .finish_session_read(read, connection.id(), response)
             .unwrap();
         router.session_change(
             &target,

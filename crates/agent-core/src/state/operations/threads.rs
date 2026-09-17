@@ -6,7 +6,13 @@ impl ListThreads {
         Self { query }
     }
 }
-rpc::rpc_method!(ListThreads, ThreadList, "host/thread/list");
+rpc::rpc_method!(
+    ListThreads,
+    ThreadList,
+    "host/thread/list",
+    ListThreads,
+    |self| self.clone()
+);
 
 impl Operation for ListThreads {
     rpc_operation!();
@@ -18,12 +24,8 @@ impl Operation for ListThreads {
         snapshot.list_query = Arc::new(self.query.clone());
         Ok(())
     }
-    const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, mut threads: Self::Output) -> Vec<Effect> {
-        if let Some(errors) = threads
-            .extra
-            .get("providerErrors")
-            .and_then(Value::as_object)
+        if let Some(errors) = threads.provider_errors.as_ref()
             && let Some(previous) = &snapshot.threads
         {
             for cached in &previous.data {
@@ -46,7 +48,7 @@ impl Operation for ListThreads {
                         .any(|thread| thread.id.as_ref() == Some(id))
                 {
                     let mut cached = cached.clone();
-                    cached.extra.insert("listStale".into(), true.into());
+                    cached.list_stale = Some(true);
                     cached.status = None;
                     threads.data.push(cached);
                 }
@@ -56,9 +58,10 @@ impl Operation for ListThreads {
                     .projects
                     .iter()
                     .any(|current| current.id == project.id)
-                    && threads.data.iter().any(|thread| {
-                        thread.project_id.as_ref().and_then(Option::as_ref) == Some(&project.id)
-                    })
+                    && threads
+                        .data
+                        .iter()
+                        .any(|thread| thread.project_id.as_ref() == Some(&project.id))
                 {
                     threads.projects.push(project.clone());
                 }
@@ -84,6 +87,9 @@ pub use crate::client::ReadItem;
 impl rpc::RpcMethod for ReadItem {
     type Output = rpc::ItemResponse;
     const METHOD: &'static str = "host/thread/item/read";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::ReadItem(self.clone()))
+    }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
         if output.item.id == self.item_id.as_str() {
             Ok(())
@@ -131,21 +137,6 @@ impl ReadItem {
         output: ItemRead,
         current_epoch: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        if output
-            .response
-            .as_ref()
-            .is_ok_and(|response| response.transfer.is_some())
-        {
-            // Consume the Host's grant even when a newer update has made this
-            // response stale. Dropping it locally does not release the grant.
-            return Ok(vec![Effect::continuation(ResolveItem {
-                request: self,
-                source: output.source,
-                subscription: output.subscription,
-                response: output.response?,
-                current_epoch,
-            })]);
-        }
         let current = self.source(snapshot);
         if !current_epoch
             || output.subscription != snapshot.subscriptions.get(&self.thread_id).copied()
@@ -178,13 +169,25 @@ impl Operation for ReadItem {
     type Output = ItemRead;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let source = self.source(context.snapshot).cloned();
+        let subscription = context.snapshot.subscriptions.get(&self.thread_id).copied();
+        let response = context.call(self).await?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            response.resolve(context.session),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(PeerError::RequestTimeout {
+                method: "item body transfer".into(),
+            })
+        });
         Ok(ItemRead {
             source,
-            subscription: context.snapshot.subscriptions.get(&self.thread_id).copied(),
-            response: Ok(context.call(self).await?),
+            subscription,
+            response,
         })
     }
-    const ORDERED: bool = true;
+
     fn complete(
         self,
         snapshot: &mut Snapshot,
@@ -192,47 +195,6 @@ impl Operation for ReadItem {
         current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
         self.apply_read(snapshot, output, current)
-    }
-}
-
-#[derive(Debug)]
-struct ResolveItem {
-    request: ReadItem,
-    source: Option<Arc<Item>>,
-    subscription: Option<uuid::Uuid>,
-    response: rpc::ItemResponse,
-    current_epoch: bool,
-}
-impl Operation for ResolveItem {
-    fn item_read(&self) -> Option<&ReadItem> {
-        Some(&self.request)
-    }
-    type Output = ItemRead;
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        Ok(ItemRead {
-            source: self.source.clone(),
-            subscription: self.subscription,
-            response: tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                self.response.clone().resolve(context.session),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(PeerError::RequestTimeout {
-                    method: "item body transfer".into(),
-                    id: 0,
-                })
-            }),
-        })
-    }
-    fn complete(
-        self,
-        snapshot: &mut Snapshot,
-        output: Self::Output,
-        current: bool,
-    ) -> Result<Vec<Effect>, PeerError> {
-        self.request
-            .apply_read(snapshot, output, current && self.current_epoch)
     }
 }
 
@@ -257,11 +219,7 @@ impl ReadThread {
     }
     pub(super) fn with_history(mut self, thread: Option<&Thread>) -> Self {
         if let Some(thread) = thread {
-            let requested = thread
-                .extra
-                .get("historyLimit")
-                .and_then(Value::as_u64)
-                .unwrap_or(5);
+            let requested = thread.history_limit.unwrap_or(5);
             self.limit = self
                 .limit
                 .max(u32::try_from(requested).unwrap_or(u32::MAX))
@@ -285,13 +243,17 @@ impl ReadThread {
 impl rpc::RpcMethod for ReadThread {
     type Output = crate::session::OpenedSession;
     const METHOD: &'static str = "host/session/open";
-    fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        crate::session::OpenSession {
-            session: crate::session::SessionRef::from_thread_id(&self.thread_id)
-                .map_err(serde::ser::Error::custom)?,
-            limit: self.limit as usize,
-        }
-        .serialize(serializer)
+    fn subscription(output: &mut Self::Output, id: uuid::Uuid) {
+        output.subscription_id = id;
+    }
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::OpenSession(
+            crate::session::OpenSession {
+                session: crate::session::SessionRef::from_thread_id(&self.thread_id)
+                    .map_err(|error| PeerError::InvalidMessage(error.into()))?,
+                limit: self.limit as usize,
+            },
+        ))
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
         if output.session.thread_id() != self.thread_id {
@@ -332,7 +294,6 @@ impl Operation for ReadThread {
         snapshot.error = None;
         Ok(())
     }
-    const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, mut output: Self::Output) -> Vec<Effect> {
         if output
             .response
@@ -393,13 +354,7 @@ impl Operation for ReadThread {
             refresh_thread(snapshot, output.response.thread)
         };
         effects.append(&mut details);
-        if let Some(old) = Arc::make_mut(&mut snapshot.subscriptions)
-            .insert(self.thread_id, output.subscription_id)
-        {
-            effects.push(Effect::execute(CloseSubscription {
-                subscription_id: old.to_string(),
-            }));
-        }
+        Arc::make_mut(&mut snapshot.subscriptions).insert(self.thread_id, output.subscription_id);
         effects
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -408,9 +363,7 @@ impl Operation for ReadThread {
         if !snapshot.subscriptions.contains_key(&self.thread_id) {
             refresh_thread(snapshot, output.response.thread);
         }
-        vec![Effect::execute(CloseSubscription {
-            subscription_id: output.subscription_id.to_string(),
-        })]
+        Vec::new()
     }
 }
 
@@ -433,14 +386,14 @@ pub(super) fn open_thread(
     let cwd = thread.cwd.clone().unwrap_or_default();
     let mut effects = refresh_thread(snapshot, thread);
     if let Some(id) = id {
-        effects.extend(navigate(
+        navigate(
             snapshot,
             Navigation {
                 thread_id: Some(id.clone()),
                 draft_key: id.clone(),
                 cwd,
             },
-        ));
+        );
         if let Some(model) = model {
             let (updated, _) = reduce(
                 snapshot,
@@ -476,6 +429,7 @@ pub struct ForkThread {
     pub thread_id: String,
     pub last_turn_id: String,
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
+    #[serde(default)]
     pub exclude_turns: bool,
 }
 impl ForkThread {
@@ -490,6 +444,9 @@ impl ForkThread {
 impl rpc::RpcMethod for ForkThread {
     type Output = crate::models::ThreadResponse;
     const METHOD: &'static str = "thread/fork";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::ForkThread(self.clone()))
+    }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
         rpc::validate_thread(output, None)
     }
@@ -498,7 +455,6 @@ impl rpc::RpcMethod for ForkThread {
 impl Operation for ForkThread {
     rpc_operation!();
     const INVALIDATES: bool = true;
-    const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let id = output.thread.id.clone().expect("validated thread ID");
         let mut effects = open_thread(snapshot, output.thread, output.model);
@@ -522,17 +478,16 @@ impl Operation for ForkThread {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartThread {
-    #[serde(skip_serializing_if = "empty_cwd")]
     pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
-fn empty_cwd(cwd: &Option<String>) -> bool {
-    cwd.as_deref().is_none_or(|cwd| cwd.trim().is_empty())
-}
+
 impl rpc::RpcMethod for StartThread {
     type Output = crate::models::ThreadResponse;
     const METHOD: &'static str = "host/thread/start";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::StartThread(self.clone()))
+    }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
         rpc::validate_thread(output, None)
     }
@@ -540,7 +495,6 @@ impl rpc::RpcMethod for StartThread {
 
 impl Operation for StartThread {
     rpc_operation!();
-    const ORDERED: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         refresh_thread(snapshot, output.thread)
     }
@@ -556,24 +510,16 @@ pub struct Interrupt {
     pub thread_id: String,
     pub turn_id: String,
 }
-rpc::rpc_method!(Interrupt, Map<String, Value>, "turn/interrupt");
+rpc::rpc_method!(
+    Interrupt,
+    crate::models::Empty,
+    "turn/interrupt",
+    Interrupt,
+    |self| self.clone()
+);
 
 impl Operation for Interrupt {
     rpc_operation!();
-}
-
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseSubscription {
-    pub subscription_id: String,
-}
-rpc::rpc_method!(CloseSubscription, Map<String, Value>, "host/session/close");
-impl Operation for CloseSubscription {
-    rpc_operation!();
-    fn disconnected_is_complete(&self) -> bool {
-        true
-    }
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -588,9 +534,8 @@ impl Operation for LoadModels {
     fn apply(self, snapshot: &mut Snapshot, catalog: Self::Output) -> Vec<Effect> {
         let models = catalog.data;
         let errors = catalog
-            .extra
-            .get("providerErrors")
-            .and_then(Value::as_object)
+            .provider_errors
+            .as_ref()
             .cloned()
             .unwrap_or_default();
         let drafts = snapshot.drafts.clone();
@@ -619,12 +564,14 @@ pub use crate::client::OpenRequest;
 impl rpc::RpcMethod for OpenRequest {
     type Output = crate::session::SessionRef;
     const METHOD: &'static str = "host/session/request";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::RequestSession(self.clone()))
+    }
 }
 impl Operation for OpenRequest {
     type Output = crate::session::OpenedSession;
-    const ORDERED: bool = true;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let session = context.client.call(self).await?.value;
+        let session = context.client.call(self).await?;
         let id = session.thread_id();
         let open = ReadThread::new(id.clone())
             .with_history(context.snapshot.conversations.get(&id).map(Arc::as_ref));
@@ -659,7 +606,7 @@ mod item_read_tests {
         )
     }
     fn read(snapshot: &Snapshot, request: &ReadItem) -> ItemRead {
-        ItemRead { source: request.source(snapshot).cloned(), subscription: snapshot.subscriptions.get("chat").copied(), response: Ok(rpc::ItemResponse {item: serde_json::from_value(serde_json::json!({"id":"item","type":"agentMessage","text":"old full body","status":"inProgress"})).unwrap(), transfer:None,extra:Default::default()}) }
+        ItemRead { source: request.source(snapshot).cloned(), subscription: snapshot.subscriptions.get("chat").copied(), response: Ok(rpc::ItemResponse {item: serde_json::from_value(serde_json::json!({"id":"item","type":"agentMessage","text":"old full body","status":"inProgress"})).unwrap(), transfer:None,}) }
     }
     fn update(snapshot: &mut Snapshot, change: SessionChange) {
         let thread = change.apply(&snapshot.conversations["chat"]).unwrap();
@@ -742,14 +689,12 @@ mod item_read_tests {
                 false,
                 PeerError::RequestTimeout {
                     method: "item body transfer".into(),
-                    id: 0,
                 },
             ),
             (
                 true,
                 PeerError::RequestTimeout {
                     method: "item body transfer".into(),
-                    id: 0,
                 },
             ),
         ] {

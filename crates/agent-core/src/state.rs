@@ -98,7 +98,8 @@ pub enum TerminalPhase {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalOutput {
     pub sequence: u64,
-    pub data: String,
+    #[serde(with = "crate::protocol::bytes")]
+    pub data: Vec<u8>,
     pub cap_reached: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -182,7 +183,8 @@ pub enum Event {
     SubmissionFailed(String),
     SubmissionUnknown(String),
 
-    Notification { method: String, params: Value },
+    Notification(crate::protocol::Notification),
+    SessionUpdate(Box<crate::session::SessionUpdate>),
     Connected,
     Disconnected(String),
     Failed(String),
@@ -202,7 +204,8 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
     match event {
         Event::Intent(intent) => reduce_intent(previous, intent),
 
-        Event::Notification { method, params } => notification(previous, &method, params),
+        Event::Notification(message) => notification(previous, message),
+        Event::SessionUpdate(update) => notifications::session_update(previous, *update),
         event => reduce_event(previous, event),
     }
 }
@@ -225,14 +228,14 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
         UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, StartThread,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
-        Interrupt, CloseSubscription,
+        Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
         LoadHostManagement, LoadModels,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
         Intent::ReadOlder { thread_id } => {
             let limit = u32::try_from(previous.conversations.get(&thread_id).map_or(5, |thread| {
-                thread.extra.get("historyLimit").and_then(Value::as_u64)
+                thread.history_limit
                     .unwrap_or_else(|| thread.turns.as_ref().map_or(5, |turns| turns.len() as u64))
             })).unwrap_or(u32::MAX).saturating_add(5);
             return prepare(previous, next, op::ReadThread { limit, ..op::ReadThread::new(thread_id) });
@@ -296,8 +299,8 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
 
         Intent::ShowThreadList => {
             next.epoch += 1;
-            let effects = navigate(&mut next, Navigation::default());
-            return (next, effects);
+            navigate(&mut next, Navigation::default());
+            return (next, Vec::new());
         }
         Intent::NewChat { cwd } => {
             next.epoch += 1;
@@ -313,12 +316,12 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 };
                 Arc::make_mut(&mut next.drafts).insert(key.clone(), Arc::new(draft));
             }
-            let mut effects = navigate(&mut next, Navigation {
+            navigate(&mut next, Navigation {
                 cwd,
                 draft_key: key,
                 ..Default::default()
             });
-            effects.extend(op::review_workspace(&mut next));
+            let effects = op::review_workspace(&mut next).into_iter().collect();
             return (next, effects);
         }
 
@@ -419,9 +422,9 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     });
     (next, Vec::new())
 }
-fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
+fn navigate(snapshot: &mut Snapshot, navigation: Navigation) {
     let previous_id = snapshot.navigation.thread_id.clone();
-    let close = previous_id
+    let _ = previous_id
         .filter(|id| navigation.thread_id.as_ref() != Some(id))
         .filter(|id| {
             snapshot.activity.active.get(id) != Some(&true)
@@ -440,14 +443,6 @@ fn navigate(snapshot: &mut Snapshot, navigation: Navigation) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.activity).unread.remove(id);
     }
     snapshot.navigation = Arc::new(navigation);
-    close
-        .into_iter()
-        .map(|id| {
-            Effect::execute(op::CloseSubscription {
-                subscription_id: id.to_string(),
-            })
-        })
-        .collect()
 }
 
 fn prepare<O: operations::Operation>(
@@ -559,7 +554,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.error = Some(reason);
         }
         Event::Failed(error) => next.error = Some(error),
-        Event::Intent(_) | Event::Notification { .. } => {
+        Event::Intent(_) | Event::Notification(_) | Event::SessionUpdate(_) => {
             unreachable!("handled by the reducer router")
         }
     }
@@ -728,7 +723,7 @@ fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) 
     if let Some(thread) = previous.conversations.get(thread_id) {
         match (crate::session::SessionChange::Item {
             turn_id: turn_id.into(),
-            item,
+            item: item.into(),
         })
         .apply(thread)
         {

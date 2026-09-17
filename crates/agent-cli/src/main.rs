@@ -1,9 +1,7 @@
-use agent_core::peer::JsonlReader;
 use agent_core::state::operations as op;
 use agent_core::{
     client::Answer,
     models::ListQuery,
-    peer::RpcPeer,
     state::{Draft, Intent, Navigation, Snapshot},
     store::{Outcome, Store},
     transport::{Endpoint, Identity, Relays, Ticket},
@@ -11,27 +9,22 @@ use agent_core::{
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 #[derive(Parser)]
 #[command(about = "Headless agent client")]
 struct Args {
-    /// JSONL fixture executable, with stderr inherited for diagnostics.
-    #[arg(long, required_unless_present = "ticket", conflicts_with = "ticket")]
-    stdio: Option<String>,
-    #[arg(long, requires = "stdio")]
-    stdio_arg: Vec<String>,
     /// Endpoint ticket for an already paired Host.
-    #[arg(long, requires = "identity_file")]
-    ticket: Option<String>,
+    #[arg(long)]
+    ticket: String,
     /// Existing 32-byte client identity secret. Never printed.
-    #[arg(long, requires = "ticket")]
-    identity_file: Option<PathBuf>,
+    #[arg(long)]
+    identity_file: PathBuf,
     /// One-use invitation for first pairing with this Host.
-    #[arg(long, requires = "ticket")]
+    #[arg(long)]
     invitation: Option<uuid::Uuid>,
     /// Disable relays and public address lookup for isolated local fixtures.
-    #[arg(long, requires = "ticket")]
+    #[arg(long)]
     no_relay: bool,
     #[command(subcommand)]
     command: Command,
@@ -105,26 +98,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
         Command::Approve { .. } => {}
     }
-    let mut child = None;
-    let store = if let Some(program) = args.stdio {
-        let mut process = tokio::process::Command::new(program)
-            .args(args.stdio_arg)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("cannot start stdio provider")?;
-        let peer = RpcPeer::open(
-            JsonlReader::new(process.stdout.take().expect("piped stdout")),
-            process.stdin.take().expect("piped stdin"),
-            Some(Duration::from_secs(30)),
-            64,
-        )?;
-        child = Some(process);
-        Store::new(peer, snapshot)
-    } else {
-        let secret = tokio::fs::read(args.identity_file.expect("identity required with ticket"))
+    let store = {
+        let secret = tokio::fs::read(args.identity_file)
             .await
             .context("cannot read client identity file")?;
         let bytes: [u8; 32] = secret
@@ -140,11 +115,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         )
         .await
         .context("cannot bind client endpoint")?;
-        let ticket: Ticket = args
-            .ticket
-            .expect("connection required")
-            .parse()
-            .context("cannot parse Host ticket")?;
+        let ticket: Ticket = args.ticket.parse().context("cannot parse Host ticket")?;
         Store::connect(&endpoint, &ticket, snapshot, args.invitation)
             .await
             .context("cannot connect to Host")?
@@ -226,8 +197,5 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }
     }
     store.close().await?;
-    if let Some(mut child) = child {
-        child.kill().await?;
-    }
     Ok(())
 }

@@ -6,7 +6,7 @@ use crate::desktop_projects::ThreadPage;
 use agent_core::{
     client as op,
     models::{Item, Thread, ThreadResponse, Turn},
-    peer::{RpcMessage, RpcMessageKind, RpcResponse},
+    peer::{RpcMessage, RpcMessageKind},
     session::{ProviderKind, SessionChange, SessionRef, TextField},
 };
 use codex_app_server::CodexAppServer;
@@ -122,20 +122,39 @@ impl Codex {
             .map_err(|error| Failure::new("codex_unavailable", error))
     }
 
-    pub(super) async fn request(&self, line: &str) -> Result<String, Failure> {
+    pub(super) async fn request_raw(&self, line: &str) -> Result<String, Failure> {
         let reply = self
             .server()?
             .request_raw_sequenced(line)
             .await
             .map_err(Failure::from)?;
+        self.wait_for_events(reply.sequence).await?;
+        Ok(reply.value)
+    }
+
+    pub(super) async fn request<P: Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<T, Failure> {
+        let reply = self
+            .server()?
+            .request_sequenced(method, params)
+            .await
+            .map_err(Failure::from)?;
+        self.wait_for_events(reply.sequence).await?;
+        reply.value.outcome.map_err(Failure::upstream)
+    }
+
+    async fn wait_for_events(&self, sequence: u64) -> Result<(), Failure> {
         let mut processed = self.processed.subscribe();
         tokio::select! {
-            result = processed.wait_for(|sequence| *sequence >= reply.sequence) => {
+            result = processed.wait_for(|position| *position >= sequence) => {
                 result.map_err(|_| Failure::unknown("codex_unavailable", "Codex event pump stopped"))?;
             }
             _ = self.stopped.cancelled() => return Err(Failure::unknown("codex_unavailable", "Codex event stream is unavailable")),
         }
-        Ok(reply.value)
+        Ok(())
     }
 
     pub(super) async fn thread_page(
@@ -151,10 +170,12 @@ impl Codex {
     }
 
     pub(super) async fn read(&self, id: &str, limit: usize) -> Result<ThreadResponse, Failure> {
-        let line = self.request(&serde_json::json!({"id":0,"method":"thread/read","params":{"threadId":id,"includeTurns":false}}).to_string()).await?;
-        let mut response = RpcResponse::<ThreadResponse>::parse(&line)?
-            .outcome
-            .map_err(Failure::upstream)?;
+        let mut response: ThreadResponse = self
+            .request(
+                "thread/read",
+                &serde_json::json!({"threadId":id,"includeTurns":false}),
+            )
+            .await?;
         let history = self
             .history(
                 id,
@@ -164,16 +185,18 @@ impl Codex {
             .await?;
         response.thread.turns = history.turns;
         response.thread.history_read_state = history.history_read_state;
-        response.thread.extra.extend(history.extra);
+        response.thread.history_has_more = history.history_has_more;
         Ok(response)
     }
 
     async fn history(&self, id: &str, paginated: bool, limit: usize) -> Result<Thread, Failure> {
         if !paginated {
-            let line = self.request(&serde_json::json!({"id":0,"method":"thread/read","params":{"threadId":id,"includeTurns":true}}).to_string()).await?;
-            let mut thread = RpcResponse::<ThreadResponse>::parse(&line)?
-                .outcome
-                .map_err(Failure::upstream)?
+            let mut thread = self
+                .request::<_, ThreadResponse>(
+                    "thread/read",
+                    &serde_json::json!({"threadId":id,"includeTurns":true}),
+                )
+                .await?
                 .thread;
             if thread.id.as_deref() != Some(id) {
                 return Err(Failure::new(
@@ -185,7 +208,7 @@ impl Codex {
                 && turns.len() > limit
             {
                 turns.drain(..turns.len() - limit);
-                thread.extra.insert("historyHasMore".into(), true.into());
+                thread.history_has_more = Some(true);
             }
             return Ok(thread);
         }
@@ -240,12 +263,7 @@ impl Codex {
         };
         page.data.reverse();
         thread.turns = Some(page.data);
-        thread.extra.insert(
-            "historyHasMore".into(),
-            page.next_cursor
-                .is_some_and(|cursor| !cursor.is_empty())
-                .into(),
-        );
+        thread.history_has_more = Some(page.next_cursor.is_some_and(|cursor| !cursor.is_empty()));
         Ok(thread)
     }
     // Keep App Server cursors opaque. Both initial hydration and older pages
@@ -255,15 +273,9 @@ impl Codex {
         method: &str,
         params: &HistoryParams<'_>,
     ) -> Result<HistoryPage<T>, String> {
-        let line = serde_json::json!({"id":0,"method":method,"params":params}).to_string();
-        let response = self
-            .request(&line)
+        self.request(method, params)
             .await
-            .map_err(|error| error.to_string())?;
-        RpcResponse::<HistoryPage<T>>::parse(&response)
-            .map_err(|error| error.to_string())?
-            .outcome
-            .map_err(|error| error.get().to_owned())
+            .map_err(|error| error.to_string())
     }
 
     async fn hydrate_turn_page(
@@ -437,7 +449,6 @@ impl Codex {
                 return Ok(agent_core::client::ItemResponse {
                     item: Arc::unwrap_or_clone(entry.item),
                     transfer: None,
-                    extra: Default::default(),
                 });
             }
             cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
@@ -460,16 +471,16 @@ impl Codex {
 /// Decode only native conversation events. Every other message keeps its owner.
 fn notification_change(
     method: &str,
-    value: Value,
+    value: &Value,
 ) -> Result<Option<(String, SessionChange)>, serde_json::Error> {
-    use serde_json::from_value as decode;
+    use serde::Deserialize;
     let turn_id = value["turnId"].as_str().unwrap_or_default().to_owned();
     let change = match method {
         "thread/status/changed" => SessionChange::Status {
-            status: decode(value["status"].clone())?,
+            status: Deserialize::deserialize(&value["status"])?,
         },
         "turn/started" | "turn/completed" => {
-            let mut turn: Turn = decode(value["turn"].clone())?;
+            let mut turn: Turn = Deserialize::deserialize(&value["turn"])?;
             turn.items_view.get_or_insert_with(|| "full".into());
             turn.items_has_more.get_or_insert(false);
             SessionChange::Turn {
@@ -479,10 +490,10 @@ fn notification_change(
         }
         "item/started" | "item/completed" => SessionChange::Item {
             turn_id,
-            item: decode(value["item"].clone())?,
+            item: Deserialize::deserialize(&value["item"])?,
         },
         "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
-            let id = decode(value["reviewId"].clone())?;
+            let id = Deserialize::deserialize(&value["reviewId"])?;
             if value["review"]["status"] == "approved" {
                 SessionChange::RemoveItem {
                     turn_id,
@@ -494,9 +505,10 @@ fn notification_change(
                     item: Item {
                         id,
                         kind: Some("automaticApprovalReview".into()),
-                        extra: decode(value.clone())?,
+                        review: value.get("review").cloned(),
                         ..Default::default()
-                    },
+                    }
+                    .into(),
                 }
             }
         }
@@ -506,8 +518,8 @@ fn notification_change(
         | "item/commandExecution/outputDelta"
         | "item/fileChange/outputDelta" => SessionChange::Text {
             turn_id,
-            item_id: decode(value["itemId"].clone())?,
-            delta: decode(value["delta"].clone())?,
+            item_id: Deserialize::deserialize(&value["itemId"])?,
+            delta: Deserialize::deserialize(&value["delta"])?,
             field: match method {
                 "item/agentMessage/delta" => TextField::Message,
                 "item/commandExecution/outputDelta" => TextField::CommandOutput,
@@ -522,7 +534,10 @@ fn notification_change(
         },
         _ => return Ok(None),
     };
-    Ok(Some((decode(value["threadId"].clone())?, change)))
+    Ok(Some((
+        Deserialize::deserialize(&value["threadId"])?,
+        change,
+    )))
 }
 
 /// Provider-specific notifications end at this adapter boundary.
@@ -541,7 +556,7 @@ pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<
     if message.method() == Some("serverRequest/resolved") {
         router.resolve_native_request(ProviderKind::Codex, &params["requestId"]);
     } else if let Some((id, change)) =
-        notification_change(message.method().unwrap_or_default(), params)
+        notification_change(message.method().unwrap_or_default(), &params)
             .map_err(|error| error.to_string())?
     {
         router.session_change(
@@ -552,7 +567,10 @@ pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<
             change,
         );
     } else {
-        router.broadcast(message.line());
+        router.broadcast(agent_core::protocol::Notification::Provider {
+            method: message.method().unwrap_or_default().into(),
+            params,
+        });
     }
     Ok(())
 }

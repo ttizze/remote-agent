@@ -1,11 +1,13 @@
+#[path = "support/host.rs"]
+mod host_fixture;
 async fn scoped_incoming(
     host: &agent_core::transport::Endpoint,
     trust: &agent_core::transport::Trust,
 ) -> (
-    agent_core::transport::Session,
-    impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + use<>,
+    host_fixture::Session,
+    host_fixture::Reader,
+    host_fixture::Writer,
 ) {
-    use tokio::io::AsyncWriteExt;
     let session = host
         .accept()
         .await
@@ -13,56 +15,32 @@ async fn scoped_incoming(
         .unwrap()
         .authorize(trust)
         .unwrap();
-    let mut stream = session.accept_stream().await.unwrap();
-    let request = {
-        let mut reader = agent_core::peer::JsonlReader::new(&mut stream);
-        assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
-        serde_json::from_str::<serde_json::Value>(&reader.read_line().await.unwrap().unwrap())
-            .unwrap()
-    };
+    let (session, mut reader, writer) = host_fixture::accept(session).await;
+    let request = reader.read_request().await.unwrap().unwrap();
     assert_eq!(request["method"], "host/session/scope");
-    stream
-        .write_all(
-            format!(
-                "{}\n",
-                serde_json::json!({"id":request["id"],"result":"fixture-storage"})
-            )
-            .as_bytes(),
-        )
+    writer
+        .reply(&request, serde_json::json!({"result":"fixture-storage"}))
         .await
         .unwrap();
-    (session, stream)
+    (session, reader, writer)
 }
-
-#[path = "support/session_wire.rs"]
-mod session_wire;
-use agent_core::peer::JsonlReader;
 use agent_core::state::operations as op;
 use agent_core::{
     client::Answer,
     models::Thread,
-    peer::{PeerError, RpcPeer},
+    peer::PeerError,
     state::{Draft, Intent, Snapshot},
     store::{Outcome, Store},
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-fn connected(snapshot: Snapshot) -> (Arc<Store>, session_wire::Reader, session_wire::Writer) {
-    let (client, server) = tokio::io::duplex(65536);
-    let (read, write) = tokio::io::split(client);
-    let peer = RpcPeer::open(
-        JsonlReader::new(read),
-        write,
-        Some(Duration::from_secs(1)),
-        16,
-    )
-    .unwrap();
-    let (reader, writer) = session_wire::pair(server, &snapshot);
+async fn connected(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fixture::Writer) {
+    let (peer, reader, writer) = host_fixture::connect(&snapshot).await;
     (Arc::new(Store::new(peer, snapshot)), reader, writer)
 }
-async fn setup(snapshot: Snapshot) -> (Arc<Store>, session_wire::Reader, session_wire::Writer) {
-    let (store, mut reader, mut writer) = connected(snapshot.clone());
+async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fixture::Writer) {
+    let (store, mut reader, writer) = connected(snapshot.clone()).await;
     let selected = snapshot
         .navigation
         .thread_id
@@ -82,7 +60,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, session_wire::Reader, session
             method => panic!("unexpected connection request: {method}"),
         };
         writer
-            .write_line(&json!({"id":request["id"], "result":result}).to_string())
+            .reply(&request, json!({ "result":result}))
             .await
             .unwrap();
     }
@@ -94,7 +72,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, session_wire::Reader, session
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/session/open");
         writer
-            .write_line(&json!({"id":request["id"],"result":{"thread":thread}}).to_string())
+            .reply(&request, json!({"result":{"thread":thread}}))
             .await
             .unwrap();
         opening.await.unwrap();
@@ -107,21 +85,20 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, session_wire::Reader, session
     .await;
     (store, reader, writer)
 }
-async fn read(reader: &mut session_wire::Reader) -> Value {
-    let line = tokio::time::timeout(Duration::from_secs(2), reader.read_line())
+async fn read(reader: &mut host_fixture::Reader) -> host_fixture::Request {
+    tokio::time::timeout(Duration::from_secs(2), reader.read_request())
         .await
         .unwrap()
         .unwrap()
-        .unwrap();
-    serde_json::from_str(&line).unwrap()
+        .unwrap()
 }
 fn review() -> Value {
     json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":""})
 }
 async fn new_chat(
     store: &Store,
-    reader: &mut session_wire::Reader,
-    writer: &mut session_wire::Writer,
+    reader: &mut host_fixture::Reader,
+    writer: &mut host_fixture::Writer,
     cwd: &str,
 ) {
     let navigation = store.dispatch(Intent::NewChat { cwd: cwd.into() });
@@ -129,28 +106,28 @@ async fn new_chat(
     assert_eq!(request["method"], "host/workspace/review");
     assert_eq!(request["params"], json!({"cwd":cwd}));
     writer
-        .write_line(&json!({"id":request["id"],"result":review()}).to_string())
+        .reply(&request, json!({"result":review()}))
         .await
         .unwrap();
     navigation.await.unwrap();
 }
 async fn read_after_reviews(
-    reader: &mut session_wire::Reader,
-    writer: &mut session_wire::Writer,
-) -> Value {
+    reader: &mut host_fixture::Reader,
+    writer: &mut host_fixture::Writer,
+) -> host_fixture::Request {
     loop {
         let request = read(reader).await;
         if request["method"] == "host/session/open" {
             let id = request["params"]["session"]["id"].as_str().unwrap();
             let response = writer.current(id);
             writer
-                .write_line(&json!({"id":request["id"], "result":response}).to_string())
+                .reply(&request, json!({ "result":response}))
                 .await
                 .unwrap();
             continue;
         }
         if request["method"] == "host/thread/list" {
-            writer.write_line(&json!({"id":request["id"],"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
+            writer.reply(&request, json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
             continue;
         }
         if request["method"] != "host/workspace/review" {
@@ -158,7 +135,7 @@ async fn read_after_reviews(
         }
         assert_eq!(request["params"], json!({"cwd":"/fixture"}));
         writer
-            .write_line(&json!({"id":request["id"],"result":review()}).to_string())
+            .reply(&request, json!({"result":review()}))
             .await
             .unwrap();
     }
@@ -283,16 +260,18 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_response_precedes_following_delta_even_when_server_closes() {
-    let (store, mut reader, mut writer) = setup(snapshot()).await;
+async fn read_response_precedes_following_delta_until_subscription_ends() {
+    let (store, mut reader, writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
-        writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" obsolete"}}).to_string()).await.unwrap();
+        writer.notify(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" obsolete"}})).await.unwrap();
         writer
-            .write_line(&json!({"id":request["id"],"result":{"thread":thread("base")}}).to_string())
+            .reply(&request, json!({"result":{"thread":thread("base")}}))
             .await
             .unwrap();
-        writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" tail"}}).to_string()).await.unwrap();
+        writer.notify(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" tail"}})).await.unwrap();
+        writer.finish_updates().await;
+        writer
     });
     let result = tokio::time::timeout(
         Duration::from_secs(2),
@@ -301,7 +280,7 @@ async fn read_response_precedes_following_delta_even_when_server_closes() {
     .await
     .unwrap();
     assert_eq!(result.unwrap(), Outcome::Applied);
-    server.await.unwrap();
+    let _writer = server.await.unwrap();
     wait_for(&store, |snapshot| {
         loaded_text(snapshot) == Some("base tail")
     })
@@ -309,24 +288,21 @@ async fn read_response_precedes_following_delta_even_when_server_closes() {
 }
 #[tokio::test]
 async fn approval_can_complete_while_another_request_is_waiting() {
-    let (store, mut reader, mut writer) = setup(snapshot()).await;
+    let (store, mut reader, writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let pending = read(&mut reader).await;
-        writer.write_line(&json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"thread"}}).to_string()).await.unwrap();
+        writer.notify(json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"thread"}})).await.unwrap();
         let answer = read(&mut reader).await;
         assert_eq!(answer["method"], "host/session/answer");
         assert_eq!(
             answer["params"],
             json!({"requestId":"approval","result":{"decision":"decline"}})
         );
+        writer.reply(&answer, json!({"result":{}})).await.unwrap();
         writer
-            .write_line(&json!({"id":answer["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
-        writer
-            .write_line(
-                &json!({"id":pending["id"],"result":{"thread":thread("approved path")}})
-                    .to_string(),
+            .reply(
+                &pending,
+                json!({"result":{"thread":thread("approved path")}}),
             )
             .await
             .unwrap();
@@ -358,20 +334,16 @@ async fn approval_can_complete_while_another_request_is_waiting() {
 }
 #[tokio::test]
 async fn invalid_typed_reply_does_not_block_later_wire_events() {
-    let (store, mut reader, mut writer) = setup(snapshot()).await;
+    let (store, mut reader, writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         writer
-            .write_line(
-                &json!({"id":request["id"],"result":{"thread":{"cwd":"/fixture"}}}).to_string(),
-            )
+            .reply(&request, json!({"result":{"thread":{"cwd":"/fixture"}}}))
             .await
             .unwrap();
         let request = read(&mut reader).await;
         writer
-            .write_line(
-                &json!({"id":request["id"],"result":{"thread":thread("recovered")}}).to_string(),
-            )
+            .reply(&request, json!({"result":{"thread":thread("recovered")}}))
             .await
             .unwrap();
         writer
@@ -382,10 +354,7 @@ async fn invalid_typed_reply_does_not_block_later_wire_events() {
         .unwrap_err();
     assert!(matches!(
         error,
-        PeerError::InvalidResponse {
-            sequence: Some(_),
-            ..
-        }
+        PeerError::InvalidResponse { sequence: None, .. }
     ));
     store
         .dispatch(Intent::ReadThread(op::ReadThread::new("thread".into())))
@@ -462,13 +431,13 @@ async fn new_conversation_clears_sent_draft_after_native_echo() {
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/thread/start");
-    writer.write_line(&json!({"id": request["id"], "result": {"thread": {"id":"created", "cwd":"/fixture", "status":{"type":"idle"}, "turns":[]}}}).to_string()).await.unwrap();
+    writer.reply(&request, json!({ "result": {"thread": {"id":"created", "cwd":"/fixture", "status":{"type":"idle"}, "turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "turn/start");
     assert_eq!(request["params"]["input"][0]["text"], "first message");
-    writer.write_line(&json!({"method":"item/completed", "params":{"threadId":"created", "turnId":"turn", "item":{"id":"native", "type":"userMessage", "clientId":"client", "content":[{"type":"text", "text":"first message"}]}}}).to_string()).await.unwrap();
+    writer.notify(json!({"method":"item/completed", "params":{"threadId":"created", "turnId":"turn", "item":{"id":"native", "type":"userMessage", "clientId":"client", "content":[{"type":"text", "text":"first message"}]}}})).await.unwrap();
     writer
-        .write_line(&json!({"id":request["id"], "result":{"turn":{"id":"turn"}}}).to_string())
+        .reply(&request, json!({ "result":{"turn":{"id":"turn"}}}))
         .await
         .unwrap();
     sending.await.unwrap();
@@ -522,9 +491,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
             .await
             .unwrap();
         writer
-            .write_line(
-                &json!({"id":request["id"],"result":{"turn":{"id":"turn-new"}}}).to_string(),
-            )
+            .reply(&request, json!({"result":{"turn":{"id":"turn-new"}}}))
             .await
             .unwrap();
         assert_eq!(
@@ -587,7 +554,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
         if navigate_away {
             new_chat(&store, &mut reader, &mut writer, "/other").await;
         }
-        writer.write_line(&json!({"id":create["id"],"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}}).to_string()).await.unwrap();
+        writer.reply(&create, json!({"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}})).await.unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(submit["method"], "turn/start");
         assert_eq!(submit["params"]["threadId"], "created");
@@ -597,7 +564,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
             "dispatch must wait for submission, not just thread creation"
         );
         writer
-            .write_line(&json!({"id":submit["id"],"result":{"turn":{"id":"turn"}}}).to_string())
+            .reply(&submit, json!({"result":{"turn":{"id":"turn"}}}))
             .await
             .unwrap();
         assert_eq!(
@@ -652,15 +619,15 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
         let failed = if fail_creation {
             create
         } else {
-            writer.write_line(&json!({"id":create["id"],"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}}).to_string()).await.unwrap();
+            writer.reply(&create, json!({"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}})).await.unwrap();
             let submit = read_after_reviews(&mut reader, &mut writer).await;
             assert_eq!(submit["method"], "turn/start");
             submit
         };
         writer
-            .write_line(
-                &json!({"id":failed["id"],"error":{"code":-32000,"message":"fixture failure","delivery":"notSent"}})
-                    .to_string(),
+            .reply(
+                &failed,
+                json!({"error":{"code":-32000,"message":"fixture failure","delivery":"notSent"}}),
             )
             .await
             .unwrap();
@@ -699,9 +666,9 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
             assert_eq!(request["params"]["threadId"], "created");
         }
         writer
-            .write_line(
-                &json!({"id":request["id"],"error":{"code":-32000,"message":"end fixture"}})
-                    .to_string(),
+            .reply(
+                &request,
+                json!({"error":{"code":-32000,"message":"end fixture"}}),
             )
             .await
             .unwrap();
@@ -768,7 +735,7 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
             .await
             .unwrap();
         writer
-            .write_line(&json!({"id":request["id"],"result":{"text":"spoken"}}).to_string())
+            .reply(&request, json!({"result":{"text":"spoken"}}))
             .await
             .unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
@@ -776,11 +743,11 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
         assert_eq!(submit["params"]["input"][0]["text"], "original\nspoken");
         assert!(!transcribing.is_finished());
         let reply = if fail_send {
-            json!({"id":submit["id"],"error":{"code":-32000,"message":"send failed","delivery":"notSent"}})
+            json!({"error":{"code":-32000,"message":"send failed","delivery":"notSent"}})
         } else {
-            json!({"id":submit["id"],"result":{"turn":{"id":"next"}}})
+            json!({"result":{"turn":{"id":"next"}}})
         };
-        writer.write_line(&reply.to_string()).await.unwrap();
+        writer.reply(&submit, reply).await.unwrap();
         assert_eq!(transcribing.await.unwrap().is_err(), fail_send);
         assert_eq!(
             store.snapshot().drafts["thread"].text,
@@ -824,7 +791,7 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/dictation/transcribe");
         writer
-            .write_line(&json!({"id":request["id"],"result":{"text":"spoken"}}).to_string())
+            .reply(&request, json!({"result":{"text":"spoken"}}))
             .await
             .unwrap();
         let sending = if direct {
@@ -842,20 +809,20 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
         };
         let start = read(&mut reader).await;
         assert_eq!(start["method"], "host/thread/start");
-        assert!(start["params"].get("cwd").is_none());
-        writer.write_line(&json!({"id":start["id"],"result":{"thread":{"id":"created","cwd":"/fixture","projectId":null,"status":{"type":"idle"},"turns":[]}}}).to_string()).await.unwrap();
+        assert!(start["params"]["cwd"].is_null());
+        writer.reply(&start, json!({"result":{"thread":{"id":"created","cwd":"/fixture","projectId":null,"status":{"type":"idle"},"turns":[]}}})).await.unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(submit["method"], "turn/start");
-        let input = json!([{"type":"text","text":"typed\nspoken","text_elements":[]},{"type":"localImage","path":"/fixture/photo.png"}]);
+        let input = json!([{"type":"text","text":"typed\nspoken"},{"type":"localImage","path":"/fixture/photo.png"}]);
         assert_eq!(submit["params"]["input"], input);
         writer
-            .write_line(&json!({"id":submit["id"],"result":{"turn":{"id":"turn"}}}).to_string())
+            .reply(&submit, json!({"result":{"turn":{"id":"turn"}}}))
             .await
             .unwrap();
-        writer.write_line(&json!({"method":"turn/completed","params":{"threadId":"created","turn":{"id":"turn","status":"completed","items":[
+        writer.notify(json!({"method":"turn/completed","params":{"threadId":"created","turn":{"id":"turn","status":"completed","items":[
             {"id":"native","type":"userMessage","clientId":"dictation","content":input},
             {"id":"answer","type":"agentMessage","phase":"final_answer","text":"done"}
-        ]}}}).to_string()).await.unwrap();
+        ]}}})).await.unwrap();
         assert!(matches!(sending.await.unwrap(), Outcome::Submitted { .. }));
         wait_for(&store, |snapshot| {
             snapshot.conversations["created"]
@@ -897,7 +864,7 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
     new_chat(&store, &mut reader, &mut writer, "/other").await;
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     writer
-        .write_line(&json!({"id":request["id"],"result":{"text":"spoken"}}).to_string())
+        .reply(&request, json!({"result":{"text":"spoken"}}))
         .await
         .unwrap();
     assert_eq!(transcribing.await.unwrap().unwrap(), Outcome::Applied);
@@ -946,7 +913,7 @@ async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
         }
         let before = store.snapshot();
         writer
-            .write_line(&json!({"id":request["id"], "result":{"text":transcript}}).to_string())
+            .reply(&request, json!({ "result":{"text":transcript}}))
             .await
             .unwrap();
         assert_eq!(operation.await.unwrap(), Outcome::Applied);
@@ -957,7 +924,7 @@ async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
         assert_eq!(after.navigation, before.navigation);
         assert!(after.error.is_none());
         assert!(
-            tokio::time::timeout(Duration::from_millis(50), reader.read_line())
+            tokio::time::timeout(Duration::from_millis(50), reader.read_request())
                 .await
                 .is_err(),
             "silent dictation must not submit or create a conversation"
@@ -971,7 +938,7 @@ async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
 
 #[tokio::test]
 async fn file_navigation_ignores_a_late_reply_from_the_previous_file() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let first = tokio::spawn({
         let store = store.clone();
         async move {
@@ -997,15 +964,17 @@ async fn file_navigation_ignores_a_late_reply_from_the_previous_file() {
     });
     let second_request = read(&mut reader).await;
     writer
-        .write_line(
-            &json!({"id":second_request["id"],"result":file("/second", "2", "second")}).to_string(),
+        .reply(
+            &second_request,
+            json!({"result":file("/second", "2", "second")}),
         )
         .await
         .unwrap();
     second.await.unwrap().unwrap();
     writer
-        .write_line(
-            &json!({"id":first_request["id"],"result":file("/first", "1", "first")}).to_string(),
+        .reply(
+            &first_request,
+            json!({"result":file("/first", "1", "first")}),
         )
         .await
         .unwrap();
@@ -1022,7 +991,7 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
     Arc::make_mut(&mut initial.workspace).file = Some(Arc::new(
         serde_json::from_value(file("/file", "base", "old")).unwrap(),
     ));
-    let (store, mut reader, mut writer) = setup(initial).await;
+    let (store, mut reader, writer) = setup(initial).await;
     store
         .dispatch(Intent::SetFileDraft {
             path: "/file".into(),
@@ -1054,8 +1023,9 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
         .await
         .unwrap();
     writer
-        .write_line(
-            &json!({"id":request["id"],"result":file("/file", "saved", "submitted")}).to_string(),
+        .reply(
+            &request,
+            json!({"result":file("/file", "saved", "submitted")}),
         )
         .await
         .unwrap();
@@ -1078,8 +1048,9 @@ async fn saving_keeps_newer_edits_and_advances_their_revision_for_the_next_save(
         json!({"path":"/file","revision":"saved","text":"newer"})
     );
     writer
-        .write_line(
-            &json!({"id":request["id"],"result":file("/file", "saved-again", "newer")}).to_string(),
+        .reply(
+            &request,
+            json!({"result":file("/file", "saved-again", "newer")}),
         )
         .await
         .unwrap();
@@ -1116,7 +1087,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         if restored {
             initial = serde_json::from_slice(&serde_json::to_vec(&initial).unwrap()).unwrap();
         }
-        let (store, mut reader, mut writer) = setup(initial).await;
+        let (store, mut reader, writer) = setup(initial).await;
         let refresh = store.dispatch(Intent::ListThreads(
             op::ListThreads::new(Default::default()),
         ));
@@ -1138,17 +1109,15 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/session/open");
         writer
-            .write_line(
-                &json!({"id":request["id"],"result":{"thread":thread("latest")}}).to_string(),
-            )
+            .reply(&request, json!({"result":{"thread":thread("latest")}}))
             .await
             .unwrap();
         opening.await.unwrap();
         assert_eq!(loaded_text(&store.snapshot()), Some("latest"));
         assert_eq!(store.snapshot().navigation.cwd, "/fixture");
-        writer.write_line(&json!({"id":list_request["id"],"result":{
+        writer.reply(&list_request, json!({"result":{
                 "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-            }}).to_string()).await.unwrap();
+            }})).await.unwrap();
         refresh.await.unwrap();
         assert_eq!(
             store.snapshot().navigation.thread_id.as_deref(),
@@ -1164,7 +1133,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
 #[tokio::test]
 async fn a_failed_open_keeps_selection_and_draft_and_can_retry() {
     for cached in [false, true] {
-        let (store, mut reader, mut writer) = setup(if cached {
+        let (store, mut reader, writer) = setup(if cached {
             snapshot()
         } else {
             Snapshot::default()
@@ -1179,7 +1148,13 @@ async fn a_failed_open_keeps_selection_and_draft_and_can_retry() {
             .await
             .unwrap();
         let request = read(&mut reader).await;
-        writer.write_line(&json!({"id":request["id"],"error":{"code":-32000,"message":"history unavailable"}}).to_string()).await.unwrap();
+        writer
+            .reply(
+                &request,
+                json!({"error":{"code":-32000,"message":"history unavailable"}}),
+            )
+            .await
+            .unwrap();
         assert!(opening.await.is_err());
         assert_eq!(
             store.snapshot().navigation.thread_id.as_deref(),
@@ -1198,9 +1173,7 @@ async fn a_failed_open_keeps_selection_and_draft_and_can_retry() {
         assert!(store.snapshot().error.is_none());
         let request = read(&mut reader).await;
         writer
-            .write_line(
-                &json!({"id":request["id"],"result":{"thread":thread("recovered")}}).to_string(),
-            )
+            .reply(&request, json!({"result":{"thread":thread("recovered")}}))
             .await
             .unwrap();
         retry.await.unwrap();
@@ -1226,7 +1199,7 @@ async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     let request = read(&mut reader).await;
     new_chat(&store, &mut reader, &mut writer, "/new-project").await;
     writer
-        .write_line(&json!({"id":request["id"],"result":{"thread":thread("loaded")}}).to_string())
+        .reply(&request, json!({"result":{"thread":thread("loaded")}}))
         .await
         .unwrap();
     opening.await.unwrap().unwrap();
@@ -1251,7 +1224,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
     );
     initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"id":"thread","cwd":"/fixture","status":{"type":"active"}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap()));
     let (store, mut reader, mut writer) = setup(initial).await;
-    writer.write_line(&json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"completed","status":"completed"}}}).to_string()).await.unwrap();
+    writer.notify(json!({"method":"turn/completed","params":{"threadId":"thread","turn":{"id":"completed","status":"completed"}}})).await.unwrap();
     wait_for(&store, |snapshot| {
         snapshot.activity.active.get("thread") == Some(&false)
     })
@@ -1283,7 +1256,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "turn/start");
     writer
-        .write_line(&json!({"id":request["id"],"result":{"turn":{"id":"new-turn"}}}).to_string())
+        .reply(&request, json!({"result":{"turn":{"id":"new-turn"}}}))
         .await
         .unwrap();
     assert_eq!(
@@ -1297,7 +1270,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
 #[tokio::test]
 async fn a_late_list_reply_cannot_replace_a_new_search() {
     use agent_core::models::ListQuery;
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let old = tokio::spawn({
         let store = store.clone();
         async move {
@@ -1324,12 +1297,12 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
     let new_request = read(&mut reader).await;
     let result = |id| json!({"data":[{"id":id}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
     writer
-        .write_line(&json!({"id":new_request["id"],"result":result("new")}).to_string())
+        .reply(&new_request, json!({"result":result("new")}))
         .await
         .unwrap();
     new.await.unwrap().unwrap();
     writer
-        .write_line(&json!({"id":old_request["id"],"result":result("old")}).to_string())
+        .reply(&old_request, json!({"result":result("old")}))
         .await
         .unwrap();
     old.await.unwrap().unwrap();
@@ -1344,12 +1317,12 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
 
 #[tokio::test]
 async fn gallery_history_reads_do_not_block_conversation_notifications() {
-    let (store, mut reader, mut writer) = setup(snapshot()).await;
+    let (store, mut reader, writer) = setup(snapshot()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/session/open");
-        writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"gallery","turns":[{"id":"image-turn","items":[{"id":"image","type":"imageGeneration","savedPath":"/image.png"}]}]}}}).to_string()).await.unwrap();
-        writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" continued"}}).to_string()).await.unwrap();
+        writer.reply(&request, json!({"result":{"thread":{"id":"gallery","turns":[{"id":"image-turn","items":[{"id":"image","type":"imageGeneration","savedPath":"/image.png"}]}]}}})).await.unwrap();
+        writer.notify(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" continued"}})).await.unwrap();
         (reader, writer)
     });
     let result = store
@@ -1372,29 +1345,23 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
 #[tokio::test]
 async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
     use agent_core::{client::TerminalSize, state::TerminalPhase};
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let start = read(&mut reader).await;
         assert_eq!(start["method"], "host/terminal/start");
         assert_eq!(start["params"]["cwd"], "/fixture");
         for data in ["YQ==", "Yg=="] {
-            writer.write_line(&json!({"method":"process/outputDelta","params":{"processHandle":"terminal","stream":"stdout","deltaBase64":data,"capReached":false}}).to_string()).await.unwrap();
+            writer.notify(json!({"method":"process/outputDelta","params":{"processHandle":"terminal","stream":"stdout","deltaBase64":data,"capReached":false}})).await.unwrap();
         }
-        writer
-            .write_line(&json!({"id":start["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
+        writer.reply(&start, json!({"result":{}})).await.unwrap();
         for data in ["Zmlyc3Q=", "c2Vjb25k"] {
             let request = read(&mut reader).await;
             assert_eq!(request["method"], "process/writeStdin");
             assert_eq!(request["params"]["deltaBase64"], data);
-            writer
-                .write_line(&json!({"id":request["id"],"result":{}}).to_string())
-                .await
-                .unwrap();
+            writer.reply(&request, json!({"result":{}})).await.unwrap();
         }
         // Keep the transport alive until Store closes it.
-        assert!(reader.read_line().await.unwrap().is_none());
+        assert!(reader.read_request().await.unwrap().is_none());
     });
     let start = store.dispatch(Intent::StartTerminal(op::StartTerminal {
         handle: "terminal".into(),
@@ -1418,9 +1385,9 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         retained.terminals["terminal"]
             .output
             .iter()
-            .map(|chunk| chunk.data.as_str())
+            .map(|chunk| chunk.data.as_slice())
             .collect::<Vec<_>>(),
-        ["YQ==", "Yg=="]
+        [b"a".as_slice(), b"b".as_slice()]
     );
     store
         .dispatch(Intent::AcknowledgeTerminal {
@@ -1458,22 +1425,19 @@ async fn disconnect_does_not_wait_for_a_terminal_start_reply() {
         .await
         .expect("disconnect waited for terminal startup")
         .unwrap();
-    assert!(reader.read_line().await.unwrap().is_none());
+    assert!(reader.read_request().await.unwrap().is_none());
     assert!(starting.await.is_err());
 }
 
 #[tokio::test]
 async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
     use agent_core::{client::TerminalSize, state::TerminalPhase};
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
-        writer.write_line(&json!({"method":"process/exited","params":{"processHandle":"terminal","exitCode":17,"stdout":"","stderr":"","stdoutCapReached":false,"stderrCapReached":false}}).to_string()).await.unwrap();
-        writer
-            .write_line(&json!({"id":request["id"],"result":{}}).to_string())
-            .await
-            .unwrap();
-        assert!(reader.read_line().await.unwrap().is_none());
+        writer.notify(json!({"method":"process/exited","params":{"processHandle":"terminal","exitCode":17,"stdout":"","stderr":"","stdoutCapReached":false,"stderrCapReached":false}})).await.unwrap();
+        writer.reply(&request, json!({"result":{}})).await.unwrap();
+        assert!(reader.read_request().await.unwrap().is_none());
     });
     store
         .dispatch(Intent::StartTerminal(op::StartTerminal {
@@ -1493,18 +1457,18 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
 
 #[tokio::test]
 async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
-    let (store, mut reader, mut writer) = setup(Snapshot {
+    let (store, mut reader, writer) = setup(Snapshot {
         threads: Some(Arc::new(serde_json::from_value(json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap())),
         list_query: Arc::new(agent_core::models::ListQuery { search_term:"created".into(), ..Default::default() }),
         ..Default::default()
     }).await;
     let server = tokio::spawn(async move {
-        while let Some(line) = tokio::time::timeout(Duration::from_secs(2), reader.read_line())
-            .await
-            .unwrap()
-            .unwrap()
+        while let Some(request) =
+            tokio::time::timeout(Duration::from_secs(2), reader.read_request())
+                .await
+                .unwrap()
+                .unwrap()
         {
-            let request: Value = serde_json::from_str(&line).unwrap();
             let result = match request["method"].as_str().unwrap() {
                 "host/thread/start" => {
                     json!({"thread":{"id":"created","name":"created chat","cwd":"/fixture","turns":[],"status":{"type":"idle"}}})
@@ -1525,7 +1489,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
                 other => panic!("unexpected method {other}"),
             };
             writer
-                .write_line(&json!({"id":request["id"],"result":result}).to_string())
+                .reply(&request, json!({"result":result}))
                 .await
                 .unwrap();
         }
@@ -1563,78 +1527,9 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
 }
 
 #[tokio::test]
-async fn malformed_file_change_delta_does_not_poison_store() {
-    let mut previous = snapshot();
-    let thread = Arc::make_mut(
-        Arc::make_mut(&mut previous.conversations)
-            .get_mut("thread")
-            .unwrap(),
-    );
-    Arc::make_mut(&mut thread.turns.as_mut().unwrap()[0])
-        .items
-        .as_mut()
-        .unwrap()
-        .push(Arc::new(
-            serde_json::from_value(json!({"id":"file", "type":"fileChange", "changes":[7]}))
-                .unwrap(),
-        ));
-    let (store, mut reader, mut writer) = setup(previous).await;
-    for (method, item) in [
-        ("item/fileChange/outputDelta", "file"),
-        ("item/agentMessage/delta", "item"),
-    ] {
-        writer
-            .write_line(
-                &json!({"method":method,"params":{
-                    "threadId":"thread","turnId":"turn","itemId":item,"delta":" continues"
-                }})
-                .to_string(),
-            )
-            .await
-            .unwrap();
-    }
-    let reopening = read(&mut reader).await;
-    assert_eq!(reopening["method"], "host/session/open");
-    writer
-        .write_line(&json!({"id":reopening["id"],"result":writer.current("thread")}).to_string())
-        .await
-        .unwrap();
-    wait_for(&store, |snapshot| {
-        loaded_text(snapshot) == Some("old continues")
-    })
-    .await;
-    assert_eq!(
-        serde_json::to_value(
-            &store.snapshot().conversations["thread"]
-                .turns
-                .as_ref()
-                .unwrap()[0]
-                .items
-                .as_ref()
-                .unwrap()[1]
-                .changes
-        )
-        .unwrap(),
-        json!([7])
-    );
-    store
-        .dispatch(Intent::SetDraft {
-            thread_id: "thread".into(),
-            draft: agent_core::state::Draft {
-                text: "still usable".into(),
-                ..Default::default()
-            },
-        })
-        .await
-        .unwrap();
-    assert_eq!(store.snapshot().drafts["thread"].text, "still usable");
-    store.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_window() {
     let initial: Thread = serde_json::from_value(json!({"id":"thread","historyLimit":5,"historyHasMore":true,"turns":[{"id":"latest","items":[]}]})).unwrap();
-    let (store, mut reader, mut writer) = setup(Snapshot {
+    let (store, mut reader, writer) = setup(Snapshot {
         conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(initial))])),
         ..Default::default()
     })
@@ -1649,13 +1544,13 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
                 json!({"session":{"provider":"codex","id":"thread"},"limit":10})
             );
             let response = if failed {
-                json!({"id":request["id"],"error":{"code":-32000,"message":"temporary history failure"}})
+                json!({"error":{"code":-32000,"message":"temporary history failure"}})
             } else {
-                json!({"id":request["id"],"result":{"thread":{"id":"thread","historyLimit":10,"historyHasMore":false,
+                json!({"result":{"thread":{"id":"thread","historyLimit":10,"historyHasMore":false,
                     "turns":[{"id":"old","items":[]},{"id":"missing","items":[
                         {"id":"question","type":"userMessage","content":[{"type":"text","text":"comparison"}]}]},{"id":"latest","items":[]}]}}})
             };
-            writer.write_line(&response.to_string()).await.unwrap();
+            writer.reply(&request, response).await.unwrap();
         }
         (reader, writer)
     });
@@ -1690,7 +1585,7 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
         thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap()[0].id,
         "question"
     );
-    assert_eq!(thread.extra["historyHasMore"], false);
+    assert_eq!(thread.history_has_more, Some(false));
     assert_eq!(recovered.error, None);
     let _server = server.await.unwrap();
     store.close().await.unwrap();
@@ -1700,7 +1595,7 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
 async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
     let initial: Thread = serde_json::from_value(json!({"id":"thread","historyLimit":5,"historyHasMore":true,
         "turns":[{"id":"new","status":"completed","items":[{"id":"new-item","type":"agentMessage","text":"new"}]}]})).unwrap();
-    let (store, mut reader, mut writer) = setup(Snapshot {
+    let (store, mut reader, writer) = setup(Snapshot {
         conversations: Arc::new(BTreeMap::from([("thread".into(), Arc::new(initial))])),
         ..Default::default()
     })
@@ -1715,9 +1610,9 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
             } else {
                 json!([{"id":"last-old","text":"tail"}])
             };
-            writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"thread","historyLimit":limit,"historyHasMore":!complete,
+            writer.reply(&request, json!({"result":{"thread":{"id":"thread","historyLimit":limit,"historyHasMore":!complete,
                 "turns":[{"id":"old","itemsHasMore":!complete,"items":items},
-                {"id":"new","status":"completed","items":[{"id":"new-item","type":"agentMessage","text":"new"}]}]}}}).to_string()).await.unwrap();
+                {"id":"new","status":"completed","items":[{"id":"new-item","type":"agentMessage","text":"new"}]}]}}})).await.unwrap();
         }
         (reader, writer)
     });
@@ -1754,7 +1649,7 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
         Some("new")
     );
     assert_eq!(turns[0].items_has_more, Some(false));
-    assert_eq!(thread.extra["historyHasMore"], false);
+    assert_eq!(thread.history_has_more, Some(false));
     let _server = server.await.unwrap();
     store.close().await.unwrap();
 }
@@ -1773,16 +1668,13 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
         if navigate {
             new_chat(&store, &mut reader, &mut writer, "/new").await;
         }
-        writer.write_line(&json!({"id":request["id"],"result":{"thread":{"id":"forked","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","type":"agentMessage","text":"copied"}]}]}}}).to_string()).await.unwrap();
+        writer.reply(&request, json!({"result":{"thread":{"id":"forked","cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","type":"agentMessage","text":"copied"}]}]}}})).await.unwrap();
         if !navigate {
             loop {
                 let opening = read(&mut reader).await;
                 if opening["method"] == "host/session/open" {
                     writer
-                        .write_line(
-                            &json!({"id":opening["id"],"result":writer.current("forked")})
-                                .to_string(),
-                        )
+                        .reply(&opening, json!({"result":writer.current("forked")}))
                         .await
                         .unwrap();
                     break;
@@ -1793,11 +1685,11 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
                     json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                 };
                 writer
-                    .write_line(&json!({"id":opening["id"],"result":result}).to_string())
+                    .reply(&opening, json!({"result":result}))
                     .await
                     .unwrap();
             }
-            writer.write_line(&json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}}).to_string()).await.unwrap();
+            writer.notify(json!({"method":"item/agentMessage/delta","params":{"threadId":"forked","turnId":"copy","itemId":"reply","delta":" later"}})).await.unwrap();
         }
         assert_eq!(
             fork.await.unwrap(),
@@ -1830,10 +1722,16 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
 
 #[tokio::test]
 async fn account_selection_publishes_the_selected_account_and_persistence_warning() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let request = read(&mut reader).await;
-    writer.write_line(&json!({"id":request["id"],"result":{"accounts":[{"id":"a"}],"selectedId":"a","error":null}}).to_string()).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"accounts":[{"id":"a"}],"selectedId":"a","error":null}}),
+        )
+        .await
+        .unwrap();
     listing.await.unwrap();
     assert_eq!(
         store
@@ -1849,7 +1747,13 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount { id: "b".into() }));
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["accountId"], "b");
-    writer.write_line(&json!({"id":request["id"],"result":{"selectedId":"b","persistenceError":"store unavailable"}}).to_string()).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"selectedId":"b","persistenceError":"store unavailable"}}),
+        )
+        .await
+        .unwrap();
     selecting.await.unwrap();
     assert_eq!(
         store
@@ -1875,7 +1779,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             method => panic!("unexpected account refresh: {method}"),
         };
         writer
-            .write_line(&json!({"id":request["id"],"result":result}).to_string())
+            .reply(&request, json!({"result":result}))
             .await
             .unwrap();
     }
@@ -1891,20 +1795,20 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 
 #[tokio::test]
 async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_late_status() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {}));
     let request = read(&mut reader).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let list = read(&mut reader).await;
     writer
-        .write_line(
-            &json!({"id":list["id"],"result":{"accounts":[],"selectedId":null,"error":null}})
-                .to_string(),
+        .reply(
+            &list,
+            json!({"result":{"accounts":[],"selectedId":null,"error":null}}),
         )
         .await
         .unwrap();
     listing.await.unwrap();
-    writer.write_line(&json!({"id":request["id"],"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}}).to_string()).await.unwrap();
+    writer.reply(&request, json!({"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}})).await.unwrap();
     starting.await.unwrap();
     assert_eq!(
         store.snapshot().account.login.as_ref().unwrap().login_id,
@@ -1919,15 +1823,12 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
         id: "login".into(),
     }));
     let cancel = read(&mut reader).await;
-    writer
-        .write_line(&json!({"id":cancel["id"],"result":{}}).to_string())
-        .await
-        .unwrap();
+    writer.reply(&cancel, json!({"result":{}})).await.unwrap();
     cancelling.await.unwrap();
     writer
-        .write_line(
-            &json!({"id":poll["id"],"result":{"completed":true,"accountId":"obsolete"}})
-                .to_string(),
+        .reply(
+            &poll,
+            json!({"result":{"completed":true,"accountId":"obsolete"}}),
         )
         .await
         .unwrap();
@@ -2025,18 +1926,24 @@ async fn reconnect_preserves_edits_made_during_pairing() {
             .await
             .unwrap();
         let drafts = store.snapshot().drafts.clone();
-        let (session, peer, mut events) = pairing.authorize(&trust).await.unwrap();
-        loop {
-            if let agent_core::peer::PeerEvent::Message(message) = events.recv().await.unwrap() {
-                let request: Value = serde_json::from_str(&message.value).unwrap();
-                if request["method"] == "host/session/scope" {
-                    peer.respond_raw(&request["id"].to_string(), "result", "\"fixture-storage\"")
-                        .await
-                        .unwrap();
-                    break;
-                }
-            }
-        }
+        let (session, _peer) = pairing.authorize(&trust).await.unwrap();
+        let agent_core::transport::IncomingRequest::Call(mut call) =
+            session.accept_request().await.unwrap()
+        else {
+            panic!("scope request expected")
+        };
+        assert!(matches!(
+            call.call,
+            agent_core::protocol::Call::SessionScope(_)
+        ));
+        agent_core::protocol::write(
+            &mut call.send,
+            agent_core::protocol::Response::Success {
+                result: Box::new("fixture-storage".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
         connecting.await.unwrap().unwrap();
         wait_for(&store, |state| state.connected).await;
         assert!(Arc::ptr_eq(&drafts, &store.snapshot().drafts));
@@ -2046,7 +1953,6 @@ async fn reconnect_preserves_edits_made_during_pairing() {
         );
         assert_eq!(store.snapshot().navigation.cwd, "/pairing");
         store.close().await.unwrap();
-        let _ = peer.close().await;
         session.close();
         host.close().await;
     })
@@ -2070,7 +1976,7 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 tokio::spawn(async move { store.reconnect(&client, &ticket, Some(uuid::Uuid::new_v4())).await })
             };
             let pending = host.accept().await.unwrap().unwrap().pairing().await.unwrap();
-            assert!(old_reader.read_line().await.unwrap().is_none(), "core must release the old connection before pairing");
+            assert!(old_reader.read_request().await.unwrap().is_none(), "core must release the old connection before pairing");
             assert!(!store.snapshot().connected);
             store.dispatch(Intent::SetDraftText { thread_id: "local".into(), text: "接続待ち中の編集".into() }).await.unwrap();
             let drafts = store.snapshot().drafts.clone();
@@ -2092,22 +1998,18 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 assert!(connecting.await.unwrap().is_err(), "obsolete pairing must not succeed: {action}");
             }
             // A delayed authorization cannot revive the superseded connection.
-            if let Ok((session, peer, _events)) = pending.authorize(&trust).await {
-                let _ = peer.close().await;
+            if let Ok((session, _peer)) = pending.authorize(&trust).await {
                 session.close();
             }
-            if let Some((session, stream)) = replacement {
-                let (read, write) = tokio::io::split(stream);
-                let mut reader = JsonlReader::new(read);
-                let mut writer = agent_core::peer::JsonlWriter::new(write);
+            if let Some((session, mut reader, writer)) = replacement {
                 for _ in 0..2 {
-                    let request = serde_json::from_str::<Value>(&reader.read_line().await.unwrap().unwrap()).unwrap();
+                    let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
                         "host/thread/list" => json!({"data":[{"id":"replacement","name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "model/list" => json!({"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
                     };
-                    writer.write_line(&json!({"id":request["id"],"result":result}).to_string()).await.unwrap();
+                    writer.reply(&request, json!({"result":result})).await.unwrap();
                 }
                 wait_for(&store, |state| state.threads.as_ref().is_some_and(|threads| threads.data.iter().any(|thread| thread.id.as_deref() == Some("replacement")))).await;
                 assert!(store.snapshot().connected);
@@ -2206,7 +2108,7 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
         "id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread"}
     })).unwrap()))]));
     let bytes = serde_json::to_vec(&saved).unwrap();
-    let (store, _reader, _writer) = connected(serde_json::from_slice(&bytes).unwrap());
+    let (store, _reader, _writer) = connected(serde_json::from_slice(&bytes).unwrap()).await;
     wait_for(&store, |snapshot| snapshot.connected).await;
     let current = store.snapshot();
     assert!(current.requests.is_empty());
@@ -2286,11 +2188,11 @@ async fn stores_share_an_endpoint_without_closing_each_others_transport() {
             scoped_incoming(&host, &trust)
         );
         let third = third.unwrap();
-        let (incoming, _stream) = incoming;
+        let (incoming, _reader, _writer) = incoming;
         assert!(stores[1].snapshot().connected);
         stores[1].close().await.unwrap();
         third.close().await.unwrap();
-        for (session, _stream) in sessions {
+        for (session, _reader, _writer) in sessions {
             session.close();
         }
         incoming.close();
@@ -2340,7 +2242,7 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         new_chat(&store, &mut reader, &mut writer, "/new").await;
         let navigated = store.snapshot();
         writer
-            .write_line(&json!({"id":request["id"],"result":output}).to_string())
+            .reply(&request, json!({"result":output}))
             .await
             .unwrap();
         loading.await.unwrap();
@@ -2359,9 +2261,9 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
     let request = read(&mut reader).await;
     new_chat(&store, &mut reader, &mut writer, "/new").await;
     writer
-        .write_line(
-            &json!({"id":request["id"],"error":{"code":-32000,"message":"old failure"}})
-                .to_string(),
+        .reply(
+            &request,
+            json!({"error":{"code":-32000,"message":"old failure"}}),
         )
         .await
         .unwrap();
@@ -2397,9 +2299,9 @@ async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_f
         .unwrap();
     new_chat(&store, &mut reader, &mut writer, "/new").await;
     writer
-        .write_line(
-            &json!({"id":request["id"],"result":file("/old/file", "saved", "submitted")})
-                .to_string(),
+        .reply(
+            &request,
+            json!({"result":file("/old/file", "saved", "submitted")}),
         )
         .await
         .unwrap();
@@ -2421,7 +2323,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         }),
         ..Default::default()
     };
-    let (store, mut reader, mut writer) = connected(initial);
+    let (store, mut reader, writer) = connected(initial).await;
     let epoch = store.snapshot().epoch;
     let mut requests = BTreeMap::new();
     for _ in 0..3 {
@@ -2456,7 +2358,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ),
     ] {
         writer
-            .write_line(&json!({"id":requests[method]["id"],"result":result}).to_string())
+            .reply(&requests[method], json!({"result":result}))
             .await
             .unwrap();
     }
@@ -2483,11 +2385,9 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
 #[tokio::test]
 async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
     use agent_core::{
-        peer::JsonlWriter,
         session::{SessionChange, TextField},
         transport::{Endpoint, Identity, Relays, Trust},
     };
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tokio::time::timeout(Duration::from_secs(180), async {
         let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
@@ -2496,18 +2396,15 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         let ticket = host.ticket();
         let (store, incoming) = tokio::join!(Store::connect(&client, &ticket, Snapshot::default(), None), scoped_incoming(&host, &trust));
         let store = store.unwrap();
-        let (session, stream) = incoming;
-        let (read_half, write_half) = tokio::io::split(stream);
-        let output = Arc::new(tokio::sync::Mutex::new(JsonlWriter::new(write_half)));
+        let (session, mut reader, writer) = incoming;
+        let output = Arc::new(tokio::sync::Mutex::new(writer));
         let (send, mut requests) = tokio::sync::mpsc::channel(16);
         let subscription_a = uuid::Uuid::new_v4();
         let subscription_b = uuid::Uuid::new_v4();
         let server = tokio::spawn({
             let output = output.clone();
             async move {
-                let mut reader = JsonlReader::new(read_half);
-                while let Some(line) = reader.read_line().await.unwrap() {
-                    let request: Value = serde_json::from_str(&line).unwrap();
+                while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/thread/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "model/list" => json!({"data":[],"nextCursor":null}),
@@ -2515,10 +2412,9 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                             let a = request["params"]["session"]["id"] == "A";
                             json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"id":if a {"A"} else {"B"},"turns":[{"id":"turn","status":"inProgress","deferredItemIds":if a {vec!["item"]} else {vec![]},"items":[{"id":"item","type":if a {"commandExecution"} else {"agentMessage"},"text":if a {""} else {"B prefix"}}]}]}}})
                         }
-                        "host/session/close" => json!({}),
                         _ => { send.send(request).await.unwrap(); continue; }
                     };
-                    output.lock().await.write_line(&json!({"id":request["id"],"result":result}).to_string()).await.unwrap();
+                    output.lock().await.reply(&request, json!({"result":result})).await.unwrap();
                 }
             }
         });
@@ -2529,12 +2425,11 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         let mut reading = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
         let request = requests.recv().await.unwrap();
         assert_eq!(request["method"], "host/thread/item/read");
-        let body = serde_json::to_vec(&json!({"id":"item","type":"commandExecution","aggregatedOutput":"old body","status":"inProgress"})).unwrap();
-        let grant = json!({"token":URL_SAFE_NO_PAD.encode([1;32]),"sha256":URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256,&body)),"size":body.len()});
-        output.lock().await.write_line(&json!({"id":request["id"],"result":{"item":{"id":"item","type":"commandExecution"},"transfer":grant}}).to_string()).await.unwrap();
+        let body = agent_core::protocol::encode(serde_json::from_value::<agent_core::models::Item>(json!({"id":"item","type":"commandExecution","aggregatedOutput":"old body","status":"inProgress"})).unwrap()).unwrap();
+        let grant = json!({"token":([1u8;32]),"sha256":ring::digest::digest(&ring::digest::SHA256,&body).as_ref(),"size":body.len()});
+        output.lock().await.reply(&request, json!({"result":{"item":{"id":"item","type":"commandExecution"},"transfer":grant}})).await.unwrap();
         let mut transfer = session.accept_stream().await.unwrap();
-        let length = transfer.read_u32().await.unwrap();
-        let mut token = vec![0; length as usize];
+        let mut token = [0; 32];
         transfer.read_exact(&mut token).await.unwrap();
         // The binary stream is now an explicit barrier: no body bytes are sent
         // until all the following control operations have completed.
@@ -2545,7 +2440,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             (subscription_a, SessionChange::Request {request:serde_json::from_value(json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"A","turnId":"turn","itemId":"item"}})).unwrap()}),
         ];
         for (subscription, change) in changes {
-            output.lock().await.write_line(&json!({"method":"host/session/update","params":{"subscriptionId":subscription,"change":change}}).to_string()).await.unwrap();
+            output.lock().await.notify(json!({"method":"host/session/update","params":{"subscriptionId":subscription,"change":change}})).await.unwrap();
         }
         wait_for(&store, |s| s.requests.contains_key("\"approval\"") && s.conversations["B"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref() == Some("B prefix + delta")).await;
         for intent in [
@@ -2555,11 +2450,11 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             let completion = store.dispatch(intent);
             let request = requests.recv().await.unwrap();
             assert!(matches!(request["method"].as_str(), Some("host/session/answer" | "turn/interrupt")));
-            output.lock().await.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
+            output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
             completion.await.unwrap();
         }
         // A delta invalidates the in-flight source without clearing deferred.
-        output.lock().await.write_line(&json!({"method":"host/session/update","params":{"subscriptionId":subscription_a,"change":{"type":"text","turnId":"turn","itemId":"item","field":"commandOutput","delta":"new suffix"}}}).to_string()).await.unwrap();
+        output.lock().await.notify(json!({"method":"host/session/update","params":{"subscriptionId":subscription_a,"change":SessionChange::Text {turn_id:"turn".into(),item_id:"item".into(),field:TextField::CommandOutput,delta:"new suffix".into()}}})).await.unwrap();
         wait_for(&store, |s| s.conversations["A"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].aggregated_output.as_deref() == Some("new suffix")).await;
         assert!(store.snapshot().conversations["A"].turns.as_ref().unwrap()[0].deferred_item_ids.as_ref().unwrap().contains(&"item".into()));
         assert!(futures_util::poll!(&mut reading).is_pending());
@@ -2568,7 +2463,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         transfer.shutdown().await.unwrap();
         let retry = requests.recv().await.unwrap();
         assert_eq!(retry["method"], "host/thread/item/read");
-        output.lock().await.write_line(&json!({"id":retry["id"],"result":{"item":{"id":"item","type":"commandExecution","aggregatedOutput":"complete prefix + new suffix","status":"completed"}}}).to_string()).await.unwrap();
+        output.lock().await.reply(&retry, json!({"result":{"item":{"id":"item","type":"commandExecution","aggregatedOutput":"complete prefix + new suffix","status":"completed"}}})).await.unwrap();
         reading.await.unwrap();
         duplicate.await.unwrap();
         let snapshot = store.snapshot();
@@ -2581,12 +2476,11 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             let before = store.snapshot().conversations.clone();
             let mut failed_read = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
             let request = requests.recv().await.unwrap();
-            let invalid = serde_json::to_vec(&json!({"id":if wrong_id {"different"} else {"item"},"type":"commandExecution","aggregatedOutput":"invalid body"})).unwrap();
-            let digest = if wrong_id { URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &invalid)) } else { URL_SAFE_NO_PAD.encode([0;32]) };
-            output.lock().await.write_line(&json!({"id":request["id"],"result":{"item":{"id":"item","type":"commandExecution"},"transfer":{"token":URL_SAFE_NO_PAD.encode([2;32]),"sha256":digest,"size":invalid.len()}}}).to_string()).await.unwrap();
+            let invalid = agent_core::protocol::encode(serde_json::from_value::<agent_core::models::Item>(json!({"id":if wrong_id {"different"} else {"item"},"type":"commandExecution","aggregatedOutput":"invalid body"})).unwrap()).unwrap();
+            let digest = if wrong_id { ring::digest::digest(&ring::digest::SHA256, &invalid).as_ref().to_vec() } else { vec![0;32] };
+            output.lock().await.reply(&request, json!({"result":{"item":{"id":"item","type":"commandExecution"},"transfer":{"token":([2u8;32]),"sha256":digest,"size":invalid.len()}}})).await.unwrap();
             let mut transfer = session.accept_stream().await.unwrap();
-            let length = transfer.read_u32().await.unwrap();
-            let mut token = vec![0;length as usize];
+            let mut token = [0; 32];
             transfer.read_exact(&mut token).await.unwrap();
             if failure == "timeout" {
                 // Exercise the production deadline against a stalled real stream.
@@ -2601,7 +2495,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                             let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:"A".into(),turn_id:"turn".into()}));
                             let request = requests.recv().await.unwrap();
                             assert_eq!(request["method"], "turn/interrupt");
-                            output.lock().await.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
+                            output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
                             interrupt.await.unwrap();
                         }
                     }
@@ -2615,7 +2509,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:"A".into(),turn_id:"turn".into()}));
             let request = requests.recv().await.unwrap();
             assert_eq!(request["method"], "turn/interrupt");
-            output.lock().await.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
+            output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
             interrupt.await.unwrap();
             assert!(store.snapshot().connected);
         }

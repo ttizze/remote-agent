@@ -231,7 +231,10 @@ impl Terminal {
                         self.script(
                             format!(
                                 "window.bexTerminal.write({}, {})",
-                                json!(chunk.data),
+                                json!(base64::Engine::encode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    &chunk.data
+                                )),
                                 chunk.sequence
                             ),
                             cx,

@@ -1,12 +1,11 @@
-//! Typed RPC operations and deferred payload reads. No UI dependencies.
+//! The Bex client: typed operations on independent QUIC streams.
+mod connection;
 use crate::state::operations::ReadThread;
-use crate::{
-    models::ThreadResponse,
-    peer::{PeerError, Reply, Request, RpcPeer},
-};
+use crate::{models::ThreadResponse, peer::PeerError};
+pub(crate) use connection::{BLOB, CALL, CLOSE, EVENTS};
+pub use connection::{Client, HostPeer, HostRequest, Updates};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
-use std::sync::Arc;
 
 /// The method, parameters and result are one contract.
 pub trait RpcMethod: Serialize {
@@ -15,144 +14,162 @@ pub trait RpcMethod: Serialize {
     fn method(&self) -> &'static str {
         Self::METHOD
     }
-    /// Serialize the RPC parameters without local Store policy fields.
-    fn serialize_params<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.serialize(serializer)
-    }
+    fn request(&self) -> Result<crate::protocol::Call, PeerError>;
+    fn subscription(_output: &mut Self::Output, _id: uuid::Uuid) {}
     fn validate(&self, _output: &Self::Output) -> Result<(), &'static str> {
         Ok(())
     }
 }
 macro_rules! rpc_method {
-    ($name:ty, $output:ty, $method:expr) => {
+    ($name:ty, $output:ty, $method:expr, $variant:ident, |$this:ident| $params:expr) => {
         impl $crate::client::RpcMethod for $name {
             type Output = $output;
             const METHOD: &'static str = $method;
+            fn request(&$this) -> Result<$crate::protocol::Call, $crate::peer::PeerError> { Ok($crate::protocol::Call::$variant($params)) }
         }
     };
 }
 pub(crate) use rpc_method;
 
-struct Params<'a, O>(&'a O);
-impl<O: RpcMethod> Serialize for Params<'_, O> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize_params(serializer)
-    }
-}
-
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pair {
     pub invitation: uuid::Uuid,
 }
-rpc_method!(Pair, Map<String, Value>, "host/pair");
+rpc_method!(Pair, crate::models::Empty, "host/pair", Pair, |self| self
+    .clone());
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ReadHostStatus {}
-rpc_method!(ReadHostStatus, crate::models::HostStatus, "host/status");
+rpc_method!(
+    ReadHostStatus,
+    crate::models::HostStatus,
+    "host/status",
+    HostStatus,
+    |self| crate::models::Empty {}
+);
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ListRemoteHosts {}
 rpc_method!(
     ListRemoteHosts,
     Vec<crate::models::RemoteHost>,
-    "host/listRemotes"
+    "host/listRemotes",
+    ListRemotes,
+    |self| crate::models::Empty {}
 );
-#[derive(Debug, Serialize)]
-pub struct RegisterRemoteHost<'a> {
-    pub ticket: &'a str,
-    pub name: &'a str,
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct RegisterRemoteHost {
+    pub ticket: String,
+    pub name: String,
 }
 rpc_method!(
-    RegisterRemoteHost<'_>,
+    RegisterRemoteHost,
     crate::models::RemoteHost,
-    "host/registerRemote"
+    "host/registerRemote",
+    RegisterRemote,
+    |self| self.clone()
 );
 
-pub struct Client {
-    peer: Arc<RpcPeer>,
-}
 impl Client {
-    pub fn new(peer: Arc<RpcPeer>) -> Self {
-        Self { peer }
+    pub(crate) async fn open_subscription<O: RpcMethod>(
+        &self,
+        operation: &O,
+    ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError> {
+        if operation.method() != "host/session/open" {
+            return Ok(None);
+        }
+        let (mut output, updates) = self
+            .request_stream::<O::Output>(&operation.request()?)
+            .await?;
+        validate_output(operation, &output)?;
+        let id = uuid::Uuid::new_v4();
+        O::subscription(&mut output, id);
+        Ok(Some((output, updates, id)))
     }
-    pub fn call<'a, O: RpcMethod>(
-        &'a self,
-        operation: &'a O,
-    ) -> Request<impl std::future::Future<Output = Result<Reply<O::Output>, PeerError>> + use<'a, O>>
-    {
-        let request = self.peer.request(operation.method(), &Params(operation));
-        Request {
-            wire_id: request.wire_id(),
-            response: async move {
-                let reply = request.await?;
-                operation
-                    .validate(&reply.value)
-                    .map_err(|reason| PeerError::InvalidResponse {
-                        method: operation.method().into(),
-                        reason: reason.into(),
-                        sequence: Some(reply.sequence),
-                        raw: serde_json::to_string(&reply.value).expect("wire output serializes"),
-                    })?;
-                Ok(reply)
-            },
+    pub async fn call<O: RpcMethod>(&self, operation: &O) -> Result<O::Output, PeerError> {
+        let output = self.request(&operation.request()?).await?;
+        validate_output(operation, &output)?;
+        Ok(output)
+    }
+}
+
+fn validate_output<O: RpcMethod>(operation: &O, output: &O::Output) -> Result<(), PeerError> {
+    operation
+        .validate(output)
+        .map_err(|reason| PeerError::InvalidResponse {
+            method: operation.method().into(),
+            reason: reason.into(),
+            sequence: None,
+            raw: serde_json::to_string(output).expect("wire output serializes"),
+        })
+}
+
+// The input schema is shared; only JSON's tagged representation differs from Postcard.
+macro_rules! inputs {
+    ($($variant:ident { $($field:ident: $ty:ty),* $(,)? }),* $(,)?) => {
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub enum Input { $($variant { $($field: $ty),* }),* }
+        mod input_json {
+            use super::*;
+            #[derive(Serialize, Deserialize)]
+            #[serde(tag = "type", rename_all = "camelCase")]
+            enum JsonInput<T> { $($variant { $($field: T),* }),* }
+            pub fn serialize<S: serde::Serializer>(input: &[Input], serializer: S) -> Result<S::Ok, S::Error> {
+                if !serializer.is_human_readable() { return input.serialize(serializer); }
+                serializer.collect_seq(input.iter().map(|item| match item {
+                    $(Input::$variant { $($field),* } => JsonInput::$variant { $($field),* }),*
+                }))
+            }
+            pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Input>, D::Error> {
+                if !deserializer.is_human_readable() { return Vec::<Input>::deserialize(deserializer); }
+                Ok(Vec::<JsonInput<String>>::deserialize(deserializer)?.into_iter().map(|item| match item {
+                    $(JsonInput::$variant { $($field),* } => Input::$variant { $($field),* }),*
+                }).collect())
+            }
         }
     }
 }
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum Input<'a> {
-    Text {
-        text: &'a str,
-        text_elements: &'a [Value],
-    },
-    LocalImage {
-        path: &'a str,
-    },
-    Mention {
-        path: &'a str,
-        name: &'a str,
-    },
+inputs! {
+    Text { text: String },
+    LocalImage { path: String },
+    Mention { path: String, name: String },
+}
+impl Input {
+    /// Provider-shaped content stored in a user message.
+    pub fn content(input: &[Self]) -> Value {
+        input_json::serialize(input, serde_json::value::Serializer).expect("input serializes")
+    }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StartTurn<'a> {
-    pub thread_id: &'a str,
-    pub client_user_message_id: &'a str,
-    pub input: &'a [Input<'a>],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<&'a str>,
-    #[serde(rename = "serviceTierForTurn", skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<&'a str>,
+pub struct StartTurn {
+    pub thread_id: String,
+    pub client_user_message_id: String,
+    #[serde(with = "input_json")]
+    pub input: Vec<Input>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    #[serde(rename = "serviceTierForTurn")]
+    pub service_tier: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum StartedTurn {
-    Turn {
-        turn: TurnIdentity,
-    },
-    Id {
-        #[serde(rename = "turnId")]
-        turn_id: String,
-    },
+pub struct StartedTurn {
+    pub turn: TurnIdentity,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TurnIdentity {
     pub id: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
-impl RpcMethod for StartTurn<'_> {
+impl RpcMethod for StartTurn {
     type Output = StartedTurn;
     const METHOD: &'static str = "turn/start";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::StartTurn(self.clone()))
+    }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        let id = match output {
-            StartedTurn::Turn { turn } => &turn.id,
-            StartedTurn::Id { turn_id } => turn_id,
-        };
+        let id = &output.turn.id;
         if id.trim().is_empty() {
             Err("turn ID is missing")
         } else {
@@ -181,10 +198,7 @@ pub(crate) fn validate_thread(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemResponse {
     pub item: crate::models::Item,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer: Option<crate::models::TransferGrant>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 impl ItemResponse {
     pub async fn resolve(
@@ -200,7 +214,7 @@ impl ItemResponse {
             })
             .await
             .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-            let item: crate::models::Item = serde_json::from_slice(&bytes)
+            let item: crate::models::Item = crate::protocol::decode(&bytes)
                 .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
             if item.id != self.item.id {
                 return Err(PeerError::InvalidMessage(
@@ -213,40 +227,54 @@ impl ItemResponse {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResumeThread<'a> {
-    pub thread_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<&'a str>,
+pub struct ResumeThread {
+    pub thread_id: String,
+    pub cwd: Option<String>,
 }
-rpc_method!(ResumeThread<'_>, Map<String, Value>, "thread/resume");
-#[derive(Debug, Serialize)]
+rpc_method!(
+    ResumeThread,
+    crate::models::Empty,
+    "thread/resume",
+    ResumeThread,
+    |self| self.clone()
+);
+#[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SteerTurn<'a> {
-    pub thread_id: &'a str,
-    pub client_user_message_id: &'a str,
-    pub input: &'a [Input<'a>],
-    pub expected_turn_id: &'a str,
+pub struct SteerTurn {
+    pub thread_id: String,
+    pub client_user_message_id: String,
+    #[serde(with = "input_json")]
+    pub input: Vec<Input>,
+    pub expected_turn_id: String,
 }
-rpc_method!(SteerTurn<'_>, Map<String, Value>, "turn/steer");
-#[derive(Debug, Serialize)]
+rpc_method!(
+    SteerTurn,
+    crate::models::Empty,
+    "turn/steer",
+    SteerTurn,
+    |self| self.clone()
+);
+#[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QueueTurn<'a> {
-    pub thread_id: &'a str,
-    pub client_user_message_id: &'a str,
-    pub input: &'a [Input<'a>],
+pub struct QueueTurn {
+    pub thread_id: String,
+    pub client_user_message_id: String,
+    #[serde(with = "input_json")]
+    pub input: Vec<Input>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueuedTurn {
     pub queued_submission: TurnIdentity,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
-impl RpcMethod for QueueTurn<'_> {
+impl RpcMethod for QueueTurn {
     type Output = QueuedTurn;
     const METHOD: &'static str = "thread/queue/add";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::QueueTurn(self.clone()))
+    }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
         if output.queued_submission.id.trim().is_empty() {
             Err("queued submission ID is missing")
@@ -256,57 +284,68 @@ impl RpcMethod for QueueTurn<'_> {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct ListModels<'a> {
+fn model_limit() -> usize {
+    100
+}
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct ListModels {
+    #[serde(default = "model_limit")]
     pub limit: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<&'a str>,
+    pub cursor: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPage {
     pub data: Vec<crate::models::Model>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
+    #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
+    pub provider_errors: Option<Map<String, Value>>,
 }
-rpc_method!(ListModels<'_>, ModelPage, "model/list");
+rpc_method!(ListModels, ModelPage, "model/list", ListModels, |self| self
+    .clone());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Transcribe<T = String> {
+#[serde(bound(serialize = "T: AsRef<[u8]>", deserialize = "T: From<Vec<u8>>"))]
+pub struct Transcribe<T = Vec<u8>> {
+    #[serde(with = "crate::protocol::bytes")]
     pub audio: T,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Transcription {
     pub text: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
-impl<T: Serialize> RpcMethod for Transcribe<T> {
+impl<T: AsRef<[u8]>> RpcMethod for Transcribe<T> {
     type Output = Transcription;
     const METHOD: &'static str = "host/dictation/transcribe";
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        Ok(crate::protocol::Call::Transcribe(Transcribe {
+            audio: self.audio.as_ref().to_vec(),
+        }))
+    }
 }
 
-#[derive(Debug, Serialize)]
-pub struct WriteFile<'a> {
-    pub path: &'a str,
-    pub revision: &'a str,
-    pub text: &'a str,
+#[derive(Debug, Serialize, Clone, Deserialize)]
+pub struct WriteFile {
+    pub path: String,
+    pub revision: String,
+    pub text: String,
 }
-rpc_method!(WriteFile<'_>, crate::models::FileContent, "host/file/write");
+rpc_method!(
+    WriteFile,
+    crate::models::FileContent,
+    "host/file/write",
+    WriteFile,
+    |self| self.clone()
+);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Account {
     pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_type: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -315,18 +354,13 @@ pub struct Accounts {
     pub accounts: Vec<Account>,
     pub selected_id: Option<String>,
     pub error: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSelection {
     pub selected_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence_error: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -336,8 +370,6 @@ pub struct AccountLogin {
     pub login_id: String,
     pub user_code: String,
     pub verification_url: String,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -345,10 +377,7 @@ pub struct AccountLogin {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AccountLoginStatus {
     pub completed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -400,7 +429,7 @@ pub fn submission_target<'a>(
 pub struct Submission<'a> {
     pub thread_id: &'a str,
     pub client_user_message_id: &'a str,
-    pub input: &'a [Input<'a>],
+    pub input: &'a [Input],
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub service_tier: Option<&'a str>,
@@ -410,7 +439,7 @@ impl Client {
         &self,
         submission: &Submission<'_>,
         target: SubmissionTarget<'_>,
-    ) -> Result<Reply<Option<String>>, PeerError> {
+    ) -> Result<Option<String>, PeerError> {
         let Submission {
             thread_id,
             client_user_message_id,
@@ -421,64 +450,50 @@ impl Client {
         } = *submission;
         match target {
             SubmissionTarget::Steer(turn_id) => {
-                let reply = self
-                    .call(&SteerTurn {
-                        thread_id,
-                        client_user_message_id,
-                        input,
-                        expected_turn_id: turn_id,
-                    })
-                    .await?;
-                Ok(Reply {
-                    sequence: reply.sequence,
-                    value: Some(turn_id.into()),
+                self.call(&SteerTurn {
+                    thread_id: thread_id.to_owned(),
+                    client_user_message_id: client_user_message_id.to_owned(),
+                    input: input.to_vec(),
+                    expected_turn_id: turn_id.to_owned(),
                 })
+                .await?;
+                Ok(Some(turn_id.into()))
             }
             SubmissionTarget::Queue => {
-                let reply = self
-                    .call(&QueueTurn {
-                        thread_id,
-                        client_user_message_id,
-                        input,
-                    })
-                    .await?;
-                Ok(Reply {
-                    sequence: reply.sequence,
-                    value: None,
+                self.call(&QueueTurn {
+                    thread_id: thread_id.to_owned(),
+                    client_user_message_id: client_user_message_id.to_owned(),
+                    input: input.to_vec(),
                 })
+                .await?;
+                Ok(None)
             }
             SubmissionTarget::Start { cwd, resume } => {
                 if resume {
                     self.call(&ResumeThread {
-                        thread_id,
-                        cwd: Some(cwd),
+                        thread_id: thread_id.to_owned(),
+                        cwd: Some(cwd.to_owned()),
                     })
                     .await?;
                 }
                 let reply = self
                     .call(&StartTurn {
-                        thread_id,
-                        client_user_message_id,
-                        input,
-                        model,
-                        effort,
-                        service_tier,
+                        thread_id: thread_id.to_owned(),
+                        client_user_message_id: client_user_message_id.to_owned(),
+                        input: input.to_vec(),
+                        model: model.map(str::to_owned),
+                        effort: effort.map(str::to_owned),
+                        service_tier: service_tier.map(str::to_owned),
                     })
                     .await?;
-                let id = match reply.value {
-                    StartedTurn::Turn { turn } => turn.id,
-                    StartedTurn::Id { turn_id } => turn_id,
-                };
-                Ok(Reply {
-                    sequence: reply.sequence,
-                    value: Some(id),
-                })
+                let id = reply.turn.id;
+                Ok(Some(id))
             }
         }
     }
 
     pub async fn models(&self) -> Result<ModelPage, PeerError> {
-        let mut extra = Map::<String, Value>::new();
+        let mut provider_errors = Map::<String, Value>::new();
         let mut models: Vec<crate::models::Model> = Vec::new();
         let mut cursor = None;
         let mut seen = std::collections::HashSet::new();
@@ -486,24 +501,11 @@ impl Client {
             let page = self
                 .call(&ListModels {
                     limit: 100,
-                    cursor: cursor.as_deref(),
+                    cursor: cursor.clone(),
                 })
-                .await?
-                .value;
-            for (key, value) in page.extra {
-                if key == "providerErrors" {
-                    let Value::Object(errors) = value else {
-                        return Err(PeerError::InvalidMessage("invalid provider errors".into()));
-                    };
-                    extra
-                        .entry(key)
-                        .or_insert_with(|| serde_json::json!({}))
-                        .as_object_mut()
-                        .expect("provider errors are an object")
-                        .extend(errors);
-                } else {
-                    extra.insert(key, value);
-                }
+                .await?;
+            if let Some(errors) = page.provider_errors {
+                provider_errors.extend(errors);
             }
             for model in page.data {
                 if let Some(index) = models.iter().position(|previous| previous.id == model.id) {
@@ -517,7 +519,7 @@ impl Client {
                 return Ok(ModelPage {
                     data: models,
                     next_cursor: None,
-                    extra,
+                    provider_errors: (!provider_errors.is_empty()).then_some(provider_errors),
                 });
             };
             if !seen.insert(next.clone()) {
@@ -531,24 +533,17 @@ impl Client {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerRequest {
-    #[serde(
-        default,
-        rename = "deliveryState",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "deliveryState")]
     pub delivery_state: Option<crate::session::RequestDelivery>,
-    #[serde(
-        default,
-        rename = "nativeRequestId",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "nativeRequestId")]
+    #[serde(with = "crate::protocol::json")]
     pub native_request_id: Option<Value>,
+    #[serde(with = "crate::protocol::json")]
     pub id: Value,
     pub method: String,
     #[serde(default)]
+    #[serde(with = "crate::protocol::json")]
     pub params: Map<String, Value>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -722,13 +717,12 @@ impl Client {
     pub async fn respond(&self, request: &ServerRequest, answer: &Answer) -> Result<(), PeerError> {
         let result = answer_result(request, answer)?;
         validate_answer(request, &result).map_err(PeerError::InvalidMessage)?;
-        self.peer
-            .request::<_, Value>(
-                "host/session/answer",
-                &serde_json::json!({"requestId":request.id,"result":result}),
-            )
-            .await
-            .map(|_| ())
+        self.request::<crate::models::Empty>(&crate::protocol::Call::AnswerSession(SessionAnswer {
+            request_id: request.id.clone(),
+            result,
+        }))
+        .await
+        .map(|_| ())
     }
 }
 
@@ -746,18 +740,16 @@ impl Client {
     ) -> Result<Vec<SessionImage>, PeerError> {
         // One bounded provider view; close this transient subscription before
         // returning images so it never replaces the Store's visible session.
-        let opened = self
-            .call(&ReadThread {
-                limit: 1000,
-                ..ReadThread::new(thread_id.to_owned())
-            })
-            .await?
-            .value;
+        let read = ReadThread {
+            limit: 1000,
+            ..ReadThread::new(thread_id.to_owned())
+        };
+        let (opened, stream) = self
+            .request_stream::<crate::session::OpenedSession>(&read.request()?)
+            .await?;
+        validate_output(&read, &opened)?;
+        drop(stream);
         let thread = opened.response.thread;
-        self.call(&crate::state::operations::CloseSubscription {
-            subscription_id: opened.subscription_id.to_string(),
-        })
-        .await?;
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();
         let mut native_items = std::collections::HashSet::new();
@@ -781,7 +773,6 @@ impl Client {
                             item_id: item.id.clone(),
                         })
                         .await?
-                        .value
                         .resolve(session)
                         .await?;
                     &detail.item
@@ -814,7 +805,7 @@ impl Client {
                 }
             }
         }
-        if thread.extra.get("historyHasMore") == Some(&Value::Bool(true))
+        if thread.history_has_more == Some(true)
             || thread
                 .history_read_state
                 .as_ref()
@@ -837,9 +828,8 @@ pub struct TerminalSize {
 // Shared Host/Client request records; Store behavior lives in state::operations.
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(transparent)]
 pub struct ListThreads {
-    #[serde(flatten)]
     pub query: crate::models::ListQuery,
 }
 
@@ -856,6 +846,7 @@ pub struct ReadItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenRequest {
+    #[serde(with = "crate::protocol::json")]
     pub request_id: Value,
 }
 
@@ -913,4 +904,33 @@ pub struct CancelAccountLogin {
 pub struct LoadVisualization {
     pub path: String,
     pub cwd: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Upload {
+    pub directory: String,
+    pub file_name: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalWrite {
+    pub process_handle: String,
+    #[serde(rename = "deltaBase64", with = "crate::protocol::bytes")]
+    pub data: Vec<u8>,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalKill {
+    pub process_handle: String,
+}
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAnswer {
+    #[serde(with = "crate::protocol::json")]
+    pub request_id: Value,
+    #[serde(with = "crate::protocol::json")]
+    pub result: Value,
 }

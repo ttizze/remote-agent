@@ -56,7 +56,8 @@ impl Snapshot {
         // Explicit Desktop decisions override workspace matching, including
         // projectless threads whose cwd happens to be inside a project.
         if let Some(assignment) = self.assignments.get(thread_id) {
-            thread.project_id = Some(Some(assignment.project_id.clone()));
+            thread.project_id =
+                agent_core::models::ProjectMembership::Assigned(assignment.project_id.clone());
         } else if self.projectless_thread_ids.contains(thread_id)
             || self.chat_directory.as_deref().is_some_and(|directory| {
                 thread
@@ -65,13 +66,8 @@ impl Snapshot {
                     .is_some_and(|cwd| Path::new(cwd) == directory)
             })
         {
-            thread.project_id = Some(None);
-        } else if thread
-            .project_id
-            .as_ref()
-            .and_then(Option::as_ref)
-            .is_none()
-        {
+            thread.project_id = agent_core::models::ProjectMembership::Unassigned {};
+        } else if thread.project_id.as_ref().is_none() {
             let project_id = self
                 .workspace_root_hints
                 .get(thread_id)
@@ -83,7 +79,8 @@ impl Snapshot {
                         .and_then(|cwd| self.project_for_workspace(cwd))
                 });
             if let Some(project_id) = project_id {
-                thread.project_id = Some(Some(project_id.to_owned()));
+                thread.project_id =
+                    agent_core::models::ProjectMembership::Assigned(project_id.to_owned());
             }
         }
     }
@@ -171,16 +168,12 @@ impl DesktopProject {
             roots: self
                 .root_paths
                 .into_iter()
-                .map(|path| ProjectRoot {
-                    path,
-                    extra: Default::default(),
-                })
+                .map(|path| ProjectRoot { path })
                 .collect(),
             position: Some(position as u64),
             created_at: Some(self.created_at),
             updated_at: Some(self.updated_at),
             source: Some("codexDesktop".into()),
-            extra: Default::default(),
         }
     }
 }
@@ -255,23 +248,11 @@ mod tests {
         for thread in &mut result {
             snapshot.enrich_thread(thread);
         }
-        assert_eq!(
-            result[0].project_id.as_ref().and_then(Option::as_deref),
-            Some("project-a")
-        );
-        assert_eq!(result[1].project_id, Some(None));
-        assert_eq!(
-            result[2].project_id.as_ref().and_then(Option::as_deref),
-            Some("project-b")
-        );
-        assert_eq!(
-            result[3].project_id.as_ref().and_then(Option::as_deref),
-            Some("upstream")
-        );
-        assert_eq!(
-            result[4].project_id.as_ref().and_then(Option::as_deref),
-            Some("project-a")
-        );
+        assert_eq!(result[0].project_id.as_deref(), Some("project-a"));
+        assert!(result[1].project_id.is_none());
+        assert_eq!(result[2].project_id.as_deref(), Some("project-b"));
+        assert_eq!(result[3].project_id.as_deref(), Some("upstream"));
+        assert_eq!(result[4].project_id.as_deref(), Some("project-a"));
     }
 
     #[test]
@@ -288,20 +269,11 @@ mod tests {
         for thread in &mut result {
             snapshot.enrich_thread(thread);
         }
-        assert_eq!(
-            result[0].project_id.as_ref().and_then(Option::as_deref),
-            Some("project-a")
-        );
-        assert_eq!(
-            result[1].project_id.as_ref().and_then(Option::as_deref),
-            Some("project-a")
-        );
+        assert_eq!(result[0].project_id.as_deref(), Some("project-a"));
+        assert_eq!(result[1].project_id.as_deref(), Some("project-a"));
         assert!(result[2].project_id.is_none());
         assert!(result[3].project_id.is_none());
-        assert_eq!(
-            result[4].project_id.as_ref().and_then(Option::as_deref),
-            Some("project-b")
-        );
+        assert_eq!(result[4].project_id.as_deref(), Some("project-b"));
     }
 
     #[test]
@@ -322,15 +294,9 @@ mod tests {
         for thread in &mut result {
             state.enrich_thread(thread);
         }
-        assert_eq!(
-            result[0].project_id.as_ref().and_then(Option::as_deref),
-            Some("a")
-        );
+        assert_eq!(result[0].project_id.as_deref(), Some("a"));
         assert!(result[1].project_id.is_none());
-        assert_eq!(
-            result[2].project_id.as_ref().and_then(Option::as_deref),
-            Some("b")
-        );
+        assert_eq!(result[2].project_id.as_deref(), Some("b"));
     }
 
     #[test]
@@ -355,14 +321,8 @@ mod tests {
         for thread in &mut result {
             snapshot.enrich_thread(thread);
         }
-        assert_eq!(
-            result[0].project_id.as_ref().and_then(Option::as_deref),
-            Some("app")
-        );
-        assert_eq!(
-            result[1].project_id.as_ref().and_then(Option::as_deref),
-            Some("repo")
-        );
+        assert_eq!(result[0].project_id.as_deref(), Some("app"));
+        assert_eq!(result[1].project_id.as_deref(), Some("repo"));
     }
 
     #[test]

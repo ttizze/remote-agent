@@ -896,8 +896,8 @@ impl Desktop {
                 .iter()
                 .find(|thread| thread.id == snapshot.navigation.thread_id)?
                 .project_id
-                .clone()
-                .flatten()
+                .as_ref()
+                .cloned()
         };
         if (navigated || project_for_selected(&previous) != project_for_selected(&self.snapshot))
             && let Some(project) = project_for_selected(&self.snapshot)
@@ -1010,7 +1010,7 @@ impl Desktop {
                 .map(|attachment| attachment.path.as_str())
                 .collect();
             for item in self.user_items() {
-                if let Some(parts) = item.extra.get("content").and_then(Value::as_array) {
+                if let Some(parts) = item.content.as_ref().and_then(Value::as_array) {
                     paths.extend(
                         parts
                             .iter()
@@ -1081,9 +1081,8 @@ impl Desktop {
         self.remote.as_ref().map_or("local", |remote| &remote.id)
     }
     fn has_older_history(&self) -> bool {
-        self.thread().is_some_and(|thread| {
-            thread.extra.get("historyHasMore") == Some(&serde_json::Value::Bool(true))
-        })
+        self.thread()
+            .is_some_and(|thread| thread.history_has_more == Some(true))
     }
     fn user_items(&self) -> impl Iterator<Item = &Arc<Item>> {
         self.thread()

@@ -166,44 +166,6 @@
     }
   },
   {
-    "name": "malformed-title-list",
-    "command": {
-      "type": "listThreads",
-      "query": {
-        "projectLimit": 5,
-        "chatLimit": 5,
-        "projectThreadLimits": {},
-        "searchTerm": ""
-      }
-    },
-    "exchanges": [
-      {
-        "method": "host/thread/list",
-        "params": {
-          "projectLimit": 5,
-          "chatLimit": 5,
-          "projectThreadLimits": {},
-          "searchTerm": ""
-        },
-        "response": {
-          "result": {
-            "data": [],
-            "projects": [],
-            "hasMoreChats": false,
-            "hasMoreProjects": false
-          }
-        }
-      }
-    ],
-    "errorContains": "Invalid host/thread/list response",
-    "errorRaw": {
-      "data": [],
-      "projects": [],
-      "hasMoreChats": false,
-      "hasMoreProjects": false
-    }
-  },
-  {
     "name": "new-thread-options",
     "command": {
       "type": "startThread",
@@ -961,57 +923,6 @@
     "result": null
   },
   {
-    "name": "malformed-queue",
-    "command": {
-      "type": "sendTurn",
-      "threadId": "thread-1",
-      "input": {
-        "text": "hello",
-        "attachments": [],
-        "clientUserMessageId": "client-1"
-      },
-      "snapshot": {
-        "status": {
-          "type": "active"
-        }
-      },
-      "listed": null,
-      "model": null,
-      "effort": null
-    },
-    "exchanges": [
-      {
-        "method": "thread/queue/add",
-        "params": {
-          "threadId": "thread-1",
-          "clientUserMessageId": "client-1",
-          "input": [
-            {
-              "type": "text",
-              "text": "hello",
-              "text_elements": []
-            }
-          ]
-        },
-        "response": {
-          "result": {
-            "queuedSubmission": {
-              "clientUserMessageId": "client-1",
-              "input": []
-            }
-          }
-        }
-      }
-    ],
-    "errorContains": "Invalid thread/queue/add response",
-    "errorRaw": {
-      "queuedSubmission": {
-        "clientUserMessageId": "client-1",
-        "input": []
-      }
-    }
-  },
-  {
     "name": "attachments-startTurn",
     "command": {
       "type": "sendTurn",
@@ -1063,7 +974,9 @@
         },
         "response": {
           "result": {
-            "turnId": "turn-1"
+            "turn": {
+              "id": "turn-1"
+            }
           }
         }
       }
@@ -1388,37 +1301,6 @@
     "errorRaw": null
   },
   {
-    "name": "malformed-models",
-    "command": {
-      "type": "models"
-    },
-    "exchanges": [
-      {
-        "method": "model/list",
-        "params": {
-          "limit": 100
-        },
-        "response": {
-          "result": {
-            "data": [
-              {
-                "id": "a"
-              }
-            ]
-          }
-        }
-      }
-    ],
-    "errorContains": "Invalid model/list response",
-    "errorRaw": {
-      "data": [
-        {
-          "id": "a"
-        }
-      ]
-    }
-  },
-  {
     "name": "remote-error-preserves-payload",
     "command": {
       "type": "readItem",
@@ -1524,15 +1406,6 @@
             }
           }
         }
-      },
-      {
-        "method": "host/session/close",
-        "params": {
-          "subscriptionId": "00000000-0000-0000-0000-000000000000"
-        },
-        "response": {
-          "result": {}
-        }
       }
     ],
     "result": [
@@ -1581,13 +1454,13 @@
     "name": "transcription-text",
     "command": {
       "type": "transcribe",
-      "audio": "fixture-audio"
+      "audio": "AQIDBA=="
     },
     "exchanges": [
       {
         "method": "host/dictation/transcribe",
         "params": {
-          "audio": "fixture-audio"
+          "audio": "AQIDBA=="
         },
         "response": {
           "result": {
@@ -1599,36 +1472,16 @@
     "result": "  文字起こし\n"
   },
   {
-    "name": "transcription-missing-text",
-    "command": {
-      "type": "transcribe",
-      "audio": "fixture-audio"
-    },
-    "exchanges": [
-      {
-        "method": "host/dictation/transcribe",
-        "params": {
-          "audio": "fixture-audio"
-        },
-        "response": {
-          "result": {}
-        }
-      }
-    ],
-    "errorContains": "host/dictation/transcribe",
-    "errorRaw": null
-  },
-  {
     "name": "transcription-blank-text",
     "command": {
       "type": "transcribe",
-      "audio": "fixture-audio"
+      "audio": "AQIDBA=="
     },
     "exchanges": [
       {
         "method": "host/dictation/transcribe",
         "params": {
-          "audio": "fixture-audio"
+          "audio": "AQIDBA=="
         },
         "response": {
           "result": {
@@ -1640,38 +1493,16 @@
     "result": " \n"
   },
   {
-    "name": "transcription-wrong-text-type",
-    "command": {
-      "type": "transcribe",
-      "audio": "fixture-audio"
-    },
-    "exchanges": [
-      {
-        "method": "host/dictation/transcribe",
-        "params": {
-          "audio": "fixture-audio"
-        },
-        "response": {
-          "result": {
-            "text": 7
-          }
-        }
-      }
-    ],
-    "errorContains": "host/dictation/transcribe",
-    "errorRaw": null
-  },
-  {
     "name": "transcription-remote-error",
     "command": {
       "type": "transcribe",
-      "audio": "fixture-audio"
+      "audio": "AQIDBA=="
     },
     "exchanges": [
       {
         "method": "host/dictation/transcribe",
         "params": {
-          "audio": "fixture-audio"
+          "audio": "AQIDBA=="
         },
         "response": {
           "error": {

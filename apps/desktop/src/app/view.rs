@@ -20,9 +20,6 @@ fn text<'a>(value: &'a Value, key: &str) -> &'a str {
 fn array(value: &Value) -> &[Value] {
     value.as_array().map(Vec::as_slice).unwrap_or_default()
 }
-fn extra<'a>(item: &'a Item, key: &str) -> &'a Value {
-    item.extra.get(key).unwrap_or(&Value::Null)
-}
 fn field<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> &'a Value {
     map.get(key).unwrap_or(&Value::Null)
 }

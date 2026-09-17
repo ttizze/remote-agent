@@ -3,7 +3,7 @@
 use crate::Result;
 use crate::test_support::Connection;
 use agent_core::transport::{Identity, Ticket};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -90,21 +90,18 @@ impl Drop for PairingServer {
     }
 }
 
-fn rpc(
+fn rpc<O: agent_core::client::RpcMethod>(
     runtime: &tokio::runtime::Runtime,
     ticket: &Ticket,
     identity: &Identity,
-    method: &str,
-    params: Value,
-) -> Result<Value> {
+    operation: &O,
+) -> Result<O::Output> {
     runtime.block_on(async {
         let connection =
             Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
-        let response = connection.peer.request::<_, Value>(method, &params).await;
-        let closed = connection.close().await;
-        let response = response?;
-        closed?;
-        Ok(response.value)
+        let response = connection.peer.call(operation).await;
+        connection.close().await;
+        response.map_err(Into::into)
     })
 }
 
@@ -119,7 +116,12 @@ fn route(
     if method == &Method::Get && path == "/pairing" {
         return Ok((
             200,
-            serde_json::to_vec(&rpc(runtime, ticket, identity, "host/invite", json!({}))?)?,
+            serde_json::to_vec(&rpc(
+                runtime,
+                ticket,
+                identity,
+                &agent_core::state::operations::CreateInvitation {},
+            )?)?,
         ));
     }
     if method != &Method::Post {
@@ -183,12 +185,11 @@ fn route(
                 runtime,
                 ticket,
                 identity,
-                "host/thread/start",
-                json!({"cwd":root.join("project")}),
+                &agent_core::state::operations::StartThread {cwd: Some(root.join("project").to_string_lossy().into_owned()), model: None},
             )?;
             return Ok((
                 200,
-                serde_json::to_vec(&json!({"threadId":response["thread"]["id"]}))?,
+                serde_json::to_vec(&json!({"threadId":response.thread.id}))?,
             ));
         }
         "/background-reply" => {
@@ -208,20 +209,13 @@ fn route(
             let connection =
                 Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
             let result: Result<()> = async {
-                connection.peer.request::<_, Value>(
-                    "host/session/open",
-                    &json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5}),
-                ).await?;
-                connection.peer.request::<_, Value>(
-                    "turn/start",
-                    &json!({"threadId":"fixture-external-thread","clientUserMessageId":"fixture-other-client",
-                        "input":[{"type":"text","text":"[success] Reply from another Bex client"}]}),
-                ).await?;
+                connection.peer.request::<agent_core::session::OpenedSession>(&agent_core::protocol::Call::OpenSession(serde_json::from_value::<agent_core::session::OpenSession>(json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap())?;
+                connection.peer.call(&serde_json::from_value::<agent_core::client::StartTurn>(json!({"threadId":"fixture-external-thread","clientUserMessageId":"fixture-other-client",
+                        "input":[{"type":"text","text":"[success] Reply from another Bex client"}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap())?;
                 Ok(())
             }.await;
-            let closed = connection.close().await;
-            result?;
-            closed
+            connection.close().await;
+            result
         })?,
         "/fail-next-thread-start" => {
             fs::write(root.join("fail-next-thread-start"), "")?;

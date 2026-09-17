@@ -158,14 +158,22 @@ impl CodexAppServer {
         Ok(self.peer.request_raw(line).await?)
     }
 
-    /// Shared peer correlation and typed payloads; preserve upstream extensions.
+    /// Shared peer correlation and typed payloads.
     pub async fn request<P: Serialize, T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
         params: &P,
     ) -> Result<RpcResponse<T>, Error> {
+        Ok(self.request_sequenced(method, params).await?.value)
+    }
+
+    pub async fn request_sequenced<P: Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &P,
+    ) -> Result<agent_core::peer::Reply<RpcResponse<T>>, Error> {
         ensure_public_method(method)?;
-        Ok(self.peer.request_envelope(method, params).await?.value)
+        Ok(self.peer.request_envelope(method, params).await?)
     }
 
     /// Sends a raw Codex notification or response exactly as supplied after

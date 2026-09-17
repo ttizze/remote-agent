@@ -6,7 +6,6 @@ mod git;
 mod host_identity;
 mod host_rpc;
 mod host_runtime;
-mod jsonl_session;
 pub mod local_host;
 pub mod platform;
 mod terminals;

@@ -167,16 +167,20 @@ impl Receipt {
 
 #[cfg(test)]
 mod tests {
+    #[allow(dead_code)]
+    mod host_fixture {
+        include!("../../tests/support/host.rs");
+    }
     use super::*;
     use std::time::Duration;
     async fn scoped_incoming(
         host: &Endpoint,
         trust: &crate::transport::Trust,
     ) -> (
-        crate::transport::Session,
-        impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + use<>,
+        host_fixture::Session,
+        host_fixture::Reader,
+        host_fixture::Writer,
     ) {
-        use tokio::io::AsyncWriteExt;
         let session = host
             .accept()
             .await
@@ -184,25 +188,14 @@ mod tests {
             .unwrap()
             .authorize(trust)
             .unwrap();
-        let mut stream = session.accept_stream().await.unwrap();
-        let request = {
-            let mut reader = crate::peer::JsonlReader::new(&mut stream);
-            assert_eq!(reader.read_line().await.unwrap().as_deref(), Some(""));
-            serde_json::from_str::<serde_json::Value>(&reader.read_line().await.unwrap().unwrap())
-                .unwrap()
-        };
+        let (session, mut reader, writer) = host_fixture::accept(session).await;
+        let request = reader.read_request().await.unwrap().unwrap();
         assert_eq!(request["method"], "host/session/scope");
-        stream
-            .write_all(
-                format!(
-                    "{}\n",
-                    serde_json::json!({"id":request["id"],"result":"fixture-storage"})
-                )
-                .as_bytes(),
-            )
+        writer
+            .reply(&request, serde_json::json!({"result":"fixture-storage"}))
             .await
             .unwrap();
-        (session, stream)
+        (session, reader, writer)
     }
 
     #[tokio::test]
@@ -227,9 +220,8 @@ mod tests {
     }
     #[tokio::test]
     async fn reconnect_reloads_selected_state_without_native_dispatch() {
-        use crate::peer::{JsonlReader, JsonlWriter};
         use crate::transport::Trust;
-        use serde_json::{Value, json};
+        use serde_json::json;
         for recovery in ["silent", "disconnected", "closed"] {
             tokio::time::timeout(Duration::from_secs(40), async {
             let identity = Identity::generate();
@@ -251,33 +243,29 @@ mod tests {
             assert_eq!(*restored.snapshot().list_query, crate::models::ListQuery::default());
             restored.shutdown().await.unwrap();
             let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached) });
-            let (connected, (session, stream)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
+            let (connected, (session, reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
             connected.unwrap();
             let first = session;
-            let (read, _write) = tokio::io::split(stream);
-            let mut old = JsonlReader::new(read);
+            let mut old = reader;
+            let _first_writer = writer;
             assert!(store.snapshot().connected());
             store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "preserved".into() })
                 .unwrap().wait().await.unwrap();
             // Leave every automatic read pending on the old transport.
             let mut methods = std::collections::BTreeSet::new();
             for _ in 0..3 {
-                let line = tokio::time::timeout(Duration::from_secs(2), old.read_line()).await
+                let request = tokio::time::timeout(Duration::from_secs(2), old.read_request()).await
                     .expect("Connected must reload without native intents").unwrap().unwrap();
-                let request: Value = serde_json::from_str(&line).unwrap();
                 methods.insert(request["method"].as_str().unwrap().to_owned());
             }
             assert_eq!(methods, ["host/thread/list", "host/session/open", "model/list"].map(str::to_owned).into());
             let server = async {
-                assert!(!matches!(old.read_line().await, Ok(Some(_))),
+                assert!(!matches!(old.read_request().await, Ok(Some(_))),
                     "reconnect must close the old stream without probing it with list/history reads");
-                let (next, stream) = scoped_incoming(&host, &trust).await;
-                let (read, write) = tokio::io::split(stream);
-                let mut reader = JsonlReader::new(read);
-                let mut writer = JsonlWriter::new(write);
+                let (next, mut reader, writer) = scoped_incoming(&host, &trust).await;
                 let mut requests = std::collections::BTreeMap::new();
                 for _ in 0..3 {
-                    let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().unwrap()).unwrap();
+                    let request = reader.read_request().await.unwrap().unwrap();
                     assert!(requests.insert(request["method"].as_str().unwrap().to_owned(), request).is_none());
                 }
                 let list = &requests["host/thread/list"];
@@ -288,10 +276,10 @@ mod tests {
                 let open = &requests["host/session/open"];
                 assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
-                writer.write_line(&json!({"id":open["id"], "result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":"after reconnect"}]}]}}}}).to_string()).await.unwrap();
-                writer.write_line(&json!({"id":requests["model/list"]["id"], "result":{"data":[{"id":"fresh-model","model":"fresh-model","displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}}).to_string()).await.unwrap();
-                writer.write_line(&json!({"id":list["id"], "result":{"data":[{"id":"thread","name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}).to_string()).await.unwrap();
-                assert!(!matches!(reader.read_line().await, Ok(Some(_))));
+                writer.reply(open, json!({ "result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":"after reconnect"}]}]}}}})).await.unwrap();
+                writer.reply(&requests["model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":"fresh-model","displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
+                writer.reply(list, json!({ "result":{"data":[{"id":"thread","name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+                assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
             };
             let client = async {
@@ -325,9 +313,8 @@ mod tests {
     }
     #[tokio::test]
     async fn active_reads_retain_transport_navigation_and_draft_after_error() {
-        use crate::peer::{JsonlReader, JsonlWriter};
         use crate::transport::Trust;
-        use serde_json::{Value, json};
+        use serde_json::json;
         for selected in [false, true] {
             tokio::time::timeout(Duration::from_secs(40), async {
                 let identity = Identity::generate();
@@ -339,19 +326,14 @@ mod tests {
                     ..Default::default()
                 };
                 let store = AgentStore::offline(serde_json::to_vec(&cached).unwrap()).await.unwrap();
-                let (connected, (session, stream)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
+                let (connected, (session, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
                 connected.unwrap();
-                let (read, write) = tokio::io::split(stream);
-                let mut reader = JsonlReader::new(read);
-                let mut writer = JsonlWriter::new(write);
                 let server = async {
                     for round in 0..(3 + usize::from(selected)) {
                         let mut requests = Vec::new();
                         while requests.len() < (1 + usize::from(selected) + usize::from(round == 0)) {
-                            let request: Value = serde_json::from_str(&reader.read_line().await.unwrap().expect("refresh must retain the existing stream")).unwrap();
-                            if request["method"] == "host/session/close" {
-                                writer.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await.unwrap();
-                            } else { requests.push(request); }
+                            let request = reader.read_request().await.unwrap().expect("refresh must retain the existing stream");
+                            requests.push(request);
                         }
                         for request in requests {
                             let result = match request["method"].as_str().unwrap() {
@@ -362,16 +344,12 @@ mod tests {
                             };
                             if round == 2 && selected && request["method"] == "host/session/open" { continue; }
                             let response = if round == 1 && request["method"] == "host/thread/list" {
-                                json!({"id":request["id"],"error":{"code":-32000,"message":"temporary read error"}})
-                            } else { json!({"id":request["id"],"result":result}) };
-                            writer.write_line(&response.to_string()).await.unwrap();
+                                json!({"error":{"code":-32000,"message":"temporary read error"}})
+                            } else { json!({"result":result}) };
+                            writer.reply(&request, response).await.unwrap();
                         }
                     }
-                    while let Ok(Some(line)) = reader.read_line().await {
-                        let request: Value = serde_json::from_str(&line).unwrap();
-                        assert_eq!(request["method"], "host/session/close");
-                        let _ = writer.write_line(&json!({"id":request["id"],"result":{}}).to_string()).await;
-                    }
+                    assert!(reader.read_request().await.unwrap().is_none());
                 };
                 let client = async {
                     let mut updates = store.store.subscribe();

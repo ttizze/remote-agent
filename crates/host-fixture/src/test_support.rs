@@ -1,6 +1,6 @@
 //! Real isolated Host startup shared by UI and transport tests.
 use agent_core::{
-    peer::RpcPeer,
+    client::Client,
     transport::{Endpoint, Identity, Relays, Session, Ticket},
 };
 use anyhow::{Context, Result};
@@ -128,7 +128,8 @@ impl HostFixture {
 pub struct Connection {
     pub endpoint: Endpoint,
     pub session: Session,
-    pub peer: RpcPeer,
+    pub peer: Client,
+    pub events: agent_core::protocol::Reader,
 }
 
 impl Connection {
@@ -136,15 +137,16 @@ impl Connection {
         let endpoint = Endpoint::bind(identity, Relays::Disabled).await?;
         let opened: crate::Result<_> = async {
             let session = endpoint.connect(ticket).await?;
-            let peer = session.open_peer(Duration::from_secs(10), 128).await?;
-            Ok((session, peer))
+            let (peer, events) = session.open_peer(Duration::from_secs(10), 128).await?;
+            Ok((session, peer, events))
         }
         .await;
         match opened {
-            Ok((session, peer)) => Ok(Self {
+            Ok((session, peer, events)) => Ok(Self {
                 endpoint,
                 session,
                 peer,
+                events,
             }),
             Err(error) => {
                 endpoint.close().await;
@@ -153,10 +155,9 @@ impl Connection {
         }
     }
 
-    pub async fn close(self) -> crate::Result<()> {
-        let closed = self.peer.close().await;
+    pub async fn close(self) {
+        self.peer.close().await;
         self.session.close();
         self.endpoint.close().await;
-        Ok(closed?)
     }
 }

@@ -68,11 +68,7 @@ pub enum TextField {
 
 /// A small change to the current conversation, never a persistent event log.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SessionChange {
     Request {
         request: crate::client::ServerRequest,
@@ -93,7 +89,7 @@ pub enum SessionChange {
     },
     Item {
         turn_id: String,
-        item: Item,
+        item: Arc<Item>,
     },
     RemoveItem {
         turn_id: String,
@@ -183,13 +179,13 @@ impl SessionChange {
                 "inProgress".into()
             });
             if let Some(old) = old {
-                if turn.started_at == Some(None) {
-                    merged.started_at = old.started_at.clone();
+                if turn.started_at.is_none() {
+                    merged.started_at = old.started_at;
                 }
-                if turn.completed_at == Some(None) {
-                    merged.completed_at = old.completed_at.clone();
+                if turn.completed_at.is_none() {
+                    merged.completed_at = old.completed_at;
                 }
-                if turn.duration_ms == Some(None) {
+                if turn.duration_ms.is_none() {
                     merged.duration_ms = old.duration_ms;
                 }
             }
@@ -229,8 +225,11 @@ impl SessionChange {
                 .iter()
                 .any(|turn| turn.status.as_deref() == Some("inProgress"));
             next.status = Some(ThreadStatus {
-                kind: if active { "active" } else { "idle" }.into(),
-                extra: Map::new(),
+                kind: if active {
+                    crate::models::ThreadStatusKind::Active
+                } else {
+                    crate::models::ThreadStatusKind::Idle
+                },
             });
             return Ok(next);
         }
@@ -246,9 +245,9 @@ impl SessionChange {
                 }
                 let items = turn.items.get_or_insert_default();
                 if let Some(index) = items.iter().position(|current| current.id == item.id) {
-                    items[index] = Arc::new(item.clone());
+                    items[index] = item.clone();
                 } else {
-                    items.push(Arc::new(item.clone()));
+                    items.push(item.clone());
                 }
             }
             Self::RemoveItem { item_id, .. } => {
@@ -281,14 +280,6 @@ impl SessionChange {
                 if item.kind.as_deref() != Some(expected) {
                     return Ok(previous.clone());
                 }
-                if *field == TextField::FileChange
-                    && item
-                        .changes
-                        .as_ref()
-                        .is_some_and(|changes| !changes.accepts_delta())
-                {
-                    return Err("invalid file change delta target");
-                }
                 let item = Arc::make_mut(item);
                 match field {
                     TextField::Message => item.text.get_or_insert_default().push_str(delta),
@@ -297,11 +288,11 @@ impl SessionChange {
                         .get_or_insert_default()
                         .push_str(delta),
                     TextField::Reasoning => {
-                        append_text(item.extra.entry("summary").or_insert(Value::Null), delta)
+                        append_text(item.summary.get_or_insert(Value::Null), delta)
                     }
                     TextField::FileChange => item
                         .changes
-                        .get_or_insert_with(|| crate::models::ItemChanges::Files(Vec::new()))
+                        .get_or_insert_with(|| crate::models::ItemChanges(Vec::new()))
                         .append_delta(delta),
                 }
             }
@@ -340,9 +331,11 @@ pub(crate) fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
         started_at,
         completed_at,
         duration_ms,
-        error
+        error,
+        started_at_ms,
+        completed_at_ms
     );
-    merged.extra.extend(incoming.extra.clone());
+
     merged
 }
 
@@ -369,6 +362,7 @@ pub struct OpenSession {
 #[serde(rename_all = "camelCase")]
 pub struct OpenedSession {
     pub session: SessionRef,
+    #[serde(skip)]
     pub subscription_id: uuid::Uuid,
     pub response: crate::models::ThreadResponse,
 }
@@ -378,12 +372,6 @@ pub struct OpenedSession {
 pub struct SessionUpdate {
     pub subscription_id: uuid::Uuid,
     pub change: SessionChange,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CloseSession {
-    pub subscription_id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,51 +388,24 @@ pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "String", into = "String")]
+#[serde(rename_all = "camelCase")]
 pub enum HistoryReadKind {
     Complete,
     Partial,
     Incomplete,
     Unavailable,
-    Other(String),
-}
-impl From<String> for HistoryReadKind {
-    fn from(value: String) -> Self {
-        match value.as_str() {
-            "complete" => Self::Complete,
-            "partial" => Self::Partial,
-            "incomplete" => Self::Incomplete,
-            "unavailable" => Self::Unavailable,
-            _ => Self::Other(value),
-        }
-    }
-}
-impl From<HistoryReadKind> for String {
-    fn from(value: HistoryReadKind) -> Self {
-        match value {
-            HistoryReadKind::Complete => "complete".into(),
-            HistoryReadKind::Partial => "partial".into(),
-            HistoryReadKind::Incomplete => "incomplete".into(),
-            HistoryReadKind::Unavailable => "unavailable".into(),
-            HistoryReadKind::Other(value) => value,
-        }
-    }
+    #[serde(other)]
+    Other,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryReadState {
     #[serde(rename = "type")]
     pub kind: HistoryReadKind,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub issues: Vec<String>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
 }
 impl HistoryReadState {
     pub fn new(kind: HistoryReadKind, issues: Vec<String>) -> Self {
-        Self {
-            kind,
-            issues,
-            extra: Map::new(),
-        }
+        Self { kind, issues }
     }
 }
