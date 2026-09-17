@@ -36,6 +36,7 @@ conversation-ui:
     scripts/ios-e2e.sh \
         testSimulatorNativeTerminalRetainsShellAfterReopening \
         testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
+        testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \

@@ -85,9 +85,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(child.exists)
         try verifyAbsoluteDirectoryNavigation(app, child: child)
         let path = app.textFields["絶対パス"]
-        path.tap()
-        path.typeKey("a", modifierFlags: .command)
-        path.typeText("relative-path")
+        replaceFieldText(app, field: path, text: "relative-path")
         app.buttons["files.open-path"].tap()
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "絶対パスを入力"))
             .firstMatch.waitForExistence(timeout: 10))
@@ -100,9 +98,7 @@ extension BexLaunchUITests {
         let path = app.textFields["絶対パス"]
         let root = try XCTUnwrap(path.value as? String)
         XCTAssertTrue(root.hasPrefix("/"))
-        path.tap()
-        path.typeKey("a", modifierFlags: .command)
-        path.typeText(root + "/nested")
+        replaceFieldText(app, field: path, text: root + "/nested")
         for _ in 0 ..< 2 {
             XCTAssertEqual(path.value as? String, root + "/nested")
             app.buttons["files.open-path"].tap()
@@ -125,7 +121,7 @@ extension BexLaunchUITests {
         address.tap(); address.typeText("file:///etc/passwd")
         app.buttons["browser.open"].tap()
         XCTAssertTrue(app.staticTexts["http または https の URL を入力してください"].waitForExistence(timeout: 5))
-        address.tap(); address.typeKey("a", modifierFlags: .command); address.typeText("about:blank")
+        replaceFieldText(app, field: address, text: "about:blank")
         app.buttons["browser.open"].tap()
         XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 10))
         captureScreen(app, named: "Separate browser workspace")
@@ -139,6 +135,14 @@ extension BexLaunchUITests {
             .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
         XCTAssertTrue(app.buttons["task.tools"].waitForExistence(timeout: 5))
         XCTAssertFalse(address.exists)
+    }
+
+    private func replaceFieldText(_ app: XCUIApplication, field: XCUIElement, text: String) {
+        field.tap(); field.press(forDuration: 1.2)
+        let selectAll = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == 'Select All' OR label == 'すべてを選択'")).firstMatch
+        XCTAssertTrue(selectAll.waitForExistence(timeout: 5)); selectAll.tap()
+        field.typeText(text)
     }
 
     func testPhysicalDeviceCanPairWithManualPayload() throws {
