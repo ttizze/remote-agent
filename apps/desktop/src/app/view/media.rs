@@ -199,22 +199,25 @@ impl Desktop {
     ) {
         let id = uuid::Uuid::new_v4();
         self.image_gallery = Some(ImageGallery {
+            zoom: 1.,
             id,
             entries: Vec::new(),
             initial: (source, encoded),
             selected: None,
             list: ListState::new(0, ListAlignment::Top, px(160.)),
-            loading: true,
+            loading: !self.selected().is_empty(),
             saving: false,
             saved: false,
             error: String::new(),
         });
-        self.perform(
-            Intent::LoadSessionImages(op::LoadSessionImages {
-                thread_id: self.selected().into(),
-            }),
-            OperationCompletion::Gallery(id),
-        );
+        if !self.selected().is_empty() {
+            self.perform(
+                Intent::LoadSessionImages(op::LoadSessionImages {
+                    thread_id: self.selected().into(),
+                }),
+                OperationCompletion::Gallery(id),
+            );
+        }
         cx.notify();
     }
 
@@ -238,6 +241,7 @@ impl Desktop {
             .on_click(cx.listener(move |s, _, _, cx| {
                 if let Some(gallery) = s.image_gallery.as_mut().filter(|gallery| !gallery.saving) {
                     gallery.selected = Some(index);
+                    gallery.zoom = 1.;
                     gallery.saved = false;
                     gallery.error.clear();
                     cx.notify();
@@ -254,6 +258,7 @@ impl Desktop {
         let gallery = self.image_gallery.as_ref().unwrap();
         let (source, encoded) = gallery.current_image().clone();
         let list_state = gallery.list.clone();
+        let zoom = gallery.zoom;
         let saving = gallery.saving;
         let saved = gallery.saved;
         let loading = gallery.loading;
@@ -265,7 +270,7 @@ impl Desktop {
         let image = self.image(
             &source,
             encoded,
-            (f32::from(window.viewport_size().height) - 148.).max(120.),
+            (f32::from(window.viewport_size().height) - 200.).max(120.) * zoom,
             false,
             cx,
         );
@@ -323,13 +328,55 @@ impl Desktop {
                     .gap_4()
                     .child(div().w(px(88.)).h_full().child(thumbnails))
                     .child(
-                        h_flex()
+                        div()
+                            .id("gallery-viewport")
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .items_center()
-                            .justify_center()
-                            .child(image),
+                            .overflow_scroll()
+                            .child(
+                                div()
+                                    .w(px((f32::from(window.viewport_size().width) - 152.)
+                                        .max(120.)
+                                        * zoom))
+                                    .child(image),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .justify_center()
+                    .gap_3()
+                    .child(
+                        self.button("gallery-zoom-out", "−", cx, |s, _, _| {
+                            if let Some(gallery) = &mut s.image_gallery {
+                                gallery.zoom = (gallery.zoom - 0.25).max(0.25);
+                            }
+                        })
+                        .accessibility_label("縮小")
+                        .disabled(zoom <= 0.25),
+                    )
+                    .child(
+                        self.button(
+                            "gallery-zoom-reset",
+                            format!("{:.0}%", zoom * 100.),
+                            cx,
+                            |s, _, _| {
+                                if let Some(gallery) = &mut s.image_gallery {
+                                    gallery.zoom = 1.;
+                                }
+                            },
+                        )
+                        .accessibility_label("倍率をリセット"),
+                    )
+                    .child(
+                        self.button("gallery-zoom-in", "+", cx, |s, _, _| {
+                            if let Some(gallery) = &mut s.image_gallery {
+                                gallery.zoom = (gallery.zoom + 0.25).min(4.);
+                            }
+                        })
+                        .accessibility_label("拡大")
+                        .disabled(zoom >= 4.),
                     ),
             )
             .into_any_element()

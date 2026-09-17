@@ -231,12 +231,18 @@ impl Desktop {
             }
             "userMessage" => {
                 let mut body = user_message_bubble();
-                let mut images = projected.data.image_sources.iter();
+                let mut has_body = false;
                 if item.content.as_ref().unwrap_or(&Value::Null).is_array() {
                     for (i, part) in array(item.content.as_ref().unwrap_or(&Value::Null))
                         .iter()
                         .enumerate()
                     {
+                        if matches!(text(part, "type"), "localImage" | "image")
+                            || (text(part, "type") == "text" && text(part, "text").is_empty())
+                        {
+                            continue;
+                        }
+                        has_body = true;
                         body = body.child(match text(part, "type") {
                             "text" => TextView::markdown(
                                 SharedString::from(format!("{id}-{i}")),
@@ -244,10 +250,6 @@ impl Desktop {
                             )
                             .selectable(true)
                             .into_any_element(),
-                            "localImage" | "image" => images
-                                .next()
-                                .map(|source| self.image(source, false, 320., true, cx))
-                                .unwrap_or_else(|| div().into_any_element()),
                             _ => {
                                 let path = text(part, "path").to_owned();
                                 self.button(
@@ -269,6 +271,7 @@ impl Desktop {
                         });
                     }
                 } else {
+                    has_body = !item.text.as_deref().unwrap_or_default().is_empty();
                     body = body.child(
                         TextView::markdown(
                             SharedString::from(id.clone()),
@@ -277,6 +280,12 @@ impl Desktop {
                         .selectable(true),
                     );
                 }
+                let body = self.user_message_content(
+                    body,
+                    has_body,
+                    projected.data.image_sources.iter().map(String::as_str),
+                    cx,
+                );
                 let text = projected.data.body.clone();
                 let edit = self.button(format!("edit-{id}"), "", cx, move |s, window, cx| {
                     selection::set_composer_text(&s.composer, text.clone().into(), window, cx);
@@ -590,9 +599,7 @@ impl Desktop {
             );
         }
         for (index, attachment) in draft.attachments.iter().enumerate() {
-            if attachment.is_image {
-                body = body.child(self.image(&attachment.path, false, 320., true, cx));
-            } else {
+            if !attachment.is_image {
                 let path = attachment.path.clone();
                 body = body.child(self.button(
                     format!("pending-{id}-file-{index}"),
@@ -602,6 +609,16 @@ impl Desktop {
                 ));
             }
         }
+        let body = self.user_message_content(
+            body,
+            !draft.text.is_empty() || draft.attachments.iter().any(|file| !file.is_image),
+            draft
+                .attachments
+                .iter()
+                .filter(|file| file.is_image)
+                .map(|file| file.path.as_str()),
+            cx,
+        );
         h_flex()
             .w_full()
             .justify_end()
@@ -615,6 +632,45 @@ impl Desktop {
                 ),
             )
             .into_any_element()
+    }
+
+    fn user_message_content<'a>(
+        &mut self,
+        body: Div,
+        has_body: bool,
+        sources: impl Iterator<Item = &'a str>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let images: Vec<_> = sources
+            .map(|source| {
+                div()
+                    .w(px(80.))
+                    .h(px(80.))
+                    .flex_shrink_0()
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(rgb(0x444444))
+                    .debug_selector(|| "user-image-thumbnail".into())
+                    .child(self.image(source, false, 80., true, cx))
+            })
+            .collect();
+        v_flex()
+            .min_w_0()
+            .max_w(px(560.))
+            .items_end()
+            .gap_2()
+            .when(!images.is_empty(), |column| {
+                column.child(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .flex_wrap()
+                        .max_w(px(560.))
+                        .children(images),
+                )
+            })
+            .when(has_body, |column| column.child(body))
     }
 
     pub(super) fn request_card(
@@ -1196,7 +1252,7 @@ mod rendering_tests {
                     serde_json::json!([])
                 } else {
                     serde_json::json!([{
-                        "id":"user", "type":"userMessage", "content":[{"type":"localImage","path":"/fixture/image.png"}]
+                        "id":"user", "type":"userMessage", "content":[{"type":"text","text":"caption"},{"type":"localImage","path":"/fixture/image.png"}]
                     }])
                 };
                 let mut snapshot = Snapshot::default();
@@ -1206,6 +1262,7 @@ mod rendering_tests {
                         Arc::new(agent_core::state::PendingSubmission {
                             draft_key: "fixture".into(),
                             draft: Arc::new(agent_core::state::Draft {
+                                text: "caption".into(),
                                 attachments: vec![agent_core::state::Attachment {
                                     path: "/fixture/image.png".into(),
                                     name: "image.png".into(),
@@ -1250,6 +1307,11 @@ mod rendering_tests {
                     window.run_until_parked();
                     view.update(window, |_, cx| cx.notify());
                     window.run_until_parked();
+                    let thumbnail = window.debug_bounds("user-image-thumbnail").unwrap();
+                    let bubble = window.debug_bounds("user-message-bubble").unwrap();
+                    assert_eq!(thumbnail.size, size(px(80.), px(80.)));
+                    assert!(thumbnail.bottom() <= bubble.top());
+                    assert_eq!(thumbnail.right(), bubble.right());
                     let bounds = window
                         .debug_bounds("chat-image")
                         .expect("image must render");

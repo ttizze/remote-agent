@@ -439,21 +439,39 @@ impl Desktop {
             body = body.child(viewport);
         }
         let key = self.draft_key().to_owned();
-        let attachments = &self.draft().attachments;
+        let attachments = self.draft().attachments.clone();
         let mut files = h_flex().gap_2().flex_wrap();
         for (i, file) in attachments.iter().enumerate() {
             let key = key.clone();
-            files = files.child(self.button(
-                format!("attachment-{i}"),
-                format!("{} ×", file.name),
-                cx,
-                move |s, _, _| {
+            let remove = self
+                .button(format!("attachment-{i}"), "×", cx, move |s, _, _| {
                     s.dispatch(Intent::RemoveAttachment {
                         draft_key: key.clone(),
                         index: i as u32,
                     });
-                },
-            ));
+                })
+                .accessibility_label(format!("{}を外す", file.name))
+                .w(px(28.))
+                .h(px(28.))
+                .rounded_full()
+                .bg(rgb(0x222222));
+            files = files.child(if file.is_image {
+                div()
+                    .relative()
+                    .w(px(104.))
+                    .h(px(104.))
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .child(self.image(&file.path, false, 104., true, cx))
+                    .child(div().absolute().top_0().right_0().child(remove))
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .gap_2()
+                    .child(file.name.clone())
+                    .child(remove)
+                    .into_any_element()
+            });
         }
         let running = self.thread().and_then(|thread| thread.active_turn_id());
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
@@ -516,6 +534,7 @@ impl Desktop {
             .p(px(7.))
             .gap_2()
             .rounded(px(30.))
+            .when(!attachments.is_empty(), |composer| composer.child(files))
             .bg(rgb(0x2b2b2b))
             .border_1()
             .border_color(rgb(0x363636))
@@ -592,7 +611,6 @@ impl Desktop {
                         .is_some_and(|review| !review.files.is_empty()),
                 |column| column.child(self.review_card(cx)),
             )
-            .child(files)
             .child(composer);
         body.child(
             h_flex()

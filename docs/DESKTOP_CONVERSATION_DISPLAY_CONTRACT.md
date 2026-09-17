@@ -384,3 +384,23 @@ results after navigation.
 Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 `successful_submission_does_not_erase_a_newer_draft`, and
 `failed_new_submission_keeps_retry_at_the_last_successful_step`.
+
+## Image preview and draft attachments
+
+- Desktop image previews expose decrease, percentage/reset, and increase controls
+  (25–400% of the fitted view). Enlarged images scroll in both directions; selecting
+  another gallery image resets the scale.
+- Desktop, iPhone and Android show draft image thumbnails inside the composer,
+  above the text. Each attachment has a top-right remove button. Removing an
+  attachment preserves the text and other attachments. Non-image files retain
+  their filenames. Mobile thumbnails use the authenticated Host download.
+- iOS `testSimulatorCanAddASecondPhoto` verifies decoded thumbnails, removal
+  placement and draft preservation in addition to separate photo selections.
+
+- Sent user images appear as 80 px thumbnails aligned to the right above the
+  text bubble, including pending/queued messages. Image-only messages have no
+  empty text bubble. Desktop wraps additional thumbnails; mobile scrolls them
+  horizontally. Desktop/iPhone retain image preview on activation.
+- Desktop `chat_images_stay_inside_the_bubble_at_different_window_sizes` now
+  checks thumbnail size, right alignment and separation above the text bubble
+  for both pending and persisted messages, as well as viewport containment.
