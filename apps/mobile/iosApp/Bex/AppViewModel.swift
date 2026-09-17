@@ -190,23 +190,24 @@ final class BexAppViewModel: ObservableObject {
         } catch { pairingError = error.localizedDescription }
     }
 
-    func connect() {
+    func connect(afterForeground: Bool = false) {
         guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
-              !isConnecting else { return }
+              !isConnecting || afterForeground else { return }
+        connection?.cancel()
         isConnecting = true
         connectionError = nil
         notice = nil
         connection = Task { [weak self] in
             do {
-                try await owner.reconnect(connection: Connection(ticket: profile.ticket,
-                                                                 identity: DeviceIdentity.loadOrGenerate(profile.id),
-                                                                 invitation: nil, useRelays: true))
+                try await owner.resume(connection: Connection(ticket: profile.ticket,
+                                                              identity: DeviceIdentity.loadOrGenerate(profile.id),
+                                                              invitation: nil, useRelays: true))
                 guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
                 publish(owner.snapshot())
                 notice = snapshot.error()
                 isConnecting = false
             } catch {
-                guard self?.selectedProfileId == profile.id else { return }
+                guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
                 self?.isConnecting = false
                 self?.connectionError = error.localizedDescription
                 self?.notice = error.localizedDescription

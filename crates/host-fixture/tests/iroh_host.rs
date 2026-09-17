@@ -1017,6 +1017,8 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
         let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation)).await.unwrap();
         store.dispatch(Intent::ListThreads(op::ListThreads::new(Default::default()))).await.unwrap();
+        // A paired mobile client must resume without local management privileges.
+        tokio::time::timeout(Duration::from_millis(500), store.resume(&endpoint, &fixture.ticket)).await.unwrap().unwrap();
         store.dispatch(Intent::SetDraftText { thread_id: "selected".into(), text: "Unsent draft".into() }).await.unwrap();
         let mut saved = None;
         let mut owner = Some(store);
@@ -2201,7 +2203,10 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
         local.peer.call(&serde_json::from_value::<rpc::StartTerminal>(json!({"processHandle":"managed-terminal","cwd":terminal_directory,"size":{"rows":24,"cols":80}})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
         assert!(Path::new(&path).is_dir());
-        assert!(local.peer.call(&serde_json::from_value::<rpc::StartTerminal>(json!({"processHandle":"managed-terminal","cwd":path,"size":{"rows":24,"cols":80}})).unwrap()).await.is_err());
+        // Detach retains the PTY and its worktree lease; canonical-path reattach succeeds.
+        local.peer.call(&op::DetachTerminal { handle: "managed-terminal".into() }).await.unwrap();
+        assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
+        local.peer.call(&rpc::StartTerminal { handle: "managed-terminal".into(), cwd: path.clone(), size: rpc::TerminalSize { rows: 24, cols: 80 } }).await.unwrap();
         assert!(store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.is_err());
         local.peer.request::<models::Empty>(&agent_core::protocol::Call::KillTerminal(serde_json::from_value::<rpc::TerminalKill>(json!({"processHandle":"managed-terminal"})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();

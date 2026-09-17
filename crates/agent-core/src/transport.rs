@@ -12,6 +12,7 @@ use std::{
     io,
     pin::Pin,
     str::FromStr,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -124,7 +125,7 @@ pub fn authorize(
 }
 
 #[derive(Clone)]
-pub struct Endpoint(iroh::Endpoint);
+pub struct Endpoint(Arc<iroh::Endpoint>);
 impl Endpoint {
     pub async fn bind(identity: Identity, relays: Relays) -> Result<Self, TransportError> {
         let mut builder = iroh::Endpoint::builder(presets::N0)
@@ -143,7 +144,7 @@ impl Endpoint {
                 builder.relay_mode(RelayMode::Custom(urls.into_iter().collect()))
             }
         };
-        Ok(Self(builder.bind().await.map_err(connection)?))
+        Ok(Self(Arc::new(builder.bind().await.map_err(connection)?)))
     }
     pub fn node_id(&self) -> NodeId {
         NodeId(self.0.id())
@@ -251,6 +252,10 @@ pub struct Session {
     _endpoint: Endpoint,
 }
 impl Session {
+    pub(crate) fn uses_endpoint(&self, endpoint: &Endpoint) -> bool {
+        Arc::ptr_eq(&self._endpoint.0, &endpoint.0)
+    }
+
     /// Open another destination through this client's existing endpoint identity.
     pub async fn connect(&self, ticket: &Ticket) -> Result<Session, TransportError> {
         self._endpoint.connect(ticket).await

@@ -934,3 +934,36 @@ pub struct SessionAnswer {
     #[serde(with = "crate::protocol::json")]
     pub result: Value,
 }
+
+/// One resumable terminal per device and working directory. Host scopes this ID to the
+/// authenticated device, so reopening a view or application can attach safely.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn terminal_handle(cwd: String) -> String {
+    format!(
+        "bex-terminal-{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_bytes())
+    )
+}
+
+/// Shared xterm palette, also used for Host-owned terminal-query replies.
+pub fn terminal_color(index: u16) -> u32 {
+    const PALETTE: [u32; 16] = [
+        0x181818, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, 0x666666,
+        0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
+    ];
+    let index = u32::from(index);
+    match index {
+        0..=15 => PALETTE[index as usize],
+        16..=231 => {
+            let n = index - 16;
+            let level = |v| if v == 0 { 0 } else { 55 + 40 * v };
+            (level(n / 36) << 16) | (level((n / 6) % 6) << 8) | level(n % 6)
+        }
+        232..=255 => {
+            let v = 8 + 10 * (index - 232);
+            (v << 16) | (v << 8) | v
+        }
+        257 => 0x181818,
+        _ => 0xe5e5e5,
+    }
+}

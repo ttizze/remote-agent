@@ -58,6 +58,53 @@ pub fn parse_invitation(contents: String, now: u64) -> Result<Invitation, AgentE
 #[derive(uniffi::Object)]
 pub struct AgentStore {
     store: crate::store::Store,
+    endpoint: tokio::sync::Mutex<Option<NativeEndpoint>>,
+}
+struct NativeEndpoint {
+    endpoint: Endpoint,
+    use_relays: bool,
+}
+
+impl AgentStore {
+    async fn connection_endpoint(
+        &self,
+        connection: Connection,
+    ) -> Result<(Endpoint, Ticket, Option<uuid::Uuid>), AgentError> {
+        let secret = Zeroizing::new(connection.identity);
+        let bytes = Zeroizing::new(
+            <[u8; 32]>::try_from(secret.as_slice())
+                .map_err(|_| error("identity must contain 32 bytes"))?,
+        );
+        let identity = Identity::from_bytes(*bytes);
+        let ticket = connection.ticket.parse::<Ticket>().map_err(error)?;
+        let invitation = connection
+            .invitation
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(error)?;
+        let mut cached = self.endpoint.lock().await;
+        if let Some(cached) = cached.as_ref()
+            && cached.endpoint.node_id() == identity.node_id()
+            && cached.use_relays == connection.use_relays
+        {
+            return Ok((cached.endpoint.clone(), ticket, invitation));
+        }
+        let endpoint = Endpoint::bind(
+            identity,
+            if connection.use_relays {
+                Relays::Default
+            } else {
+                Relays::Disabled
+            },
+        )
+        .await
+        .map_err(error)?;
+        *cached = Some(NativeEndpoint {
+            endpoint: endpoint.clone(),
+            use_relays: connection.use_relays,
+        });
+        Ok((endpoint, ticket, invitation))
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -71,6 +118,7 @@ impl AgentStore {
         };
         Ok(Arc::new(Self {
             store: crate::store::Store::offline(snapshot),
+            endpoint: Default::default(),
         }))
     }
 
@@ -85,32 +133,24 @@ impl AgentStore {
     }
 
     pub async fn reconnect(&self, connection: Connection) -> Result<(), AgentError> {
-        let secret = Zeroizing::new(connection.identity);
-        let bytes = Zeroizing::new(
-            <[u8; 32]>::try_from(secret.as_slice())
-                .map_err(|_| error("identity must contain 32 bytes"))?,
-        );
-        let identity = Identity::from_bytes(*bytes);
-        let ticket = connection.ticket.parse::<Ticket>().map_err(error)?;
-        let invitation = connection
-            .invitation
-            .map(|value| value.parse())
-            .transpose()
-            .map_err(error)?;
-        let endpoint = Endpoint::bind(
-            identity,
-            if connection.use_relays {
-                Relays::Default
-            } else {
-                Relays::Disabled
-            },
-        )
-        .await
-        .map_err(error)?;
+        let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
         self.store
             .reconnect(&endpoint, &ticket, invitation)
             .await
             .map_err(error)
+    }
+
+    /// Foreground recovery reuses a responsive session and the endpoint identity.
+    pub async fn resume(&self, connection: Connection) -> Result<(), AgentError> {
+        let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
+        if invitation.is_none() {
+            self.store.resume(&endpoint, &ticket).await.map_err(error)
+        } else {
+            self.store
+                .reconnect(&endpoint, &ticket, invitation)
+                .await
+                .map_err(error)
+        }
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -143,7 +183,11 @@ impl AgentStore {
     }
 
     pub async fn shutdown(&self) -> Result<(), AgentError> {
-        self.store.close().await.map_err(error)
+        let result = self.store.close().await.map_err(error);
+        if let Some(cached) = self.endpoint.lock().await.take() {
+            cached.endpoint.close().await;
+        }
+        result
     }
 }
 
@@ -236,13 +280,13 @@ mod tests {
                 navigation: Arc::new(crate::state::Navigation { thread_id: Some("thread".into()), draft_key: "thread".into(), ..Default::default() }),
                 ..Default::default()
             };
-            let mut saved = serde_json::to_value(&cached).unwrap();
+            let mut saved: serde_json::Value = serde_json::from_slice(&cached.serialize_local_state().unwrap()).unwrap();
             assert!(saved.get("list_query").is_none());
             saved["list_query"] = serde_json::to_value(&cached.list_query).unwrap();
             let restored = AgentStore::offline(serde_json::to_vec(&saved).unwrap()).await.unwrap();
             assert_eq!(*restored.snapshot().list_query, crate::models::ListQuery::default());
             restored.shutdown().await.unwrap();
-            let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached) });
+            let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached), endpoint: Default::default() });
             let (connected, (session, reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
             connected.unwrap();
             let first = session;
@@ -311,6 +355,177 @@ mod tests {
         }).await.unwrap();
         }
     }
+    #[tokio::test]
+    async fn foreground_reuses_live_session_and_replaces_silent_session() {
+        use crate::transport::Trust;
+        use serde_json::{Value, json};
+        for (selected, mode) in [
+            (false, "live"),
+            (true, "live"),
+            (false, "slow"),
+            (true, "slow"),
+            (true, "silent"),
+            (true, "error"),
+        ] {
+            let silent = mode == "silent";
+            tokio::time::timeout(Duration::from_secs(10), async {
+                    let identity = Identity::generate();
+                    let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
+                    let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+                    let connection = || Connection {
+                        ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(),
+                        invitation: None, use_relays: false,
+                    };
+                    let snapshot = Snapshot {
+                        navigation: Arc::new(crate::state::Navigation {
+                            thread_id: selected.then(|| "thread".into()), draft_key: "thread".into(),
+                            ..Default::default()
+                        }), ..Default::default()
+                    };
+                    let store = AgentStore::offline(serde_json::to_vec(&snapshot).unwrap()).await.unwrap();
+                    let (connected, (first, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
+                    connected.unwrap();
+                    let old_ticket = store.endpoint.lock().await.as_ref().unwrap().endpoint.ticket().to_string();
+                    let response = |request: &Value, text: &str| {
+                        let result = match request["method"].as_str().unwrap() {
+                            "host/session/scope" => json!("fixture-storage"),
+                            "host/thread/list" => json!({"data":[{"id":"thread","name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                            "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":text}]}]}}}),
+                            "model/list" => json!({"data":[],"nextCursor":null}),
+                            method => panic!("unexpected request: {method}"),
+                        };
+                        json!({"result":result})
+                    };
+                    let server = async {
+                        for _ in 0..(2 + usize::from(selected)) {
+                            let request = reader.read_request().await.unwrap().unwrap();
+                            writer.reply(&request, response(&request, "before")).await.unwrap();
+                        }
+                        let request = reader.read_request().await.unwrap().unwrap();
+                        assert_eq!(request["method"], "host/session/scope");
+                        if silent {
+                            // Do not answer the Host check. Recovery must replace this
+                            // transport without waiting for the normal 30-second deadline.
+                            let (next, mut next_reader, next_writer) = scoped_incoming(&host, &trust).await;
+                            for _ in 0..(2 + usize::from(selected)) {
+                                let request = next_reader.read_request().await.unwrap().unwrap();
+                                next_writer.reply(&request, response(&request, "after")).await.unwrap();
+                            }
+                            assert!(!matches!(reader.read_request().await, Ok(Some(_))));
+                            while let Ok(Some(_)) = next_reader.read_request().await {}
+                            next.close();
+                        } else {
+                            let reply = if mode == "error" {
+                                json!({"error":{"code":-32000,"message":"history unavailable"}})
+                            } else { response(&request, "after") };
+                            writer.reply(&request, reply).await.unwrap();
+                            if mode == "slow" { tokio::time::sleep(Duration::from_millis(1200)).await; }
+                            while let Ok(Some(request)) = reader.read_request().await {
+                                let _ = writer.reply(&request, response(&request, "after")).await;
+                            }
+                        }
+                    };
+                    let client = async {
+                        let mut updates = store.store.subscribe();
+                        loop {
+                            let ready = { let snapshot = updates.borrow_and_update(); snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
+                            if ready { break; }
+                            updates.changed().await.unwrap();
+                        }
+                        store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "keep draft".into() }).unwrap().wait().await.unwrap();
+                        let resumed = tokio::time::timeout(if silent { Duration::from_secs(2) } else { Duration::from_millis(500) }, store.resume(connection())).await
+                            .expect("foreground recovery must not wait for provider reads or shutdown deadlines");
+                        if mode == "error" { assert!(resumed.is_err()); } else { resumed.unwrap(); }
+                        if mode != "error" { loop {
+                            let ready = {
+                                let snapshot = updates.borrow_and_update();
+                                snapshot.threads.as_ref().is_some_and(|list| list.data.iter().any(|thread| thread.name.as_deref() == Some("after")))
+                                    && (!selected || snapshot.conversations["thread"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref() == Some("after"))
+                            };
+                            if ready { break; }
+                            updates.changed().await.unwrap();
+                        } }
+                        assert!(store.snapshot().connected());
+                        assert_eq!(store.snapshot().drafts["thread"].text, "keep draft");
+                        assert_eq!(store.endpoint.lock().await.as_ref().unwrap().endpoint.ticket().to_string(), old_ticket, "recovery retains the endpoint");
+                        store.shutdown().await.unwrap();
+                    };
+                    tokio::join!(server, client);
+                    first.close(); host.close().await;
+                }).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_replacement_and_cancellation_respect_connection_ownership() {
+        let identity = Identity::generate();
+        let trust = crate::transport::Trust {
+            allowed: [identity.node_id()].into(),
+            ..Default::default()
+        };
+        let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let ticket = host.ticket();
+        let first = Endpoint::bind(Identity::from_bytes(identity.to_bytes()), Relays::Disabled)
+            .await
+            .unwrap();
+        let replacement = Endpoint::bind(identity, Relays::Disabled).await.unwrap();
+        let (store, (old, old_reader, old_writer)) = tokio::join!(
+            crate::store::Store::connect(&first, &ticket, Snapshot::default(), None),
+            scoped_incoming(&host, &trust),
+        );
+        let store = Arc::new(store.unwrap());
+        let (resumed, (next, mut reader, _writer)) =
+            tokio::time::timeout(Duration::from_millis(500), async {
+                tokio::join!(
+                    store.resume(&replacement, &ticket),
+                    scoped_incoming(&host, &trust)
+                )
+            })
+            .await
+            .expect("a changed endpoint must replace the session without probing the old one");
+        resumed.unwrap();
+        // Leave automatic list/model reads pending, then cancel the foreground read.
+        for _ in 0..2 {
+            reader.read_request().await.unwrap().unwrap();
+        }
+        let recovering = store.clone();
+        let endpoint = replacement.clone();
+        let resume = tokio::spawn(async move { recovering.resume(&endpoint, &ticket).await });
+        let request = tokio::time::timeout(Duration::from_secs(1), reader.read_request())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(request["method"], "host/session/scope");
+        tokio::time::timeout(Duration::from_millis(500), store.disconnect())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), resume)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(!store.snapshot().connected);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1100), host.accept())
+                .await
+                .is_err(),
+            "cancelled recovery must not reconnect after its read deadline"
+        );
+        store.close().await.unwrap();
+        drop((old_reader, old_writer));
+        old.close();
+        next.close();
+        first.close().await;
+        replacement.close().await;
+        host.close().await;
+    }
+
     #[tokio::test]
     async fn active_reads_retain_transport_navigation_and_draft_after_error() {
         use crate::transport::Trust;

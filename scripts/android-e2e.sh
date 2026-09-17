@@ -3,6 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 : "${ANDROID_HOME:?Run through nix develop .#android-test}"
+mode=${1:-all}
+[[ $mode == all || $mode == terminal ]] || { echo "usage: android-e2e.sh [all|terminal]" >&2; exit 2; }
 target=${CARGO_TARGET_DIR:-target}
 mkdir -p "$target/qa"
 target=$(cd "$target" && pwd -P)
@@ -62,6 +64,9 @@ done
 adb -P "$server_port" -s "$serial" shell input keyevent 82
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/debug/mobile-debug.apk
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/androidTest/debug/mobile-debug-androidTest.apk
+if [[ $mode == terminal ]]; then
+    adb -P "$server_port" -s "$serial" shell pm grant dev.remoteagent.mobile android.permission.ACCESS_LOCAL_NETWORK
+else
 test_status=0
 python3 - "$serial" "$log.network.log" "$server_port" <<'PYTHON' || test_status=$?
 import pathlib, re, socketserver, subprocess, sys, threading
@@ -91,6 +96,7 @@ if [[ $test_status != 0 ]]; then
 fi
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png"
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-granted.png "$log.granted.png"
+fi
 # The permission test starts denied and leaves LAN access granted for the real Host checks.
 "$target/debug/bex-ui-fixture" "$fixture/host" "$target/debug/bex-codex-fixture" "$fixture/pairing.port" 100 >"$fixture/host.log" 2>&1 &
 host=$!
@@ -104,6 +110,7 @@ prepare_pairing() {
     adb -P "$server_port" -s "$serial" shell run-as dev.remoteagent.mobile mkdir -p cache
     adb -P "$server_port" -s "$serial" shell "run-as dev.remoteagent.mobile sh -c 'cat > cache/fixture-invitation.json'" <"$fixture/invitation.json"
 }
+if [[ $mode == all ]]; then
 prepare_pairing
 adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \
     -e class dev.remoteagent.mobile.StorePersistenceTest,dev.remoteagent.mobile.ConversationRecoveryTest,dev.remoteagent.mobile.MarkdownTableTest,dev.remoteagent.mobile.ConversationNavigationTest,dev.remoteagent.mobile.ThreadListTest \
@@ -111,6 +118,7 @@ adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/
 adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.final.png"
 grep -qx 'OK (8 tests)' "$log.store.log"
 # Each paired test gets a fresh single-use invitation and isolated credentials.
+
 prepare_pairing
 adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \
     -e class dev.remoteagent.mobile.VisualizationTest \
@@ -121,7 +129,20 @@ if ! grep -qx 'OK (1 test)' "$log.visualize.log"; then
     adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-failure.xml "$log.visualize-failure.xml" || true
     exit 1
 fi
-echo "Android API 37: 10 tests passed; $log.network.log, $log.store.log and $log.visualize.log"
 
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-selected.png "$log.visualize-selected.png"
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/visualize-reopened.png "$log.visualize-reopened.png"
+fi
+
+prepare_pairing
+adb -P "$server_port" -s "$serial" shell am instrument -w -e cwd "$fixture/host/project" \
+    -e class dev.remoteagent.mobile.NativeTerminalTest \
+    dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner | tee "$log.terminal.log"
+if ! grep -qx 'OK (1 test)' "$log.terminal.log"; then
+    adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/terminal-failure.png "$log.terminal-failure.png" || true
+    adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/terminal-failure.xml "$log.terminal-failure.xml" || true
+    exit 1
+fi
+adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/terminal-input.png "$log.terminal-input.png"
+adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/terminal-retained.png "$log.terminal-retained.png"
+echo "Android API 37: $mode checks passed; records at $log.*"

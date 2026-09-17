@@ -16,7 +16,9 @@ pub fn notification(method: &str, params: Value) -> Result<Notification, serde_j
         "host/session/activity"
         | "process/outputDelta"
         | "process/exited"
-        | "host/terminal/failed" => serde_json::from_value(serde_json::json!({method:params})),
+        | "host/terminal/failed"
+        | "host/terminal/restored"
+        | "host/terminal/detached" => serde_json::from_value(serde_json::json!({method:params})),
         _ => Ok(Notification::Provider {
             method: method.into(),
             params,

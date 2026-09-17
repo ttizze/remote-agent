@@ -85,9 +85,9 @@ class StorePersistenceTest {
             val key = store.snapshot().navigation().draftKey
             store.dispatch(Intent.SetDraftText(key, "日本語の下書き")).wait()
             store.dispatch(Intent.AddAttachment(key, Attachment("/fixture/photo.png", "photo.png", true))).wait()
-            repository.save("host-a", store.snapshot().serialize())
+            repository.save("host-a", store.snapshot().serializeLocalState())
             store.dispatch(Intent.SetDraftText(key, "別の Host の下書き")).wait()
-            repository.save("host-b", store.snapshot().serialize())
+            repository.save("host-b", store.snapshot().serializeLocalState())
             val restoredA = AgentStore.offline(repository.load("host-a"))
             val restoredB = AgentStore.offline(repository.load("host-b"))
             try {

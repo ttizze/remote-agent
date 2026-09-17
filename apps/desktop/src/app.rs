@@ -559,7 +559,7 @@ impl Desktop {
                 ));
                 let mut snapshot: Snapshot = match tokio::fs::read(&path).await {
                     Ok(bytes) => serde_json::from_slice(&bytes)
-                        .map_err(|error| format!("下書きを読み込めません: {error}"))?,
+                        .map_err(|error| format!("保存した入力状態を読み込めません: {error}"))?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         Snapshot::default()
                     }
@@ -1414,13 +1414,15 @@ impl Desktop {
                 }));
                 Ok(())
             }
-            Panel::Terminal if self.terminal.is_none() => crate::terminal::Terminal::new(
-                self.remote.as_ref().map_or("", |remote| &remote.ticket),
-                self.snapshot.navigation.cwd.clone(),
-                window,
-                cx,
-            )
-            .map(|view| self.terminal = Some(view)),
+            Panel::Terminal if self.terminal.is_none() => {
+                self.terminal = Some(crate::terminal::Terminal::new(
+                    self.remote.as_ref().map_or("", |remote| &remote.ticket),
+                    self.snapshot.navigation.cwd.clone(),
+                    window,
+                    cx,
+                ));
+                Ok(())
+            }
             Panel::Browser if self.browser.is_none() => crate::browser::Browser::new(
                 wry::WebViewBuilder::new(),
                 #[cfg(target_os = "macos")]

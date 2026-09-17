@@ -25,8 +25,6 @@ pub enum Notification {
         handle: String,
         #[serde(rename = "deltaBase64", with = "bytes")]
         data: Vec<u8>,
-        #[serde(default, rename = "capReached")]
-        cap_reached: bool,
     },
     #[serde(rename = "process/exited")]
     Exited {
@@ -41,6 +39,20 @@ pub enum Notification {
         handle: String,
         #[serde(rename = "message")]
         reason: String,
+    },
+    #[serde(rename = "host/terminal/restored")]
+    TerminalRestored {
+        #[serde(rename = "processHandle")]
+        handle: String,
+        #[serde(rename = "deltaBase64", with = "bytes")]
+        data: Vec<u8>,
+        cols: u16,
+        rows: u16,
+    },
+    #[serde(rename = "host/terminal/detached")]
+    TerminalDetached {
+        #[serde(rename = "processHandle")]
+        handle: String,
     },
     /// Opaque external-provider events for raw subscribers.
     Provider {

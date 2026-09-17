@@ -78,6 +78,7 @@ contracts! {
     StartTerminal, "host/terminal/start" => (c::StartTerminal, m::Empty),
     ResizeTerminal, "process/resizePty" => (op::ResizeTerminal, m::Empty),
     WriteTerminal, "process/writeStdin" => (c::TerminalWrite, m::Empty),
+    DetachTerminal, "host/terminal/detach" => (op::DetachTerminal, m::Empty),
     KillTerminal, "process/kill" => (c::TerminalKill, m::Empty),
     Pair, "host/pair" => (c::Pair, m::Empty),
     HostStatus, "host/status" => (m::Empty, m::HostStatus),

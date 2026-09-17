@@ -32,13 +32,15 @@ extension BexLaunchUITests {
         try simulatorFixture("background-reply")
         try simulatorFixture("hold-history-reads")
         row.tap()
-        XCTAssertTrue(firstAnswer.waitForExistence(timeout: 2),
-                      "Restored history must display before its remote refresh completes")
+        XCTAssertTrue(app.descendants(matching: .any)["task.loading"].waitForExistence(timeout: 2),
+                      "After relaunch, Host-owned history must be fetched while the local draft remains available")
+        XCTAssertFalse(firstAnswer.exists)
         XCTAssertEqual(composer.value as? String, "Keep this opening draft")
         let latest = app.descendants(matching: .any)["item.fixture-external-final"]
         XCTAssertFalse(latest.exists)
-        captureScreen(app, named: "Cached task opens while history refresh is pending")
+        captureScreen(app, named: "Local draft survives relaunch while Host history loads")
         try simulatorFixture("release-history-reads")
+        XCTAssertTrue(firstAnswer.waitForExistence(timeout: 15))
         XCTAssertTrue(latest.waitForExistence(timeout: 15))
         XCTAssertEqual(composer.value as? String, "Keep this opening draft")
         XCTAssertFalse(app.staticTexts["notice"].exists)

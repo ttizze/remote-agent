@@ -209,14 +209,15 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
             ..Default::default()
         }),
     );
-    let saved: Snapshot = serde_json::from_slice(&serde_json::to_vec(&next).unwrap()).unwrap();
+    let saved: Snapshot =
+        serde_json::from_slice(&serde_json::to_vec(&next.local_state()).unwrap()).unwrap();
     let (restored, _) = reduce(&saved, Event::StorageScope("host-key:area-a".into()));
     assert_eq!(restored.drafts["native"].text, "area A draft");
     assert_eq!(
         restored.archived_scopes["host-key:area-b"].drafts["native"].text,
         "area B draft"
     );
-    assert!(restored.conversations.contains_key("native"));
+    assert!(restored.conversations.is_empty());
     assert_eq!(original.drafts["native"].text, "area A draft");
 }
 
@@ -293,4 +294,97 @@ fn native_session_ids_round_trip_without_provider_collisions() {
             );
         }
     }
+}
+
+#[test]
+fn local_storage_keeps_user_work_without_host_caches() {
+    use agent_core::state::{Draft, FileDraft, Navigation, PendingSubmission, Snapshot};
+    let draft = Arc::new(Draft {
+        text: "unsent message".into(),
+        attachments: vec![agent_core::state::Attachment {
+            path: "/uploaded/image.png".into(),
+            name: "image.png".into(),
+            is_image: true,
+        }],
+        model: Some("chosen-model".into()),
+        ..Default::default()
+    });
+    let mut original = Snapshot {
+        storage_scope: "host:area".into(),
+        conversations: Arc::new([("native".into(), Arc::new(conversation()))].into()),
+        drafts: Arc::new([("native".into(), draft.clone())].into()),
+        pending_submissions: Arc::new(
+            [(
+                "send-id".into(),
+                Arc::new(PendingSubmission {
+                    draft_key: "native".into(),
+                    draft,
+                    turn_id: Some("turn".into()),
+                    after_item_id: None,
+                    accepted: false,
+                    delivery_unknown: true,
+                    recovery_text: None,
+                    clear_draft: None,
+                }),
+            )]
+            .into(),
+        ),
+        file_drafts: Arc::new(
+            [(
+                "/file.txt".into(),
+                FileDraft {
+                    revision: "revision".into(),
+                    text: "unsaved edit".into(),
+                },
+            )]
+            .into(),
+        ),
+        navigation: Arc::new(Navigation {
+            thread_id: Some("native".into()),
+            cwd: "/project".into(),
+            draft_key: "native".into(),
+        }),
+        epoch: 99,
+        ..Default::default()
+    };
+    Arc::make_mut(&mut original.activity)
+        .unread
+        .insert("native".into());
+    Arc::make_mut(&mut original.activity)
+        .active
+        .insert("native".into(), true);
+    let bytes = serde_json::to_vec(&original.local_state()).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let keys: Vec<_> = saved
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "activity",
+            "archived_scopes",
+            "drafts",
+            "file_drafts",
+            "navigation",
+            "pending_submissions",
+            "storage_scope"
+        ]
+    );
+    assert_eq!(saved["activity"], json!({"unread":["native"]}));
+    let restored: Snapshot = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(restored.drafts, original.drafts);
+    assert_eq!(restored.pending_submissions, original.pending_submissions);
+    assert_eq!(restored.file_drafts, original.file_drafts);
+    assert_eq!(restored.navigation, original.navigation);
+    assert_eq!(restored.activity.unread, original.activity.unread);
+    assert!(restored.activity.active.is_empty());
+    assert!(restored.conversations.is_empty());
+    assert!(restored.threads.is_none());
+    assert!(restored.models.is_empty());
+    assert_eq!(restored.epoch, 0);
+    assert!(!restored.connected);
+    assert!(!original.conversations.is_empty());
 }

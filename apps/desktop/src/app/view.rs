@@ -256,11 +256,6 @@ impl Render for Desktop {
                 v.set_visible(active && self.panel == Panel::Browser, cx)
             });
         }
-        if let Some(view) = self.terminal.clone() {
-            view.update(cx, |v, cx| {
-                v.set_visible(active && self.panel == Panel::Terminal, cx)
-            });
-        }
         if self.image_gallery.is_some() {
             let gallery = self.image_gallery_view(window, cx);
             return h_flex()

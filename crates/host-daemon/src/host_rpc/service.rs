@@ -163,9 +163,23 @@ impl HostRpcService {
         }
     }
 
+    pub(crate) fn revoke_terminals(&self, principal: &str) {
+        self.inner.terminals.revoke_device(principal);
+    }
     pub fn open_session(&self, capacity: usize) -> HostSession {
         self.start_codex_event_pump();
         self.inner.router.open_session(capacity)
+    }
+
+    pub(crate) fn open_authenticated_session(
+        &self,
+        capacity: usize,
+        principal: String,
+    ) -> HostSession {
+        self.start_codex_event_pump();
+        self.inner
+            .router
+            .open_authenticated_session(capacity, Some(principal))
     }
 
     pub fn close_session(&self, session: SessionId) {
@@ -634,7 +648,7 @@ impl HostRpcService {
                 Call::StartTerminal(params) => {
                     Response::from_result(self.inner.terminals.start(self.inner.router.clone(), session, params.handle.clone(), params.cwd.clone(), params.size).await.map_err(|error| Failure::new("terminal_start_failed", error)))?
                 }
-                Call::WriteTerminal(_) | Call::ResizeTerminal(_) | Call::KillTerminal(_) => Response::from_result(self.inner.terminals.request(session, request).await.map_err(|error| Failure::new("terminal_operation_failed", error)))?,
+                Call::WriteTerminal(_) | Call::ResizeTerminal(_) | Call::KillTerminal(_) | Call::DetachTerminal(_) => Response::from_result(self.inner.terminals.request(session, request).await.map_err(|error| Failure::new("terminal_operation_failed", error)))?,
                 Call::Transcribe(params) => Response::from_result(self.inner.dictation.transcribe(&params.audio).await.map_err(|error| Failure::new("dictation_failed", error)))?,
                 Call::ReviewWorkspace(params) => Response::from_result(crate::inspect_workspace(params.cwd.clone()).await.map_err(|error| Failure::new("workspace_review_failed", error)))?,
                 Call::ListFiles(_) | Call::ReadFile(_) | Call::WriteFile(_) | Call::Upload(_) | Call::Download(_) | Call::ReadVisualization(_) => Response::from_result(self.inner.files.request(session, request.clone()).await.map_err(|error| Failure::new("file_operation_failed", error)))?,

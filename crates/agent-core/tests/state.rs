@@ -750,3 +750,35 @@ fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
         assert_eq!(next.error, None);
     }
 }
+
+#[test]
+fn terminal_disconnect_keeps_resumption_and_host_switch_drops_old_handles() {
+    use agent_core::state::{Event, Intent, Snapshot, TerminalPhase, operations as op, reduce};
+    let snapshot = Snapshot {
+        connected: true,
+        storage_scope: "first-host".into(),
+        ..Default::default()
+    };
+    let (starting, _) = reduce(
+        &snapshot,
+        Event::Intent(Intent::StartTerminal(op::StartTerminal {
+            handle: "test".into(),
+            cwd: "/fixture".into(),
+            size: agent_core::client::TerminalSize { cols: 80, rows: 24 },
+        })),
+    );
+    let (disconnected, _) = reduce(&starting, Event::Disconnected("offline".into()));
+    let (late_failure, _) = reduce(
+        &disconnected,
+        Event::TerminalFailed {
+            handle: "test".into(),
+            reason: "cancelled".into(),
+        },
+    );
+    assert_eq!(
+        late_failure.terminals["test"].phase,
+        TerminalPhase::Suspended
+    );
+    let (other_host, _) = reduce(&late_failure, Event::StorageScope("other-host".into()));
+    assert!(other_host.terminals.is_empty());
+}

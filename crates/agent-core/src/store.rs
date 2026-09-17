@@ -35,6 +35,11 @@ pub enum Outcome {
 }
 enum Command {
     Dispatch(Dispatch),
+    ResumePeer {
+        endpoint: crate::transport::Endpoint,
+        remote: crate::transport::NodeId,
+        complete: oneshot::Sender<Option<Arc<Client>>>,
+    },
     Disconnect(oneshot::Sender<Result<(), PeerError>>),
     Attach {
         connection: Box<Connection>,
@@ -182,6 +187,79 @@ impl Store {
         store.reconnect(endpoint, ticket, invitation).await?;
         Ok(store)
     }
+    /// Reuse a responsive Host connection, then refresh without blocking interaction.
+    /// Only reads are retried; pending submissions retain their delivery evidence.
+    pub async fn resume(
+        &self,
+        endpoint: &crate::transport::Endpoint,
+        ticket: &crate::transport::Ticket,
+    ) -> Result<(), crate::transport::TransportError> {
+        let attempt = {
+            let mut current = self.connection_attempt.lock().unwrap();
+            current.cancel();
+            *current = self.stop.child_token();
+            current.clone()
+        };
+        let guard = attempt.clone().drop_guard();
+        let (complete, receiver) = oneshot::channel();
+        self.commands
+            .send(Command::ResumePeer {
+                endpoint: endpoint.clone(),
+                remote: ticket.node_id(),
+                complete,
+            })
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+        let reusable = tokio::select! {
+            biased;
+            _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
+            result = receiver => result.unwrap_or(None),
+        };
+        if let Some(peer) = reusable {
+            // Provider reads can be slow even when QUIC is healthy. Check the Host
+            // itself through the paired-client scope read so provider latency cannot
+            // force replacement and changed storage cannot reuse stale state.
+            let responsive = tokio::select! {
+                biased;
+                _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
+                result = tokio::time::timeout(std::time::Duration::from_secs(1), read_storage_scope(&peer)) => result,
+            };
+            match responsive {
+                Ok(Ok(scope))
+                    if self.snapshot().storage_scope == format!("{}:{scope}", ticket.node_id()) =>
+                {
+                    let snapshot = self.snapshot();
+                    if let Some(id) = &snapshot.navigation.thread_id {
+                        drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
+                    }
+                    drop(self.dispatch(Intent::ListThreads(op::ListThreads::new(
+                        (*snapshot.list_query).clone(),
+                    ))));
+                    drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
+                    guard.disarm();
+                    return Ok(());
+                }
+                // An application response proves reachability; reconnecting cannot fix it.
+                Ok(Err(error @ (PeerError::Remote { .. } | PeerError::InvalidResponse { .. }))) => {
+                    return Err(error.into());
+                }
+                _ => {}
+            }
+        }
+        let disconnected = {
+            // Atomically move this same recovery attempt into replacement. A newer
+            // attempt must not be cancelled by an older read reaching its deadline.
+            let _current = self.connection_attempt.lock().unwrap();
+            if attempt.is_cancelled() {
+                return Err(
+                    PeerError::ConnectionClosed("connection attempt cancelled".into()).into(),
+                );
+            }
+            self.request_disconnect()?
+        };
+        guard.disarm();
+        self.attach_connection(endpoint, ticket, None, attempt, disconnected)
+            .await
+    }
     /// Replace transport while retaining local edits. A newer reconnect or
     /// disconnect cancels setup before it can attach an obsolete connection.
     pub async fn reconnect(
@@ -198,13 +276,24 @@ impl Store {
             // cannot reorder a newer attempt behind an older disconnect.
             (current.clone(), self.request_disconnect()?)
         };
+        self.attach_connection(endpoint, ticket, invitation, attempt, disconnected)
+            .await
+    }
+    async fn attach_connection(
+        &self,
+        endpoint: &crate::transport::Endpoint,
+        ticket: &crate::transport::Ticket,
+        invitation: Option<uuid::Uuid>,
+        attempt: CancellationToken,
+        disconnected: oneshot::Receiver<Result<(), PeerError>>,
+    ) -> Result<(), crate::transport::TransportError> {
         let guard = attempt.clone().drop_guard();
         let setup = async {
             disconnected
                 .await
                 .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            // Do not probe a suspended connection: its RPC deadline would delay
-            // foreground recovery. The actor releases it before setup begins.
+            // Explicit replacement never waits for a read on the old transport.
+            // Foreground resume has already applied its separate short deadline.
             let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| {
                 session.close();
             });
@@ -214,16 +303,7 @@ impl Store {
             if let Some(invitation) = invitation {
                 peer.call(&Pair { invitation }).await?;
             }
-            let scope = peer
-                .request::<String>(&crate::protocol::Call::SessionScope(
-                    crate::models::Empty {},
-                ))
-                .await?;
-            if scope.is_empty() || scope.len() > 256 {
-                return Err(
-                    PeerError::InvalidMessage("invalid provider storage scope".into()).into(),
-                );
-            }
+            let scope = read_storage_scope(&peer).await?;
             let (complete, result) = oneshot::channel();
             let command = Command::Attach {
                 connection: Box::new(Connection {
@@ -329,6 +409,20 @@ impl Store {
             .map(|_| ())
             .map_err(|_| PeerError::ConnectionClosed("store task stopped".into()))
     }
+}
+
+async fn read_storage_scope(peer: &Client) -> Result<String, PeerError> {
+    let scope = peer
+        .request::<String>(&crate::protocol::Call::SessionScope(
+            crate::models::Empty {},
+        ))
+        .await?;
+    if scope.is_empty() || scope.len() > 256 {
+        return Err(PeerError::InvalidMessage(
+            "invalid provider storage scope".into(),
+        ));
+    }
+    Ok(scope)
 }
 
 fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Scheduled> {
@@ -665,6 +759,10 @@ async fn run(
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
                     Command::Dispatch(command) => command,
+                    Command::ResumePeer { endpoint, remote, complete } => {
+                        let _ = complete.send(session.as_ref().filter(|session| session.uses_endpoint(&endpoint) && session.node_id() == remote).map(|_| peer.clone()));
+                        continue;
+                    }
                     Command::Disconnect(complete) => {
                         disconnected = Some(complete);
                         break "Host disconnected".into();
@@ -703,8 +801,12 @@ async fn run(
             }
         }
     };
-    // The Host owns PTY cleanup, including starts still in flight. Closing
-    // the connection cancels them without waiting for individual RPC replies.
+    // The Host owns connection-scoped PTYs and grants, including starts in flight.
+    // Replacement must not wait for delivery acknowledgments from the old peer.
+    let replacing = disconnected.is_some() && session.is_some();
+    if replacing {
+        session.as_ref().unwrap().close();
+    }
     drop(jobs);
     peer.close().await;
     drop(connection);
@@ -727,6 +829,10 @@ async fn run_offline(
         };
         let command = match command {
             Command::Dispatch(command) => command,
+            Command::ResumePeer { complete, .. } => {
+                let _ = complete.send(None);
+                continue;
+            }
             Command::Disconnect(complete) => {
                 let _ = complete.send(Ok(()));
                 continue;

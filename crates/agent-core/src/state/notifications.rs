@@ -34,12 +34,10 @@ pub(super) fn notification(
         Notification::TerminalFailed { handle, reason } => {
             reduce(previous, Event::TerminalFailed { handle, reason })
         }
-        Notification::Output {
-            handle,
-            data,
-            cap_reached,
-        } => process(previous, handle, Ok((data, cap_reached))),
-        Notification::Exited { handle, code } => process(previous, handle, Err(code)),
+        event @ (Notification::Output { .. }
+        | Notification::Exited { .. }
+        | Notification::TerminalRestored { .. }
+        | Notification::TerminalDetached { .. }) => process(previous, event),
         Notification::Provider { method, .. } if method == "thread/name/updated" => {
             (previous.clone(), refresh_list(previous))
         }
@@ -57,30 +55,48 @@ fn refresh_list(snapshot: &Snapshot) -> Vec<Effect> {
     }
 }
 
-fn process(
-    previous: &Snapshot,
-    handle: String,
-    output: Result<(Vec<u8>, bool), i32>,
-) -> (Snapshot, Vec<Effect>) {
-    let Some(current) = previous.terminals.get(&handle) else {
+fn process(previous: &Snapshot, event: crate::protocol::Notification) -> (Snapshot, Vec<Effect>) {
+    use crate::protocol::Notification;
+    let handle = match &event {
+        Notification::Output { handle, .. }
+        | Notification::Exited { handle, .. }
+        | Notification::TerminalRestored { handle, .. }
+        | Notification::TerminalDetached { handle } => handle,
+        _ => unreachable!(),
+    };
+    let Some(current) = previous.terminals.get(handle) else {
         return (previous.clone(), Vec::new());
     };
     if matches!(current.phase, TerminalPhase::Exited(_)) {
         return (previous.clone(), Vec::new());
     }
     let mut next = previous.clone();
-    let Some(terminal) = shared_mut(&mut next.terminals, &handle) else {
-        return (next, Vec::new());
-    };
-    if let Err(code) = output {
-        terminal.phase = TerminalPhase::Exited(code);
-    } else if let Ok((data, cap_reached)) = output {
-        terminal.sequence += 1;
-        terminal.output.push_back(Arc::new(TerminalOutput {
-            sequence: terminal.sequence,
-            data,
-            cap_reached,
-        }));
+    let terminal = shared_mut(&mut next.terminals, handle).unwrap();
+    match event {
+        Notification::Exited { code, .. } => terminal.phase = TerminalPhase::Exited(code),
+        Notification::TerminalDetached { .. } => terminal.phase = TerminalPhase::Detached,
+        Notification::Output { data, .. } => {
+            terminal.sequence += 1;
+            terminal.output.push_back(Arc::new(TerminalOutput {
+                sequence: terminal.sequence,
+                data,
+                reset_size: None,
+            }));
+        }
+        Notification::TerminalRestored {
+            data, cols, rows, ..
+        } => {
+            terminal.output.clear();
+            terminal.phase = TerminalPhase::Running;
+            terminal.size = crate::client::TerminalSize { cols, rows };
+            terminal.sequence += 1;
+            terminal.output.push_back(Arc::new(TerminalOutput {
+                sequence: terminal.sequence,
+                data,
+                reset_size: Some(terminal.size),
+            }));
+        }
+        _ => unreachable!(),
     }
     (next, Vec::new())
 }

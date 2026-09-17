@@ -101,7 +101,11 @@ Client persistence is scoped by Host public identity and a digest of configured
 provider storage locations, including canonical existing ancestors. Switching
 storage archives the old client scope in the same persisted snapshot; returning
 to that configured area restores its drafts and unsaved file edits. The task
-list explains this recovery path. Cache replacement does not replace drafts.
+list explains this recovery path. Only drafts (including attachments and model
+choices), pending submissions, unsaved file edits, navigation and unread markers
+are persisted. Conversation bodies, task lists, model/account catalogs, workspace
+results and connection state remain in memory and are fetched from the Host after
+launch. Archived scopes retain the same client-owned data, without history caches.
 
 Uploaded attachments and worktree files retain their storage and
 revision/permission protections.
