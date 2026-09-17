@@ -7,10 +7,7 @@ extension BexLaunchUITests {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.new.project.simulator-project"].tap()
         func openTerminal() {
-            if app.buttons["task.more"].exists {
-                app.buttons["task.more"].tap()
-            }
-            let action = app.buttons["task.terminal"]
+            let action = app.buttons["workbench.terminal"]
             XCTAssertTrue(action.waitForExistence(timeout: 10)); action.tap()
             XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
         }
@@ -28,18 +25,18 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Native terminal with keyboard")
         XCTAssertFalse(app.buttons["終了"].exists)
         XCTAssertFalse(app.buttons["terminal.close"].exists)
-        app.buttons["workbench.files"].tap()
+        terminal.swipeLeft()
         let file = app.buttons["file.hello.txt"]
         XCTAssertTrue(file.waitForExistence(timeout: 10))
-        captureScreen(app, named: "Files in the chat right panel")
+        captureScreen(app, named: "Full-screen files")
         file.tap()
         XCTAssertTrue(app.textViews["file.editor"].waitForExistence(timeout: 10))
         app.buttons["file.close"].tap()
-        app.buttons["workbench.terminal"].tap()
+        app.textFields["絶対パス"].swipeRight()
         XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
-        XCTAssertGreaterThan(terminal.frame.minX, 0)
+        XCTAssertEqual(terminal.frame.width, app.frame.width, accuracy: 2)
         terminal.swipeRight()
-        XCTAssertTrue(app.buttons["task.terminal"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["workbench.terminal"].waitForExistence(timeout: 5))
         XCTAssertFalse(terminal.exists)
         XCTAssertEqual(composer.value as? String, "Keep my draft")
         openTerminal()
@@ -47,6 +44,66 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.staticTexts["終了 · 17"].waitForExistence(timeout: 10))
         captureScreen(app, named: "Reattached native shell retains state")
         closeWorkbench(app)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["tasks.new.chat"].tap()
+        for page in ["terminal", "files"] {
+            app.buttons["workbench.\(page)"].tap()
+            XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "フォルダを選択すると"))
+                .firstMatch.waitForExistence(timeout: 5))
+        }
+        closeWorkbench(app)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+    }
+
+    func testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[success] Native project disclosure")
+        let answer = prefixedElement(app, prefix: "item.fixture-final-")
+        XCTAssertTrue(answer.waitForExistence(timeout: 25))
+        openFiles(app)
+        let nested = app.buttons["file.nested"]
+        XCTAssertTrue(nested.waitForExistence(timeout: 10)); nested.tap()
+        let child = app.buttons["file.child.txt"]
+        XCTAssertTrue(child.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["workbench.files"].exists)
+        captureScreen(app, named: "Native directory navigation")
+        let navigationBar = app.navigationBars["nested"]
+        XCTAssertTrue(navigationBar.waitForExistence(timeout: 5))
+        let start = navigationBar.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 1))
+            .withOffset(CGVector(dx: 0, dy: 100))
+        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 280, dy: 0)))
+        XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
+        XCTAssertFalse(child.exists)
+        try verifyAbsoluteDirectoryNavigation(app, child: child)
+        let path = app.textFields["絶対パス"]
+        path.tap()
+        path.typeKey("a", modifierFlags: .command)
+        path.typeText("relative-path")
+        app.buttons["files.open-path"].tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "絶対パスを入力"))
+            .firstMatch.waitForExistence(timeout: 10))
+        closeWorkbench(app)
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+        XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
+    }
+
+    private func verifyAbsoluteDirectoryNavigation(_ app: XCUIApplication, child: XCUIElement) throws {
+        let path = app.textFields["絶対パス"]
+        let root = try XCTUnwrap(path.value as? String)
+        XCTAssertTrue(root.hasPrefix("/"))
+        path.tap()
+        path.typeKey("a", modifierFlags: .command)
+        path.typeText(root + "/nested")
+        for _ in 0 ..< 2 {
+            XCTAssertEqual(path.value as? String, root + "/nested")
+            app.buttons["files.open-path"].tap()
+            XCTAssertTrue(child.waitForExistence(timeout: 10))
+            XCTAssertTrue(app.buttons["workbench.files"].exists)
+            app.navigationBars["nested"].buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
+            XCTAssertFalse(child.exists)
+        }
     }
 
     func testPhysicalDeviceCanPairWithManualPayload() throws {

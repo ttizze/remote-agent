@@ -6,7 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-        D36E8C890D10474EB83C8D37 /* ConversationWorkbench.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* ConversationWorkbench.swift */; };
+        D36E8C890D10474EB83C8D37 /* ConversationPages.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* ConversationPages.swift */; };
         C30000000000000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C30000000000000000000002; };
         C30000000000000000000003 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000004; };
 		123AEE37BEE0000000000001 /* ConversationVisualization.swift in Sources */ = {isa = PBXBuildFile; fileRef = 123AEE37BEE0000000000002 /* ConversationVisualization.swift */; };
@@ -51,7 +51,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-        F1E85101D97E4E84A7B33C96 /* ConversationWorkbench.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationWorkbench.swift; sourceTree = "<group>"; };
+        F1E85101D97E4E84A7B33C96 /* ConversationPages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPages.swift; sourceTree = "<group>"; };
         C30000000000000000000004 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
 		123AEE37BEE0000000000002 /* ConversationVisualization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationVisualization.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -160,7 +160,7 @@
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
 				613A5AAB450EC067108110F3 /* ConversationScreen.swift */,
                 C30000000000000000000004 /* TerminalScreen.swift */,
-                F1E85101D97E4E84A7B33C96 /* ConversationWorkbench.swift */,
+                F1E85101D97E4E84A7B33C96 /* ConversationPages.swift */,
 				F6A4ABC2B38DF545C243FD72 /* ConversationRows.swift */,
 				63950266A2798560BC414B70 /* ConversationMedia.swift */,
 				C0DE00000000000000000005 /* ConversationTextSelection.swift */,
@@ -306,7 +306,7 @@
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
 				FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */,
                 C30000000000000000000003 /* TerminalScreen.swift in Sources */,
-                D36E8C890D10474EB83C8D37 /* ConversationWorkbench.swift in Sources */,
+                D36E8C890D10474EB83C8D37 /* ConversationPages.swift in Sources */,
 				F9897A4D00C8F44425414C1F /* ConversationRows.swift in Sources */,
 				2DCDAABCD1000D782FF1BE5B /* ConversationMedia.swift in Sources */,
 				C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */,
@@ -368,7 +368,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 61;
+				CURRENT_PROJECT_VERSION = 62;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -396,7 +396,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 61;
+				CURRENT_PROJECT_VERSION = 62;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";

@@ -51,7 +51,7 @@ private struct WorkspaceNavigation: UIViewControllerRepresentable {
     }
 }
 
-struct WorkspacePanel: View {
+struct WorkspaceScreen: View {
     @ObservedObject var model: BexAppViewModel
     let root: String
     @Binding var showingDiff: Bool
@@ -67,15 +67,10 @@ struct WorkspacePanel: View {
             Divider()
             if showingDiff {
                 WorkspaceDiffScreen { complete in
-                    model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) { result in
+                    request(.reviewWorkspace(ReviewWorkspace(cwd: root))) { snapshot, result in
                         if case let .failure(failure) = result {
-                            let error = model.snapshot.error() ?? failure.localizedDescription
-                            if model.notice == error {
-                                model.notice = nil
-                            }
-                            complete(.failure(NSError(domain: "BexWorkspace", code: 1,
-                                                      userInfo: [NSLocalizedDescriptionKey: error])))
-                        } else if let review = model.snapshot.review() {
+                            complete(.failure(failure))
+                        } else if let review = snapshot.review() {
                             complete(.success(review.diffFiles()))
                         } else {
                             complete(.failure(NSError(domain: "BexWorkspace", code: 1,
@@ -88,7 +83,7 @@ struct WorkspacePanel: View {
             } else {
                 WorkspaceNavigation(root: root) { directory, openDirectory in
                     WorkspaceDirectoryScreen(snapshot: model.snapshot, root: root, directory: directory,
-                                             perform: model.requestSnapshot, fileDraft: fileDraft,
+                                             perform: request, fileDraft: fileDraft,
                                              downloadFile: model.download,
                                              aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
                                              close: close, openDirectory: openDirectory)
@@ -96,9 +91,24 @@ struct WorkspacePanel: View {
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
-        .onDisappear {
-            if !root.isEmpty {
-                model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root)))
+        .onDisappear { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) }
+    }
+
+    private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
+        model.requestSnapshot(intent) { snapshot, result in
+            let message: String? = if case let .failure(failure) = result {
+                snapshot.error() ?? failure.localizedDescription
+            } else {
+                snapshot.error()
+            }
+            if let message {
+                if model.notice == message {
+                    model.notice = nil
+                }
+                completion(snapshot, .failure(NSError(domain: "BexWorkspace", code: 1,
+                                                      userInfo: [NSLocalizedDescriptionKey: message])))
+            } else {
+                completion(snapshot, result)
             }
         }
     }
@@ -144,7 +154,8 @@ private struct WorkspaceDirectoryScreen: View {
                     .accessibilityIdentifier("files.open-path")
             }.padding()
             List {
-                Button("親ディレクトリ") { openDirectory((path as NSString).deletingLastPathComponent) }
+                Button("親ディレクトリ") { openDirectory((directory as NSString).deletingLastPathComponent) }
+                    .disabled(directory == "/")
                 ForEach(entries) { entry in
                     HStack {
                         if entry.directory {
@@ -190,6 +201,7 @@ private struct WorkspaceDirectoryScreen: View {
     }
 
     private func load(_ directory: String) {
+        path = directory
         busy = true; error = nil
         perform(.listFiles(ListFiles(path: directory))) { snapshot, result in
             busy = false

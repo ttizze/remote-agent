@@ -11,6 +11,12 @@ rpc::rpc_method!(ListFiles, FileList, "host/file/list", ListFiles, |self| {
 
 impl Operation for ListFiles {
     rpc_operation!(workspace.directory);
+    fn prepare(&mut self, _: &mut Snapshot) -> Result<(), String> {
+        if !std::path::Path::new(&self.path).is_absolute() {
+            return Err("絶対パスを入力してください。".into());
+        }
+        Ok(())
+    }
     const INVALIDATES: bool = true;
 }
 

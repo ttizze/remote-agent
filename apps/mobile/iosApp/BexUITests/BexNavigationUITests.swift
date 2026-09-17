@@ -133,30 +133,6 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
     }
 
-    func testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation() throws {
-        let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[success] Native project disclosure")
-        let answer = prefixedElement(app, prefix: "item.fixture-final-")
-        XCTAssertTrue(answer.waitForExistence(timeout: 25))
-        openFiles(app)
-        let nested = app.buttons["file.nested"]
-        XCTAssertTrue(nested.waitForExistence(timeout: 10)); nested.tap()
-        let child = app.buttons["file.child.txt"]
-        XCTAssertTrue(child.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["workbench.files"].exists)
-        captureScreen(app, named: "Native directory navigation")
-        let navigationBar = app.navigationBars["nested"]
-        XCTAssertTrue(navigationBar.waitForExistence(timeout: 5))
-        let start = navigationBar.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 1))
-            .withOffset(CGVector(dx: 0, dy: 100))
-        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 280, dy: 0)))
-        XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
-        XCTAssertFalse(child.exists)
-        try verifyAbsoluteDirectoryNavigation(app, child: child)
-        closeWorkbench(app)
-        XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
-    }
-
     func testSimulatorUsesClaudeWithoutCodexAndRestoresConversation() throws {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.new.project.simulator-project"].tap()
@@ -189,24 +165,6 @@ extension BexLaunchUITests {
         XCTAssertEqual(message.value as? String, message.placeholderValue)
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Claude conversation restored and continued")
-    }
-
-    private func verifyAbsoluteDirectoryNavigation(_ app: XCUIApplication, child: XCUIElement) throws {
-        let path = app.textFields["絶対パス"]
-        let root = try XCTUnwrap(path.value as? String)
-        XCTAssertTrue(root.hasPrefix("/"))
-        path.tap()
-        path.typeKey("a", modifierFlags: .command)
-        path.typeText(root + "/nested")
-        for _ in 0 ..< 2 {
-            XCTAssertEqual(path.value as? String, root + "/nested")
-            app.buttons["files.open-path"].tap()
-            XCTAssertTrue(child.waitForExistence(timeout: 10))
-            XCTAssertTrue(app.buttons["workbench.files"].exists)
-            app.navigationBars["nested"].buttons.element(boundBy: 0).tap()
-            XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
-            XCTAssertFalse(child.exists)
-        }
     }
 
     func chooseFixtureModel(_ app: XCUIApplication) {

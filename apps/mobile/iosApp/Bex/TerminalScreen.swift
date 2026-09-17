@@ -15,7 +15,6 @@ struct TerminalScreen: View {
                 .font(.caption).foregroundStyle(.secondary)
             NativeTerminalView(model: model, handle: handle, cwd: cwd)
         }
-        .onDisappear { model.perform(.detachTerminal(DetachTerminal(handle: handle))) }
     }
 }
 
@@ -36,9 +35,18 @@ private struct NativeTerminalView: UIViewRepresentable {
         return view
     }
 
+    static func dismantleUIView(_ view: SwiftTerm.TerminalView, coordinator: Coordinator) {
+        view.terminalDelegate = nil
+        coordinator.dismantled = true
+        if coordinator.started {
+            coordinator.model.perform(.detachTerminal(DetachTerminal(handle: coordinator.handle)))
+        }
+    }
+
     func updateUIView(_ view: SwiftTerm.TerminalView, context: Context) {
         let coordinator = context.coordinator
         guard let terminal = model.snapshot.terminalView(handle: handle) else { return }
+        let previousSequence = coordinator.sequence
         for chunk in terminal.output where chunk.sequence > coordinator.sequence {
             if let size = chunk.resetSize {
                 coordinator.restoring = true
@@ -47,7 +55,9 @@ private struct NativeTerminalView: UIViewRepresentable {
             view.feed(byteArray: Array(chunk.data)[...])
             coordinator.restoring = false
             coordinator.sequence = chunk.sequence
-            let sequence = chunk.sequence
+        }
+        if coordinator.sequence > previousSequence {
+            let sequence = coordinator.sequence
             Task { @MainActor in model.perform(.acknowledgeTerminal(handle: handle, sequence: sequence)) }
         }
     }
@@ -58,28 +68,31 @@ private struct NativeTerminalView: UIViewRepresentable {
         var sequence: UInt64 = 0
         var restoring = false
         var started = false
+        var dismantled = false
         let cwd: String
         init(model: BexAppViewModel, handle: String, cwd: String) {
             self.model = model; self.handle = handle; self.cwd = cwd
         }
 
         func send(source _: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
+            guard !dismantled, model.snapshot.terminalView(handle: handle)?.acceptsInput == true else { return }
             model.perform(.writeTerminal(WriteTerminal(handle: handle, data: Data(data))))
         }
 
         func sizeChanged(source _: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
-            guard !restoring, newCols > 0, newRows > 0 else { return }
+            guard !dismantled, !restoring, newCols > 0, newRows > 0 else { return }
             let size = TerminalSize(
                 cols: UInt16(clamping: min(newCols, 500)),
                 rows: UInt16(clamping: min(newRows, 250))
             )
-            if !started {
-                started = true
-                Task { @MainActor in
+            Task { @MainActor in
+                guard !dismantled else { return }
+                if !started {
+                    started = true
                     model.perform(.startTerminal(StartTerminal(handle: handle, cwd: cwd, size: size)))
+                } else if model.snapshot.terminalView(handle: handle)?.acceptsInput == true {
+                    model.perform(.resizeTerminal(ResizeTerminal(handle: handle, size: size)))
                 }
-            } else {
-                Task { @MainActor in model.perform(.resizeTerminal(ResizeTerminal(handle: handle, size: size))) }
             }
         }
 

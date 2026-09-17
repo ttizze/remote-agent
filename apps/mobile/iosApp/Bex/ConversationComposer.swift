@@ -13,7 +13,7 @@ extension ThreadScreen {
                 newThreadContext
             }
             if !model.isNewThread, let review, review.files > 0 {
-                Button { showingDiff = true; panel = .files; showingPanel = true } label: {
+                Button { showingDiff = true; page = .files } label: {
                     HStack(spacing: 10) {
                         Text("\(review.files)件のファイル")
                         Text("+\(review.additions)").foregroundColor(.green)
@@ -60,7 +60,7 @@ extension ThreadScreen {
                             }
                         }
                     }
-                    .frame(height: attachments.contains(where: { $0.isImage }) ? 104 : 44)
+                    .frame(height: attachments.contains(where: \.isImage) ? 104 : 44)
                 }
                 Group {
                     if dictation.isRecording {

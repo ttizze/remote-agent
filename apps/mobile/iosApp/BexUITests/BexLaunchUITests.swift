@@ -14,17 +14,16 @@ final class BexLaunchUITests: XCTestCase {
     }
 
     func openFiles(_ app: XCUIApplication) {
-        app.buttons["task.more"].tap()
-        let files = app.buttons["task.files"]
+        let files = app.buttons["workbench.files"]
         XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
+        app.buttons["files.all"].tap()
     }
 
     func closeWorkbench(_ app: XCUIApplication) {
-        let tab = app.buttons["workbench.terminal"]
-        XCTAssertTrue(tab.waitForExistence(timeout: 5))
-        let start = tab.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 220, dy: 0)))
-        XCTAssertFalse(tab.exists)
+        let chat = app.buttons["workbench.chat"]
+        XCTAssertTrue(chat.waitForExistence(timeout: 5))
+        chat.tap()
+        XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 5))
     }
 
     func expandSimulatorProject(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {

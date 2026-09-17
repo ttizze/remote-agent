@@ -765,7 +765,14 @@ fn terminal_disconnect_keeps_resumption_and_host_switch_drops_old_handles() {
             size: agent_core::client::TerminalSize { cols: 80, rows: 24 },
         })),
     );
+    assert!(starting.terminal_view("test".into()).unwrap().accepts_input);
     let (disconnected, _) = reduce(&starting, Event::Disconnected("offline".into()));
+    assert!(
+        !disconnected
+            .terminal_view("test".into())
+            .unwrap()
+            .accepts_input
+    );
     let (late_failure, _) = reduce(
         &disconnected,
         Event::TerminalFailed {
@@ -860,4 +867,29 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
         vec![attachment("/next"), attachment("/sent")]
     );
     assert_eq!(restored.model.as_deref(), Some("new-model"));
+}
+
+#[test]
+fn file_navigation_rejects_empty_and_relative_paths_before_rpc() {
+    for path in ["", "nested", "../", "~/project"] {
+        let (snapshot, effects) = reduce(
+            &Snapshot::default(),
+            Event::Intent(agent_core::state::Intent::ListFiles(op::ListFiles {
+                path: path.into(),
+            })),
+        );
+        assert!(effects.is_empty(), "sent an invalid path: {path:?}");
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("絶対パスを入力してください。")
+        );
+    }
+    let (snapshot, effects) = reduce(
+        &Snapshot::default(),
+        Event::Intent(agent_core::state::Intent::ListFiles(op::ListFiles {
+            path: "/".into(),
+        })),
+    );
+    assert!(snapshot.error.is_none());
+    assert_eq!(effects.len(), 1);
 }
