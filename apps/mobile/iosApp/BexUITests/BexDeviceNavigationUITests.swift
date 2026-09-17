@@ -85,7 +85,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(child.exists)
         try verifyAbsoluteDirectoryNavigation(app, child: child)
         let path = app.textFields["絶対パス"]
-        replaceFieldText(app, field: path, text: "relative-path")
+        replaceFieldText(field: path, text: "relative-path")
         app.buttons["files.open-path"].tap()
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "絶対パスを入力"))
             .firstMatch.waitForExistence(timeout: 10))
@@ -98,7 +98,7 @@ extension BexLaunchUITests {
         let path = app.textFields["絶対パス"]
         let root = try XCTUnwrap(path.value as? String)
         XCTAssertTrue(root.hasPrefix("/"))
-        replaceFieldText(app, field: path, text: root + "/nested")
+        replaceFieldText(field: path, text: root + "/nested")
         for _ in 0 ..< 2 {
             XCTAssertEqual(path.value as? String, root + "/nested")
             app.buttons["files.open-path"].tap()
@@ -121,7 +121,7 @@ extension BexLaunchUITests {
         address.tap(); address.typeText("file:///etc/passwd")
         app.buttons["browser.open"].tap()
         XCTAssertTrue(app.staticTexts["http または https の URL を入力してください"].waitForExistence(timeout: 5))
-        replaceFieldText(app, field: address, text: "about:blank")
+        replaceFieldText(field: address, text: "about:blank")
         app.buttons["browser.open"].tap()
         XCTAssertTrue(app.webViews.firstMatch.waitForExistence(timeout: 10))
         captureScreen(app, named: "Separate browser workspace")
@@ -137,13 +137,8 @@ extension BexLaunchUITests {
         XCTAssertFalse(address.exists)
     }
 
-    private func replaceFieldText(_ app: XCUIApplication, field: XCUIElement, text: String) {
-        field.tap(); field.press(forDuration: 1.2)
-        let selectAll = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label == 'Select All' OR label == 'すべてを選択'")).firstMatch
-        if selectAll.waitForExistence(timeout: 2) {
-            selectAll.tap()
-        }
+    private func replaceFieldText(field: XCUIElement, text: String) {
+        field.tap(withNumberOfTaps: 3, numberOfTouches: 1)
         field.typeText(XCUIKeyboardKey.delete.rawValue)
         XCTAssertEqual(field.value as? String, field.placeholderValue)
         field.typeText(text)
