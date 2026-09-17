@@ -487,8 +487,9 @@ mod tests {
             .expect("a changed endpoint must replace the session without probing the old one");
         resumed.unwrap();
         // Leave automatic list/model reads pending, then cancel the foreground read.
+        let mut pending = Vec::new();
         for _ in 0..2 {
-            reader.read_request().await.unwrap().unwrap();
+            pending.push(reader.read_request().await.unwrap().unwrap());
         }
         let recovering = store.clone();
         let endpoint = replacement.clone();
@@ -544,6 +545,7 @@ mod tests {
                 let (connected, (session, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
                 connected.unwrap();
                 let server = async {
+                    let mut pending = Vec::new();
                     for round in 0..(3 + usize::from(selected)) {
                         let mut requests = Vec::new();
                         while requests.len() < (1 + usize::from(selected) + usize::from(round == 0)) {
@@ -557,7 +559,7 @@ mod tests {
                                 "model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
-                            if round == 2 && selected && request["method"] == "host/session/open" { continue; }
+                            if round == 2 && selected && request["method"] == "host/session/open" { pending.push(request); continue; }
                             let response = if round == 1 && request["method"] == "host/thread/list" {
                                 json!({"error":{"code":-32000,"message":"temporary read error"}})
                             } else { json!({"result":result}) };
