@@ -278,6 +278,35 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.descendants(matching: .any)[nextID].waitForExistence(timeout: 20))
     }
 
+    func testSimulatorAddsClaudeAccountAndKeepsCodexSelected() throws {
+        #if !targetEnvironment(simulator)
+            throw XCTSkip("This test uses the isolated Simulator fixture")
+        #endif
+        let app = try connectedSimulatorApp()
+        let compose = app.buttons["tasks.new.project.simulator-project"]
+        XCTAssertTrue(compose.waitForExistence(timeout: 10)); compose.tap()
+        app.buttons["model.settings"].tap()
+        let desktop = app.buttons["model.account.desktop"]
+        XCTAssertTrue(desktop.waitForExistence(timeout: 10))
+        let add = app.buttons["model.account.add.claude"]
+        for _ in 0 ..< 5 where !add.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(add.isHittable); add.tap()
+        let code = app.secureTextFields["model.login.input"]
+        XCTAssertTrue(code.waitForExistence(timeout: 15))
+        code.tap(); code.typeText("fixture-code")
+        app.buttons["model.login.submit"].tap()
+        let account = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'model.account.claude:'"))
+            .firstMatch
+        XCTAssertTrue(account.waitForExistence(timeout: 20))
+        let selected = expectation(for: NSPredicate(format: "value == %@", "選択中"), evaluatedWith: account)
+        wait(for: [selected], timeout: 15)
+        XCTAssertEqual(desktop.value as? String, "選択中")
+        captureScreen(app, named: "Claude account added alongside Codex")
+        app.buttons["model.close"].tap()
+    }
+
     private func switchFixtureAccount(_ app: XCUIApplication) {
         app.buttons["model.settings"].tap()
         let desktop = app.buttons["model.account.desktop"]

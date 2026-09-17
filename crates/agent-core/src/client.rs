@@ -301,6 +301,7 @@ rpc_method!(WriteFile<'_>, crate::models::FileContent, "host/file/write");
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Account {
     pub id: String,
+    pub provider: crate::session::ProviderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,14 +315,45 @@ pub struct Account {
 pub struct Accounts {
     pub accounts: Vec<Account>,
     pub selected_id: Option<String>,
+    pub selected_claude_id: Option<String>,
     pub error: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
 
+impl Accounts {
+    pub fn is_selected(&self, account: &Account) -> bool {
+        (match account.provider {
+            crate::session::ProviderKind::Codex => self.selected_id.as_ref(),
+            crate::session::ProviderKind::Claude => self.selected_claude_id.as_ref(),
+        }) == Some(&account.id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct StartAccountLogin {
+    pub provider: crate::session::ProviderKind,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct SubmitAccountLogin {
+    pub id: String,
+    pub code: String,
+}
+impl std::fmt::Debug for SubmitAccountLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubmitAccountLogin")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSelection {
+    pub provider: crate::session::ProviderKind,
     pub selected_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence_error: Option<String>,
@@ -334,6 +366,7 @@ pub struct AccountSelection {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AccountLogin {
     pub login_id: String,
+    pub requires_code_submission: bool,
     pub user_code: String,
     pub verification_url: String,
     #[serde(flatten)]
@@ -342,7 +375,6 @@ pub struct AccountLogin {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AccountLoginStatus {
     pub completed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

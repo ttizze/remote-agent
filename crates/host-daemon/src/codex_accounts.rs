@@ -1,7 +1,7 @@
+use crate::host_rpc::AccountRequest;
 use std::{collections::HashMap, path::PathBuf};
 
 use agent_core::{
-    client as op,
     client::{AccountLogin, AccountLoginStatus},
     models::Empty,
     peer::PeerEvent,
@@ -52,22 +52,6 @@ pub(crate) struct Accounts {
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "method", content = "params")]
-pub(crate) enum AccountRequest {
-    #[serde(rename = "host/account/list")]
-    List(Empty),
-    #[serde(rename = "host/account/select")]
-    Select(op::SelectAccount),
-    #[serde(rename = "host/account/logout")]
-    Logout(op::LogoutAccount),
-    #[serde(rename = "host/account/login/start")]
-    LoginStart(Empty),
-    #[serde(rename = "host/account/login/status")]
-    LoginStatus(op::ReadAccountLogin),
-    #[serde(rename = "host/account/login/cancel")]
-    LoginCancel(op::CancelAccountLogin),
-}
 #[derive(Serialize)]
 #[serde(untagged, rename_all_fields = "camelCase")]
 pub(crate) enum AccountResponse<'a> {
@@ -77,6 +61,7 @@ pub(crate) enum AccountResponse<'a> {
         error: Option<String>,
     },
     Selected {
+        provider: agent_core::session::ProviderKind,
         selected_id: String,
         persistence_error: Option<String>,
     },
@@ -209,6 +194,7 @@ impl Accounts {
             AccountRequest::Select(params) => {
                 self.select(primary, &params.id).await?;
                 Ok(AccountResponse::Selected {
+                    provider: agent_core::session::ProviderKind::Codex,
                     selected_id: params.id,
                     persistence_error: self.save().await.err(),
                 })
@@ -286,6 +272,8 @@ impl Accounts {
                     .as_str()
                     .ok_or("ログインを開始できませんでした。")?
                     .to_owned();
+                let mut result = result;
+                result["requiresCodeSubmission"] = false.into();
                 let response: AccountLogin = serde_json::from_value(result)
                     .map_err(|_| "ログインを開始できませんでした。")?;
                 self.login = Some(Login {
@@ -297,6 +285,9 @@ impl Accounts {
                 });
                 self.completed_login = None;
                 Ok(AccountResponse::Login(response))
+            }
+            AccountRequest::LoginSubmit(_) => {
+                Err("Codexのコードはブラウザで入力してください。".into())
             }
             AccountRequest::LoginStatus(params) => self
                 .login_status(&params.id)

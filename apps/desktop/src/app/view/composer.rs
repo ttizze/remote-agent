@@ -179,7 +179,7 @@ impl Desktop {
         v_flex()
             .w(px(280.))
             .gap_2()
-            .child(div().text_sm().child("Codex アカウント"))
+            .child(div().text_sm().child("アカウント"))
             .child(account_selector(
                 accounts,
                 self.busy > 0
@@ -634,20 +634,28 @@ fn account_selector(
     disabled: bool,
     on_select: impl Fn(Intent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let selected = accounts.as_ref().and_then(|accounts| {
-        accounts
-            .accounts
-            .iter()
-            .find(|account| Some(&account.id) == accounts.selected_id.as_ref())
-    });
-    let label = selected.map_or("アカウントを選択", |account| {
-        account.email.as_deref().unwrap_or(&account.id)
-    });
+    let selected = accounts
+        .as_ref()
+        .map(|accounts| {
+            accounts
+                .accounts
+                .iter()
+                .filter(|account| accounts.is_selected(account))
+                .map(|account| account.email.as_deref().unwrap_or(&account.id))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        })
+        .unwrap_or_default();
+    let label = if selected.is_empty() {
+        "アカウントを選択"
+    } else {
+        &selected
+    };
     let on_select = Rc::new(on_select);
     Button::new("account-select")
         .debug_selector(|| "account-select".into())
         .label(label.to_owned())
-        .accessibility_label("Codex アカウントを変更")
+        .accessibility_label("アカウントを変更")
         .dropdown_caret(true)
         .w_full()
         .small()
@@ -668,9 +676,13 @@ fn account_selector(
                         || email.to_owned(),
                         |plan| format!("{email} · {}", plan.to_uppercase()),
                     );
+                    let provider = match account.provider {
+                        agent_core::session::ProviderKind::Codex => "Codex",
+                        agent_core::session::ProviderKind::Claude => "Claude",
+                    };
                     menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(accounts.selected_id.as_ref() == Some(&id))
+                        PopupMenuItem::new(format!("{provider} · {label}"))
+                            .checked(accounts.is_selected(account))
                             .on_click(move |_, window, cx| {
                                 select(
                                     Intent::SelectAccount(op::SelectAccount { id: id.clone() }),
@@ -725,8 +737,9 @@ mod tests {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let accounts = Arc::new(
             serde_json::from_value(serde_json::json!({
-                "accounts":[{"id":"first","email":"first@example.invalid","planType":"plus"},
-                            {"id":"second","email":"second@example.invalid","planType":"pro"}],
+                "accounts":[{"provider":"codex","id":"first","email":"first@example.invalid","planType":"plus"},
+                            {"provider":"codex","id":"second","email":"second@example.invalid","planType":"pro"},
+                            {"provider":"claude","id":"claude:third","email":"claude@example.invalid","planType":"max"}],
                 "selectedId":"first","error":null
             }))
             .unwrap(),
@@ -744,6 +757,9 @@ mod tests {
         window.simulate_click(bounds.center(), Modifiers::default());
         window.simulate_keystrokes("down down enter");
         assert_eq!(*selected.borrow(), ["second"]);
+        window.simulate_click(bounds.center(), Modifiers::default());
+        window.simulate_keystrokes("down down down enter");
+        assert_eq!(*selected.borrow(), ["second", "claude:third"]);
         window.update(|_, cx| {
             picker.update(cx, |picker, cx| {
                 picker.disabled = true;
@@ -756,7 +772,7 @@ mod tests {
         window.simulate_keystrokes("down enter");
         assert_eq!(
             *selected.borrow(),
-            ["second"],
+            ["second", "claude:third"],
             "busy picker must not switch accounts"
         );
     }

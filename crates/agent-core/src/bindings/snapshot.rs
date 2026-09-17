@@ -1,7 +1,7 @@
 //! Export the core snapshot and shared graph directly; only ABI getters live here.
 use super::{AgentError, error};
 use crate::{
-    client::{AccountLogin, AccountLoginStatus, Accounts},
+    client::{AccountLogin, Accounts},
     models::{FileContent, FileList, ListQuery, Model, Thread, WorkspaceReview, WorktreeSettings},
     presentation::conversation::{
         ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn, Request, request,
@@ -106,11 +106,17 @@ impl Snapshot {
     pub fn accounts(&self) -> Option<Accounts> {
         self.account.accounts.as_deref().cloned()
     }
+    pub fn account_is_selected(&self, id: String) -> bool {
+        self.account.accounts.as_ref().is_some_and(|accounts| {
+            accounts
+                .accounts
+                .iter()
+                .find(|account| account.id == id)
+                .is_some_and(|account| accounts.is_selected(account))
+        })
+    }
     pub fn account_login(&self) -> Option<AccountLogin> {
         self.account.login.as_deref().cloned()
-    }
-    pub fn account_login_status(&self) -> Option<AccountLoginStatus> {
-        self.account.login_status.as_deref().cloned()
     }
 }
 #[uniffi::export]

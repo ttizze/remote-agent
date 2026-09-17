@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ProviderKind {
     Codex,
     Claude,

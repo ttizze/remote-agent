@@ -143,6 +143,79 @@ impl HostRpcService {
         }
     }
 
+    async fn account_request(&self, line: &str) -> Result<serde_json::Value, Failure> {
+        use crate::host_rpc::AccountRequest;
+        use agent_core::session::ProviderKind;
+        use serde_json::Value;
+        let request: AccountRequest = serde_json::from_str(line)
+            .map_err(|error| Failure::new("invalid_params", error.to_string()))?;
+        let claude_request = match &request {
+            AccountRequest::LoginStart(params) => params.provider == ProviderKind::Claude,
+            AccountRequest::Select(params) => params.id.starts_with("claude:"),
+            AccountRequest::Logout(params) => params.id.starts_with("claude:"),
+            AccountRequest::LoginStatus(params) => params.id.starts_with("claude:"),
+            AccountRequest::LoginCancel(params) => params.id.starts_with("claude:"),
+            AccountRequest::LoginSubmit(params) => params.id.starts_with("claude:"),
+            AccountRequest::List(_) => false,
+        };
+        if claude_request {
+            let claude = self.inner.claude.get().ok_or_else(|| {
+                Failure::new("account_unavailable", "Claude が設定されていません。")
+            })?;
+            return claude
+                .accounts
+                .lock()
+                .await
+                .request(request)
+                .await
+                .map_err(|error| Failure::new("account_operation_failed", error));
+        }
+        let listing = matches!(request, AccountRequest::List(_));
+        let mut accounts = self.inner.accounts.lock().await;
+        let result = match accounts.as_mut() {
+            Some(accounts) => match self.inner.codex.server() {
+                Ok(server) => accounts
+                    .request(server, request)
+                    .await
+                    .and_then(|response| {
+                        serde_json::to_value(response).map_err(|error| error.to_string())
+                    }),
+                Err(error) => Err(error.to_string()),
+            },
+            None => Err("Codex のアカウント管理が利用できません。".into()),
+        };
+        drop(accounts);
+        if !listing {
+            return result.map_err(|error| Failure::new("account_operation_failed", error));
+        }
+        let mut result = result.unwrap_or_else(
+            |error| serde_json::json!({"accounts":[],"selectedId":null,"error":error}),
+        );
+        for account in result["accounts"].as_array_mut().into_iter().flatten() {
+            account["provider"] = "codex".into();
+        }
+        result["selectedClaudeId"] = Value::Null;
+        if let Some(claude) = self.inner.claude.get() {
+            match claude.accounts.lock().await.list().await {
+                Ok((entries, selected)) => {
+                    if let Some(accounts) = result["accounts"].as_array_mut() {
+                        accounts.extend(entries.into_iter().map(|entry| {
+                            serde_json::to_value(entry).expect("serializable account")
+                        }));
+                    }
+                    result["selectedClaudeId"] = selected.into();
+                }
+                Err(error) => {
+                    let error = result["error"]
+                        .as_str()
+                        .map_or_else(|| error.clone(), |codex| format!("{codex}\n{error}"));
+                    result["error"] = error.into();
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub async fn enable_accounts(
         &self,
         directory: std::path::PathBuf,
@@ -600,32 +673,9 @@ impl HostRpcService {
                 | "host/account/logout"
                 | "host/account/login/start"
                 | "host/account/login/status"
+                | "host/account/login/submit"
                 | "host/account/login/cancel" => {
-                    if let Err(error) = self.inner.codex.server() {
-                        return request.response::<(), _>(Err(error));
-                    }
-                    let mut accounts = self.inner.accounts.lock().await;
-                    let result = match accounts.as_mut() {
-                        Some(accounts) => {
-                            run_handler(
-                                serde_json::from_str(line),
-                                "account_operation_failed",
-                                |params| async move {
-                                    accounts
-                                        .request(
-                                            self.inner.codex.server().map_err(|error| error.to_string())?,
-                                            params,
-                                        )
-                                        .await
-                                },
-                            )
-                            .await
-                        }
-                        None => Err(Failure::new(
-                            "account_operation_failed",
-                            "このHostはアカウント切り替えに対応していません。",
-                        )),
-                    };
+                    let result = self.account_request(line).await;
                     request.response(result)?
                 }
 

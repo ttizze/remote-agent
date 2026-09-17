@@ -108,13 +108,13 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let before = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
         assert!(before.get("error").is_none(), "{before}");
         assert_eq!(before["result"]["thread"]["turns"].as_array().unwrap().len(), 1);
-        let canceled = call(&service, &mut session, "host/account/login/start", json!({})).await;
+        let canceled = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
         assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
         // Dismissing an already discarded login must still allow another attempt.
         assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"].as_array().unwrap().len(), 1);
-        let login = call(&service, &mut session, "host/account/login/start", json!({})).await;
+        let login = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
         assert_eq!(login["result"]["userCode"], "TEST-CODE");
         let status = loop {
             let status = call(&service, &mut session, "host/account/login/status", json!({"loginId":login["result"]["loginId"]})).await;
@@ -225,7 +225,7 @@ async fn helper_initialization_does_not_block_completed_turns() {
                 &login_service,
                 &mut login_session,
                 "host/account/login/start",
-                json!({}),
+                json!({"provider":"codex"}),
             )
             .await
         });
@@ -305,7 +305,7 @@ async fn logout_removes_credentials_survives_restart_and_allows_login_again() {
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["accounts"], json!([]));
         assert!(listed["result"]["selectedId"].is_null());
-        let login = call(&service, &mut session, "host/account/login/start", json!({})).await;
+        let login = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
         let status = loop {
             let status = call(&service, &mut session, "host/account/login/status", json!({"loginId":login["result"]["loginId"]})).await;
             assert!(status.get("error").is_none(), "{status}");

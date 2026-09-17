@@ -1013,3 +1013,126 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
     .await
     .expect("independent PTY deadline");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let native = root.join("claude-native");
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("fixture-auth.json"), json!({"loggedIn":true,"authMethod":"claude.ai","email":"native@example.invalid","subscriptionType":"pro"}).to_string()).unwrap();
+        let memory = Arc::new(Memory::default());
+        let start = || HostFixture::start(&root, AppServerConfig { program: root.join("missing-codex"), ..Default::default() }, memory.clone(), "Claude accounts", false, Some(fixture_program()));
+        let fixture = start().await.unwrap();
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
+        assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected_claude_id.as_deref(), Some("claude:desktop"));
+        store.dispatch(Intent::NewChat { cwd: root.to_string_lossy().into() }).await.unwrap();
+        let key = store.snapshot().navigation.draft_key.clone();
+        store.dispatch(Intent::SelectModel { thread_id: key, model: "claude:default".into() }).await.unwrap();
+        let thread = send(&store, "first account", "account-first").await;
+        completed(&store, &thread, 1, "completed").await;
+
+        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_core::session::ProviderKind::Claude })).await.unwrap();
+        let login = store.snapshot().account.login.clone().unwrap();
+        assert!(login.requires_code_submission);
+        assert!(login.verification_url.starts_with("https://claude.com/"));
+        assert!(store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: "claude:wrong".into(), code: "fixture-code".into() })).await.is_err());
+        store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: login.login_id.clone(), code: "fixture-code".into() })).await.unwrap();
+        loop {
+            store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin { id: login.login_id.clone() })).await.unwrap();
+            if store.snapshot().account.login.is_none() { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        until(&store, |snapshot| snapshot.account.accounts.as_ref().is_some_and(|accounts| accounts.selected_claude_id.as_ref() == Some(&login.login_id))).await;
+        send(&store, "second account, same history", "account-second").await;
+        completed(&store, &thread, 2, "completed").await;
+        let profile = root.join("claude/accounts").join(login.login_id.strip_prefix("claude:").unwrap());
+        assert_eq!(std::fs::canonicalize(profile.join("projects")).unwrap(), std::fs::canonicalize(native.join("projects")).unwrap());
+        let homes = std::fs::read_to_string(root.join("claude-auth-homes.jsonl")).unwrap();
+        assert!(homes.lines().any(|line| line == native.to_string_lossy()));
+        assert!(homes.lines().any(|line| line == profile.to_string_lossy()), "retained process must not reuse the previous account");
+        let snapshot = (*store.snapshot()).clone();
+        drop(store); endpoint.close().await; fixture.close().await.unwrap();
+        let fixture = start().await.unwrap();
+        let (store, endpoint) = connect(&fixture, snapshot).await;
+        store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
+        assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected_claude_id.as_ref(), Some(&login.login_id));
+        send(&store, "resumed after restart", "account-third").await;
+        completed(&store, &thread, 3, "completed").await;
+
+        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_core::session::ProviderKind::Claude })).await.unwrap();
+        let canceled = store.snapshot().account.login.clone().unwrap();
+        store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin { id: canceled.login_id.clone() })).await.unwrap();
+        assert!(!root.join("claude/accounts").join(canceled.login_id.strip_prefix("claude:").unwrap()).exists());
+        assert!(native.join("projects").exists(), "cancel must preserve shared history");
+        store.dispatch(Intent::LogoutAccount(op::LogoutAccount { id: login.login_id.clone() })).await.unwrap();
+        store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
+        assert!(store.snapshot().account.accounts.as_ref().unwrap().selected_claude_id.is_none());
+        let snapshot = (*store.snapshot()).clone();
+        drop(store); endpoint.close().await; fixture.close().await.unwrap();
+        let fixture = start().await.unwrap();
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, snapshot, None).await.unwrap();
+        assert!(store.dispatch(Intent::LoadModels(op::LoadModels {})).await.is_err(), "logged-out Claude and unavailable Codex must not expose models");
+        store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
+        assert!(store.snapshot().account.accounts.as_ref().unwrap().selected_claude_id.is_none(), "restart must preserve logout without selecting the native account");
+        store.dispatch(Intent::SelectAccount(op::SelectAccount { id: "claude:desktop".into() })).await.unwrap();
+        until(&store, |snapshot| snapshot.models.iter().any(|model| model.model == "claude:default")).await;
+        send(&store, "back to native account", "account-fourth").await;
+        completed(&store, &thread, 4, "completed").await;
+        drop(store); endpoint.close().await; fixture.close().await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires BEX_LIVE_CLAUDE_PROGRAM; starts and cancels an isolated login, never performs inference"]
+async fn live_claude_account_login_url_and_cancellation() {
+    let program = std::env::var_os("BEX_LIVE_CLAUDE_PROGRAM").expect("set BEX_LIVE_CLAUDE_PROGRAM");
+    let root = tempfile::tempdir().unwrap();
+    let fixture = HostFixture::start(
+        root.path(),
+        AppServerConfig {
+            program: root.path().join("missing-codex"),
+            ..Default::default()
+        },
+        Arc::new(Memory::default()),
+        "Isolated Claude login",
+        false,
+        Some(Path::new(&program)),
+    )
+    .await
+    .unwrap();
+    let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+        .await
+        .unwrap();
+    let store = Store::connect(&endpoint, &fixture.ticket, Snapshot::default(), None)
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
+            provider: agent_core::session::ProviderKind::Claude,
+        }))
+        .await
+        .unwrap();
+    let login = store.snapshot().account.login.clone().unwrap();
+    assert!(login.requires_code_submission);
+    assert!(login.verification_url.starts_with("https://claude.com/"));
+    store
+        .dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin {
+            id: login.login_id.clone(),
+        }))
+        .await
+        .unwrap();
+    assert!(
+        !root
+            .path()
+            .join("claude/accounts")
+            .join(login.login_id.strip_prefix("claude:").unwrap())
+            .exists()
+    );
+    drop(store);
+    endpoint.close().await;
+    fixture.close().await.unwrap();
+}

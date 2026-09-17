@@ -9,6 +9,7 @@ struct ModelSettingsSheet: View {
         model.snapshot.accountLogin()
     }
 
+    @State private var loginCode = ""
     @State private var changingAccount = false
     @State private var loadingModels = false
     @State private var loginError: String?
@@ -25,19 +26,20 @@ struct ModelSettingsSheet: View {
                                 Image(systemName: "person.crop.circle").font(.title2)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(account.email ?? account.id).foregroundColor(.primary)
-                                    Text((account.planType ?? "").uppercased()).font(.caption)
+                                    Text((account.provider == .claude ? "Claude · " : "Codex · ") +
+                                        (account.planType ?? "").uppercased()).font(.caption)
                                         .foregroundColor(.secondary)
                                 }
                                 Spacer()
-                                if account.id == model.selectedAccountId {
+                                if model.snapshot.accountIsSelected(id: account.id) {
                                     Image(systemName: "checkmark.circle.fill")
                                 }
                             }.padding(.vertical, 4)
                         }
                         .accessibilityIdentifier("model.account." + account.id)
-                        .accessibilityValue(account.id == model.selectedAccountId ? "選択中" : "")
-                        .disabled(changingAccount)
-                        if account.id == model.selectedAccountId {
+                        .accessibilityValue(model.snapshot.accountIsSelected(id: account.id) ? "選択中" : "")
+                        .disabled(changingAccount || login != nil)
+                        if account.provider == .codex, model.snapshot.accountIsSelected(id: account.id) {
                             Button { model.chooseModel("") } label: {
                                 HStack {
                                     Text("Codex の既定モデル").foregroundColor(.primary)
@@ -100,18 +102,33 @@ struct ModelSettingsSheet: View {
                 }
                 Section {
                     if let login {
-                        Text("ブラウザでログインし、次のコードを入力してください。")
-                        Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
-                            .accessibilityIdentifier("model.login.code")
+                        if login.requiresCodeSubmission {
+                            Text("ブラウザで Claude にログインし、表示された認証コードを貼り付けてください。")
+                            SecureField("認証コード", text: $loginCode)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .accessibilityIdentifier("model.login.input")
+                            Button("認証コードを送信") { submitLoginCode(login.loginId) }
+                                .disabled(loginCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .isEmpty || startingLogin)
+                                .accessibilityIdentifier("model.login.submit")
+                        } else {
+                            Text("ブラウザでログインし、次のコードを入力してください。")
+                            Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
+                                .accessibilityIdentifier("model.login.code")
+                        }
                         if let url = URL(string: login.verificationUrl),
                            url.scheme == "https" {
                             Link("ログインページを開く", destination: url)
                         }
                         Button("ログインをキャンセル") { cancelLogin() }
                     } else {
-                        Button { startLogin() } label: { Label("Codex アカウントを追加", systemImage: "plus") }
+                        Button { startLogin(.codex) } label: { Label("Codex アカウントを追加", systemImage: "plus") }
                             .disabled(startingLogin)
                             .accessibilityIdentifier("model.account.add")
+                        Button { startLogin(.claude) } label: { Label("Claude アカウントを追加", systemImage: "plus") }
+                            .disabled(startingLogin)
+                            .accessibilityIdentifier("model.account.add.claude")
                     }
                     if let error = loginError ?? model.accountError ?? model.modelError {
                         Text(error).font(.caption).foregroundColor(.red)
@@ -136,15 +153,31 @@ struct ModelSettingsSheet: View {
         .onDisappear { pollingLogin?.cancel(); pollingLogin = nil }
     }
 
-    private func startLogin() {
+    private func startLogin(_ provider: ProviderKind) {
+        loginCode = ""
         startingLogin = true
         loginError = nil
-        model.perform(.startAccountLogin(StartAccountLogin())) { result in
+        model.perform(.startAccountLogin(StartAccountLogin(provider: provider))) { result in
             startingLogin = false
             if case let .failure(error) = result {
                 loginError = error.localizedDescription; return
             }
             if let id = login?.loginId {
+                pollLogin(id)
+            }
+        }
+    }
+
+    private func submitLoginCode(_ id: String) {
+        startingLogin = true
+        loginError = nil
+        let code = loginCode
+        loginCode = ""
+        model.perform(.submitAccountLogin(SubmitAccountLogin(id: id, code: code))) { result in
+            startingLogin = false
+            if case let .failure(error) = result {
+                loginError = error.localizedDescription
+            } else {
                 pollLogin(id)
             }
         }
@@ -178,12 +211,6 @@ struct ModelSettingsSheet: View {
                 guard !Task.isCancelled else { return }
                 if case let .failure(error) = result {
                     loginError = error.localizedDescription; return
-                }
-                if let status = model.snapshot.accountLoginStatus(), status.completed {
-                    if let id = status.accountId {
-                        model.chooseAccount(id)
-                    }
-                    return
                 }
             }
         }
