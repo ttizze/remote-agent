@@ -414,7 +414,7 @@ async fn snapshot_notification_can_reenter_store_synchronously() {
 }
 
 #[tokio::test]
-async fn new_conversation_clears_sent_draft_after_native_echo() {
+async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();
@@ -431,6 +431,14 @@ async fn new_conversation_clears_sent_draft_after_native_echo() {
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/thread/start");
+    let pending = store.snapshot();
+    assert!(pending.drafts[&key].text.is_empty());
+    let source = pending.conversation_source().unwrap();
+    let rendered =
+        agent_core::presentation::conversation::project_conversation(&pending, source, &None);
+    assert_eq!(rendered.queued.len(), 1);
+    assert_eq!(rendered.queued[0].data.body, "first message");
+    assert_eq!(rendered.queued[0].data.title, "送信中…");
     writer.reply(&request, json!({ "result": {"thread": {"id":"created", "cwd":"/fixture", "status":{"type":"idle"}, "turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "turn/start");
@@ -483,6 +491,8 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
         assert_eq!(request["method"], "turn/start");
         assert_eq!(request["params"]["input"][0]["text"], "sent");
         assert_eq!(request["params"]["serviceTierForTurn"], "priority");
+        assert!(store.snapshot().drafts["thread"].text.is_empty());
+        assert!(store.snapshot().drafts["thread"].attachments.is_empty());
         store
             .dispatch(Intent::SetDraft {
                 thread_id: "thread".into(),
@@ -751,7 +761,11 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
         assert_eq!(transcribing.await.unwrap().is_err(), fail_send);
         assert_eq!(
             store.snapshot().drafts["thread"].text,
-            if fail_send { "newer\nspoken" } else { "newer" }
+            if fail_send {
+                "original\nspoken\nnewer"
+            } else {
+                "newer"
+            }
         );
         store.close().await.unwrap();
     }
@@ -1725,13 +1739,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let request = read(&mut reader).await;
-    writer
-        .reply(
-            &request,
-            json!({"result":{"accounts":[{"id":"a"}],"selectedId":"a","error":null}}),
-        )
-        .await
-        .unwrap();
+    writer.reply(&request, json!({"result":{"accounts":[{"provider":"codex","id":"a"},{"provider":"claude","id":"claude:c"}],"selectedClaudeId":"claude:c","selectedId":"a","error":null}})).await.unwrap();
     listing.await.unwrap();
     assert_eq!(
         store
@@ -1747,13 +1755,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount { id: "b".into() }));
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["accountId"], "b");
-    writer
-        .reply(
-            &request,
-            json!({"result":{"selectedId":"b","persistenceError":"store unavailable"}}),
-        )
-        .await
-        .unwrap();
+    writer.reply(&request, json!({"result":{"provider":"codex","selectedId":"b","persistenceError":"store unavailable"}})).await.unwrap();
     selecting.await.unwrap();
     assert_eq!(
         store
@@ -1767,13 +1769,24 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
         Some("b")
     );
     assert_eq!(store.snapshot().error.as_deref(), Some("store unavailable"));
+    assert_eq!(
+        store
+            .snapshot()
+            .account
+            .accounts
+            .as_ref()
+            .unwrap()
+            .selected_claude_id
+            .as_deref(),
+        Some("claude:c")
+    );
     // Selecting a newly logged-in account invalidates the login completion's
     // pending list request, so selection must fetch the new entry itself.
     for _ in 0..2 {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/account/list" => {
-                json!({"accounts":[{"id":"a"},{"id":"b"}],"selectedId":"b","error":null})
+                json!({"accounts":[{"provider":"codex","id":"a"},{"provider":"codex","id":"b"},{"provider":"claude","id":"claude:c"}],"selectedClaudeId":"claude:c","selectedId":"b","error":null})
             }
             "model/list" => json!({"data":[]}),
             method => panic!("unexpected account refresh: {method}"),
@@ -1796,7 +1809,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 #[tokio::test]
 async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_late_status() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
-    let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {}));
+    let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
+        provider: agent_core::session::ProviderKind::Codex,
+    }));
     let request = read(&mut reader).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let list = read(&mut reader).await;
@@ -1808,7 +1823,7 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
         .await
         .unwrap();
     listing.await.unwrap();
-    writer.reply(&request, json!({"result":{"loginId":"login","userCode":"fixture-only","verificationUrl":"https://example.invalid"}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"loginId":"login","userCode":"fixture-only","requiresCodeSubmission":false,"verificationUrl":"https://example.invalid"}})).await.unwrap();
     starting.await.unwrap();
     assert_eq!(
         store.snapshot().account.login.as_ref().unwrap().login_id,
@@ -1835,7 +1850,6 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
     polling.await.unwrap();
     let state = store.snapshot();
     assert!(state.account.login.is_none());
-    assert!(state.account.login_status.is_none());
     assert!(state.account.accounts.as_ref().unwrap().accounts.is_empty());
     store.close().await.unwrap();
 }
@@ -2076,7 +2090,7 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
     use agent_core::client::{SubmissionTarget, submission_target};
     use agent_core::state::{Activity, Navigation, PendingSubmission};
     let draft = Arc::new(Draft {
-        text: "typed".into(),
+        text: "typed\nspoken".into(),
         ..Default::default()
     });
     let mut saved = snapshot();
@@ -2090,7 +2104,7 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
         active: BTreeMap::from([("thread".into(), true)]),
         ..Default::default()
     });
-    saved.drafts = Arc::new(BTreeMap::from([("thread".into(), draft.clone())]));
+    saved.drafts = Arc::new(BTreeMap::from([("thread".into(), Arc::default())]));
     saved.pending_submissions = Arc::new(BTreeMap::from([(
         "unsent".into(),
         Arc::new(PendingSubmission {
@@ -2100,8 +2114,6 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
             after_item_id: None,
             accepted: false,
             delivery_unknown: false,
-            recovery_text: Some("spoken".into()),
-            clear_draft: None,
         }),
     )]));
     saved.requests = Arc::new(BTreeMap::from([("1".into(), Arc::new(serde_json::from_value(json!({
@@ -2116,12 +2128,10 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
     assert!(current.subscriptions.is_empty());
     assert!(current.pending_submissions["unsent"].delivery_unknown);
     assert_eq!(
-        current.pending_submissions["unsent"]
-            .recovery_text
-            .as_deref(),
-        Some("spoken")
+        current.pending_submissions["unsent"].draft.text,
+        "typed\nspoken"
     );
-    assert_eq!(current.drafts["thread"].text, "typed");
+    assert!(current.drafts["thread"].text.is_empty());
     assert!(matches!(
         submission_target(Some(&current.conversations["thread"]), None, None).unwrap(),
         SubmissionTarget::Start { .. }
@@ -2519,4 +2529,58 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         client.close().await;
         host.close().await;
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_login_selects_its_account_before_refreshing_without_client_logic() {
+    for (provider, id) in [("codex", "added"), ("claude", "claude:added")] {
+        let (store, mut reader, writer) = setup(Snapshot::default()).await;
+        let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
+            id: "login".into(),
+        }));
+        let request = read(&mut reader).await;
+        writer
+            .reply(
+                &request,
+                json!({"result":{"completed":true,"accountId":id}}),
+            )
+            .await
+            .unwrap();
+        polling.await.unwrap();
+        let select = read(&mut reader).await;
+        assert_eq!(select["method"], "host/account/select");
+        assert_eq!(select["params"], json!({"accountId":id}));
+        writer
+            .reply(
+                &select,
+                json!({"result":{"provider":provider,"selectedId":id}}),
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let request = read(&mut reader).await;
+            let result = match request["method"].as_str().unwrap() {
+                "host/account/list" => {
+                    json!({"accounts":[{"provider":provider,"id":id}],"selectedId":if provider == "codex" {Some(id)} else {None},"selectedClaudeId":if provider == "claude" {Some(id)} else {None},"error":null})
+                }
+                "model/list" => json!({"data":[]}),
+                method => panic!("unexpected login effect: {method}"),
+            };
+            writer
+                .reply(&request, json!({"result":result}))
+                .await
+                .unwrap();
+        }
+        wait_for(&store, |snapshot| {
+            snapshot.account.accounts.as_ref().is_some_and(|accounts| {
+                accounts
+                    .accounts
+                    .iter()
+                    .any(|account| account.id == id && accounts.is_selected(account))
+            })
+        })
+        .await;
+        assert!(store.snapshot().account.login.is_none());
+        store.close().await.unwrap();
+    }
 }

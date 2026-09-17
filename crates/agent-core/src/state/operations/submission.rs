@@ -47,7 +47,6 @@ impl Operation for Dictate {
             draft_key,
             draft,
             client_user_message_id,
-            Some(output.text),
             Some(clear_draft),
         );
         *snapshot = next;
@@ -139,16 +138,16 @@ impl StartSubmission {
             return Vec::new();
         };
         let current = snapshot.drafts.get(&draft_key);
-        let original = snapshot
-            .pending_submissions
-            .get(&client_user_message_id)
-            .and_then(|pending| pending.clear_draft.as_ref())
-            .unwrap_or(&draft);
-        let remove_original = current_view || current == Some(original);
+        let empty = Arc::new(Draft {
+            text: String::new(),
+            attachments: Vec::new(),
+            ..draft.as_ref().clone()
+        });
+        let remove_original = current_view || current == Some(&empty);
         let target = if current_view {
-            current.unwrap_or(original).clone()
+            current.unwrap_or(&empty).clone()
         } else {
-            original.clone()
+            empty
         };
         let mut effects = if current_view {
             open_thread(snapshot, thread, None)
@@ -283,42 +282,9 @@ impl Operation for SendSubmission {
         let Self {
             thread_id,
             client_user_message_id,
-            draft,
+            ..
         } = self;
 
-        let draft = snapshot
-            .pending_submissions
-            .get(&client_user_message_id)
-            .and_then(|pending| pending.clear_draft.as_ref())
-            .unwrap_or(&draft);
-        if let Some(current) = snapshot.drafts.get(&thread_id) {
-            let clear_text = !current.text.is_empty() && current.text == draft.text;
-            let sent_attachment = |attachment: &Attachment| {
-                draft
-                    .attachments
-                    .iter()
-                    .any(|sent| sent.path == attachment.path)
-            };
-            if clear_text || current.attachments.iter().any(sent_attachment) {
-                let retained = Draft {
-                    text: if clear_text {
-                        String::new()
-                    } else {
-                        current.text.clone()
-                    },
-                    attachments: current
-                        .attachments
-                        .iter()
-                        .filter(|attachment| !sent_attachment(attachment))
-                        .cloned()
-                        .collect(),
-                    model: current.model.clone(),
-                    effort: current.effort.clone(),
-                    service_tier: current.service_tier.clone(),
-                };
-                Arc::make_mut(&mut snapshot.drafts).insert(thread_id.clone(), Arc::new(retained));
-            }
-        }
         if let Some(pending) =
             Arc::make_mut(&mut snapshot.pending_submissions).get_mut(&client_user_message_id)
         {

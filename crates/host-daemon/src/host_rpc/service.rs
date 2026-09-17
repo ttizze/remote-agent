@@ -116,6 +116,69 @@ impl HostRpcService {
         }
     }
 
+    async fn account_request(&self, request: Call) -> Result<agent_core::protocol::Body, Failure> {
+        use agent_core::{protocol::Body, session::ProviderKind};
+        let claude_request = match &request {
+            Call::StartAccountLogin(params) => params.provider == ProviderKind::Claude,
+            Call::SelectAccount(params) => params.id.starts_with("claude:"),
+            Call::LogoutAccount(params) => params.id.starts_with("claude:"),
+            Call::ReadAccountLogin(params) => params.id.starts_with("claude:"),
+            Call::CancelAccountLogin(params) => params.id.starts_with("claude:"),
+            Call::SubmitAccountLogin(params) => params.id.starts_with("claude:"),
+            _ => false,
+        };
+        if claude_request {
+            let claude = self.inner.claude.get().ok_or_else(|| {
+                Failure::new("account_unavailable", "Claude が設定されていません。")
+            })?;
+            return claude
+                .accounts
+                .lock()
+                .await
+                .request(request)
+                .await
+                .map_err(|error| Failure::new("account_operation_failed", error));
+        }
+        let listing = matches!(request, Call::ListAccounts(_));
+        let mut accounts = self.inner.accounts.lock().await;
+        let result = match accounts.as_mut() {
+            Some(accounts) => match self.inner.codex.server() {
+                Ok(server) => accounts.request(server, request).await,
+                Err(error) => Err(error.to_string()),
+            },
+            None => Err("Codex のアカウント管理が利用できません。".into()),
+        };
+        drop(accounts);
+        if !listing {
+            return result.map_err(|error| Failure::new("account_operation_failed", error));
+        }
+        let mut result = match result {
+            Ok(Body::Accounts(accounts)) => *accounts,
+            Ok(_) => unreachable!("account listing returns Accounts"),
+            Err(error) => op::Accounts {
+                accounts: Vec::new(),
+                selected_id: None,
+                selected_claude_id: None,
+                error: Some(error),
+            },
+        };
+        if let Some(claude) = self.inner.claude.get() {
+            match claude.accounts.lock().await.list().await {
+                Ok((entries, selected)) => {
+                    result.accounts.extend(entries);
+                    result.selected_claude_id = selected;
+                }
+                Err(error) => {
+                    result.error = Some(match result.error {
+                        Some(codex) => format!("{codex}\n{error}"),
+                        None => error,
+                    });
+                }
+            }
+        }
+        Ok(result.into())
+    }
+
     pub async fn enable_accounts(
         &self,
         directory: std::path::PathBuf,
@@ -559,21 +622,8 @@ impl HostRpcService {
                 );
             }
             let response = match request {
-                Call::ListAccounts(_) | Call::SelectAccount(_) | Call::LogoutAccount(_) | Call::StartAccountLogin(_) | Call::ReadAccountLogin(_) | Call::CancelAccountLogin(_) => {
-                    if let Err(error) = self.inner.codex.server() {
-                        return Response::from_result::<(), _>(Err(error));
-                    }
-                    let mut accounts = self.inner.accounts.lock().await;
-                    let result = match accounts.as_mut() {
-                        Some(accounts) => {
-                            accounts.request(self.inner.codex.server().unwrap(), request.clone()).await.map_err(|error| Failure::new("account_operation_failed", error))
-                        }
-                        None => Err(Failure::new(
-                            "account_operation_failed",
-                            "このHostはアカウント切り替えに対応していません。",
-                        )),
-                    };
-                    Response::from_result(result)?
+                Call::ListAccounts(_) | Call::SelectAccount(_) | Call::LogoutAccount(_) | Call::StartAccountLogin(_) | Call::ReadAccountLogin(_) | Call::SubmitAccountLogin(_) | Call::CancelAccountLogin(_) => {
+                    Response::from_result(self.account_request(request.clone()).await)?
                 }
 
                 Call::ListModels(params) if self.inner.claude.get().is_some() => {

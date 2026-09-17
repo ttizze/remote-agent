@@ -65,8 +65,8 @@ impl Desktop {
             SidebarMenuItem::new("新しいチャット")
                 .icon(IconName::Plus)
                 .disable(!self.snapshot.connected)
-                .on_click(cx.listener(|s, _, _, cx| {
-                    s.new_chat(String::new());
+                .on_click(cx.listener(|s, _, window, cx| {
+                    s.new_chat(String::new(), window, cx);
                     cx.notify();
                 })),
         );
@@ -108,10 +108,10 @@ impl Desktop {
                             .tooltip("このプロジェクトで新しいチャット")
                             .accessibility_label("このプロジェクトで新しいチャット")
                             .disabled(!connected)
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
                                 let _ = entity.update(cx, |s, cx| {
-                                    s.new_chat(path.clone());
+                                    s.new_chat(path.clone(), window, cx);
                                     cx.notify();
                                 });
                             })
@@ -312,8 +312,8 @@ impl Desktop {
                         )
                     })
             })
-            .on_click(cx.listener(move |view, _, _, cx| {
-                view.open_chat(id.clone());
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.open_chat(id.clone(), window, cx);
                 cx.notify();
             }))
     }

@@ -99,6 +99,11 @@ fn reply(session: &str, count: usize, text: &str) {
 
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("auth") {
+        auth(&args);
+        return;
+    }
+
     let option = |name: &str| {
         args.windows(2)
             .find(|pair| pair[0] == name)
@@ -120,6 +125,14 @@ fn main() {
     let session = option("--resume")
         .or_else(|| option("--session-id"))
         .unwrap_or_else(|| "catalog".into());
+    if session != "catalog" {
+        let mut trace = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("claude-auth-homes.jsonl")
+            .unwrap();
+        writeln!(trace, "{}", std::env::var("CLAUDE_CONFIG_DIR").unwrap()).unwrap();
+    }
     let path = format!("claude-session-{session}.json");
     let mut inputs: Vec<Value> = if option("--resume").is_some() {
         serde_json::from_slice(
@@ -245,5 +258,40 @@ fn main() {
             }
             _ => panic!("unexpected fixture input type"),
         }
+    }
+}
+
+fn auth(args: &[String]) {
+    let home = std::path::PathBuf::from(
+        std::env::var_os("CLAUDE_CONFIG_DIR").expect("isolated auth home"),
+    );
+    fs::create_dir_all(&home).unwrap();
+    let file = home.join("fixture-auth.json");
+    match args.get(1).map(String::as_str) {
+        Some("status") => {
+            let value = fs::read(&file)
+                .ok()
+                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())
+                .unwrap_or(json!({"loggedIn":false,"authMethod":"none"}));
+            println!("{value}");
+        }
+        Some("login") => {
+            assert!(args.iter().any(|arg| arg == "--claudeai"));
+            println!(
+                "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?state=fixture-only"
+            );
+            print!("Paste code here if prompted > ");
+            io::stdout().flush().unwrap();
+            let mut code = String::new();
+            io::stdin().read_line(&mut code).unwrap();
+            if code.trim() != "fixture-code" {
+                std::process::exit(1);
+            }
+            fs::write(file, serde_json::to_vec(&json!({"loggedIn":true,"authMethod":"claude.ai","email":"claude@example.invalid","subscriptionType":"max"})).unwrap()).unwrap();
+        }
+        Some("logout") => {
+            let _ = fs::remove_file(file);
+        }
+        _ => panic!("unexpected auth command"),
     }
 }

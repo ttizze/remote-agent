@@ -252,11 +252,13 @@
                 "id": "account-a",
                 "email": "fixture@example.test",
                 "planType": "plus",
-                "chatgptAccountId": "synthetic-account"
+                "chatgptAccountId": "synthetic-account",
+                "provider": "codex"
               }
             ],
             "selectedId": "account-a",
-            "error": null
+            "error": null,
+            "selectedClaudeId": null
           }
         }
       }
@@ -267,11 +269,13 @@
           "id": "account-a",
           "email": "fixture@example.test",
           "planType": "plus",
-          "chatgptAccountId": "synthetic-account"
+          "chatgptAccountId": "synthetic-account",
+          "provider": "codex"
         }
       ],
       "selectedId": "account-a",
-      "error": null
+      "error": null,
+      "selectedClaudeId": null
     }
   },
   {
@@ -289,14 +293,16 @@
         "response": {
           "result": {
             "selectedId": "account-a",
-            "persistenceError": "fixture persistence failure"
+            "persistenceError": "fixture persistence failure",
+            "provider": "codex"
           }
         }
       }
     ],
     "result": {
       "selectedId": "account-a",
-      "persistenceError": "fixture persistence failure"
+      "persistenceError": "fixture persistence failure",
+      "provider": "codex"
     }
   },
   {
@@ -307,12 +313,15 @@
     "exchanges": [
       {
         "method": "host/account/login/start",
-        "params": {},
+        "params": {
+          "provider": "codex"
+        },
         "response": {
           "result": {
             "loginId": "fixture-login",
             "userCode": "TEST-ONLY",
-            "verificationUrl": "https://example.test/device"
+            "verificationUrl": "https://example.test/device",
+            "requiresCodeSubmission": false
           }
         }
       }
@@ -320,7 +329,8 @@
     "result": {
       "loginId": "fixture-login",
       "userCode": "TEST-ONLY",
-      "verificationUrl": "https://example.test/device"
+      "verificationUrl": "https://example.test/device",
+      "requiresCodeSubmission": false
     }
   },
   {

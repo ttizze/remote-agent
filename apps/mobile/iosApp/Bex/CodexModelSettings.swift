@@ -6,10 +6,6 @@ extension BexAppViewModel {
         snapshot.accounts()?.accounts ?? []
     }
 
-    var selectedAccountId: String? {
-        snapshot.accounts()?.selectedId
-    }
-
     var accountError: String? {
         snapshot.accounts()?.error ?? notice
     }

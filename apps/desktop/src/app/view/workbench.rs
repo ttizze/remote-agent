@@ -383,9 +383,11 @@ impl Desktop {
                         IconName::Plus,
                         "新しいサイドチャット",
                         cx,
-                        |s, _, cx| {
+                        |s, window, cx| {
                             if let Some(chat) = &s.side_chat {
-                                chat.update(cx, |chat, _| chat.new_chat(String::new()));
+                                chat.update(cx, |chat, cx| {
+                                    chat.new_chat(String::new(), window, cx);
+                                });
                             }
                         },
                     ))

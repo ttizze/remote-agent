@@ -112,8 +112,6 @@ fn snapshot_preserves_history_drafts_and_navigation() {
             after_item_id: None,
             accepted: true,
             delivery_unknown: false,
-            recovery_text: None,
-            clear_draft: None,
         }),
     )]));
     let restored: Snapshot =
@@ -816,4 +814,50 @@ fn project_registration_navigates_only_while_current() {
         1
     );
     assert_eq!(elsewhere.navigation, navigation);
+}
+
+#[test]
+fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
+    use agent_core::state::{Attachment, Draft, Intent};
+    let attachment = |path: &str| Attachment {
+        path: path.into(),
+        name: path.into(),
+        is_image: false,
+    };
+    let mut snapshot = Snapshot::default();
+    Arc::make_mut(&mut snapshot.drafts).insert(
+        "thread".into(),
+        Arc::new(Draft {
+            text: "sent".into(),
+            attachments: vec![attachment("/sent")],
+            ..Default::default()
+        }),
+    );
+    let (mut snapshot, _) = reduce(
+        &snapshot,
+        Event::Intent(Intent::Submit {
+            thread_id: Some("thread".into()),
+            client_user_message_id: "pending".into(),
+        }),
+    );
+    assert!(snapshot.drafts["thread"].text.is_empty());
+    assert!(snapshot.drafts["thread"].attachments.is_empty());
+    Arc::make_mut(&mut snapshot.drafts).insert(
+        "thread".into(),
+        Arc::new(Draft {
+            text: "next".into(),
+            attachments: vec![attachment("/next")],
+            model: Some("new-model".into()),
+            ..Default::default()
+        }),
+    );
+    let (snapshot, _) = reduce(&snapshot, Event::SubmissionFailed("pending".into()));
+    assert!(snapshot.pending_submissions.is_empty());
+    let restored = &snapshot.drafts["thread"];
+    assert_eq!(restored.text, "sent\nnext");
+    assert_eq!(
+        restored.attachments,
+        vec![attachment("/next"), attachment("/sent")]
+    );
+    assert_eq!(restored.model.as_deref(), Some("new-model"));
 }

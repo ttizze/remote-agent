@@ -28,6 +28,7 @@ if [[ $# == 0 ]]; then
         testSimulatorReviewsTheOpenSessionsWorktree \
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorSwitchesCodexAccountsAndForksConversation \
+        testSimulatorAddsClaudeAccountAndKeepsCodexSelected \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
@@ -100,7 +101,7 @@ trap 'exit 143' TERM
 scripts/build-agent-ios.sh simulator
 cargo build --locked --package bex-process --bin bex-provider-supervisor --package host-fixture --bin bex-ui-fixture --bin bex-codex-fixture --bin bex-claude-fixture
 codex_program="$target/debug/bex-codex-fixture"
-claude_args=()
+claude_args=("$target/debug/bex-claude-fixture")
 if [[ $without_codex == true ]]; then
     codex_program=--without-codex
     claude_args=("$target/debug/bex-claude-fixture")

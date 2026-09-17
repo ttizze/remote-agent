@@ -3,8 +3,7 @@ use agent_core::protocol::Call;
 use std::{collections::HashMap, path::PathBuf};
 
 use agent_core::{
-    client as op,
-    client::{AccountLogin, AccountLoginStatus},
+    client::{self as op, AccountLogin, AccountLoginStatus},
     models::Empty,
     peer::PeerEvent,
 };
@@ -176,11 +175,13 @@ impl Accounts {
                         .iter()
                         .map(|account| op::Account {
                             id: account.id.clone(),
+                            provider: agent_core::session::ProviderKind::Codex,
                             email: Some(account.email.clone()),
                             plan_type: Some(account.plan_type.clone()),
                         })
                         .collect(),
                     selected_id: selected.map(str::to_owned),
+                    selected_claude_id: None,
                     error: self.restoration_error.borrow().clone(),
                 }
                 .into())
@@ -188,6 +189,7 @@ impl Accounts {
             Call::SelectAccount(params) => {
                 self.select(primary, &params.id).await?;
                 Ok(op::AccountSelection {
+                    provider: agent_core::session::ProviderKind::Codex,
                     selected_id: params.id,
                     persistence_error: self.save().await.err(),
                 }
@@ -266,6 +268,8 @@ impl Accounts {
                     .as_str()
                     .ok_or("ログインを開始できませんでした。")?
                     .to_owned();
+                let mut result = result;
+                result["requiresCodeSubmission"] = false.into();
                 let response: AccountLogin = serde_json::from_value(result)
                     .map_err(|_| "ログインを開始できませんでした。")?;
                 self.login = Some(Login {
@@ -277,6 +281,9 @@ impl Accounts {
                 });
                 self.completed_login = None;
                 Ok(Body::from(response))
+            }
+            Call::SubmitAccountLogin(_) => {
+                Err("Codexのコードはブラウザで入力してください。".into())
             }
             Call::ReadAccountLogin(params) => self.login_status(&params.id).await.map(Body::from),
             Call::CancelAccountLogin(params) => {

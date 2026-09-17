@@ -169,7 +169,7 @@ impl Desktop {
         v_flex()
             .w(px(280.))
             .gap_2()
-            .child(div().text_sm().child("Codex アカウント"))
+            .child(div().text_sm().child("アカウント"))
             .child(account_selector(
                 accounts,
                 self.busy > 0
@@ -261,9 +261,9 @@ impl Desktop {
                 menu = menu.item(
                     PopupMenuItem::new("チャット")
                         .checked(selected_directory.is_empty())
-                        .on_click(move |_, _, cx| {
+                        .on_click(move |_, window, cx| {
                             let _ = unassigned.update(cx, |s, cx| {
-                                s.new_chat(String::new());
+                                s.new_chat(String::new(), window, cx);
                                 cx.notify();
                             });
                         }),
@@ -286,9 +286,9 @@ impl Desktop {
                         menu = menu.item(
                             PopupMenuItem::new(label)
                                 .checked(path == selected_directory)
-                                .on_click(move |_, _, cx| {
+                                .on_click(move |_, window, cx| {
                                     let _ = target.update(cx, |s, cx| {
-                                        s.new_chat(path.clone());
+                                        s.new_chat(path.clone(), window, cx);
                                         cx.notify();
                                     });
                                 }),
@@ -352,26 +352,13 @@ impl Desktop {
                     }
                     Some(ConversationRow::Turn(turn)) => view.turn(&turn, cx),
                     Some(ConversationRow::Pending(id, pending)) => {
-                        let row = view.pending_item(&id, &pending.draft, cx);
+                        let row = view.pending_item(&id, &pending, cx);
                         h_flex()
                             .justify_center()
                             .w_full()
                             .px_6()
                             .pb_8()
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    .max_w(px(CHAT_WIDTH))
-                                    .gap_4()
-                                    .child(row)
-                                    .child(div().text_sm().text_color(rgb(0x999999)).child(
-                                        if pending.accepted {
-                                            "送信済み"
-                                        } else {
-                                            "送信中…"
-                                        },
-                                    )),
-                            )
+                            .child(v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4().child(row))
                             .into_any_element()
                     }
                     Some(ConversationRow::Request(key, request)) => view.request_card(
@@ -452,21 +439,39 @@ impl Desktop {
             body = body.child(viewport);
         }
         let key = self.draft_key().to_owned();
-        let attachments = &self.draft().attachments;
+        let attachments = self.draft().attachments.clone();
         let mut files = h_flex().gap_2().flex_wrap();
         for (i, file) in attachments.iter().enumerate() {
             let key = key.clone();
-            files = files.child(self.button(
-                format!("attachment-{i}"),
-                format!("{} ×", file.name),
-                cx,
-                move |s, _, _| {
+            let remove = self
+                .button(format!("attachment-{i}"), "×", cx, move |s, _, _| {
                     s.dispatch(Intent::RemoveAttachment {
                         draft_key: key.clone(),
                         index: i as u32,
                     });
-                },
-            ));
+                })
+                .accessibility_label(format!("{}を外す", file.name))
+                .w(px(28.))
+                .h(px(28.))
+                .rounded_full()
+                .bg(rgb(0x222222));
+            files = files.child(if file.is_image {
+                div()
+                    .relative()
+                    .w(px(104.))
+                    .h(px(104.))
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .child(self.image(&file.path, false, 104., true, cx))
+                    .child(div().absolute().top_0().right_0().child(remove))
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .gap_2()
+                    .child(file.name.clone())
+                    .child(remove)
+                    .into_any_element()
+            });
         }
         let running = self.thread().and_then(|thread| thread.active_turn_id());
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
@@ -529,6 +534,7 @@ impl Desktop {
             .p(px(7.))
             .gap_2()
             .rounded(px(30.))
+            .when(!attachments.is_empty(), |composer| composer.child(files))
             .bg(rgb(0x2b2b2b))
             .border_1()
             .border_color(rgb(0x363636))
@@ -605,7 +611,6 @@ impl Desktop {
                         .is_some_and(|review| !review.files.is_empty()),
                 |column| column.child(self.review_card(cx)),
             )
-            .child(files)
             .child(composer);
         body.child(
             h_flex()
@@ -624,20 +629,28 @@ fn account_selector(
     disabled: bool,
     on_select: impl Fn(Intent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let selected = accounts.as_ref().and_then(|accounts| {
-        accounts
-            .accounts
-            .iter()
-            .find(|account| Some(&account.id) == accounts.selected_id.as_ref())
-    });
-    let label = selected.map_or("アカウントを選択", |account| {
-        account.email.as_deref().unwrap_or(&account.id)
-    });
+    let selected = accounts
+        .as_ref()
+        .map(|accounts| {
+            accounts
+                .accounts
+                .iter()
+                .filter(|account| accounts.is_selected(account))
+                .map(|account| account.email.as_deref().unwrap_or(&account.id))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        })
+        .unwrap_or_default();
+    let label = if selected.is_empty() {
+        "アカウントを選択"
+    } else {
+        &selected
+    };
     let on_select = Rc::new(on_select);
     Button::new("account-select")
         .debug_selector(|| "account-select".into())
         .label(label.to_owned())
-        .accessibility_label("Codex アカウントを変更")
+        .accessibility_label("アカウントを変更")
         .dropdown_caret(true)
         .w_full()
         .small()
@@ -658,9 +671,13 @@ fn account_selector(
                         || email.to_owned(),
                         |plan| format!("{email} · {}", plan.to_uppercase()),
                     );
+                    let provider = match account.provider {
+                        agent_core::session::ProviderKind::Codex => "Codex",
+                        agent_core::session::ProviderKind::Claude => "Claude",
+                    };
                     menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(accounts.selected_id.as_ref() == Some(&id))
+                        PopupMenuItem::new(format!("{provider} · {label}"))
+                            .checked(accounts.is_selected(account))
                             .on_click(move |_, window, cx| {
                                 select(
                                     Intent::SelectAccount(op::SelectAccount { id: id.clone() }),
@@ -715,8 +732,9 @@ mod tests {
         let selected = Rc::new(RefCell::new(Vec::new()));
         let accounts = Arc::new(
             serde_json::from_value(serde_json::json!({
-                "accounts":[{"id":"first","email":"first@example.invalid","planType":"plus"},
-                            {"id":"second","email":"second@example.invalid","planType":"pro"}],
+                "accounts":[{"provider":"codex","id":"first","email":"first@example.invalid","planType":"plus"},
+                            {"provider":"codex","id":"second","email":"second@example.invalid","planType":"pro"},
+                            {"provider":"claude","id":"claude:third","email":"claude@example.invalid","planType":"max"}],
                 "selectedId":"first","error":null
             }))
             .unwrap(),
@@ -734,6 +752,9 @@ mod tests {
         window.simulate_click(bounds.center(), Modifiers::default());
         window.simulate_keystrokes("down down enter");
         assert_eq!(*selected.borrow(), ["second"]);
+        window.simulate_click(bounds.center(), Modifiers::default());
+        window.simulate_keystrokes("down down down enter");
+        assert_eq!(*selected.borrow(), ["second", "claude:third"]);
         window.update(|_, cx| {
             picker.update(cx, |picker, cx| {
                 picker.disabled = true;
@@ -746,7 +767,7 @@ mod tests {
         window.simulate_keystrokes("down enter");
         assert_eq!(
             *selected.borrow(),
-            ["second"],
+            ["second", "claude:third"],
             "busy picker must not switch accounts"
         );
     }

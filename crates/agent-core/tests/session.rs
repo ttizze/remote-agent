@@ -323,8 +323,6 @@ fn local_storage_keeps_user_work_without_host_caches() {
                     after_item_id: None,
                     accepted: false,
                     delivery_unknown: true,
-                    recovery_text: None,
-                    clear_draft: None,
                 }),
             )]
             .into(),
@@ -355,12 +353,13 @@ fn local_storage_keeps_user_work_without_host_caches() {
         .insert("native".into(), true);
     let bytes = serde_json::to_vec(&original.local_state()).unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let keys: Vec<_> = saved
+    let mut keys: Vec<_> = saved
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    keys.sort_unstable();
     assert_eq!(
         keys,
         [

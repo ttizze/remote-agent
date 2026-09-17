@@ -176,7 +176,9 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "selectAccount" => call!(SelectAccount {
             id: text(command, "accountId").to_owned()
         }),
-        "startAccountLogin" => call!(StartAccountLogin {}),
+        "startAccountLogin" => call!(StartAccountLogin {
+            provider: agent_core::session::ProviderKind::Codex
+        }),
         "accountLoginStatus" => call!(ReadAccountLogin {
             id: text(command, "loginId").to_owned()
         }),

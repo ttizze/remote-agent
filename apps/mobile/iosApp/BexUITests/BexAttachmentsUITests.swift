@@ -42,6 +42,17 @@ extension BexLaunchUITests {
         let nextAttachment = expectation(for: NSPredicate(format: "count == 1"), evaluatedWith: removals)
         wait(for: [nextAttachment], timeout: 60)
         XCTAssertTrue(app.buttons["task.send"].isEnabled)
+        let thumbnail = app.images["composer.attachment.0"]
+        XCTAssertTrue(thumbnail.waitForExistence(timeout: 20))
+        let remove = removals.firstMatch
+        XCTAssertGreaterThan(remove.frame.midX, thumbnail.frame.midX)
+        XCTAssertLessThan(remove.frame.midY, thumbnail.frame.midY)
+        XCTAssertLessThanOrEqual(thumbnail.frame.maxY, prompt.frame.minY)
+        prompt.tap(); prompt.typeText("Keep this draft")
+        remove.tap()
+        XCTAssertFalse(thumbnail.exists)
+        XCTAssertEqual(removals.count, 0)
+        XCTAssertEqual(prompt.value as? String, "Keep this draft")
     }
 
     func testSimulatorCanAttachPhotosAndVideos() throws {

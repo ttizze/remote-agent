@@ -1,5 +1,6 @@
 //! Claude Code owns inference, credentials and its transcript. The Host owns
 //! the client-facing conversation and adapts the CLI's streaming protocol.
+mod accounts;
 mod history;
 mod process;
 
@@ -59,6 +60,7 @@ pub(crate) struct Claude {
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
+    pub(crate) accounts: AsyncMutex<accounts::Accounts>,
     records: AsyncMutex<HashMap<String, Arc<AsyncMutex<Record>>>>,
     models: OnceCell<Vec<Model>>,
     processes: Arc<Semaphore>,
@@ -79,6 +81,7 @@ struct Record {
 
 struct Idle {
     process: Process,
+    auth_revision: u64,
     model: String,
     effort: Option<String>,
     released: CancellationToken,
@@ -126,7 +129,14 @@ impl Claude {
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
+        let accounts = accounts::Accounts::load(
+            program.clone(),
+            directory.join("accounts"),
+            native_home.clone(),
+        )
+        .await?;
         Ok(Self {
+            accounts: AsyncMutex::new(accounts),
             program,
             directory,
             native_home,
@@ -142,6 +152,7 @@ impl Claude {
 
     pub(crate) async fn shutdown(&self) {
         self.stop.cancel();
+        let _ = self.accounts.lock().await.cancel().await;
         let mut workers = self.workers.lock().await;
         while let Some(result) = workers.join_next().await {
             if let Err(error) = result {
@@ -166,15 +177,9 @@ impl Claude {
             .get_or_try_init(|| async {
                 let cwd =
                     tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-                let (process, initialized) = Process::start(
-                    &self.program,
-                    &self.native_home,
-                    cwd.path(),
-                    None,
-                    None,
-                    None,
-                )
-                .await?;
+                let auth_home = self.accounts.lock().await.home()?;
+                let (process, initialized) =
+                    Process::start(&self.program, &auth_home, cwd.path(), None, None, None).await?;
                 process.finish().await?;
                 let entries = initialized["models"]
                     .as_array()
@@ -638,11 +643,16 @@ impl Claude {
         }
         let session = state.session_id.to_string();
         let cwd = state.cwd.clone();
+        let (auth_home, auth_revision) = {
+            let accounts = self.accounts.lock().await;
+            (accounts.home()?, accounts.revision())
+        };
         let idle = state.idle.take();
-        let mut process = if idle
-            .as_ref()
-            .is_some_and(|idle| idle.model == model && idle.effort.as_deref() == effort)
-        {
+        let mut process = if idle.as_ref().is_some_and(|idle| {
+            idle.auth_revision == auth_revision
+                && idle.model == model
+                && idle.effort.as_deref() == effort
+        }) {
             let idle = idle.unwrap();
             idle.released.cancel();
             idle.process
@@ -655,7 +665,7 @@ impl Claude {
                 .map_err(|_| "Claude process capacity reached (8); wait for an active or retained session to finish")?;
             let (mut process, initialized) = Process::start(
                 &self.program,
-                &self.native_home,
+                &auth_home,
                 Path::new(&cwd),
                 Some((&session, state.resumable)),
                 Some(&model_name),
@@ -668,7 +678,7 @@ impl Claude {
                 .is_some_and(|plan| !plan.is_empty())
             {
                 process.finish().await?;
-                return Err("Claudeのサブスク認証がありません。Hostの端末で claude auth login を実行してください。".into());
+                return Err("Claudeのサブスク認証がありません。アカウント設定から Claude アカウントを追加してください。".into());
             }
             process
         };
@@ -722,6 +732,7 @@ impl Claude {
             interrupt,
             model,
             effort: effort.map(str::to_owned),
+            auth_revision,
         };
         let mut workers = self.workers.lock().await;
         while let Some(result) = workers.try_join_next() {
@@ -781,6 +792,7 @@ impl Claude {
 }
 
 struct Worker {
+    auth_revision: u64,
     record: Arc<AsyncMutex<Record>>,
     router: SessionRouter,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
@@ -908,6 +920,7 @@ impl Worker {
         if let Some(process) = retained {
             record.idle = Some(Idle {
                 process,
+                auth_revision: self.auth_revision,
                 model: self.model,
                 effort: self.effort,
                 released: released.clone(),

@@ -30,11 +30,17 @@ impl Operation for SelectAccount {
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let rpc::AccountSelection {
             selected_id,
+            provider,
             persistence_error,
-            ..
         } = output;
         if let Some(accounts) = &mut Arc::make_mut(&mut snapshot.account).accounts {
-            Arc::make_mut(accounts).selected_id = Some(selected_id);
+            let accounts = Arc::make_mut(accounts);
+            match provider {
+                crate::session::ProviderKind::Codex => accounts.selected_id = Some(selected_id),
+                crate::session::ProviderKind::Claude => {
+                    accounts.selected_claude_id = Some(selected_id)
+                }
+            }
         }
         snapshot.error = persistence_error;
         vec![
@@ -44,15 +50,13 @@ impl Operation for SelectAccount {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartAccountLogin {}
+pub use crate::client::{StartAccountLogin, SubmitAccountLogin};
 rpc::rpc_method!(
     StartAccountLogin,
     rpc::AccountLogin,
     "host/account/login/start",
     StartAccountLogin,
-    |self| crate::models::Empty {}
+    |self| self.clone()
 );
 
 impl Operation for StartAccountLogin {
@@ -61,7 +65,6 @@ impl Operation for StartAccountLogin {
     fn apply(self, snapshot: &mut Snapshot, login: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
         account.login = Some(Arc::new(login));
-        account.login_status = None;
         Vec::new()
     }
 }
@@ -78,18 +81,20 @@ rpc::rpc_method!(
 impl Operation for ReadAccountLogin {
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, status: Self::Output) -> Vec<Effect> {
-        let completed = status.completed;
-        let account = Arc::make_mut(&mut snapshot.account);
-        account.login_status = Some(Arc::new(status));
-        if completed {
-            account.login = None;
-            let (updated, mut effects) = reduce(
-                snapshot,
-                Event::Intent(Intent::ListAccounts(ListAccounts {})),
-            );
-            *snapshot = updated;
-            effects.push(Effect::execute(LoadModels {}));
-            return effects;
+        if status.completed {
+            Arc::make_mut(&mut snapshot.account).login = None;
+            if let Some(id) = status.account_id {
+                let (updated, effects) = reduce(
+                    snapshot,
+                    Event::Intent(Intent::SelectAccount(SelectAccount { id })),
+                );
+                *snapshot = updated;
+                return effects;
+            }
+            return vec![
+                Effect::execute(ListAccounts {}),
+                Effect::execute(LoadModels {}),
+            ];
         }
         Vec::new()
     }
@@ -110,7 +115,6 @@ impl Operation for CancelAccountLogin {
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
         account.login = None;
-        account.login_status = None;
         Vec::new()
     }
 }
@@ -134,4 +138,15 @@ impl Operation for LogoutAccount {
             Effect::execute(LoadModels {}),
         ]
     }
+}
+
+rpc::rpc_method!(
+    SubmitAccountLogin,
+    crate::models::Empty,
+    "host/account/login/submit",
+    SubmitAccountLogin,
+    |self| self.clone()
+);
+impl Operation for SubmitAccountLogin {
+    rpc_operation!();
 }
