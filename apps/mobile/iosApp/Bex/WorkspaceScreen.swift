@@ -102,7 +102,6 @@ private struct WorkspaceToolsScreen: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .accessibilityIdentifier("workspace.tools")
     }
 }
 
