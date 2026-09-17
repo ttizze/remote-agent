@@ -22,7 +22,7 @@ use agent_core::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex as AsyncMutex, OnceCell, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -56,13 +56,19 @@ impl From<&str> for OperationError {
 
 pub(crate) const MODEL_PREFIX: &str = "claude:";
 
+struct AccountModels {
+    home: PathBuf,
+    revision: u64,
+    models: Vec<Model>,
+}
+
 pub(crate) struct Claude {
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
     pub(crate) accounts: AsyncMutex<accounts::Accounts>,
     records: AsyncMutex<HashMap<String, Arc<AsyncMutex<Record>>>>,
-    models: OnceCell<Vec<Model>>,
+    models: AsyncMutex<Option<AccountModels>>,
     processes: Arc<Semaphore>,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
     router: SessionRouter,
@@ -141,7 +147,7 @@ impl Claude {
             directory,
             native_home,
             records: AsyncMutex::new(HashMap::new()),
-            models: OnceCell::new(),
+            models: AsyncMutex::new(None),
             processes: Arc::new(Semaphore::new(8)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             router,
@@ -161,7 +167,7 @@ impl Claude {
         }
     }
 
-    pub(crate) async fn models(&self) -> Result<&[Model], String> {
+    pub(crate) async fn models(&self) -> Result<Vec<Model>, String> {
         let available = if self.program.components().count() > 1 {
             self.program.is_file()
         } else {
@@ -171,69 +177,81 @@ impl Claude {
             })
         };
         if !available {
-            return Ok(&[]);
+            return Ok(Vec::new());
         }
-        self.models
-            .get_or_try_init(|| async {
-                let cwd =
-                    tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-                let auth_home = self.accounts.lock().await.home()?;
-                let (process, initialized) =
-                    Process::start(&self.program, &auth_home, cwd.path(), None, None, None).await?;
-                process.finish().await?;
-                let entries = initialized["models"]
-                    .as_array()
-                    .ok_or("Claude Code did not return a model catalog")?;
-                entries
-                    .iter()
-                    .map(|entry| {
-                        let name = entry["value"]
-                            .as_str()
-                            .filter(|name| !name.is_empty())
-                            .ok_or("Claude model has no value")?;
-                        let display = entry["displayName"]
-                            .as_str()
-                            .ok_or("Claude model has no display name")?;
-                        let values = match entry.get("supportedEffortLevels") {
-                            Some(value) => value
-                                .as_array()
-                                .ok_or("invalid Claude effort levels")?
-                                .as_slice(),
-                            None => &[],
-                        };
-                        let efforts = values
-                            .iter()
-                            .map(|value| {
-                                Ok(ReasoningEffort {
-                                    reasoning_effort: value
-                                        .as_str()
-                                        .ok_or("invalid Claude effort level")?
-                                        .into(),
-                                })
+        let (auth_home, revision) = {
+            let accounts = self.accounts.lock().await;
+            (accounts.home()?, accounts.revision())
+        };
+        let mut cached = self.models.lock().await;
+        if let Some(catalog) = cached.as_ref()
+            && catalog.home == auth_home
+            && catalog.revision == revision
+        {
+            return Ok(catalog.models.clone());
+        }
+        let models = {
+            let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
+            let (process, initialized) =
+                Process::start(&self.program, &auth_home, cwd.path(), None, None, None).await?;
+            process.finish().await?;
+            let entries = initialized["models"]
+                .as_array()
+                .ok_or("Claude Code did not return a model catalog")?;
+            entries
+                .iter()
+                .map(|entry| {
+                    let name = entry["value"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .ok_or("Claude model has no value")?;
+                    let display = entry["displayName"]
+                        .as_str()
+                        .ok_or("Claude model has no display name")?;
+                    let values = match entry.get("supportedEffortLevels") {
+                        Some(value) => value
+                            .as_array()
+                            .ok_or("invalid Claude effort levels")?
+                            .as_slice(),
+                        None => &[],
+                    };
+                    let efforts = values
+                        .iter()
+                        .map(|value| {
+                            Ok(ReasoningEffort {
+                                reasoning_effort: value
+                                    .as_str()
+                                    .ok_or("invalid Claude effort level")?
+                                    .into(),
                             })
-                            .collect::<Result<Vec<_>, String>>()?;
-                        let default = efforts
-                            .iter()
-                            .find(|effort| effort.reasoning_effort == "high")
-                            .or(efforts.first())
-                            .map(|effort| effort.reasoning_effort.clone())
-                            .unwrap_or_default();
-                        let model = format!("{MODEL_PREFIX}{name}");
-                        Ok(Model {
-                            id: model.clone(),
-                            model,
-                            display_name: format!("Claude · {display}"),
-                            default_reasoning_effort: default,
-                            supported_reasoning_efforts: efforts,
-                            service_tiers: Some(Vec::new()),
-                            default_service_tier: None,
-                            is_default: Some(false),
                         })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let default = efforts
+                        .iter()
+                        .find(|effort| effort.reasoning_effort == "high")
+                        .or(efforts.first())
+                        .map(|effort| effort.reasoning_effort.clone())
+                        .unwrap_or_default();
+                    let model = format!("{MODEL_PREFIX}{name}");
+                    Ok(Model {
+                        id: model.clone(),
+                        model,
+                        display_name: format!("Claude · {display}"),
+                        default_reasoning_effort: default,
+                        supported_reasoning_efforts: efforts,
+                        service_tiers: Some(Vec::new()),
+                        default_service_tier: None,
+                        is_default: Some(false),
                     })
-                    .collect::<Result<Vec<Model>, String>>()
-            })
-            .await
-            .map(Vec::as_slice)
+                })
+                .collect::<Result<Vec<Model>, String>>()?
+        };
+        *cached = Some(AccountModels {
+            home: auth_home,
+            revision,
+            models: models.clone(),
+        });
+        Ok(models)
     }
 
     pub(crate) async fn create(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {

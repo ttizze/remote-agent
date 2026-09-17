@@ -1009,6 +1009,10 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         let fixture = start().await.unwrap();
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
         store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
+        let usage = store.snapshot().account.accounts.as_ref().unwrap().accounts[0].usage.clone().unwrap();
+        assert_eq!(usage.windows[0].remaining_percent, 28);
+        assert_eq!(usage.windows[1].remaining_percent, 61);
+
         assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected_claude_id.as_deref(), Some("claude:desktop"));
         store.dispatch(Intent::NewChat { cwd: root.to_string_lossy().into() }).await.unwrap();
         let key = store.snapshot().navigation.draft_key.clone();

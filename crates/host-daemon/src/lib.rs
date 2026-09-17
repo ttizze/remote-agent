@@ -1,3 +1,4 @@
+mod account_usage;
 mod claude;
 mod codex_accounts;
 mod dictation;

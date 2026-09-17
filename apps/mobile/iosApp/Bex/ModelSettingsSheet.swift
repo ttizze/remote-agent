@@ -4,226 +4,206 @@ import SwiftUI
 struct ModelSettingsSheet: View {
     @ObservedObject var model: BexAppViewModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scenePhase
-    private var login: AccountLogin? {
-        model.snapshot.accountLogin()
-    }
-
-    @State private var loginCode = ""
     @State private var changingAccount = false
     @State private var loadingModels = false
-    @State private var loginError: String?
-    @State private var startingLogin = false
-    @State private var pollingLogin: Task<Void, Never>?
+    @State private var loadingAccounts = false
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(model.accounts, id: \.id) { account in
-                    Section {
-                        Button { chooseAccount(account.id) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "person.crop.circle").font(.title2)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(account.email ?? account.id).foregroundColor(.primary)
-                                    Text((account.provider == .claude ? "Claude · " : "Codex · ") +
-                                        (account.planType ?? "").uppercased()).font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                if model.snapshot.accountIsSelected(id: account.id) {
-                                    Image(systemName: "checkmark.circle.fill")
-                                }
-                            }.padding(.vertical, 4)
-                        }
-                        .accessibilityIdentifier("model.account." + account.id)
-                        .accessibilityValue(model.snapshot.accountIsSelected(id: account.id) ? "選択中" : "")
-                        .disabled(changingAccount || login != nil)
-                        if account.provider == .codex, model.snapshot.accountIsSelected(id: account.id) {
-                            Button { model.chooseModel("") } label: {
-                                HStack {
-                                    Text("Codex の既定モデル").foregroundColor(.primary)
-                                    Spacer()
-                                    if model.selectedModel.isEmpty {
-                                        Image(systemName: "checkmark")
+                Section("アカウント") {
+                    ForEach(model.accounts, id: \.id) { account in
+                        VStack(alignment: .leading, spacing: 10) {
+                            Button {
+                                changingAccount = true
+                                model
+                                    .perform(.selectAccountForDraft(SelectAccountForDraft(
+                                        id: account.id,
+                                        threadId: model.coreDraftKey
+                                    ))) { _ in
+                                        changingAccount = false
                                     }
-                                }.padding(.leading, 36)
+                            } label: {
+                                AccountIdentityRow(
+                                    account: account,
+                                    selected: model.snapshot.accountIsActiveForDraft(
+                                        id: account.id,
+                                        threadId: model.coreDraftKey
+                                    )
+                                )
                             }
-                            .accessibilityIdentifier("model.choice.default")
-                        }
+                            .buttonStyle(.borderless)
+                            .accessibilityIdentifier("model.account." + account.id)
+                            .accessibilityValue(model.snapshot.accountIsActiveForDraft(
+                                id: account.id,
+                                threadId: model.coreDraftKey
+                            ) ? "選択中" : "")
+                            .disabled(changingAccount || !model.isConnected || model.snapshot.accountLogin() != nil)
+                            AccountUsageView(usage: account.usage, showsDetails: false)
+                            if model.snapshot.accountIsActiveForDraft(id: account.id, threadId: model.coreDraftKey) {
+                                accountModelControls(account.id)
+                                    .disabled(changingAccount || loadingModels || !model.isConnected)
+                            }
+                        }.padding(.vertical, 4)
+                    }
+                    if loadingAccounts {
+                        ProgressView("アカウントを読み込み中…")
+                    }
+                    if !loadingAccounts, model.accounts.isEmpty {
+                        Text("アカウントを管理から追加できます。")
                     }
                 }
-                Section("モデル") {
-                    ForEach(model.models, id: \.id) { choice in
-                        Button { model.chooseModel(choice.model) } label: {
-                            HStack {
-                                Text(choice.displayName).foregroundColor(.primary)
-                                Spacer()
-                                if model.selectedModel == choice.model {
-                                    Image(systemName: "checkmark")
-                                }
-                            }.padding(.leading, 36)
-                        }
-                        .accessibilityIdentifier("model.choice." + choice.id)
-                        .accessibilityValue(model.selectedModel == choice.model ? "選択中" : "")
-                    }
+
+                Section {
+                    NavigationLink { AccountSettingsView(model: model) } label: {
+                        Label("アカウントを管理", systemImage: "person.crop.circle")
+                    }.accessibilityIdentifier("model.accounts.manage")
                     ForEach(model.snapshot.modelErrorMessages(), id: \.self) { error in
                         Text(error).font(.caption).foregroundColor(.red)
                     }
-                }
-                if loadingModels || changingAccount {
-                    ProgressView()
-                }
-                if let current = model.currentModel, !current.supportedReasoningEfforts.isEmpty {
-                    Section("推論の強度") {
-                        Picker("推論の強度", selection: Binding(
-                            get: { model.selectedEffort.isEmpty ? current.defaultReasoningEffort : model.selectedEffort
-                            },
-                            set: model.chooseEffort
-                        )) {
-                            ForEach(current.supportedReasoningEfforts, id: \.reasoningEffort) {
-                                Text($0.reasoningEffort).tag($0.reasoningEffort)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .accessibilityIdentifier("model.quick.effort")
+                    if loadingModels || changingAccount {
+                        ProgressView()
                     }
-                }
-                if let tiers = model.currentModel?.serviceTiers, !tiers.isEmpty {
-                    Section("サービス階層") {
-                        Picker(
-                            "サービス階層",
-                            selection: Binding(get: { model.selectedServiceTier }, set: model.chooseServiceTier)
-                        ) {
-                            Text("既定").tag("")
-                            ForEach(tiers, id: \.id) { Text($0.id).tag($0.id) }
-                        }.accessibilityIdentifier("model.service-tier")
-                    }
-                }
-                Section {
-                    if let login {
-                        if login.requiresCodeSubmission {
-                            Text("ブラウザで Claude にログインし、表示された認証コードを貼り付けてください。")
-                            SecureField("認証コード", text: $loginCode)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .accessibilityIdentifier("model.login.input")
-                            Button("認証コードを送信") { submitLoginCode(login.loginId) }
-                                .disabled(loginCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    .isEmpty || startingLogin)
-                                .accessibilityIdentifier("model.login.submit")
-                        } else {
-                            Text("ブラウザでログインし、次のコードを入力してください。")
-                            Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
-                                .accessibilityIdentifier("model.login.code")
-                        }
-                        if let url = URL(string: login.verificationUrl),
-                           url.scheme == "https" {
-                            Link("ログインページを開く", destination: url)
-                        }
-                        Button("ログインをキャンセル") { cancelLogin() }
-                    } else {
-                        Button { startLogin(.codex) } label: { Label("Codex アカウントを追加", systemImage: "plus") }
-                            .disabled(startingLogin)
-                            .accessibilityIdentifier("model.account.add")
-                        Button { startLogin(.claude) } label: { Label("Claude アカウントを追加", systemImage: "plus") }
-                            .disabled(startingLogin)
-                            .accessibilityIdentifier("model.account.add.claude")
-                    }
-                    if let error = loginError ?? model.accountError ?? model.modelError {
+                    if let error = model.accountError {
                         Text(error).font(.caption).foregroundColor(.red)
-                        Button("再読み込み") { refresh() }
                     }
+                } footer: {
+                    Text("アカウント選択はサービスごとに接続先のHostで共有されます。")
                 }
             }
-            .navigationTitle("アカウントとモデル")
+            .navigationTitle("モデルとアカウント")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) {
-                Button("完了") { dismiss() }.disabled(login != nil || startingLogin)
+                Button("完了") { dismiss() }
                     .accessibilityIdentifier("model.close")
             } }
         }
-        .interactiveDismissDisabled(login != nil || startingLogin)
-        .onAppear { refresh() }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active, let id = login?.loginId {
-                pollLogin(id)
-            }
-        }
-        .onDisappear { pollingLogin?.cancel(); pollingLogin = nil }
-    }
-
-    private func startLogin(_ provider: ProviderKind) {
-        loginCode = ""
-        startingLogin = true
-        loginError = nil
-        model.perform(.startAccountLogin(StartAccountLogin(provider: provider))) { result in
-            startingLogin = false
-            if case let .failure(error) = result {
-                loginError = error.localizedDescription; return
-            }
-            if let id = login?.loginId {
-                pollLogin(id)
-            }
-        }
-    }
-
-    private func submitLoginCode(_ id: String) {
-        startingLogin = true
-        loginError = nil
-        let code = loginCode
-        loginCode = ""
-        model.perform(.submitAccountLogin(SubmitAccountLogin(id: id, code: code))) { result in
-            startingLogin = false
-            if case let .failure(error) = result {
-                loginError = error.localizedDescription
-            } else {
-                pollLogin(id)
-            }
-        }
-    }
-
-    private func chooseAccount(_ id: String) {
-        changingAccount = true
-        model.perform(.selectAccount(SelectAccount(id: id))) { _ in changingAccount = false }
-    }
-
-    private func refresh() {
-        if let id = login?.loginId {
-            pollLogin(id)
-        } else {
-            model.loadAccounts()
+        .onAppear {
+            loadingAccounts = true
+            model.perform(.listAccounts(ListAccounts())) { _ in loadingAccounts = false }
             loadingModels = true
             model.perform(.loadModels(LoadModels())) { _ in loadingModels = false }
         }
     }
 
-    private func pollLogin(_ id: String) {
-        guard pollingLogin == nil else { return }
-        loginError = nil
-        pollingLogin = Task { @MainActor in
-            defer { pollingLogin = nil }
-            while !Task.isCancelled, login?.loginId == id {
-                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
-                let result: Result<Outcome, Error> = await withCheckedContinuation { continuation in
-                    model.perform(.readAccountLogin(ReadAccountLogin(id: id))) { continuation.resume(returning: $0) }
+    @ViewBuilder
+    private func accountModelControls(_ accountID: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("モデル").font(.caption).foregroundColor(.secondary)
+            Menu {
+                ForEach(model.snapshot.accountModels(id: accountID), id: \.id) { choice in
+                    Button { model.chooseModel(choice.model) } label: {
+                        if model.selectedModel == choice.model {
+                            Label(choice.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(choice.displayName)
+                        }
+                    }
+                    .accessibilityIdentifier("model.choice." + choice.id)
                 }
-                guard !Task.isCancelled else { return }
-                if case let .failure(error) = result {
-                    loginError = error.localizedDescription; return
+            } label: {
+                HStack {
+                    Text(model.currentModel?.displayName ?? "モデルを選択")
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
                 }
+            }
+            .buttonStyle(.borderless)
+            .accessibilityIdentifier("model.choice.menu")
+            .accessibilityValue(model.currentModel?.displayName ?? "モデルを選択")
+        }
+        modelTuning
+    }
+
+    @ViewBuilder
+    private var modelTuning: some View {
+        if let current = model.currentModel, !current.supportedReasoningEfforts.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("推論の強度").font(.caption).foregroundColor(.secondary)
+                Picker("推論の強度", selection: Binding(
+                    get: { model.selectedEffort.isEmpty ? current.defaultReasoningEffort : model.selectedEffort
+                    },
+                    set: model.chooseEffort
+                )) {
+                    ForEach(current.supportedReasoningEfforts, id: \.reasoningEffort) {
+                        Text($0.reasoningEffort).tag($0.reasoningEffort)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("model.quick.effort")
+            }
+        }
+        if let tiers = model.currentModel?.serviceTiers, !tiers.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("速度").font(.caption).foregroundColor(.secondary)
+                Picker(
+                    "サービス階層",
+                    selection: Binding(get: { model.selectedServiceTier }, set: model.chooseServiceTier)
+                ) {
+                    Text("既定").tag("")
+                    ForEach(tiers, id: \.id) { Text($0.id).tag($0.id) }
+                }.accessibilityIdentifier("model.service-tier")
             }
         }
     }
+}
 
-    private func cancelLogin() {
-        guard let id = login?.loginId else { return }
-        pollingLogin?.cancel()
-        model.perform(.cancelAccountLogin(CancelAccountLogin(id: id))) { result in
-            if case let .failure(error) = result {
-                loginError = error.localizedDescription
+struct AccountIdentityRow: View {
+    let account: Account
+    let selected: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(account.provider == .claude ? "Claude" : "Codex").font(.headline)
+                Text(account.email ?? account.id).font(.subheadline).foregroundColor(.secondary)
+                    .lineLimit(2)
+                if let plan = account.planType, !plan.isEmpty {
+                    Text(plan.uppercased()).font(.caption).foregroundColor(.secondary)
+                }
+            }.foregroundColor(.primary)
+            Spacer(minLength: 8)
+            if selected {
+                Image(systemName: "checkmark.circle.fill")
             }
-            model.loadAccounts()
+        }
+    }
+}
+
+struct AccountUsageView: View {
+    let usage: AccountUsage?
+    var showsDetails = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let usage {
+                if let error = usage.error {
+                    Text(error).font(.caption).foregroundColor(.secondary)
+                }
+                ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text(window.label)
+                            Spacer()
+                            Text("残り \(window.remainingPercent)%").monospacedDigit()
+                        }.font(.caption)
+                        ProgressView(value: Double(window.remainingPercent), total: 100)
+                            .tint(window.remainingPercent <= 20 ? .orange : .green)
+                        if showsDetails, let reset = window.resetsAt {
+                            let date = Date(timeIntervalSince1970: Double(reset))
+                            Text("\(date.formatted(date: .abbreviated, time: .shortened)) にリセット")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                }
+                if showsDetails, usage.error == nil {
+                    let date = Date(timeIntervalSince1970: Double(usage.fetchedAt))
+                    Text("\(date.formatted(date: .omitted, time: .shortened)) 時点")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            } else {
+                Text("使用量は未取得です").font(.caption).foregroundColor(.secondary)
+            }
         }
     }
 }

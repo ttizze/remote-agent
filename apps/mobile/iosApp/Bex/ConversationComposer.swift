@@ -122,9 +122,12 @@ extension ThreadScreen {
                     }
                     Spacer(minLength: 0)
                     Button { showingModelSettings = true } label: {
-                        Image(systemName: "speedometer")
-                            .font(.system(size: 23, weight: .regular))
-                            .frame(width: 44, height: 44)
+                        HStack(spacing: 4) {
+                            Text(model.currentModel?.displayName ?? "モデル").lineLimit(1)
+                            Image(systemName: "chevron.down").font(.caption)
+                        }
+                        .font(.subheadline)
+                        .frame(maxWidth: 130, minHeight: 44)
                     }
                     .accessibilityLabel("モデル設定")
                     .accessibilityIdentifier("model.settings")

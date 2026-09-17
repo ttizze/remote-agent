@@ -179,6 +179,39 @@ pub struct Snapshot {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn account_models(&self, id: String) -> Vec<Model> {
+        let Some(account) = self.account.accounts.as_ref().and_then(|accounts| {
+            accounts
+                .accounts
+                .iter()
+                .find(|account| account.id == id && accounts.is_selected(account))
+        }) else {
+            return Vec::new();
+        };
+        self.models
+            .iter()
+            .filter(|model| crate::models::model_provider(&model.model) == account.provider)
+            .cloned()
+            .collect()
+    }
+
+    pub fn account_is_active_for_draft(&self, id: String, thread_id: String) -> bool {
+        let selected = self
+            .drafts
+            .get(&thread_id)
+            .and_then(|draft| draft.model.as_deref());
+        self.account.accounts.as_ref().is_some_and(|accounts| {
+            accounts.accounts.iter().any(|account| {
+                account.id == id
+                    && accounts.is_selected(account)
+                    && self.models.iter().any(|model| {
+                        Some(model.model.as_str()) == selected
+                            && crate::models::model_provider(&model.model) == account.provider
+                    })
+            })
+        })
+    }
+
     pub fn terminal_view(&self, handle: String) -> Option<TerminalView> {
         self.terminals.get(&handle).map(|terminal| TerminalView {
             status: terminal.phase.label(),
@@ -298,7 +331,7 @@ macro_rules! prepare_operations {
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
-        ListAccounts, SelectAccount, LogoutAccount, StartAccountLogin,
+        ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkThread,
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
@@ -742,13 +775,25 @@ fn supported_settings<'a>(
             draft.service_tier.as_deref(),
         );
     }
-    let model = models
-        .iter()
+    let provider = draft
+        .model
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .map(crate::models::model_provider);
+    let mut available = models.iter().filter(|model| {
+        provider.is_none_or(|provider| crate::models::model_provider(&model.model) == provider)
+    });
+    let model = available
+        .clone()
         .find(|model| Some(model.model.as_str()) == draft.model.as_deref())
-        .or_else(|| models.iter().find(|model| model.is_default == Some(true)))
-        .or_else(|| models.first());
+        .or_else(|| {
+            available
+                .clone()
+                .find(|model| model.is_default == Some(true))
+        })
+        .or_else(|| available.next());
     let Some(model) = model else {
-        return (None, None, None);
+        return (draft.model.as_deref(), None, None);
     };
     let changed = draft.model.as_deref() != Some(&model.model);
     let effort = model

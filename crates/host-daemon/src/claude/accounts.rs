@@ -46,6 +46,7 @@ pub(crate) struct Accounts {
     registry: Registry,
     revision: u64,
     login: Option<Login>,
+    usage: crate::account_usage::UsageCache,
 }
 struct Login {
     started: Instant,
@@ -85,6 +86,7 @@ impl Accounts {
             registry,
             revision: 0,
             login: None,
+            usage: Default::default(),
         })
     }
 
@@ -141,6 +143,7 @@ impl Accounts {
             provider: ProviderKind::Claude,
             email: value["email"].as_str().map(str::to_owned),
             plan_type: value["subscriptionType"].as_str().map(str::to_owned),
+            usage: None,
         }))
     }
 
@@ -148,6 +151,16 @@ impl Accounts {
         let native = self
             .info(&self.native_home, "claude:desktop".into())
             .await?;
+        let previous = self
+            .registry
+            .accounts
+            .iter()
+            .find(|account| account.id == "claude:desktop");
+        if previous.and_then(|account| account.email.as_deref())
+            != native.as_ref().and_then(|account| account.email.as_deref())
+        {
+            self.usage.remove("claude:desktop");
+        }
         self.registry
             .accounts
             .retain(|account| account.id != "claude:desktop");
@@ -165,7 +178,37 @@ impl Accounts {
                     .any(|account| &account.id == *id)
             })
             .cloned();
-        Ok((self.registry.accounts.clone(), selected))
+        let mut entries = self.registry.accounts.clone();
+        for account in &mut entries {
+            let usage = if let Some(usage) = self.usage.get(&account.id) {
+                usage
+            } else {
+                let result = self.read_usage(&account.id).await;
+                self.usage.save(account.id.clone(), result)
+            };
+            account.usage = Some(usage);
+        }
+        Ok((entries, selected))
+    }
+
+    async fn read_usage(&self, id: &str) -> Result<Vec<agent_core::client::UsageWindow>, String> {
+        let home = self.account_home(id)?;
+        let (mut process, _) =
+            super::process::Process::start(&self.program, &home, &self.directory, None, None, None)
+                .await?;
+        let result = tokio::time::timeout(Duration::from_secs(8), async {
+            process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
+            while let Some(message) = process.read().await? {
+                if message["type"] == "control_response" && message["response"]["request_id"] == "usage" {
+                    return if message["response"]["subtype"] == "success" {
+                        Ok(crate::account_usage::claude(&message["response"]["response"]))
+                    } else { Err("Claude usage unavailable".into()) };
+                }
+            }
+            Err("Claude exited".into())
+        }).await.unwrap_or_else(|_| Err("timeout".into()));
+        let _ = process.finish().await;
+        result
     }
 
     pub(crate) async fn request(&mut self, request: Call) -> Result<Body, String> {
@@ -190,6 +233,7 @@ impl Accounts {
                 .into())
             }
             Call::LogoutAccount(params) => {
+                self.usage.remove(&params.id);
                 let home = self.account_home(&params.id)?;
                 if self.registry.selected_id.as_ref() == Some(&params.id) {
                     self.registry.selected_id = None;

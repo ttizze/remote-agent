@@ -50,6 +50,7 @@ pub(crate) struct Accounts {
     helpers: HashMap<String, CodexAppServer>,
     login: Option<Login>,
     completed_login: Option<(String, String)>,
+    usage: crate::account_usage::UsageCache,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
 }
 
@@ -83,6 +84,7 @@ impl Accounts {
             helpers: HashMap::new(),
             login: None,
             completed_login: None,
+            usage: Default::default(),
             restoration_error,
         };
         if accounts.registry.signed_out {
@@ -157,6 +159,30 @@ impl Accounts {
         match request {
             Call::ListAccounts(_) => {
                 self.discover_desktop().await?;
+                let mut entries = Vec::new();
+                for account in self.registry.accounts.clone() {
+                    let usage = if let Some(usage) = self.usage.get(&account.id) {
+                        usage
+                    } else {
+                        let result =
+                            tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                                let helper = self.helper(&account.id).await?;
+                                let value =
+                                    rpc(helper, "account/rateLimits/read", json!({})).await?;
+                                Ok(crate::account_usage::codex(&value))
+                            })
+                            .await
+                            .unwrap_or_else(|_| Err("timeout".into()));
+                        self.usage.save(account.id.clone(), result)
+                    };
+                    entries.push(op::Account {
+                        id: account.id,
+                        provider: agent_core::session::ProviderKind::Codex,
+                        email: Some(account.email),
+                        plan_type: Some(account.plan_type),
+                        usage: Some(usage),
+                    });
+                }
                 let selected = if self.restoration_error.borrow().is_some() {
                     None
                 } else {
@@ -169,17 +195,7 @@ impl Accounts {
                     })
                 };
                 Ok(op::Accounts {
-                    accounts: self
-                        .registry
-                        .accounts
-                        .iter()
-                        .map(|account| op::Account {
-                            id: account.id.clone(),
-                            provider: agent_core::session::ProviderKind::Codex,
-                            email: Some(account.email.clone()),
-                            plan_type: Some(account.plan_type.clone()),
-                        })
-                        .collect(),
+                    accounts: entries,
                     selected_id: selected.map(str::to_owned),
                     selected_claude_id: None,
                     error: self.restoration_error.borrow().clone(),
@@ -196,6 +212,7 @@ impl Accounts {
                 .into())
             }
             Call::LogoutAccount(params) => {
+                self.usage.remove(&params.id);
                 if !self
                     .registry
                     .accounts
