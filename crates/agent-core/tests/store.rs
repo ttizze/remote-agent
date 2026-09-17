@@ -414,7 +414,7 @@ async fn snapshot_notification_can_reenter_store_synchronously() {
 }
 
 #[tokio::test]
-async fn new_conversation_clears_sent_draft_after_native_echo() {
+async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();
@@ -431,6 +431,14 @@ async fn new_conversation_clears_sent_draft_after_native_echo() {
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/thread/start");
+    let pending = store.snapshot();
+    assert!(pending.drafts[&key].text.is_empty());
+    let source = pending.conversation_source().unwrap();
+    let rendered =
+        agent_core::presentation::conversation::project_conversation(&pending, source, &None);
+    assert_eq!(rendered.queued.len(), 1);
+    assert_eq!(rendered.queued[0].data.body, "first message");
+    assert_eq!(rendered.queued[0].data.title, "送信中…");
     writer.reply(&request, json!({ "result": {"thread": {"id":"created", "cwd":"/fixture", "status":{"type":"idle"}, "turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "turn/start");
@@ -483,6 +491,8 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
         assert_eq!(request["method"], "turn/start");
         assert_eq!(request["params"]["input"][0]["text"], "sent");
         assert_eq!(request["params"]["serviceTierForTurn"], "priority");
+        assert!(store.snapshot().drafts["thread"].text.is_empty());
+        assert!(store.snapshot().drafts["thread"].attachments.is_empty());
         store
             .dispatch(Intent::SetDraft {
                 thread_id: "thread".into(),
@@ -751,7 +761,11 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
         assert_eq!(transcribing.await.unwrap().is_err(), fail_send);
         assert_eq!(
             store.snapshot().drafts["thread"].text,
-            if fail_send { "newer\nspoken" } else { "newer" }
+            if fail_send {
+                "original\nspoken\nnewer"
+            } else {
+                "newer"
+            }
         );
         store.close().await.unwrap();
     }
@@ -2076,7 +2090,7 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
     use agent_core::client::{SubmissionTarget, submission_target};
     use agent_core::state::{Activity, Navigation, PendingSubmission};
     let draft = Arc::new(Draft {
-        text: "typed".into(),
+        text: "typed\nspoken".into(),
         ..Default::default()
     });
     let mut saved = snapshot();
@@ -2090,7 +2104,7 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
         active: BTreeMap::from([("thread".into(), true)]),
         ..Default::default()
     });
-    saved.drafts = Arc::new(BTreeMap::from([("thread".into(), draft.clone())]));
+    saved.drafts = Arc::new(BTreeMap::from([("thread".into(), Arc::default())]));
     saved.pending_submissions = Arc::new(BTreeMap::from([(
         "unsent".into(),
         Arc::new(PendingSubmission {
@@ -2100,8 +2114,6 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
             after_item_id: None,
             accepted: false,
             delivery_unknown: false,
-            recovery_text: Some("spoken".into()),
-            clear_draft: None,
         }),
     )]));
     saved.requests = Arc::new(BTreeMap::from([("1".into(), Arc::new(serde_json::from_value(json!({
@@ -2116,12 +2128,10 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
     assert!(current.subscriptions.is_empty());
     assert!(current.pending_submissions["unsent"].delivery_unknown);
     assert_eq!(
-        current.pending_submissions["unsent"]
-            .recovery_text
-            .as_deref(),
-        Some("spoken")
+        current.pending_submissions["unsent"].draft.text,
+        "typed\nspoken"
     );
-    assert_eq!(current.drafts["thread"].text, "typed");
+    assert!(current.drafts["thread"].text.is_empty());
     assert!(matches!(
         submission_target(Some(&current.conversations["thread"]), None, None).unwrap(),
         SubmissionTarget::Start { .. }

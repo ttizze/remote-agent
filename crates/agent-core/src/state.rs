@@ -81,10 +81,17 @@ pub struct PendingSubmission {
     pub after_item_id: Option<String>,
     pub accepted: bool,
     pub delivery_unknown: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clear_draft: Option<Arc<Draft>>,
+}
+impl PendingSubmission {
+    pub fn delivery_label(&self) -> &'static str {
+        if self.delivery_unknown {
+            "送信結果不明（自動再送しません）"
+        } else if self.accepted {
+            "送信済み"
+        } else {
+            "送信中…"
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -335,7 +342,6 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 draft,
                 client_user_message_id,
                 None,
-                None,
             );
         }
         Intent::AddAttachment {
@@ -576,15 +582,24 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
         }
         Event::SubmissionFailed(id) => {
-            if let Some(pending) = Arc::make_mut(&mut next.pending_submissions).remove(&id)
-                && let Some(text) = &pending.recovery_text
-            {
+            if let Some(pending) = Arc::make_mut(&mut next.pending_submissions).remove(&id) {
                 let draft = Arc::make_mut(
                     Arc::make_mut(&mut next.drafts)
                         .entry(pending.draft_key.clone())
                         .or_default(),
                 );
-                append_transcript(&mut draft.text, text);
+                let mut restored = pending.draft.text.clone();
+                append_transcript(&mut restored, &draft.text);
+                draft.text = restored;
+                for attachment in &pending.draft.attachments {
+                    if !draft
+                        .attachments
+                        .iter()
+                        .any(|current| current.path == attachment.path)
+                    {
+                        draft.attachments.push(attachment.clone());
+                    }
+                }
             }
         }
         Event::Connected => {
@@ -821,7 +836,6 @@ fn submission(
     draft_key: String,
     draft: Arc<Draft>,
     client_user_message_id: String,
-    recovery_text: Option<String>,
     clear_draft: Option<Arc<Draft>>,
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
@@ -833,6 +847,18 @@ fn submission(
     {
         next.error = Some(reason);
         return (next, Vec::new());
+    }
+    let cleared = clear_draft.as_ref().unwrap_or(&draft);
+    if let Some(current) = shared_mut(&mut next.drafts, &draft_key) {
+        if current.text == cleared.text {
+            current.text.clear();
+        }
+        current.attachments.retain(|attachment| {
+            !cleared
+                .attachments
+                .iter()
+                .any(|sent| sent.path == attachment.path)
+        });
     }
     let active = thread_id
         .as_ref()
@@ -856,8 +882,6 @@ fn submission(
                 .map(|item| item.id.clone()),
             accepted: false,
             delivery_unknown: false,
-            recovery_text,
-            clear_draft,
         }),
     );
     let effect = match thread_id {
@@ -878,6 +902,9 @@ fn submission(
 }
 
 fn append_transcript(text: &mut String, transcript: &str) {
+    if transcript.is_empty() {
+        return;
+    }
     text.reserve(transcript.len() + usize::from(!text.is_empty()));
     if !text.is_empty() && !text.ends_with(char::is_whitespace) {
         text.push('\n');

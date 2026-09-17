@@ -112,7 +112,6 @@ internal fun ThreadDetailScreen(
                     )
                 }
                 items(projection?.queued.orEmpty(), key = { "queued:${it.id()}" }) {
-                    Text("順番待ち")
                     ThreadMessageCard(it, true)
                 }
             }

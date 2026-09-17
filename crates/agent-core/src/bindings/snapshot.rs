@@ -28,7 +28,9 @@ impl Snapshot {
     }
     pub fn conversation_unchanged(&self, other: Arc<Self>) -> bool {
         let id = self.navigation.thread_id.as_ref();
-        if id != other.navigation.thread_id.as_ref() {
+        if id != other.navigation.thread_id.as_ref()
+            || self.navigation.draft_key != other.navigation.draft_key
+        {
             return false;
         }
         let same_thread = match (

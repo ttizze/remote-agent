@@ -281,7 +281,7 @@ extension BexAppViewModel {
             models = next.models()
         }
         let changed = !next.conversationUnchanged(other: snapshot)
-        let source = next.navigation().threadId.flatMap { next.conversation(id: $0) }
+        let source = next.conversationSource()
         snapshot = next
         if changed {
             projectConversation(source)
@@ -312,7 +312,7 @@ extension BexAppViewModel {
                     ConversationPresentation.project(input.source, snapshot: input.snapshot, previous: previous)
                 }.value
                 if selectedProfileId == input.host, snapshot.requestsUnchanged(other: input.snapshot),
-                   snapshot.navigation().threadId == input.source?.id() {
+                   snapshot.navigation().draftKey == input.snapshot.navigation().draftKey {
                     conversation = rendered
                 }
                 // Keep one background projection in flight and coalesce stream deltas.

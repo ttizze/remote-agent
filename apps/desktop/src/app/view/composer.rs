@@ -352,26 +352,13 @@ impl Desktop {
                     }
                     Some(ConversationRow::Turn(turn)) => view.turn(&turn, cx),
                     Some(ConversationRow::Pending(id, pending)) => {
-                        let row = view.pending_item(&id, &pending.draft, cx);
+                        let row = view.pending_item(&id, &pending, cx);
                         h_flex()
                             .justify_center()
                             .w_full()
                             .px_6()
                             .pb_8()
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    .max_w(px(CHAT_WIDTH))
-                                    .gap_4()
-                                    .child(row)
-                                    .child(div().text_sm().text_color(rgb(0x999999)).child(
-                                        if pending.accepted {
-                                            "送信済み"
-                                        } else {
-                                            "送信中…"
-                                        },
-                                    )),
-                            )
+                            .child(v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4().child(row))
                             .into_any_element()
                     }
                     Some(ConversationRow::Request(key, request)) => view.request_card(

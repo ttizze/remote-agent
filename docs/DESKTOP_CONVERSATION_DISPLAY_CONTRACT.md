@@ -372,3 +372,15 @@ results after navigation.
 - 作成直後、main 自体、detached HEAD、Git の確認失敗、作成履歴を確認できない場合は表示しない。ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。squash/rebase による別コミットへの置換は判定対象外。
 - 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定し、未マージの追加コミットがあればマークを消す。Git の状態をプロジェクト設定のキャッシュに保存しない。
 - 受け入れ確認: core の `list_preserves_merge_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `mergeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。
+
+## Immediate submission feedback
+
+- Submitting moves text and attachments from the composer into a pending message
+  immediately, before thread creation or submission RPCs finish.
+- Acknowledgement never clears content typed or attached after submission.
+- A definite failure restores the sent content alongside newer draft content for
+  retry. Unknown delivery remains visible and is never automatically resent.
+
+Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
+`successful_submission_does_not_erase_a_newer_draft`, and
+`failed_new_submission_keeps_retry_at_the_last_successful_step`.

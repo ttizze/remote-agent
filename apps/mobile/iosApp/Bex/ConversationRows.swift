@@ -194,6 +194,9 @@ struct ThreadMessageRow: View {
                     }
                 }
             }
+            if isUser, item.data.nativeId == nil {
+                Text(item.data.title).font(.caption).foregroundStyle(.secondary)
+            }
             if item.data.kind == "agent" {
                 HStack(spacing: 20) {
                     Button { UIPasteboard.general.string = item.data.body; copied = true } label: {

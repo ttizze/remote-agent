@@ -13,6 +13,30 @@ use std::{
     sync::Arc,
 };
 
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl Snapshot {
+    /// Display pending input before a new conversation has a server ID.
+    pub fn conversation_source(&self) -> Option<Arc<models::Thread>> {
+        if let Some(source) = self
+            .navigation
+            .thread_id
+            .as_ref()
+            .and_then(|id| self.conversations.get(id))
+        {
+            return Some(source.clone());
+        }
+        self.pending_submissions
+            .values()
+            .any(|pending| pending.draft_key == self.navigation.draft_key)
+            .then(|| {
+                Arc::new(models::Thread {
+                    id: Some(self.navigation.draft_key.clone()),
+                    ..Default::default()
+                })
+            })
+    }
+}
+
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedConversation {
     pub source: Arc<models::Thread>,
@@ -195,12 +219,7 @@ impl RenderedItem {
                 id: id.into(),
                 native_id: None,
                 kind: "user".into(),
-                title: if pending.delivery_unknown {
-                    "送信結果不明（自動再送しません）"
-                } else {
-                    "You"
-                }
-                .into(),
+                title: pending.delivery_label().into(),
                 collapsible: false,
                 visible: true,
                 body: body.text,
@@ -818,8 +837,6 @@ mod tests {
                 after_item_id: None,
                 accepted: true,
                 delivery_unknown: false,
-                recovery_text: None,
-                clear_draft: None,
             }),
         );
         let first = project_snapshot(snapshot.clone(), None);
@@ -912,8 +929,6 @@ mod tests {
                 after_item_id: None,
                 accepted: true,
                 delivery_unknown: false,
-                recovery_text: None,
-                clear_draft: None,
             })
         };
         Arc::make_mut(&mut snapshot.pending_submissions)

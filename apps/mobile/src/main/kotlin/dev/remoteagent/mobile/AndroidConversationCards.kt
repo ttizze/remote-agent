@@ -52,6 +52,7 @@ internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String 
             Column(Modifier.padding(12.dp)) {
                 if (isUser) Text(content.body) else ConversationBody(content.body, cwd, perform)
                 content.imageSources.forEach { Text("画像: $it", style = MaterialTheme.typography.bodySmall) }
+                if (isUser && content.nativeId == null) Text(content.title, style = MaterialTheme.typography.bodySmall)
             }
         }
     }

@@ -302,7 +302,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun publish(next: Snapshot) {
         if (!next.listUnchanged(snapshot)) list = next.threadList()
-        conversation = projectConversationRows(next, next.navigation().threadId?.let(next::conversation), conversation)
+        conversation = projectConversationRows(next, next.conversationSource(), conversation)
         snapshot = next
         persistence?.cancel()
         persistence = scope.launch {

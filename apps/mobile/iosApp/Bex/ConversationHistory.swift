@@ -15,10 +15,7 @@ extension ThreadScreen {
         case .olderTurns: historyBoundary(nil)
         case let .native(content, item): nativeConversationRow(content, item: item)
         case let .queued(item):
-            VStack(alignment: .leading, spacing: 6) {
-                Text("順番待ち").font(.caption).foregroundColor(.secondary)
-                ThreadMessageRow(item: item, isUser: true, media: model.mediaAccess, selection: model.selectionActions)
-            }
+            ThreadMessageRow(item: item, isUser: true, media: model.mediaAccess, selection: model.selectionActions)
         }
     }
 

@@ -568,16 +568,17 @@ impl Desktop {
                 self.item(item, native, Some(turn), cx)
             }
             agent_core::presentation::conversation::ItemSource::Pending(id, pending) => {
-                self.pending_item(id, &pending.draft, cx)
+                self.pending_item(id, pending, cx)
             }
         }
     }
     pub(super) fn pending_item(
         &mut self,
         id: &str,
-        draft: &Draft,
+        pending: &agent_core::state::PendingSubmission,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let draft = &pending.draft;
         let mut body = user_message_bubble();
         if !draft.text.is_empty() {
             body = body.child(
@@ -605,7 +606,14 @@ impl Desktop {
             .w_full()
             .justify_end()
             .my_4()
-            .child(body)
+            .child(
+                v_flex().min_w_0().gap_2().child(body).child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0x999999))
+                        .child(pending.delivery_label()),
+                ),
+            )
             .into_any_element()
     }
 
@@ -1209,8 +1217,6 @@ mod rendering_tests {
                             after_item_id: None,
                             accepted: true,
                             delivery_unknown: false,
-                            recovery_text: None,
-                            clear_draft: None,
                         }),
                     );
                 }
