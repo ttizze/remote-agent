@@ -99,9 +99,7 @@ struct WorkspaceScreen: View {
 
     private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
         model.requestSnapshot(intent) { snapshot, result in
-            if case .failure = result {
-                model.notice = nil
-            }
+            model.notice = nil
             completion(snapshot, result)
         }
     }
