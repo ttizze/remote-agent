@@ -201,7 +201,10 @@ private struct WorkspaceDirectoryScreen: View {
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
             }
-            guard let result = snapshot.directory(), result.path == directory else { return }
+            guard let result = snapshot.directory(), result.path == directory else {
+                error = snapshot.error()
+                return
+            }
             path = result.path
             entries = result.entries
             if result.truncated {
