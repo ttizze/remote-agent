@@ -74,9 +74,7 @@ struct ConversationImage: View {
                         preparingPreview = true
                         Task {
                             do {
-                                previewURL = try await Task.detached(priority: .userInitiated) {
-                                    try writeConversationImage(original)
-                                }.value
+                                previewURL = try await writeConversationImage(original)
                             } catch { self.error = error.localizedDescription }
                             preparingPreview = false
                         }
@@ -140,8 +138,10 @@ struct ConversationImage: View {
     let source = image.source
     let data: Data
     if image.encoded {
-        guard let decoded = Data(base64Encoded: source) else { throw CocoaError(.fileReadCorruptFile) }
-        data = decoded
+        data = try await Task.detached(priority: .userInitiated) {
+            guard let decoded = Data(base64Encoded: source) else { throw CocoaError(.fileReadCorruptFile) }
+            return decoded
+        }.value
     } else if source.hasPrefix("data:image/") {
         throw CocoaError(.fileReadCorruptFile)
     } else if let url = URL(string: source), url.scheme == "https" || url.scheme == "http" {
@@ -173,20 +173,31 @@ struct ConversationImage: View {
     }.value
 }
 
-private func writeConversationImage(_ data: Data) throws -> URL {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    do {
-        let image = CGImageSourceCreateWithData(data as CFData, nil)
-        let type = image.flatMap { CGImageSourceGetType($0) }.flatMap { UTType($0 as String) }
-        let local = directory.appendingPathComponent("image")
-            .appendingPathExtension(type?.preferredFilenameExtension ?? "png")
-        try data.write(to: local)
-        return local
-    } catch {
-        try? FileManager.default.removeItem(at: directory)
-        throw error
+private func writeConversationImage(_ data: Data) async throws -> URL {
+    try Task.checkCancellation()
+    let local = try await Task.detached(priority: .userInitiated) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            let image = CGImageSourceCreateWithData(data as CFData, nil)
+            let type = image.flatMap { CGImageSourceGetType($0) }.flatMap { UTType($0 as String) }
+            let local = directory.appendingPathComponent("image")
+                .appendingPathExtension(type?.preferredFilenameExtension ?? "png")
+            try data.write(to: local)
+            return local
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }.value
+    if Task.isCancelled {
+        try? FileManager.default.removeItem(at: local.deletingLastPathComponent())
+        throw CancellationError()
     }
+    return local
 }
 
 struct ConversationPreview: View {
@@ -276,7 +287,7 @@ struct ConversationPreview: View {
                     guard let media else { break }
                     let data = try await conversationImageData(image, media: media)
                     try Task.checkCancellation()
-                    downloaded[image] = try writeConversationImage(data)
+                    downloaded[image] = try await writeConversationImage(data)
                 }
                 // Publish the gallery once its URLs are stable. Reloading Quick
                 // Look as downloads finish can reset an in-progress swipe.
