@@ -1,5 +1,6 @@
 use agent_core::state::operations as op;
 mod clipboard;
+mod completions;
 mod dictation;
 mod hosts;
 mod selection;
@@ -186,6 +187,8 @@ pub(crate) struct Desktop {
     pending_explanation: Option<String>,
     composer_value: SharedString,
     composer_revision: u64,
+    completion_index: usize,
+    completion_dismissed: bool,
     composer_pending: Option<u64>,
     editor_input: Entity<EditorState>,
     editor_value: SharedString,
@@ -340,14 +343,18 @@ impl Desktop {
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value();
                     if value != view.composer_value {
+                        view.completion_index = 0;
+                        view.completion_dismissed = false;
+                        let cursor = input.read(cx).cursor();
                         view.composer_value = value.clone();
                         view.composer_revision += 1;
                         let revision = view.composer_revision;
                         view.composer_pending = Some(revision);
                         view.perform(
-                            Intent::SetDraftText {
+                            Intent::EditComposer {
                                 thread_id: view.draft_key().into(),
                                 text: value.to_string(),
+                                cursor: cursor as u32,
                             },
                             OperationCompletion::Composer(revision),
                         );
@@ -470,6 +477,8 @@ impl Desktop {
             pending_explanation: None,
             composer_value: "".into(),
             composer_revision: 0,
+            completion_index: 0,
+            completion_dismissed: false,
             composer_pending: None,
             editor_input,
             editor_value: "".into(),
@@ -1062,6 +1071,7 @@ impl Desktop {
     }
     fn draft(&self) -> &Draft {
         static EMPTY: Draft = Draft {
+            invocations: Vec::new(),
             text: String::new(),
             attachments: Vec::new(),
             model: None,
@@ -1463,6 +1473,10 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !action.shift && !action.secondary && self.accept_completion(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         let submit = self.composer.update(cx, |input, cx| {
             composer_should_submit(input, action, window, cx)
         });

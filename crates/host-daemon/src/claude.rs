@@ -1357,6 +1357,9 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
     for input in input {
         match input {
             op::Input::Text { text, .. } => content.push(json!({"type":"text","text":text})),
+            op::Input::Skill { name, .. } => {
+                content.push(json!({"type":"text","text":format!("${name}")}))
+            }
             op::Input::Mention { path, .. } => {
                 content.push(json!({"type":"text","text":format!("添付ファイル: {path}")}))
             }

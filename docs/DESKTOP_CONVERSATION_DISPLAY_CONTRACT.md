@@ -447,3 +447,24 @@ checks for both providers, and iOS
 `testSimulatorAccountOwnsModelEffortAndSpeed`,
 `testSimulatorSwitchesCodexAccountsAndForksConversation`, and
 `testSimulatorAddsClaudeAccountAndKeepsCodexSelected`.
+
+## Plugin and skill invocation
+
+- In Codex conversations, `@` opens installed, enabled plugin candidates and `/`
+  opens enabled skill candidates from the selected Host and working directory.
+  Full-width `＠` and `／` also open the picker. Names and descriptions filter the
+  list; loading, empty and partial catalog failures remain visible.
+- Desktop supports clicking, Up/Down, Enter/Tab to select, and Escape to dismiss.
+  IME confirmation never selects a candidate or sends the message. Mobile uses
+  tappable candidates. Skill selection inserts `$name`; plugin selection inserts
+  `@name`. Selected identities stay in the draft and are sent as native `skill`
+  or `mention` inputs, including their exact Host path or `plugin://` identity.
+- Removing or renaming the invocation removes its selected identity. Submission
+  and definite-failure restoration preserve selected identities alongside text,
+  attachments, and newer draft content.
+
+Acceptance: core `composer::tests`,
+`selected_invocations_reach_submission_and_return_after_failure`, Host
+`composer_catalog_uses_host_provider_and_excludes_disabled_entries`, desktop
+`invocation_completion_preserves_suffix_and_does_not_accept_ime`, and iOS
+`testSimulatorSelectsPluginAndSkillFromComposer`.

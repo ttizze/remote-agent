@@ -141,6 +141,7 @@ impl StartSubmission {
         let empty = Arc::new(Draft {
             text: String::new(),
             attachments: Vec::new(),
+            invocations: Vec::new(),
             ..draft.as_ref().clone()
         });
         let remove_original = current_view || current == Some(&empty);
@@ -242,6 +243,13 @@ impl Operation for SendSubmission {
                 text: self.draft.text.clone(),
             });
         }
+        input.extend(
+            self.draft
+                .invocations
+                .iter()
+                .filter(|item| item.is_in(&self.draft.text))
+                .map(crate::composer::Invocation::input),
+        );
         for attachment in &self.draft.attachments {
             input.push(if attachment.is_image {
                 Input::LocalImage {

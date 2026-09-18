@@ -24,6 +24,7 @@ impl Operation for SelectAccount {
 }
 
 fn apply_selection(snapshot: &mut Snapshot, output: rpc::AccountSelection) {
+    snapshot.composer_catalog = None;
     let rpc::AccountSelection {
         selected_id,
         provider,

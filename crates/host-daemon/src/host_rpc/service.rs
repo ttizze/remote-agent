@@ -595,6 +595,9 @@ impl HostRpcService {
             ));
         }
         let response = match request {
+            Call::ComposerCatalog(params) => {
+                self.inner.codex.composer_catalog(&params.cwd).await.into()
+            }
             Call::ListAccounts(_)
             | Call::SelectAccount(_)
             | Call::LogoutAccount(_)

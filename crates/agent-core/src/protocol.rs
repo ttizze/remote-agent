@@ -133,6 +133,7 @@ macro_rules! results {
 results! {
     Opened(crate::session::OpenedSession), Item(crate::client::ItemResponse),
     Thread(crate::models::ThreadResponse), Threads(crate::models::ThreadList),
+    ComposerCatalog(crate::composer::ComposerCatalog),
     Models(crate::client::ModelPage), WorktreeSettings(crate::models::WorktreeSettings),
     Worktrees(Vec<crate::models::Worktree>), Review(crate::models::WorkspaceReview),
     Session(crate::session::SessionRef), Empty(crate::models::Empty),

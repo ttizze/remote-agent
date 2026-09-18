@@ -125,6 +125,7 @@ macro_rules! inputs {
 }
 inputs! {
     Text { text: String },
+    Skill { name: String, path: String },
     LocalImage { path: String },
     Mention { path: String, name: String },
 }

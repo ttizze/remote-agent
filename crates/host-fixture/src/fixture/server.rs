@@ -327,6 +327,20 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         "platformFamily":"unix","platformOs":"macos","codexHome":context.home}))?;
                 },
                 "account/read" | "account/rateLimits/read" | "getAuthStatus" | "account/login/start" | "account/login/cancel" | "account/logout" | "fixture/account/current" | "fixture/account/refresh" => accounts.request(&context, id, method, params)?,
+                "skills/list" => {
+                    context.respond(id, &json!({"data":[{"cwd":params["cwds"][0],"skills":[
+                        {"name":"fixture-review","path":"/fixture/skills/review/SKILL.md","description":"Review fixture changes","enabled":true},
+                        {"name":"disabled-skill","path":"/fixture/disabled/SKILL.md","description":"Disabled","enabled":false}
+                    ],"errors":[]}]}))?;
+                }
+                "plugin/list" => {
+                    context.respond(id, &json!({"marketplaces":[{"plugins":[
+                        {"id":"fixture@local","name":"fixture","installed":true,"enabled":true,"availability":"AVAILABLE","interface":{"displayName":"Fixture Plugin","shortDescription":"Fixture tools"}},
+                        {"id":"disabled@local","name":"disabled","installed":true,"enabled":false,"availability":"AVAILABLE","interface":null},
+                        {"id":"uninstalled@local","name":"uninstalled","installed":false,"enabled":true,"availability":"AVAILABLE","interface":null},
+                        {"id":"blocked@local","name":"blocked","installed":true,"enabled":true,"availability":"DISABLED_BY_ADMIN","interface":null}
+                    ]}],"marketplaceLoadErrors":[]}))?;
+                }
                 "model/list" => {
                     let models = json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
                             "defaultReasoningEffort":"medium","supportedReasoningEfforts":[

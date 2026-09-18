@@ -85,8 +85,6 @@ extension ThreadScreen {
                     } else {
                         messageField
                             .font(.system(size: 18))
-                            .focused($composerFocused)
-                            .accessibilityIdentifier("task.message")
                     }
                 }
                 .padding(.horizontal, 8)
@@ -226,9 +224,51 @@ extension ThreadScreen {
     }
 
     var messageField: some View {
-        BufferedTextInput(value: Binding(get: { model.draft }, set: { model.draft = $0 })) { input in
-            TextField(model.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: input, axis: .vertical)
-                .lineLimit(1 ... 6)
+        BufferedTextInput(value: Binding(get: { model.draft }, set: {
+            model.perform(.editComposer(threadId: model.coreDraftKey, text: $0, cursor: UInt32($0.utf8.count)))
+        })) { input in
+            VStack(alignment: .leading, spacing: 8) {
+                let suggestions = model.snapshot.composerSuggestions(
+                    text: input.wrappedValue, cursor: UInt32(input.wrappedValue.utf8.count)
+                )
+                let candidates = suggestions?.candidates ?? []
+                if let status = suggestions?.status {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+                if !candidates.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(candidates, id: \.invocation.path) { candidate in
+                                Button {
+                                    if let inserted = insertInvocation(
+                                        text: input.wrappedValue, cursor: UInt32(input.wrappedValue.utf8.count),
+                                        kind: candidate.invocation.kind, name: candidate.invocation.name
+                                    ) {
+                                        input.wrappedValue = inserted.text
+                                        model.perform(.insertInvocation(
+                                            threadId: model.coreDraftKey,
+                                            text: inserted.text,
+                                            invocation: candidate.invocation
+                                        ))
+                                        composerFocused = true
+                                    }
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(candidate.invocation.name).font(.subheadline)
+                                        Text(candidate.description).font(.caption).foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                                }
+                                .accessibilityIdentifier("composer.invocation.\(candidate.invocation.name)")
+                            }
+                        }
+                    }.frame(maxHeight: 180)
+                }
+                TextField(model.isNewThread ? "メッセージを入力" : "追加の指示を入力", text: input, axis: .vertical)
+                    .lineLimit(1 ... 6)
+                    .focused($composerFocused)
+                    .accessibilityIdentifier("task.message")
+            }
         }
         .id(model.draftKey)
     }

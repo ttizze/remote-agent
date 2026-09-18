@@ -2787,3 +2787,40 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
     .await
     .expect("project registration deadline");
 }
+
+#[tokio::test]
+async fn composer_catalog_uses_host_provider_and_excludes_disabled_entries() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
+        let catalog = local
+            .peer
+            .call(&op::LoadComposerCatalog {
+                cwd: "/fixture/project".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(catalog.cwd, "/fixture/project");
+        assert!(!catalog.loading);
+        assert!(catalog.errors.is_empty());
+        assert_eq!(catalog.candidates.len(), 2);
+        let plugin = catalog
+            .candidates
+            .iter()
+            .find(|c| c.invocation.kind == agent_core::composer::InvocationKind::Plugin)
+            .unwrap();
+        assert_eq!(plugin.invocation.name, "Fixture Plugin");
+        assert_eq!(plugin.invocation.path, "plugin://fixture@local");
+        let skill = catalog
+            .candidates
+            .iter()
+            .find(|c| c.invocation.kind == agent_core::composer::InvocationKind::Skill)
+            .unwrap();
+        assert_eq!(skill.invocation.path, "/fixture/skills/review/SKILL.md");
+        local.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}

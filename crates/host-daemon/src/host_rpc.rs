@@ -2,6 +2,7 @@
 //! Backend adapters translate their protocols into the shared conversation API.
 
 mod codex;
+mod composer;
 pub(crate) mod routing;
 mod service;
 mod session_actor;

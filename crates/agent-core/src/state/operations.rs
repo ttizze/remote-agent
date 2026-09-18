@@ -92,9 +92,20 @@ pub enum Intent {
         thread_id: String,
     },
     LoadModels(LoadModels),
+    LoadComposerCatalog(LoadComposerCatalog),
     SetDraft {
         thread_id: String,
         draft: Draft,
+    },
+    EditComposer {
+        thread_id: String,
+        text: String,
+        cursor: u32,
+    },
+    InsertInvocation {
+        thread_id: String,
+        text: String,
+        invocation: crate::composer::Invocation,
     },
     SetDraftText {
         thread_id: String,
@@ -172,6 +183,8 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     }
 }
 
+mod composer;
+pub use composer::*;
 mod accounts;
 pub use accounts::*;
 mod terminal;

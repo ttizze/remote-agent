@@ -2585,3 +2585,71 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
         store.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn selected_invocations_reach_submission_and_return_after_failure() {
+    use agent_core::composer::{Invocation, InvocationKind, insert_invocation};
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    new_chat(&store, &mut reader, &mut writer, "/fixture").await;
+    let key = store.snapshot().navigation.draft_key.clone();
+    let invocation = Invocation {
+        kind: InvocationKind::Skill,
+        name: "review".into(),
+        path: "/fixture/review/SKILL.md".into(),
+    };
+    let insertion = insert_invocation(
+        "/review".into(),
+        7,
+        invocation.kind,
+        invocation.name.clone(),
+    )
+    .unwrap();
+    store
+        .dispatch(Intent::InsertInvocation {
+            thread_id: key.clone(),
+            text: insertion.text,
+            invocation: invocation.clone(),
+        })
+        .await
+        .unwrap();
+    let sending = store.dispatch(Intent::Submit {
+        thread_id: None,
+        client_user_message_id: "invocation".into(),
+    });
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "host/thread/start");
+    assert!(store.snapshot().drafts[&key].invocations.is_empty());
+    assert_eq!(
+        store.snapshot().pending_submissions["invocation"]
+            .draft
+            .invocations,
+        vec![invocation.clone()]
+    );
+    writer.reply(&request, json!({"result":{"thread":{"id":"created","cwd":"/fixture","status":{"type":"idle"},"turns":[]}}})).await.unwrap();
+    let request = read_after_reviews(&mut reader, &mut writer).await;
+    assert_eq!(request["method"], "turn/start");
+    assert_eq!(
+        request["params"]["input"][1],
+        json!({"type":"skill","name":"review","path":"/fixture/review/SKILL.md"})
+    );
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: "created".into(),
+            text: "newer input".into(),
+        })
+        .await
+        .unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"error":{"code":-32000,"message":"definite failure","delivery":"notSent"}}),
+        )
+        .await
+        .unwrap();
+    assert!(sending.await.is_err());
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.drafts["created"].invocations, vec![invocation]);
+    assert!(snapshot.drafts["created"].text.contains("newer input"));
+    assert!(snapshot.drafts["created"].text.contains("$review"));
+    store.close().await.unwrap();
+}

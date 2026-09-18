@@ -52,6 +52,7 @@ import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.Respond
 import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.insertInvocation
 import dev.remoteagent.core.activityIsExpanded
 import java.util.UUID
 import kotlinx.coroutines.launch
@@ -248,9 +249,15 @@ internal fun ThreadComposer(
                 }
             }
         }
+        val cursor = draft.text.toByteArray(Charsets.UTF_8).size.toUInt()
+        ComposerInvocationPicker(snapshot.composerSuggestions(draft.text, cursor)) { invocation ->
+            insertInvocation(draft.text, cursor, invocation.kind, invocation.name)?.let {
+                perform(Intent.InsertInvocation(navigation.draftKey, it.text, invocation)) {}
+            }
+        }
         OutlinedTextField(
             draft.text,
-            { perform(Intent.SetDraftText(navigation.draftKey, it)) {} },
+            { perform(Intent.EditComposer(navigation.draftKey, it, it.toByteArray(Charsets.UTF_8).size.toUInt())) {} },
             Modifier.fillMaxWidth(),
             label = { Text("Codexへの入力") },
             minLines = 2,

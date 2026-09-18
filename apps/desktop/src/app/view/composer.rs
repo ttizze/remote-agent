@@ -580,7 +580,10 @@ impl Desktop {
         let composer = v_flex()
             .key_context("ChatComposer")
             .track_focus(&self.composer.read(cx).focus_handle(cx))
-            .capture_key_down(cx.listener(|s, event: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|s, event: &KeyDownEvent, window, cx| {
+                if s.completion_key(event, window, cx) {
+                    return;
+                }
                 if event.keystroke.key == "escape"
                     && s.dictation
                         .as_ref()
@@ -598,6 +601,7 @@ impl Desktop {
             .p(px(7.))
             .gap_2()
             .rounded(px(30.))
+            .child(self.completion_menu(cx))
             .when(!attachments.is_empty(), |composer| composer.child(files))
             .bg(rgb(0x2b2b2b))
             .border_1()

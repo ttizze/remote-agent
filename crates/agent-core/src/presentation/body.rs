@@ -44,7 +44,12 @@ fn message(item: &Item) -> String {
     let content = item.content.as_ref().unwrap_or(&Value::Null);
     let mut result = item.text.clone().unwrap_or_else(|| parts(content, ""));
     if let Some(parts) = content.as_array() {
-        for part in parts.iter().filter(|part| part["type"] == "mention") {
+        for part in parts.iter().filter(|part| {
+            part["type"] == "mention"
+                && !part["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with("plugin://") || path.starts_with("app://"))
+        }) {
             attachment(&mut result, &field(part, "name"), &field(part, "path"));
         }
     }
@@ -200,6 +205,10 @@ mod tests {
     #[case::user_with_attachments(
         json!({"id":"user","type":"userMessage","content":[{"text":"hello"},{"type":"mention","name":"a.txt","path":"/a"},{"type":"localImage","path":"/photo.png"}]}),
         "hello\n添付: a.txt (/a)", "hello\n添付: a.txt (/a)", &["/photo.png"]
+    )]
+    #[case::user_with_invocations(
+        json!({"id":"user","type":"userMessage","content":[{"type":"text","text":"$review @Tools"},{"type":"skill","name":"review","path":"/skills/review/SKILL.md"},{"type":"mention","name":"Tools","path":"plugin://tools@local"}]}),
+        "$review @Tools", "$review @Tools", &[]
     )]
     #[case::reasoning_summary(
         json!({"id":"reason","type":"reasoning","summary":[{"text":"one"},{"unknown":true},"two"]}),

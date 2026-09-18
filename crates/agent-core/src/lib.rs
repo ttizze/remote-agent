@@ -2,6 +2,7 @@
 extern crate self as agent_core;
 
 pub mod client;
+pub mod composer;
 pub mod diagnostics;
 pub mod models;
 pub mod peer;

@@ -3,6 +3,26 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorSelectsPluginAndSkillFromComposer() throws {
+        let app = try connectedSimulatorApp()
+        let compose = app.buttons["tasks.new.project.simulator-project"]
+        XCTAssertTrue(compose.waitForExistence(timeout: 10)); compose.tap()
+        let input = app.textFields["task.message"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10)); input.tap()
+        input.typeText("/fixture")
+        let skill = app.buttons["composer.invocation.fixture-review"]
+        XCTAssertTrue(skill.waitForExistence(timeout: 15)); skill.tap()
+        XCTAssertEqual(input.value as? String, "$fixture-review ")
+        input.typeText("@Fixture")
+        let plugin = app.buttons["composer.invocation.Fixture Plugin"]
+        XCTAssertTrue(plugin.waitForExistence(timeout: 15)); plugin.tap()
+        XCTAssertEqual(input.value as? String, "$fixture-review @Fixture Plugin ")
+        input.typeText("[success] Use the selected tools")
+        app.buttons["task.send"].tap()
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
+        XCTAssertFalse((input.value as? String ?? "").contains("fixture-review"))
+    }
+
     func testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[success] [selection] Verify assistant selection")

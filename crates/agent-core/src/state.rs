@@ -19,6 +19,8 @@ use std::{
 pub struct Draft {
     pub text: String,
     pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub invocations: Vec<crate::composer::Invocation>,
     pub model: Option<String>,
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,6 +144,8 @@ pub struct TerminalView {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    #[serde(skip)]
+    pub composer_catalog: Option<Arc<crate::composer::ComposerCatalog>>,
     pub storage_scope: String,
     pub archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(default)]
@@ -341,7 +345,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
-        LoadHostManagement, LoadModels,
+        LoadHostManagement, LoadModels, LoadComposerCatalog,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
         Intent::ReadOlder { thread_id } => {
@@ -464,18 +468,26 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
         }
-        Intent::SetDraftText { thread_id, text } => {
-            if previous
-                .drafts
-                .get(&thread_id)
-                .is_none_or(|draft| draft.text != text)
-            {
-                let draft = Arc::make_mut(&mut next.drafts)
-                    .entry(thread_id)
-                    .or_default();
-                Arc::make_mut(draft).text = text;
+        Intent::EditComposer { thread_id, text, cursor } => {
+            let load_catalog = thread_id == previous.navigation.draft_key
+                && previous.composer_query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
+                    previous.composer_catalog.as_ref().is_none_or(|catalog| catalog.cwd != previous.navigation.cwd)
+                        || (filter.is_empty() && previous.drafts.get(&thread_id).is_none_or(|draft| draft.text != text))
+                });
+            set_draft_text(&mut next, thread_id, text);
+            if load_catalog {
+                let cwd = next.navigation.cwd.clone();
+                return prepare(previous, next, op::LoadComposerCatalog { cwd });
             }
         }
+        Intent::InsertInvocation { thread_id, text, invocation } => {
+            let draft = Arc::make_mut(Arc::make_mut(&mut next.drafts).entry(thread_id).or_default());
+            let token = invocation.token();
+            draft.invocations.retain(|item| item.token() != token && item.is_in(&text));
+            draft.invocations.push(invocation);
+            draft.text = text;
+        }
+        Intent::SetDraftText { thread_id, text } => set_draft_text(&mut next, thread_id, text),
         intent @ (Intent::SelectModel { .. }
         | Intent::SelectEffort { .. }
         | Intent::SelectServiceTier { .. }) => {
@@ -532,6 +544,23 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     });
     (next, Vec::new())
 }
+fn set_draft_text(snapshot: &mut Snapshot, thread_id: String, text: String) {
+    if snapshot
+        .drafts
+        .get(&thread_id)
+        .is_some_and(|draft| draft.text == text)
+    {
+        return;
+    }
+    let draft = Arc::make_mut(
+        Arc::make_mut(&mut snapshot.drafts)
+            .entry(thread_id)
+            .or_default(),
+    );
+    draft.invocations.retain(|item| item.is_in(&text));
+    draft.text = text;
+}
+
 fn navigate(snapshot: &mut Snapshot, navigation: Navigation) {
     let previous_id = snapshot.navigation.thread_id.clone();
     let _ = previous_id
@@ -630,6 +659,11 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 let mut restored = pending.draft.text.clone();
                 append_transcript(&mut restored, &draft.text);
                 draft.text = restored;
+                for invocation in &pending.draft.invocations {
+                    if !draft.invocations.contains(invocation) {
+                        draft.invocations.push(invocation.clone());
+                    }
+                }
                 for attachment in &pending.draft.attachments {
                     if !draft
                         .attachments
@@ -697,6 +731,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
 /// Cached history and drafts survive; IDs and activity belong to one connection.
 /// Pending submissions are persisted only to recover dictation after a crash.
 fn reset_session(snapshot: &mut Snapshot) {
+    snapshot.composer_catalog = None;
     snapshot.subscriptions = Arc::default();
     for thread in Arc::make_mut(&mut snapshot.conversations).values_mut() {
         if !thread.requests.is_empty() {
@@ -903,6 +938,7 @@ fn submission(
     if let Some(current) = shared_mut(&mut next.drafts, &draft_key) {
         if current.text == cleared.text {
             current.text.clear();
+            current.invocations.clear();
         }
         current.attachments.retain(|attachment| {
             !cleared

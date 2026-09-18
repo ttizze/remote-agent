@@ -85,6 +85,7 @@ contracts! {
     SteerTurn, "turn/steer" => (c::SteerTurn, m::Empty) [clone],
     QueueTurn, "thread/queue/add" => (c::QueueTurn, c::QueuedTurn) [clone, c::QueueTurn::validate],
     Interrupt, "turn/interrupt" => (op::Interrupt, m::Empty) [clone],
+    ComposerCatalog, "host/composer/catalog" => (op::LoadComposerCatalog, crate::composer::ComposerCatalog) [clone],
     ListModels, "model/list" => (c::ListModels, c::ModelPage) [clone],
     Transcribe, "host/dictation/transcribe" => (c::Transcribe, c::Transcription),
     ListFiles, "host/file/list" => (op::ListFiles, m::FileList) [clone],
