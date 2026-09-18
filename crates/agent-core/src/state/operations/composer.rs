@@ -1,7 +1,6 @@
 use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct LoadComposerCatalog {
     pub cwd: String,
 }

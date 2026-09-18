@@ -92,7 +92,6 @@ pub enum Intent {
         thread_id: String,
     },
     LoadModels(LoadModels),
-    LoadComposerCatalog(LoadComposerCatalog),
     SetDraft {
         thread_id: String,
         draft: Draft,
