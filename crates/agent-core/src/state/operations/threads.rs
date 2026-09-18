@@ -1,13 +1,6 @@
 use super::*;
 
 pub use crate::client::AddProject;
-rpc::rpc_method!(
-    AddProject,
-    String,
-    "host/project/add",
-    AddProject,
-    |self| self.clone()
-);
 
 impl Operation for AddProject {
     rpc_operation!();
@@ -33,13 +26,6 @@ impl ListThreads {
         Self { query }
     }
 }
-rpc::rpc_method!(
-    ListThreads,
-    ThreadList,
-    "host/thread/list",
-    ListThreads,
-    |self| self.clone()
-);
 
 impl Operation for ListThreads {
     rpc_operation!();
@@ -111,13 +97,8 @@ impl Operation for ListThreads {
 }
 
 pub use crate::client::ReadItem;
-impl rpc::RpcMethod for ReadItem {
-    type Output = rpc::ItemResponse;
-    const METHOD: &'static str = "host/thread/item/read";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::ReadItem(self.clone()))
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+impl ReadItem {
+    pub(crate) fn validate(&self, output: &rpc::ItemResponse) -> Result<(), &'static str> {
         if output.item.id == self.item_id.as_str() {
             Ok(())
         } else {
@@ -268,19 +249,18 @@ impl ReadThread {
     }
 }
 impl rpc::RpcMethod for ReadThread {
-    type Output = crate::session::OpenedSession;
-    const METHOD: &'static str = "host/session/open";
+    crate::client::rpc_contract!(OpenSession);
     fn subscription(output: &mut Self::Output, id: uuid::Uuid) {
         output.subscription_id = id;
     }
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::OpenSession(
-            crate::session::OpenSession {
-                session: crate::session::SessionRef::from_thread_id(&self.thread_id)
-                    .map_err(|error| PeerError::InvalidMessage(error.into()))?,
-                limit: self.limit as usize,
-            },
-        ))
+    fn params(
+        &self,
+    ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
+        Ok(crate::session::OpenSession {
+            session: crate::session::SessionRef::from_thread_id(&self.thread_id)
+                .map_err(|error| PeerError::InvalidMessage(error.into()))?,
+            limit: self.limit as usize,
+        })
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
         if output.session.thread_id() != self.thread_id {
@@ -467,14 +447,10 @@ impl ForkThread {
             exclude_turns: false,
         }
     }
-}
-impl rpc::RpcMethod for ForkThread {
-    type Output = crate::models::ThreadResponse;
-    const METHOD: &'static str = "thread/fork";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::ForkThread(self.clone()))
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+    pub(crate) fn validate(
+        &self,
+        output: &crate::models::ThreadResponse,
+    ) -> Result<(), &'static str> {
         rpc::validate_thread(output, None)
     }
 }
@@ -509,13 +485,11 @@ pub struct StartThread {
     pub model: Option<String>,
 }
 
-impl rpc::RpcMethod for StartThread {
-    type Output = crate::models::ThreadResponse;
-    const METHOD: &'static str = "host/thread/start";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::StartThread(self.clone()))
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+impl StartThread {
+    pub(crate) fn validate(
+        &self,
+        output: &crate::models::ThreadResponse,
+    ) -> Result<(), &'static str> {
         rpc::validate_thread(output, None)
     }
 }
@@ -537,13 +511,6 @@ pub struct Interrupt {
     pub thread_id: String,
     pub turn_id: String,
 }
-rpc::rpc_method!(
-    Interrupt,
-    crate::models::Empty,
-    "turn/interrupt",
-    Interrupt,
-    |self| self.clone()
-);
 
 impl Operation for Interrupt {
     rpc_operation!();
@@ -588,13 +555,7 @@ impl Operation for LoadModels {
 }
 
 pub use crate::client::OpenRequest;
-impl rpc::RpcMethod for OpenRequest {
-    type Output = crate::session::SessionRef;
-    const METHOD: &'static str = "host/session/request";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::RequestSession(self.clone()))
-    }
-}
+
 impl Operation for OpenRequest {
     type Output = crate::session::OpenedSession;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {

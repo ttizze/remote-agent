@@ -5,9 +5,6 @@ use super::*;
 pub struct ListFiles {
     pub path: String,
 }
-rpc::rpc_method!(ListFiles, FileList, "host/file/list", ListFiles, |self| {
-    self.clone()
-});
 
 impl Operation for ListFiles {
     rpc_operation!(workspace.directory);
@@ -27,12 +24,13 @@ pub struct ReadFile {
     pub discard_draft: bool,
 }
 impl rpc::RpcMethod for ReadFile {
-    type Output = FileContent;
-    const METHOD: &'static str = "host/file/read";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::ReadFile(ListFiles {
+    crate::client::rpc_contract!(ReadFile);
+    fn params(
+        &self,
+    ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
+        Ok(ListFiles {
             path: self.path.clone(),
-        }))
+        })
     }
 }
 
@@ -100,13 +98,6 @@ impl SaveFile {
 }
 
 pub use crate::client::ReviewWorkspace;
-rpc::rpc_method!(
-    ReviewWorkspace,
-    WorkspaceReview,
-    "host/workspace/review",
-    ReviewWorkspace,
-    |self| self.clone()
-);
 
 /// Navigation and notifications already belong to an epoch. Their review read
 /// shares it instead of dispatching a second intent that invalidates siblings.
@@ -153,13 +144,9 @@ impl Operation for ReviewWorkspace {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadWorktreeSettings {}
-rpc::rpc_method!(
-    ReadWorktreeSettings,
-    super::WorktreeSettings,
-    "host/worktree/settings/read",
-    ReadWorktreeSettings,
-    |self| crate::models::Empty {}
-);
+rpc::rpc_method!(ReadWorktreeSettings, ReadWorktreeSettings, |self| {
+    crate::models::Empty {}
+});
 
 impl Operation for ReadWorktreeSettings {
     rpc_operation!(workspace.settings);
@@ -171,13 +158,9 @@ impl Operation for ReadWorktreeSettings {
 pub struct UpdateWorktreeSettings {
     pub settings: WorktreeSettings,
 }
-rpc::rpc_method!(
-    UpdateWorktreeSettings,
-    super::WorktreeSettings,
-    "host/worktree/settings/update",
-    UpdateWorktreeSettings,
-    |self| self.settings.clone()
-);
+rpc::rpc_method!(UpdateWorktreeSettings, UpdateWorktreeSettings, |self| self
+    .settings
+    .clone());
 
 impl Operation for UpdateWorktreeSettings {
     rpc_operation!(workspace.settings);
@@ -230,15 +213,7 @@ impl Operation for LoadSessionImages {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListWorktrees {}
-impl rpc::RpcMethod for ListWorktrees {
-    type Output = Vec<crate::models::Worktree>;
-    const METHOD: &'static str = "host/worktree/list";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::ListWorktrees(
-            crate::models::Empty {},
-        ))
-    }
-}
+rpc::rpc_method!(ListWorktrees, ListWorktrees, |self| crate::models::Empty {});
 impl Operation for ListWorktrees {
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, worktrees: Self::Output) -> Vec<Effect> {
@@ -248,13 +223,7 @@ impl Operation for ListWorktrees {
 }
 
 pub use crate::client::RemoveWorktree;
-impl rpc::RpcMethod for RemoveWorktree {
-    type Output = ();
-    const METHOD: &'static str = "host/worktree/remove";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::RemoveWorktree(self.clone()))
-    }
-}
+
 impl Operation for RemoveWorktree {
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
@@ -266,13 +235,7 @@ impl Operation for RemoveWorktree {
 }
 
 pub use crate::client::LoadVisualization;
-rpc::rpc_method!(
-    LoadVisualization,
-    String,
-    "host/visualize/read",
-    ReadVisualization,
-    |self| self.clone()
-);
+
 impl Operation for LoadVisualization {
     rpc_operation!();
     fn outcome(output: &mut Self::Output) -> Outcome {

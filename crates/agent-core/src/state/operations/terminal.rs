@@ -1,13 +1,6 @@
 use super::*;
 
 pub use crate::client::StartTerminal;
-rpc::rpc_method!(
-    StartTerminal,
-    crate::models::Empty,
-    "host/terminal/start",
-    StartTerminal,
-    |self| self.clone()
-);
 
 impl Operation for StartTerminal {
     rpc_operation!();
@@ -64,13 +57,6 @@ pub struct ResizeTerminal {
     pub handle: String,
     pub size: rpc::TerminalSize,
 }
-rpc::rpc_method!(
-    ResizeTerminal,
-    crate::models::Empty,
-    "process/resizePty",
-    ResizeTerminal,
-    |self| self.clone()
-);
 
 impl Operation for ResizeTerminal {
     rpc_operation!();
@@ -92,13 +78,14 @@ pub struct WriteTerminal {
     pub data: Vec<u8>,
 }
 impl rpc::RpcMethod for WriteTerminal {
-    type Output = crate::models::Empty;
-    const METHOD: &'static str = "process/writeStdin";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::WriteTerminal(rpc::TerminalWrite {
+    crate::client::rpc_contract!(WriteTerminal);
+    fn params(
+        &self,
+    ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
+        Ok(rpc::TerminalWrite {
             process_handle: self.handle.clone(),
             data: self.data.clone(),
-        }))
+        })
     }
 }
 
@@ -128,13 +115,7 @@ pub struct DetachTerminal {
     #[serde(rename = "processHandle")]
     pub handle: String,
 }
-rpc::rpc_method!(
-    DetachTerminal,
-    crate::models::Empty,
-    "host/terminal/detach",
-    DetachTerminal,
-    |self| self.clone()
-);
+
 impl Operation for DetachTerminal {
     rpc_operation!();
     fn terminal_handle(&self) -> Option<&str> {
@@ -158,15 +139,9 @@ pub struct KillTerminal {
     #[serde(rename = "processHandle")]
     pub handle: String,
 }
-rpc::rpc_method!(
-    KillTerminal,
-    crate::models::Empty,
-    "process/kill",
-    KillTerminal,
-    |self| rpc::TerminalKill {
-        process_handle: self.handle.clone()
-    }
-);
+rpc::rpc_method!(KillTerminal, KillTerminal, |self| rpc::TerminalKill {
+    process_handle: self.handle.clone()
+});
 impl Operation for KillTerminal {
     rpc_operation!();
     fn terminal_handle(&self) -> Option<&str> {

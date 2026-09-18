@@ -3,13 +3,7 @@ use super::*;
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInvitation {}
-rpc::rpc_method!(
-    CreateInvitation,
-    Invitation,
-    "host/invite",
-    Invite,
-    |self| crate::models::Empty {}
-);
+rpc::rpc_method!(CreateInvitation, Invite, |self| crate::models::Empty {});
 
 impl Operation for CreateInvitation {
     rpc_operation!(management.invitation);
@@ -20,13 +14,6 @@ impl Operation for CreateInvitation {
 pub struct RemoveRemoteHost {
     pub id: String,
 }
-rpc::rpc_method!(
-    RemoveRemoteHost,
-    crate::models::Empty,
-    "host/removeRemote",
-    RemoveRemote,
-    |self| self.clone()
-);
 
 impl Operation for RemoveRemoteHost {
     rpc_operation!();
@@ -45,13 +32,6 @@ pub struct RevokeDevice {
     #[serde(rename = "nodeId")]
     pub id: String,
 }
-rpc::rpc_method!(
-    RevokeDevice,
-    crate::models::Empty,
-    "host/revoke",
-    Revoke,
-    |self| self.clone()
-);
 
 impl Operation for RevokeDevice {
     rpc_operation!();

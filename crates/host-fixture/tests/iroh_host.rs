@@ -1269,6 +1269,11 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         let preview = open_session(&mobile.peer, thread, 5).await.0["response"].clone();
         let preview_bytes = agent_core::protocol::encode(serde_json::from_value::<models::ThreadResponse>(preview.clone()).unwrap()).unwrap().len();
         assert_eq!(preview["thread"]["projectId"], json!({"Assigned":"workspace"}));
+        for field in ["session", "capabilities"] {
+            assert!(!started["thread"][field].is_null(), "missing {field}");
+            assert_eq!(started["thread"][field], listed["data"][0][field]);
+            assert_eq!(started["thread"][field], preview["thread"][field]);
+        }
         println!("large history preview: {preview_bytes} bytes, {} ms", start.elapsed().as_millis());
         // A byte budget is deterministic; machine speed and network scheduling are not.
         assert!(preview_bytes < 16 * 1024, "collapsed output must not delay the conversation: {preview_bytes} bytes");

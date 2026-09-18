@@ -9,23 +9,37 @@ use serde_json::{Map, Value};
 
 /// The method, parameters and result are one contract.
 pub trait RpcMethod: Serialize {
+    type Contract: crate::protocol::contracts::Contract<Output = Self::Output>;
     type Output: DeserializeOwned + Serialize;
-    const METHOD: &'static str;
     fn method(&self) -> &'static str {
-        Self::METHOD
+        <Self::Contract as crate::protocol::contracts::Contract>::METHOD
     }
-    fn request(&self) -> Result<crate::protocol::Call, PeerError>;
+    fn params(
+        &self,
+    ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError>;
+    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
+        self.params()
+            .map(<Self::Contract as crate::protocol::contracts::Contract>::call)
+    }
     fn subscription(_output: &mut Self::Output, _id: uuid::Uuid) {}
     fn validate(&self, _output: &Self::Output) -> Result<(), &'static str> {
         Ok(())
     }
 }
+macro_rules! rpc_contract {
+    ($variant:ident) => {
+        type Contract = $crate::protocol::contracts::$variant;
+        type Output = <$crate::protocol::contracts::$variant as $crate::protocol::contracts::Contract>::Output;
+    };
+}
+pub(crate) use rpc_contract;
 macro_rules! rpc_method {
-    ($name:ty, $output:ty, $method:expr, $variant:ident, |$this:ident| $params:expr) => {
+    ($name:ty, $variant:ident, |$this:ident| $params:expr) => {
         impl $crate::client::RpcMethod for $name {
-            type Output = $output;
-            const METHOD: &'static str = $method;
-            fn request(&$this) -> Result<$crate::protocol::Call, $crate::peer::PeerError> { Ok($crate::protocol::Call::$variant($params)) }
+            $crate::client::rpc_contract!($variant);
+            fn params(&$this) -> Result<<Self::Contract as $crate::protocol::contracts::Contract>::Params, $crate::peer::PeerError> {
+                Ok($params)
+            }
         }
     };
 }
@@ -35,40 +49,19 @@ pub(crate) use rpc_method;
 pub struct Pair {
     pub invitation: uuid::Uuid,
 }
-rpc_method!(Pair, crate::models::Empty, "host/pair", Pair, |self| self
-    .clone());
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ReadHostStatus {}
-rpc_method!(
-    ReadHostStatus,
-    crate::models::HostStatus,
-    "host/status",
-    HostStatus,
-    |self| crate::models::Empty {}
-);
+rpc_method!(ReadHostStatus, HostStatus, |self| crate::models::Empty {});
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ListRemoteHosts {}
-rpc_method!(
-    ListRemoteHosts,
-    Vec<crate::models::RemoteHost>,
-    "host/listRemotes",
-    ListRemotes,
-    |self| crate::models::Empty {}
-);
+rpc_method!(ListRemoteHosts, ListRemotes, |self| crate::models::Empty {});
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct RegisterRemoteHost {
     pub ticket: String,
     pub name: String,
 }
-rpc_method!(
-    RegisterRemoteHost,
-    crate::models::RemoteHost,
-    "host/registerRemote",
-    RegisterRemote,
-    |self| self.clone()
-);
 
 impl Client {
     pub(crate) async fn open_subscription<O: RpcMethod>(
@@ -162,13 +155,8 @@ pub struct StartedTurn {
 pub struct TurnIdentity {
     pub id: String,
 }
-impl RpcMethod for StartTurn {
-    type Output = StartedTurn;
-    const METHOD: &'static str = "turn/start";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::StartTurn(self.clone()))
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+impl StartTurn {
+    pub(crate) fn validate(&self, output: &StartedTurn) -> Result<(), &'static str> {
         let id = &output.turn.id;
         if id.trim().is_empty() {
             Err("turn ID is missing")
@@ -227,19 +215,20 @@ impl ItemResponse {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameThread {
+    pub thread_id: String,
+    pub name: String,
+}
+
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeThread {
     pub thread_id: String,
     pub cwd: Option<String>,
 }
-rpc_method!(
-    ResumeThread,
-    crate::models::Empty,
-    "thread/resume",
-    ResumeThread,
-    |self| self.clone()
-);
+
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SteerTurn {
@@ -249,13 +238,7 @@ pub struct SteerTurn {
     pub input: Vec<Input>,
     pub expected_turn_id: String,
 }
-rpc_method!(
-    SteerTurn,
-    crate::models::Empty,
-    "turn/steer",
-    SteerTurn,
-    |self| self.clone()
-);
+
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueTurn {
@@ -269,13 +252,8 @@ pub struct QueueTurn {
 pub struct QueuedTurn {
     pub queued_submission: TurnIdentity,
 }
-impl RpcMethod for QueueTurn {
-    type Output = QueuedTurn;
-    const METHOD: &'static str = "thread/queue/add";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::QueueTurn(self.clone()))
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+impl QueueTurn {
+    pub(crate) fn validate(&self, output: &QueuedTurn) -> Result<(), &'static str> {
         if output.queued_submission.id.trim().is_empty() {
             Err("queued submission ID is missing")
         } else {
@@ -302,8 +280,6 @@ pub struct ModelPage {
     #[serde(with = "crate::protocol::json")]
     pub provider_errors: Option<Map<String, Value>>,
 }
-rpc_method!(ListModels, ModelPage, "model/list", ListModels, |self| self
-    .clone());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "T: AsRef<[u8]>", deserialize = "T: From<Vec<u8>>"))]
@@ -316,12 +292,13 @@ pub struct Transcription {
     pub text: String,
 }
 impl<T: AsRef<[u8]>> RpcMethod for Transcribe<T> {
-    type Output = Transcription;
-    const METHOD: &'static str = "host/dictation/transcribe";
-    fn request(&self) -> Result<crate::protocol::Call, PeerError> {
-        Ok(crate::protocol::Call::Transcribe(Transcribe {
+    crate::client::rpc_contract!(Transcribe);
+    fn params(
+        &self,
+    ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
+        Ok(Transcribe {
             audio: self.audio.as_ref().to_vec(),
-        }))
+        })
     }
 }
 
@@ -331,13 +308,6 @@ pub struct WriteFile {
     pub revision: String,
     pub text: String,
 }
-rpc_method!(
-    WriteFile,
-    crate::models::FileContent,
-    "host/file/write",
-    WriteFile,
-    |self| self.clone()
-);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

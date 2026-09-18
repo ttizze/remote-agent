@@ -8,7 +8,7 @@ use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 pub mod json_boundary;
 mod requests;
-pub use requests::{Call, ProviderCall};
+pub use requests::{Call, ProviderCall, contracts};
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,19 +175,6 @@ impl Response {
         Self::from_result::<(), _>(Err(
             serde_json::json!({"code":code,"message":message.to_string()}),
         ))
-    }
-
-    pub fn failure(&self) -> Option<&Value> {
-        match self {
-            Self::Failure { error } => Some(error),
-            _ => None,
-        }
-    }
-    pub fn error_mut(&mut self) -> Option<&mut Value> {
-        match self {
-            Self::Failure { error } => Some(error),
-            _ => None,
-        }
     }
 }
 impl<T: Serialize> Response<T> {
