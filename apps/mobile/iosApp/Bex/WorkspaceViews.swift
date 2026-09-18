@@ -71,7 +71,10 @@ struct WorkspaceScreen: View {
                         if case let .failure(failure) = result {
                             complete(.failure(failure))
                         } else if let review = snapshot.review() {
-                            complete(.success(review.diffFiles()))
+                            Task {
+                                let files = await Task.detached(priority: .userInitiated) { review.diffFiles() }.value
+                                complete(.success(files))
+                            }
                         } else {
                             complete(.failure(NSError(domain: "BexWorkspace", code: 1,
                                                       userInfo: [
@@ -96,20 +99,10 @@ struct WorkspaceScreen: View {
 
     private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
         model.requestSnapshot(intent) { snapshot, result in
-            let message: String? = if case let .failure(failure) = result {
-                snapshot.error() ?? failure.localizedDescription
-            } else {
-                snapshot.error()
+            if case .failure = result {
+                model.notice = nil
             }
-            if let message {
-                if model.notice == message {
-                    model.notice = nil
-                }
-                completion(snapshot, .failure(NSError(domain: "BexWorkspace", code: 1,
-                                                      userInfo: [NSLocalizedDescriptionKey: message])))
-            } else {
-                completion(snapshot, result)
-            }
+            completion(snapshot, result)
         }
     }
 
