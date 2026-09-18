@@ -209,6 +209,19 @@ impl Claude {
                     let display = entry["displayName"]
                         .as_str()
                         .ok_or("Claude model has no display name")?;
+                    // The CLI's short display name omits the model generation.
+                    // Its description starts with the versioned name and context size.
+                    let title = entry["description"]
+                        .as_str()
+                        .and_then(|description| description.split('·').next())
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or(display);
+                    let display = if name == "default" && title != display {
+                        format!("{display} · {title}")
+                    } else {
+                        title.to_owned()
+                    };
                     let values = match entry.get("supportedEffortLevels") {
                         Some(value) => value
                             .as_array()

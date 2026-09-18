@@ -389,6 +389,22 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
         let root = tempfile::tempdir().unwrap();
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        for (model, display) in [
+            ("default", "Default (recommended) · Opus 5 with 1M context"),
+            ("opus[1m]", "Opus 5 with 1M context"),
+            ("claude-fable-5-1[1m]", "Fable 5.1"),
+            ("sonnet", "Sonnet 5"),
+            ("haiku", "Haiku 4.5"),
+            ("custom", "Custom model"),
+        ] {
+            let snapshot = store.snapshot();
+            let entry = snapshot
+                .models
+                .iter()
+                .find(|entry| entry.model == format!("claude:{model}"))
+                .unwrap();
+            assert_eq!(entry.display_name, format!("Claude · {display}"));
+        }
         let codex_model = store
             .snapshot()
             .models
@@ -842,6 +858,16 @@ async fn live_claude_subscription_completes_and_resumes_through_store_and_host()
         assert!(snapshot.error.is_none());
         assert!(snapshot.drafts[&id].text.is_empty() && snapshot.pending_submissions.is_empty());
         assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[3].items.as_ref().unwrap().iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| text.contains("BEX_CLAUDE_RECOVERED"))));
+        send(&store, "Count from 1 to 100, one number per line. Do not use tools.", "live-before-additional").await;
+        until(&store, |snapshot| snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 5 && turns[4].items.as_ref().is_some_and(|items| items.iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| !text.is_empty()))))).await;
+        assert!(agent_core::session::input_unavailable_reason(&store.snapshot().conversations[&id]).is_none());
+        send(&store, "Reply with exactly BEX_CLAUDE_ADDITIONAL_OK. Do not use tools.", "live-additional").await;
+        let snapshot = completed(&store, &id, 5, "completed").await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert!(snapshot.pending_submissions.is_empty());
+        let items = snapshot.conversations[&id].turns.as_ref().unwrap()[4].items.as_ref().unwrap();
+        assert_eq!(items.iter().filter(|item| item.client_id.as_deref() == Some("live-additional")).count(), 1);
+        assert!(items.iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| text.contains("BEX_CLAUDE_ADDITIONAL_OK"))));
         store.close().await.unwrap();
         endpoint.close().await;
         fixture.close().await.unwrap();
@@ -1136,7 +1162,7 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
             .conversations
             .get(&id)
             .and_then(|thread| thread.turns.as_ref())
-            .and_then(|turns| turns.get(0))
+            .and_then(|turns| turns.first())
             .and_then(|turn| turn.items.as_ref())
             .is_some_and(|items| {
                 items

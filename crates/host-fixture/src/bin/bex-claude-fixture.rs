@@ -159,7 +159,14 @@ fn main() {
                 } else {
                     emit(
                         json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{
-                            "models":[{"value":"default","displayName":"Fixture Claude","supportedEffortLevels":["low","high"]},{"value":"haiku","displayName":"Fixture Haiku"}],
+                            "models":[
+                                {"value":"default","displayName":"Default (recommended)","description":"Opus 5 with 1M context · Best for everyday, complex tasks","supportedEffortLevels":["low","high"]},
+                                {"value":"opus[1m]","displayName":"Opus (1M context)","description":"Opus 5 with 1M context · Best for everyday, complex tasks"},
+                                {"value":"claude-fable-5-1[1m]","displayName":"Fable","description":"Fable 5.1 · Most capable for your hardest and longest-running tasks"},
+                                {"value":"sonnet","displayName":"Sonnet","description":"Sonnet 5 · Efficient for routine tasks"},
+                                {"value":"haiku","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers"},
+                                {"value":"custom","displayName":"Custom model"}
+                            ],
                             "account":if config["unauthenticated"] == true {json!({})} else {json!({"subscriptionType":"Claude Max"})}
                         }}}),
                     );
