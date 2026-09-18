@@ -1379,7 +1379,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn unsupported_provider_capabilities_are_checked_at_the_host() {
+    async fn provider_capabilities_are_checked_before_provider_availability() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
@@ -1387,11 +1387,11 @@ mod tests {
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
         let session = service.open_session(16);
-        for method in [
-            "thread/fork",
-            "thread/name/set",
-            "turn/steer",
-            "thread/queue/add",
+        for (method, expected) in [
+            ("thread/fork", "unsupported_operation"),
+            ("thread/name/set", "unsupported_operation"),
+            ("turn/steer", "claude_unavailable"),
+            ("thread/queue/add", "claude_unavailable"),
         ] {
             let call = agent_core::protocol::json_boundary::call(method, serde_json::json!({"threadId":"claude:native","clientUserMessageId":method,"lastTurnId":"turn","excludeTurns":false,"name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
             let response = service.dispatch(session.id(), &call).await.unwrap();
@@ -1400,7 +1400,7 @@ mod tests {
             >(&response.initial)
             .unwrap()
             .into_value();
-            assert_eq!(response["error"]["code"], "unsupported_operation");
+            assert_eq!(response["error"]["code"], expected, "{method}");
         }
     }
 
