@@ -1,5 +1,6 @@
 //! The visible list combines wire summaries with locally observed activity.
 use crate::{models::Project, state::Snapshot};
+use std::collections::HashSet;
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadSummary {
     pub id: String,
@@ -42,6 +43,11 @@ impl Snapshot {
 
     pub fn thread_list(&self) -> Option<ThreadList> {
         let list = self.threads.as_ref()?;
+        let project_ids: HashSet<_> = list
+            .projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect();
         let mut notices = Vec::new();
         if let Some(errors) = list.provider_errors.as_ref() {
             notices.push(format!("会話一覧は部分結果です（{}）。取得できない提供元の保存済み表示は最新とは限りません。", errors.keys().cloned().collect::<Vec<_>>().join("、")));
@@ -84,8 +90,8 @@ impl Snapshot {
                         project_id: thread
                             .project_id
                             .as_ref()
-                            .cloned()
-                            .filter(|id| list.projects.iter().any(|project| &project.id == id)),
+                            .filter(|id| project_ids.contains(id.as_str()))
+                            .cloned(),
                         active,
                         unread,
                         worktree_merged: thread.worktree_merged.unwrap_or(false),
@@ -114,6 +120,43 @@ mod tests {
         state::operations::{ListThreads, Operation},
     };
     use serde_json::json;
+
+    #[test]
+    fn list_preserves_order_and_only_exposes_known_project_membership() {
+        let mut snapshot = Snapshot::default();
+        ListThreads::new(Default::default()).apply(
+            &mut snapshot,
+            serde_json::from_value(json!({
+                "data": [
+                    {"id":"assigned", "projectId":"known"},
+                    {"id":"missing", "projectId":"absent"},
+                    {"id":"chat", "projectId":null},
+                    {"id":"unknown"}
+                ],
+                "projects":[{"id":"known", "name":"Project", "roots":[]}],
+                "moreProjectIds":["known"], "hasMoreChats":true, "hasMoreProjects":true
+            }))
+            .unwrap(),
+        );
+        let list = snapshot.thread_list().unwrap();
+        let memberships: Vec<_> = list
+            .threads
+            .iter()
+            .map(|thread| (thread.id.as_str(), thread.project_id.as_deref()))
+            .collect();
+        assert_eq!(
+            memberships,
+            vec![
+                ("assigned", Some("known")),
+                ("missing", None),
+                ("chat", None),
+                ("unknown", None)
+            ]
+        );
+        assert_eq!(list.projects[0].id, "known");
+        assert_eq!(list.more_project_ids, vec!["known"]);
+        assert!(list.has_more_chats && list.has_more_projects);
+    }
 
     #[test]
     fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {

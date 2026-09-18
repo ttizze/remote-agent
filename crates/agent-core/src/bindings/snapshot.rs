@@ -101,7 +101,9 @@ impl Snapshot {
         self.workspace.file.as_deref().cloned()
     }
     pub fn file_draft(&self, path: String) -> Option<FileDraft> {
-        self.file_drafts.get(&path).cloned()
+        self.file_drafts
+            .get(&path)
+            .map(|draft| draft.as_ref().clone())
     }
     pub fn review(&self) -> Option<Arc<WorkspaceReview>> {
         self.workspace.review.clone()

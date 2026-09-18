@@ -51,7 +51,7 @@ pub struct SaveFile {
     pub path: String,
 }
 impl Operation for SaveFile {
-    type Output = (FileDraft, FileContent);
+    type Output = (Arc<FileDraft>, FileContent);
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let submitted = context
             .snapshot
@@ -87,11 +87,12 @@ impl Operation for SaveFile {
 }
 impl SaveFile {
     fn rebase_draft(snapshot: &mut Snapshot, submitted: &FileDraft, file: &FileContent) {
-        if let Some(current) = Arc::make_mut(&mut snapshot.file_drafts).get_mut(&file.path) {
-            if current == submitted {
-                Arc::make_mut(&mut snapshot.file_drafts).remove(&file.path);
+        let drafts = Arc::make_mut(&mut snapshot.file_drafts);
+        if let Some(current) = drafts.get_mut(&file.path) {
+            if current.as_ref() == submitted {
+                drafts.remove(&file.path);
             } else if current.revision == submitted.revision {
-                current.revision = file.revision.clone();
+                Arc::make_mut(current).revision = file.revision.clone();
             }
         }
     }

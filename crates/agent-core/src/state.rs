@@ -160,7 +160,7 @@ pub struct Snapshot {
     pub requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
     pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
-    pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
+    pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     #[serde(default)]
     pub workspace: Arc<Workspace>,
     pub navigation: Arc<Navigation>,
@@ -255,7 +255,7 @@ use operations::add_attachment;
 pub struct ScopedData {
     pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
     pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
-    pub file_drafts: Arc<BTreeMap<String, FileDraft>>,
+    pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     pub navigation: Arc<Navigation>,
     pub activity: Arc<Activity>,
 }
@@ -267,7 +267,7 @@ pub struct LocalState<'a> {
     archived_scopes: &'a BTreeMap<String, Arc<ScopedData>>,
     drafts: &'a BTreeMap<String, Arc<Draft>>,
     pending_submissions: &'a BTreeMap<String, Arc<PendingSubmission>>,
-    file_drafts: &'a BTreeMap<String, FileDraft>,
+    file_drafts: &'a BTreeMap<String, Arc<FileDraft>>,
     navigation: &'a Navigation,
     activity: &'a Activity,
 }
@@ -451,10 +451,10 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             if let Some(revision) = revision {
                 Arc::make_mut(&mut next.file_drafts).insert(
                     path,
-                    FileDraft {
+                    Arc::new(FileDraft {
                         revision: revision.into(),
                         text,
-                    },
+                    }),
                 );
             } else {
                 next.error = Some("file has not been loaded".into());

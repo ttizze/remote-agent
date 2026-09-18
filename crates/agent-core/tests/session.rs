@@ -358,10 +358,10 @@ fn local_storage_keeps_user_work_without_host_caches() {
         file_drafts: Arc::new(
             [(
                 "/file.txt".into(),
-                FileDraft {
+                Arc::new(FileDraft {
                     revision: "revision".into(),
                     text: "unsaved edit".into(),
-                },
+                }),
             )]
             .into(),
         ),

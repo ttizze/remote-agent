@@ -500,10 +500,10 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
         }),
         file_drafts: Arc::new(BTreeMap::from([(
             "/old/file".into(),
-            FileDraft {
+            Arc::new(FileDraft {
                 revision: "r1".into(),
                 text: "unsaved".into(),
-            },
+            }),
         )])),
         ..Default::default()
     };
@@ -939,4 +939,47 @@ fn file_navigation_rejects_empty_and_relative_paths_before_rpc() {
     );
     assert!(snapshot.error.is_none());
     assert_eq!(effects.len(), 1);
+}
+
+#[test]
+fn editing_a_file_shares_other_drafts_and_preserves_previous_snapshots() {
+    use agent_core::state::FileDraft;
+    let original = Snapshot {
+        file_drafts: Arc::new(BTreeMap::from([
+            (
+                "/edited".into(),
+                Arc::new(FileDraft {
+                    revision: "r1".into(),
+                    text: "before".into(),
+                }),
+            ),
+            (
+                "/other".into(),
+                Arc::new(FileDraft {
+                    revision: "r2".into(),
+                    text: "large unchanged draft".repeat(1024),
+                }),
+            ),
+        ])),
+        ..Default::default()
+    };
+    let (edited, effects) = reduce(
+        &original,
+        Event::Intent(op::Intent::SetFileDraft {
+            path: "/edited".into(),
+            text: "after".into(),
+        }),
+    );
+    assert!(effects.is_empty());
+    assert_eq!(original.file_drafts["/edited"].text, "before");
+    assert_eq!(edited.file_drafts["/edited"].text, "after");
+    assert_eq!(edited.file_drafts["/edited"].revision, "r1");
+    assert!(Arc::ptr_eq(
+        &original.file_drafts["/other"],
+        &edited.file_drafts["/other"]
+    ));
+    assert!(!Arc::ptr_eq(
+        &original.file_drafts["/edited"],
+        &edited.file_drafts["/edited"]
+    ));
 }
