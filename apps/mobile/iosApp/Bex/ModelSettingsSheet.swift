@@ -2,8 +2,8 @@ import AgentCore
 import SwiftUI
 
 struct ModelSettingsSheet: View {
-    @ObservedObject var model: BexAppViewModel
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: BexAppViewModel
     @State private var changingAccount = false
     @State private var loadingModels = false
     @State private var loadingAccounts = false
@@ -13,36 +13,31 @@ struct ModelSettingsSheet: View {
             List {
                 Section("アカウント") {
                     ForEach(model.accounts, id: \.id) { account in
+                        let selected = model.snapshot.accountIsActiveForDraft(
+                            id: account.id,
+                            threadId: model.coreDraftKey
+                        )
                         VStack(alignment: .leading, spacing: 10) {
-                            Button {
-                                changingAccount = true
-                                model
-                                    .perform(.selectAccountForDraft(SelectAccountForDraft(
-                                        id: account.id,
-                                        threadId: model.coreDraftKey
-                                    ))) { _ in
-                                        changingAccount = false
-                                    }
-                            } label: {
-                                AccountIdentityRow(
-                                    account: account,
-                                    selected: model.snapshot.accountIsActiveForDraft(
-                                        id: account.id,
-                                        threadId: model.coreDraftKey
-                                    )
-                                )
+                            Button { chooseAccount(account.id) } label: {
+                                AccountIdentityRow(account: account, selected: selected)
                             }
                             .buttonStyle(.borderless)
                             .accessibilityIdentifier("model.account." + account.id)
-                            .accessibilityValue(model.snapshot.accountIsActiveForDraft(
-                                id: account.id,
-                                threadId: model.coreDraftKey
-                            ) ? "選択中" : "")
+                            .accessibilityValue(selected ? "選択中" : "")
                             .disabled(changingAccount || !model.isConnected || model.snapshot.accountLogin() != nil)
                             AccountUsageView(usage: account.usage, showsDetails: false)
-                            if model.snapshot.accountIsActiveForDraft(id: account.id, threadId: model.coreDraftKey) {
-                                accountModelControls(account.id)
-                                    .disabled(changingAccount || loadingModels || !model.isConnected)
+                            if selected {
+                                AccountModelControls(
+                                    choices: model.snapshot.accountModels(id: account.id),
+                                    currentModel: model.currentModel,
+                                    selectedModel: Binding(get: { model.selectedModel }, set: model.chooseModel),
+                                    selectedEffort: Binding(get: { model.selectedEffort }, set: model.chooseEffort),
+                                    selectedServiceTier: Binding(
+                                        get: { model.selectedServiceTier },
+                                        set: model.chooseServiceTier
+                                    )
+                                )
+                                .disabled(changingAccount || loadingModels || !model.isConnected)
                             }
                         }.padding(.vertical, 4)
                     }
@@ -78,73 +73,21 @@ struct ModelSettingsSheet: View {
                     .accessibilityIdentifier("model.close")
             } }
         }
-        .onAppear {
-            loadingAccounts = true
-            model.perform(.listAccounts(ListAccounts())) { _ in loadingAccounts = false }
-            loadingModels = true
-            model.perform(.loadModels(LoadModels())) { _ in loadingModels = false }
+        .onAppear(perform: loadSettings)
+    }
+
+    private func chooseAccount(_ id: String) {
+        changingAccount = true
+        model.perform(.selectAccountForDraft(SelectAccountForDraft(id: id, threadId: model.coreDraftKey))) { _ in
+            changingAccount = false
         }
     }
 
-    @ViewBuilder
-    private func accountModelControls(_ accountID: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("モデル").font(.caption).foregroundColor(.secondary)
-            Menu {
-                ForEach(model.snapshot.accountModels(id: accountID), id: \.id) { choice in
-                    Button { model.chooseModel(choice.model) } label: {
-                        if model.selectedModel == choice.model {
-                            Label(choice.displayName, systemImage: "checkmark")
-                        } else {
-                            Text(choice.displayName)
-                        }
-                    }
-                    .accessibilityIdentifier("model.choice." + choice.id)
-                }
-            } label: {
-                HStack {
-                    Text(model.currentModel?.displayName ?? "モデルを選択")
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
-                }
-            }
-            .buttonStyle(.borderless)
-            .accessibilityIdentifier("model.choice.menu")
-            .accessibilityValue(model.currentModel?.displayName ?? "モデルを選択")
-        }
-        modelTuning
-    }
-
-    @ViewBuilder
-    private var modelTuning: some View {
-        if let current = model.currentModel, !current.supportedReasoningEfforts.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("推論の強度").font(.caption).foregroundColor(.secondary)
-                Picker("推論の強度", selection: Binding(
-                    get: { model.selectedEffort.isEmpty ? current.defaultReasoningEffort : model.selectedEffort
-                    },
-                    set: model.chooseEffort
-                )) {
-                    ForEach(current.supportedReasoningEfforts, id: \.reasoningEffort) {
-                        Text($0.reasoningEffort).tag($0.reasoningEffort)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("model.quick.effort")
-            }
-        }
-        if let tiers = model.currentModel?.serviceTiers, !tiers.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("速度").font(.caption).foregroundColor(.secondary)
-                Picker(
-                    "サービス階層",
-                    selection: Binding(get: { model.selectedServiceTier }, set: model.chooseServiceTier)
-                ) {
-                    Text("既定").tag("")
-                    ForEach(tiers, id: \.id) { Text($0.id).tag($0.id) }
-                }.accessibilityIdentifier("model.service-tier")
-            }
-        }
+    private func loadSettings() {
+        loadingAccounts = true
+        model.perform(.listAccounts(ListAccounts())) { _ in loadingAccounts = false }
+        loadingModels = true
+        model.perform(.loadModels(LoadModels())) { _ in loadingModels = false }
     }
 }
 
