@@ -22,6 +22,9 @@ pub(crate) struct StartupConfig {
     /// Credential directory; defaults to the remembered Host or platform data directory.
     #[arg(long)]
     pub(crate) state_dir: Option<PathBuf>,
+    /// Shared provider account storage; defaults to the Host state directory.
+    #[arg(long)]
+    pub(crate) account_state_dir: Option<PathBuf>,
     /// Start a separate test/development Host, outside the user's shared instance.
     #[arg(long, requires = "state_dir")]
     pub(crate) isolated: bool,

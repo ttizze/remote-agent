@@ -83,6 +83,11 @@ nix develop . --command ./gradlew :apps:mobile:assembleDebug
 
 Rerun the iOS library build after changing Rust sources. Desktop drafts and logs use `BEX_STATE_DIR`; Host discovery may select a different credential directory. `BEX_KEY_STORAGE=file` selects file keys for a new Host. An isolated desktop requires both `BEX_ISOLATED_HOST=1` and `BEX_STATE_DIR`; use a separate Codex home or fixture executable as well so tests cannot read personal provider state.
 
+Run `nix develop . --command just dev` for a separate local Host with shared
+provider accounts and conversation history. Check active tasks and stop the old
+development Host before rebuilding; closing its window does not stop it. Avoid
+running the same conversation on both Hosts at once.
+
 ## Conversation controls
 
 On Mac and iPhone, select assistant text to quote it into the draft or ask about it in a side chat. Closing an iPhone side chat restores the original conversation and draft. Mac also supports right-click Copy and Google Search, and own-message hover actions for copying or returning text to the composer. Command activity starts collapsed while running and after reopening; explicit expansion is preserved. See the [conversation display contract](docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md).

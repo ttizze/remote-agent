@@ -17,6 +17,19 @@ build-host-macos:
 build-desktop-macos:
     scripts/build-macos.sh desktop
 
+# Launch the normal build with a separate Host and shared provider accounts.
+dev: build-desktop-macos
+    #!/usr/bin/env bash
+    set -euo pipefail
+    accounts="$HOME/Library/Application Support/app.bex.BEX"
+    if [[ -f "$accounts/host-instance.json" ]]; then
+        accounts=$(/usr/bin/plutil -extract directory raw -o - "$accounts/host-instance.json")
+    fi
+    target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
+    open -n "$target/Bex.app" --env BEX_ISOLATED_HOST=1 \
+        --env "BEX_STATE_DIR=$HOME/Library/Application Support/app.bex.BEX-Dev" \
+        --env "BEX_ACCOUNT_STATE_DIR=$accounts"
+
 # Run isolated iOS Simulator tests; reject skipped and missing results.
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"

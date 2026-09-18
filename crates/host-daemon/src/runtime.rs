@@ -73,14 +73,19 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     if let Err(error) = &app_server {
         tracing::error!(target: "bex", operation = "host.codex", message = %error);
     }
+    let account_directory = config.account_state_dir.as_deref().unwrap_or(&directory);
     let service = HostRpcService::new(app_server.clone(), projects);
     service
-        .enable_claude(config.claude, directory.join("claude"), config.claude_home)
+        .enable_claude(
+            config.claude,
+            account_directory.join("claude"),
+            config.claude_home,
+        )
         .await
         .context("cannot enable Claude")?;
     if app_server.is_ok() {
         service
-            .enable_accounts(directory.join("codex-accounts"), app_server_config)
+            .enable_accounts(account_directory.join("codex-accounts"), app_server_config)
             .await
             .map_err(anyhow::Error::msg)
             .context("cannot enable Codex accounts")?;

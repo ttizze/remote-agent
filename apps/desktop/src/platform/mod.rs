@@ -203,6 +203,9 @@ fn start_host(host: &LocalHost, isolated: bool) -> anyhow::Result<std::process::
     if isolated {
         command.arg("--isolated");
     }
+    if let Some(directory) = std::env::var_os("BEX_ACCOUNT_STATE_DIR") {
+        command.arg("--account-state-dir").arg(directory);
+    }
     os::prepare_host(&mut command);
     command.spawn().map_err(Into::into)
 }
