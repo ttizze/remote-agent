@@ -1,6 +1,6 @@
 use agent_core::protocol::Body;
 use agent_core::protocol::Call;
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use agent_core::{
     client::{self as op, AccountLogin, AccountLoginStatus},
@@ -40,6 +40,23 @@ struct Login {
     completed: bool,
 }
 
+struct Helper {
+    config: AppServerConfig,
+    server: tokio::sync::OnceCell<CodexAppServer>,
+}
+
+impl Helper {
+    async fn server(&self) -> Result<&CodexAppServer, String> {
+        self.server
+            .get_or_try_init(|| async {
+                CodexAppServer::spawn(self.config.clone())
+                    .await
+                    .map_err(|_| "Codexの認証処理を起動できませんでした。".into())
+            })
+            .await
+    }
+}
+
 // Only these helpers have separate credential stores. All thread RPCs continue
 // through the original App Server and its original CODEX_HOME.
 pub(crate) struct Accounts {
@@ -47,7 +64,7 @@ pub(crate) struct Accounts {
     default_home: PathBuf,
     config: AppServerConfig,
     registry: Registry,
-    helpers: HashMap<String, CodexAppServer>,
+    helpers: HashMap<String, Arc<Helper>>,
     login: Option<Login>,
     completed_login: Option<(String, String)>,
     usage: crate::account_usage::UsageCache,
@@ -99,7 +116,7 @@ impl Accounts {
         Ok(accounts)
     }
 
-    async fn helper(&mut self, id: &str) -> Result<&CodexAppServer, String> {
+    fn helper(&mut self, id: &str) -> Result<Arc<Helper>, String> {
         if !self.helpers.contains_key(id) {
             if id != "desktop"
                 && !self
@@ -122,12 +139,32 @@ impl Accounts {
                     .config_overrides
                     .push("cli_auth_credentials_store=\"keyring\"".into());
             }
-            let helper = CodexAppServer::spawn(config)
-                .await
-                .map_err(|_| "Codexの認証処理を起動できませんでした。")?;
-            self.helpers.insert(id.to_owned(), helper);
+            self.helpers.insert(
+                id.to_owned(),
+                Arc::new(Helper {
+                    config,
+                    server: tokio::sync::OnceCell::new(),
+                }),
+            );
         }
-        Ok(&self.helpers[id])
+        Ok(self.helpers[id].clone())
+    }
+
+    pub(crate) fn usage_request(
+        &mut self,
+        id: &str,
+    ) -> Result<impl std::future::Future<Output = op::AccountUsage> + use<>, String> {
+        let helper = self.helper(id)?;
+        let cache = self.usage.entry(id.to_owned()).or_default().clone();
+        Ok(async move {
+            cache
+                .read(async {
+                    let value =
+                        rpc(helper.server().await?, "account/rateLimits/read", json!({})).await?;
+                    Ok(crate::account_usage::codex(&value))
+                })
+                .await
+        })
     }
 
     async fn discover_desktop(&mut self) -> Result<(), String> {
@@ -139,7 +176,8 @@ impl Accounts {
         {
             return Ok(());
         }
-        let helper = self.helper("desktop").await?;
+        let helper = self.helper("desktop")?;
+        let helper = helper.server().await?;
         let info = rpc(helper, "account/read", json!({"refreshToken":false})).await?;
         if info["account"]["type"] != "chatgpt" {
             return Ok(());
@@ -159,30 +197,6 @@ impl Accounts {
         match request {
             Call::ListAccounts(_) => {
                 self.discover_desktop().await?;
-                let mut entries = Vec::new();
-                for account in self.registry.accounts.clone() {
-                    let usage = if let Some(usage) = self.usage.get(&account.id) {
-                        usage
-                    } else {
-                        let result =
-                            tokio::time::timeout(std::time::Duration::from_secs(8), async {
-                                let helper = self.helper(&account.id).await?;
-                                let value =
-                                    rpc(helper, "account/rateLimits/read", json!({})).await?;
-                                Ok(crate::account_usage::codex(&value))
-                            })
-                            .await
-                            .unwrap_or_else(|_| Err("timeout".into()));
-                        self.usage.save(account.id.clone(), result)
-                    };
-                    entries.push(op::Account {
-                        id: account.id,
-                        provider: agent_core::session::ProviderKind::Codex,
-                        email: Some(account.email),
-                        plan_type: Some(account.plan_type),
-                        usage: Some(usage),
-                    });
-                }
                 let selected = if self.restoration_error.borrow().is_some() {
                     None
                 } else {
@@ -195,7 +209,18 @@ impl Accounts {
                     })
                 };
                 Ok(op::Accounts {
-                    accounts: entries,
+                    accounts: self
+                        .registry
+                        .accounts
+                        .iter()
+                        .map(|account| op::Account {
+                            id: account.id.clone(),
+                            provider: agent_core::session::ProviderKind::Codex,
+                            email: Some(account.email.clone()),
+                            plan_type: Some(account.plan_type.clone()),
+                            usage: None,
+                        })
+                        .collect(),
                     selected_id: selected.map(str::to_owned),
                     selected_claude_id: None,
                     error: self.restoration_error.borrow().clone(),
@@ -240,7 +265,12 @@ impl Accounts {
                         .send_replace(Some("ログインするアカウントを選択してください。".into()));
                     rpc(primary, "account/logout", json!({})).await?;
                 }
-                rpc(self.helper(&params.id).await?, "account/logout", json!({})).await?;
+                rpc(
+                    self.helper(&params.id)?.server().await?,
+                    "account/logout",
+                    json!({}),
+                )
+                .await?;
                 self.helpers.remove(&params.id);
                 if self
                     .completed_login
@@ -386,7 +416,10 @@ impl Accounts {
         let login = self.login.take().unwrap();
         let _ = login.directory.keep();
         self.completed_login = Some((login.id, id.clone()));
-        self.helpers.insert(id.clone(), login.server);
+        self.helper(&id)?
+            .server
+            .set(login.server)
+            .map_err(|_| "アカウントの認証処理は既に起動しています。")?;
         Ok(AccountLoginStatus {
             completed: true,
             account_id: Some(id),
@@ -402,7 +435,7 @@ impl Accounts {
         {
             return Err("アカウントが見つかりません。".into());
         }
-        let auth = credentials(self.helper(id).await?, false).await?;
+        let auth = credentials(self.helper(id)?.server().await?, false).await?;
         rpc(
             primary,
             "account/login/start",
@@ -443,7 +476,7 @@ impl Accounts {
             None => self.registry.selected_id.clone(),
         }
         .ok_or("更新対象のアカウントが見つかりません。ログインしてください。")?;
-        credentials(self.helper(&id).await?, true).await
+        credentials(self.helper(&id)?.server().await?, true).await
     }
 
     async fn save(&self) -> Result<(), String> {

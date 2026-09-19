@@ -100,6 +100,7 @@ contracts! {
     ListWorktrees, "host/worktree/list" => (m::Empty, Vec<m::Worktree>),
     RemoveWorktree, "host/worktree/remove" => (c::RemoveWorktree, ()) [clone],
     ListAccounts, "host/account/list" => (m::Empty, c::Accounts),
+    ReadAccountUsage, "host/account/usage" => (op::ReadAccountUsage, c::AccountUsage) [clone],
     SelectAccount, "host/account/select" => (c::SelectAccount, c::AccountSelection) [clone],
     LogoutAccount, "host/account/logout" => (c::LogoutAccount, m::Empty) [clone],
     StartAccountLogin, "host/account/login/start" => (c::StartAccountLogin, c::AccountLogin) [clone],

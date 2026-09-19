@@ -598,6 +598,37 @@ impl HostRpcService {
             Call::ComposerCatalog(params) => {
                 self.inner.codex.composer_catalog(&params.cwd).await.into()
             }
+            Call::ReadAccountUsage(params) => {
+                let usage = if params.id.starts_with("claude:") {
+                    let claude = self.inner.claude.get().ok_or_else(|| {
+                        Failure::new("account_unavailable", "Claude が設定されていません。")
+                    })?;
+                    let fetch = claude
+                        .accounts
+                        .lock()
+                        .await
+                        .usage_request(&params.id)
+                        .map_err(|error| Failure::new("account_operation_failed", error))?;
+                    fetch.await
+                } else {
+                    let fetch = self
+                        .inner
+                        .accounts
+                        .lock()
+                        .await
+                        .as_mut()
+                        .ok_or_else(|| {
+                            Failure::new(
+                                "account_unavailable",
+                                "Codex のアカウント管理が利用できません。",
+                            )
+                        })?
+                        .usage_request(&params.id)
+                        .map_err(|error| Failure::new("account_operation_failed", error))?;
+                    fetch.await
+                };
+                usage.into()
+            }
             Call::ListAccounts(_)
             | Call::SelectAccount(_)
             | Call::LogoutAccount(_)

@@ -137,6 +137,7 @@ results! {
     Models(crate::client::ModelPage), WorktreeSettings(crate::models::WorktreeSettings),
     Worktrees(Vec<crate::models::Worktree>), Review(crate::models::WorkspaceReview),
     Session(crate::session::SessionRef), Empty(crate::models::Empty),
+    AccountUsage(crate::client::AccountUsage),
     Accounts(crate::client::Accounts), Selected(crate::client::AccountSelection),
     Login(crate::client::AccountLogin), LoginStatus(crate::client::AccountLoginStatus),
     Files(crate::models::FileList), File(crate::models::FileContent), Grant(crate::models::TransferGrant),

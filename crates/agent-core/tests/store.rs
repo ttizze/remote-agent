@@ -1752,11 +1752,26 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .as_deref(),
         Some("a")
     );
+    // The listing receipt resolves while both usage reads are still pending.
+    let usage_a = read(&mut reader).await;
+    let usage_c = read(&mut reader).await;
+    assert_eq!(usage_a["method"], "host/account/usage");
+    assert_eq!(usage_c["method"], "host/account/usage");
     let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount { id: "b".into() }));
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["accountId"], "b");
     writer.reply(&request, json!({"result":{"provider":"codex","selectedId":"b","persistenceError":"store unavailable"}})).await.unwrap();
     selecting.await.unwrap();
+    for request in [usage_a, usage_c] {
+        writer
+            .reply(
+                &request,
+                json!({"result":{"windows":[],"fetchedAt":1,"error":"unavailable"}}),
+            )
+            .await
+            .unwrap();
+    }
+
     assert_eq!(
         store
             .snapshot()

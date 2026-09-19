@@ -178,37 +178,38 @@ impl Accounts {
                     .any(|account| &account.id == *id)
             })
             .cloned();
-        let mut entries = self.registry.accounts.clone();
-        for account in &mut entries {
-            let usage = if let Some(usage) = self.usage.get(&account.id) {
-                usage
-            } else {
-                let result = self.read_usage(&account.id).await;
-                self.usage.save(account.id.clone(), result)
-            };
-            account.usage = Some(usage);
-        }
-        Ok((entries, selected))
+        Ok((self.registry.accounts.clone(), selected))
     }
 
-    async fn read_usage(&self, id: &str) -> Result<Vec<agent_core::client::UsageWindow>, String> {
+    pub(crate) fn usage_request(
+        &mut self,
+        id: &str,
+    ) -> Result<impl std::future::Future<Output = agent_core::client::AccountUsage> + use<>, String>
+    {
         let home = self.account_home(id)?;
-        let (mut process, _) =
-            super::process::Process::start(&self.program, &home, &self.directory, None, None, None)
-                .await?;
-        let result = tokio::time::timeout(Duration::from_secs(8), async {
-            process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
-            while let Some(message) = process.read().await? {
-                if message["type"] == "control_response" && message["response"]["request_id"] == "usage" {
-                    return if message["response"]["subtype"] == "success" {
-                        Ok(crate::account_usage::claude(&message["response"]["response"]))
-                    } else { Err("Claude usage unavailable".into()) };
-                }
-            }
-            Err("Claude exited".into())
-        }).await.unwrap_or_else(|_| Err("timeout".into()));
-        let _ = process.finish().await;
-        result
+        let program = self.program.clone();
+        let directory = self.directory.clone();
+        let cache = self.usage.entry(id.to_owned()).or_default().clone();
+        Ok(async move {
+            cache.read(async {
+                let (mut process, _) = super::process::Process::start(
+                    &program, &home, &directory, None, None, None,
+                ).await?;
+                let result = async {
+                    process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
+                    while let Some(message) = process.read().await? {
+                        if message["type"] == "control_response" && message["response"]["request_id"] == "usage" {
+                            return if message["response"]["subtype"] == "success" {
+                                Ok(crate::account_usage::claude(&message["response"]["response"]))
+                            } else { Err("Claude usage unavailable".into()) };
+                        }
+                    }
+                    Err("Claude exited".into())
+                }.await;
+                let _ = process.finish().await;
+                result
+            }).await
+        })
     }
 
     pub(crate) async fn request(&mut self, request: Call) -> Result<Body, String> {

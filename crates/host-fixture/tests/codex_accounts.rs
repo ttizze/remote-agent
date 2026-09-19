@@ -103,8 +103,29 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"][0]["email"], "desktop@example.invalid");
         assert_eq!(list["result"]["selectedId"], "desktop");
-        assert_eq!(list["result"]["accounts"][0]["usage"]["windows"][0]["remainingPercent"], 72);
-        assert_eq!(list["result"]["accounts"][0]["usage"]["windows"][1]["remainingPercent"], 86);
+        assert!(list["result"]["accounts"][0]["usage"].is_null());
+        std::fs::write(home.join("usage-paused"), "").unwrap();
+        let usage_service = service.clone();
+        let mut usage_session = service.open_session(256);
+        let usage = tokio::spawn(async move {
+            call(&usage_service, &mut usage_session, "host/account/usage", json!({"accountId":"desktop"})).await
+        });
+        while !home.join("usage-requested").exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let selected = tokio::time::timeout(std::time::Duration::from_secs(2),
+            call(&service, &mut session, "host/account/select", json!({"accountId":"desktop"})),
+        ).await.expect("selection must not wait for usage");
+        assert_eq!(selected["result"]["selectedId"], "desktop");
+        let list = tokio::time::timeout(std::time::Duration::from_secs(2),
+            call(&service, &mut session, "host/account/list", json!({})),
+        ).await.expect("listing must not wait for usage");
+        assert_eq!(list["result"]["accounts"][0]["id"], "desktop");
+        assert!(!usage.is_finished());
+        std::fs::remove_file(home.join("usage-paused")).unwrap();
+        let usage = usage.await.unwrap();
+        assert_eq!(usage["result"]["windows"][0]["remainingPercent"], 72);
+        assert_eq!(usage["result"]["windows"][1]["remainingPercent"], 86);
         let started = call(&service, &mut session, "host/thread/start", json!({"cwd":home})).await;
         let thread = started["result"]["thread"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;

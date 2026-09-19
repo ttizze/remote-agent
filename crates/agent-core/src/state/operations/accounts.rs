@@ -6,7 +6,56 @@ pub struct ListAccounts {}
 rpc::rpc_method!(ListAccounts, ListAccounts, |self| crate::models::Empty {});
 
 impl Operation for ListAccounts {
-    rpc_operation!(account.accounts);
+    rpc_operation!();
+    fn apply(self, snapshot: &mut Snapshot, mut output: Self::Output) -> Vec<Effect> {
+        let effects = output
+            .accounts
+            .iter_mut()
+            .map(|account| {
+                account.usage = snapshot
+                    .account
+                    .accounts
+                    .as_ref()
+                    .and_then(|previous| {
+                        previous
+                            .accounts
+                            .iter()
+                            .find(|old| old.id == account.id && old.email == account.email)
+                    })
+                    .and_then(|old| old.usage.clone());
+                Effect::execute(ReadAccountUsage {
+                    id: account.id.clone(),
+                    email: account.email.clone(),
+                })
+            })
+            .collect();
+        Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(output));
+        effects
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadAccountUsage {
+    #[serde(rename = "accountId")]
+    pub id: String,
+    // The native profile can change identity while a usage read is in flight.
+    #[serde(skip)]
+    email: Option<String>,
+}
+
+impl Operation for ReadAccountUsage {
+    rpc_operation!();
+    fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        if let Some(accounts) = &mut Arc::make_mut(&mut snapshot.account).accounts
+            && let Some(account) = Arc::make_mut(accounts)
+                .accounts
+                .iter_mut()
+                .find(|account| account.id == self.id && account.email == self.email)
+        {
+            account.usage = Some(output);
+        }
+        Vec::new()
+    }
 }
 
 pub use crate::client::SelectAccount;
@@ -165,6 +214,63 @@ impl Operation for SubmitAccountLogin {
 mod account_model_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn usage_updates_only_its_account_and_survives_list_refresh() {
+        let mut snapshot = Snapshot::default();
+        let accounts: rpc::Accounts = serde_json::from_value(json!({
+            "accounts": [{"id":"a","provider":"codex","email":"a@example.invalid"}, {"id":"b","provider":"codex"}],
+            "selectedId":"b"
+        })).unwrap();
+        let effects = ListAccounts {}.apply(&mut snapshot, accounts.clone());
+        assert_eq!(effects.len(), 2);
+        let usage = rpc::AccountUsage {
+            windows: vec![],
+            fetched_at: 1,
+            error: Some("unavailable".into()),
+        };
+        ReadAccountUsage {
+            id: "a".into(),
+            email: Some("a@example.invalid".into()),
+        }
+        .apply(&mut snapshot, usage.clone());
+        ListAccounts {}.apply(&mut snapshot, accounts);
+        let listed = snapshot.account.accounts.as_ref().unwrap();
+        assert_eq!(listed.selected_id.as_deref(), Some("b"));
+        assert_eq!(listed.accounts[0].usage.as_ref(), Some(&usage));
+        assert!(listed.accounts[1].usage.is_none());
+        let mut changed = (**listed).clone();
+        changed.accounts[0].email = Some("different@example.invalid".into());
+        ListAccounts {}.apply(&mut snapshot, changed);
+        ReadAccountUsage {
+            id: "a".into(),
+            email: Some("a@example.invalid".into()),
+        }
+        .apply(&mut snapshot, usage.clone());
+        assert!(
+            snapshot.account.accounts.as_ref().unwrap().accounts[0]
+                .usage
+                .is_none()
+        );
+        ListAccounts {}.apply(
+            &mut snapshot,
+            serde_json::from_value(json!({"accounts":[]})).unwrap(),
+        );
+        ReadAccountUsage {
+            id: "a".into(),
+            email: Some("a@example.invalid".into()),
+        }
+        .apply(&mut snapshot, usage);
+        assert!(
+            snapshot
+                .account
+                .accounts
+                .as_ref()
+                .unwrap()
+                .accounts
+                .is_empty()
+        );
+    }
 
     #[test]
     fn account_selection_owns_catalog_model_effort_and_speed() {

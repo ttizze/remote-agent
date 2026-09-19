@@ -2,30 +2,30 @@ use agent_core::client::{AccountUsage, UsageWindow};
 use serde_json::Value;
 use std::{
     collections::HashMap,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub(crate) type UsageCache = HashMap<String, Arc<UsageEntry>>;
+
 #[derive(Default)]
-pub(crate) struct UsageCache(HashMap<String, (Instant, AccountUsage)>);
+pub(crate) struct UsageEntry(tokio::sync::Mutex<Option<(Instant, AccountUsage)>>);
 
-impl UsageCache {
-    pub(crate) fn remove(&mut self, id: &str) {
-        self.0.remove(id);
-    }
-    pub(crate) fn get(&self, id: &str) -> Option<AccountUsage> {
-        self.0
-            .get(id)
-            .filter(|(at, _)| at.elapsed() < Duration::from_secs(60))
-            .map(|(_, usage)| usage.clone())
-    }
-
-    pub(crate) fn save(
-        &mut self,
-        id: String,
-        result: Result<Vec<UsageWindow>, String>,
+impl UsageEntry {
+    pub(crate) async fn read(
+        &self,
+        fetch: impl std::future::Future<Output = Result<Vec<UsageWindow>, String>>,
     ) -> AccountUsage {
+        // Serialize only requests for this account's usage, never account selection.
+        let mut cached = self.0.lock().await;
+        if let Some((at, usage)) = cached.as_ref()
+            && at.elapsed() < Duration::from_secs(60)
+        {
+            return usage.clone();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(8), fetch).await;
         let (windows, error) = match result {
-            Ok(windows) if !windows.is_empty() => (windows, None),
+            Ok(Ok(windows)) if !windows.is_empty() => (windows, None),
             _ => (
                 Vec::new(),
                 Some(
@@ -41,7 +41,7 @@ impl UsageCache {
                 .as_secs() as i64,
             error,
         };
-        self.0.insert(id, (Instant::now(), usage.clone()));
+        *cached = Some((Instant::now(), usage.clone()));
         usage
     }
 }
@@ -124,18 +124,33 @@ mod tests {
         assert!(claude(&json!({"rate_limits":null})).is_empty());
     }
 
-    #[test]
-    fn cached_failures_do_not_expose_old_or_other_account_usage() {
+    #[tokio::test]
+    async fn cache_is_scoped_to_account_and_expired_failures_replace_old_usage() {
         let mut cache = UsageCache::default();
-        cache.save(
-            "a".into(),
-            Ok(vec![
-                UsageWindow::from_used("5時間枠".into(), 20., None).unwrap(),
-            ]),
-        );
-        assert!(cache.get("b").is_none());
-        let failed = cache.save("a".into(), Err("private upstream error".into()));
+        let a = cache.entry("a".into()).or_default().clone();
+        let usage = a
+            .read(async {
+                Ok(vec![
+                    UsageWindow::from_used("5時間枠".into(), 20., None).unwrap(),
+                ])
+            })
+            .await;
+        let cached = a
+            .read(async { panic!("fresh usage must not be fetched again") })
+            .await;
+        assert_eq!(cached.windows, usage.windows);
+        let failed = cache
+            .entry("b".into())
+            .or_default()
+            .read(async { Err("private upstream error".into()) })
+            .await;
         assert!(failed.windows.is_empty());
         assert!(!failed.error.unwrap().contains("private"));
+        a.0.lock().await.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(61);
+        let expired = a.read(async { Err("private upstream error".into()) }).await;
+        assert!(expired.windows.is_empty());
+        assert!(expired.error.is_some());
+        cache.remove("a");
+        assert!(!Arc::ptr_eq(&a, cache.entry("a".into()).or_default()));
     }
 }

@@ -1024,7 +1024,19 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         let start = || HostFixture::start(&root, AppServerConfig { program: root.join("missing-codex"), ..Default::default() }, memory.clone(), "Claude accounts", false, Some(fixture_program()));
         let fixture = start().await.unwrap();
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
+        std::fs::write(native.join("usage-paused"), "").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), store.dispatch(Intent::ListAccounts(op::ListAccounts {})))
+            .await.expect("listing must not wait for usage").unwrap();
+        while !native.join("usage-requested").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let key = store.snapshot().navigation.draft_key.clone();
+        tokio::time::timeout(Duration::from_secs(2), store.dispatch(Intent::SelectAccountForDraft(op::SelectAccountForDraft {
+            id: "claude:desktop".into(), thread_id: key,
+        }))).await.expect("selection and model loading must not wait for usage").unwrap();
+        assert!(store.snapshot().account.accounts.as_ref().unwrap().accounts[0].usage.is_none());
+        std::fs::remove_file(native.join("usage-paused")).unwrap();
+        until(&store, |snapshot| snapshot.account.accounts.as_ref().is_some_and(|accounts| accounts.accounts[0].usage.is_some())).await;
         let usage = store.snapshot().account.accounts.as_ref().unwrap().accounts[0].usage.clone().unwrap();
         assert_eq!(usage.windows[0].remaining_percent, 28);
         assert_eq!(usage.windows[1].remaining_percent, 61);

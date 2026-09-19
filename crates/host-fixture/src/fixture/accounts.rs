@@ -34,7 +34,21 @@ impl Accounts {
                 id,
                 &json!({"account":self.current,"requiresOpenaiAuth":true}),
             ),
-            "account/rateLimits/read" => context.respond(id, &json!({"rateLimits":{"primary":{"usedPercent":28,"windowDurationMins":300,"resetsAt":2000000000},"secondary":{"usedPercent":14,"windowDurationMins":10080,"resetsAt":2000500000}}})),
+            "account/rateLimits/read" => {
+                let context = context.clone();
+                let id = id.clone();
+                tokio::task::spawn_local(async move {
+                    if context.home.join("usage-paused").exists() {
+                        fs::write(context.home.join("usage-requested"), "").unwrap();
+                        while context.home.join("usage-paused").exists() {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                    let _ = context.respond(&id, &json!({"rateLimits":{"primary":{"usedPercent":28,"windowDurationMins":300,"resetsAt":2000000000},"secondary":{"usedPercent":14,"windowDurationMins":10080,"resetsAt":2000500000}}}));
+                });
+                Ok(())
+            }
+
             "getAuthStatus" => {
                 let token = if self.current.is_null()
                     || context.home.join("auth-token-unavailable").exists()
