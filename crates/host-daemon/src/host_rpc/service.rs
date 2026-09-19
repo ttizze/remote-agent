@@ -979,8 +979,6 @@ impl HostRpcService {
         &self,
         query: ListQuery,
     ) -> Result<agent_core::models::ThreadList, Failure> {
-        let snapshot = self.project_snapshot().await?;
-        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, &query);
         let mut params = ThreadListParams {
             limit: 100,
             sort_key: "updated_at",
@@ -996,13 +994,19 @@ impl HostRpcService {
                 None => Ok(Vec::new()),
             }
         };
-        let (claude_result, codex_result) = tokio::join!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), claude_listing),
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.inner.codex.thread_page(&params)
-            ),
-        );
+        // Membership is needed to assemble the list, not to fetch provider metadata.
+        // Start all reads together so opening the app does not pay their latency in series.
+        let (snapshot, (claude_result, codex_result)) =
+            tokio::try_join!(self.project_snapshot(), async {
+                Ok(tokio::join!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), claude_listing),
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.inner.codex.thread_page(&params)
+                    ),
+                ))
+            })?;
+        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, &query);
         let mut provider_errors = serde_json::Map::new();
         let mut claude_threads = match claude_result.unwrap_or_else(|_| {
             Err(anyhow::anyhow!(
