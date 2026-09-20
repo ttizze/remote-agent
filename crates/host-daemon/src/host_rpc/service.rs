@@ -410,6 +410,7 @@ impl HostRpcService {
                 .router
                 .begin_session_read(params)
                 .map_err(anyhow::Error::msg)?;
+            let started = std::time::Instant::now();
             let mut response = match target.provider {
                 agent_core::session::ProviderKind::Claude => {
                     self.inner
@@ -423,6 +424,7 @@ impl HostRpcService {
                     self.inner.codex.read(&target.id, limit).await?
                 }
             };
+            let native_ms = started.elapsed().as_millis();
             let expected = match target.provider {
                 agent_core::session::ProviderKind::Codex => target.id.clone(),
                 agent_core::session::ProviderKind::Claude => target.thread_id(),
@@ -436,6 +438,7 @@ impl HostRpcService {
                 target.provider,
                 &self.project_snapshot().await?,
             );
+            let project_ms = started.elapsed().as_millis() - native_ms;
             let more = response.thread.history_has_more == Some(true)
                 || response
                     .thread
@@ -455,19 +458,25 @@ impl HostRpcService {
                     Vec::new(),
                 )
             });
-            self.inner
+            let reply = self.inner
                 .router
                 .finish_session_read(read, session, response)
-                .map_err(anyhow::Error::msg)
+                .map_err(anyhow::Error::msg)?;
+            tracing::info!(target: "bex", operation = "history.open",
+                message = %format_args!("native_ms={native_ms} project_ms={project_ms} total_ms={} bytes={} limit={limit}",
+                    started.elapsed().as_millis(), reply.initial.len()));
+            Ok(reply)
         }
         .await;
         match result {
             Ok(reply) => Ok(reply),
-            Err(error) => Ok(
-                Response::error("session_open_failed", &format!("{error:#}"))
+            Err(error) => {
+                let message = format!("{error:#}");
+                tracing::error!(target: "bex", operation = "history.open", message);
+                Ok(Response::error("session_open_failed", &message)
                     .map_err(invalid_message)?
-                    .into(),
-            ),
+                    .into())
+            }
         }
     }
 

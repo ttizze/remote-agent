@@ -320,7 +320,7 @@ pub fn source_order<'a>(
     order
 }
 
-fn compact_title(value: &str) -> String {
+pub(crate) fn compact_title(value: &str) -> String {
     let line = value.lines().next().unwrap_or_default().trim();
     match line.char_indices().nth(120) {
         Some((end, _)) => format!("{}…", &line[..end]),

@@ -1249,6 +1249,48 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_small_command_outputs_do_not_delay_opening_history() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let directory = tempfile::tempdir().unwrap();
+        let output = "saved command output\n".repeat(100);
+        let mut items = vec![json!({"id":"question","type":"userMessage","content":[{"type":"text","text":"Inspect the build"}]})];
+        items.extend((0..498).map(|index| json!({
+            "id":format!("command-{index}"),"type":"commandExecution",
+            "command":"cargo check","status":"completed","aggregatedOutput":output,"exitCode":0
+        })));
+        items.push(json!({"id":"answer","type":"agentMessage","phase":"final_answer","text":"The build passed"}));
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([{
+            "id":"command-history","cwd":directory.path(),"historyMode":"paginated",
+            "turns":[{"id":"turn","status":"completed","items":items}]
+        }])).unwrap()).unwrap();
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
+        local.peer.call(&op::ListThreads::new(Default::default())).await.unwrap();
+        let (opened, _updates) = local.peer.request_stream::<agent_core::session::OpenedSession>(
+            &agent_core::protocol::Call::OpenSession(agent_core::session::OpenSession {
+                session: agent_core::session::SessionRef::from_thread_id("command-history").unwrap(), limit: 5,
+            }),
+        ).await.unwrap();
+        let bytes = agent_core::protocol::encode(&opened).unwrap().len();
+        assert!(bytes < 100 * 1024, "collapsed command bodies delayed history: {bytes} bytes");
+        let turn = &opened.response.thread.turns.as_ref().unwrap()[0];
+        let loaded = turn.items.as_ref().unwrap();
+        assert_eq!(loaded.len(), 500);
+        assert_eq!(loaded[0].content, Some(items[0]["content"].clone()));
+        assert_eq!(loaded[499].text.as_deref(), Some("The build passed"));
+        assert_eq!(turn.deferred_item_ids.as_ref().unwrap().len(), 498);
+        for index in [1, 249, 498] {
+            let detail = local.peer.call(&rpc::ReadItem {
+                thread_id: "command-history".into(), turn_id: "turn".into(), item_id: loaded[index].id.clone(),
+            }).await.unwrap();
+            assert_eq!(detail.item, serde_json::from_value::<models::Item>(items[index].clone()).unwrap());
+        }
+        local.close().await;
+        fixture.close().await.unwrap();
+    }).await.expect("command history exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
