@@ -1,4 +1,4 @@
 // Separate iPhone app and sandbox for the development Host.
 PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.dev
 PRODUCT_NAME = BEX Dev
-CURRENT_PROJECT_VERSION = 2
+CURRENT_PROJECT_VERSION = 3
