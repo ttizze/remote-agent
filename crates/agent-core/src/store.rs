@@ -1,6 +1,7 @@
 //! The single state owner. Independent RPC work publishes completed results.
 use crate::{
     client::*,
+    diagnostics::ConnectionPerformance,
     peer::PeerError,
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
@@ -11,17 +12,6 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
-
-/// Durations and path kind only; never addresses, keys or conversation data.
-#[derive(Debug, Default)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct ConnectionPerformance {
-    pub endpoint_ms: u64,
-    pub transport_ms: u64,
-    pub verification_ms: u64,
-    pub reused: bool,
-    pub route: String,
-}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -45,6 +35,10 @@ pub enum Outcome {
     },
 }
 enum Command {
+    ConnectionPerformance {
+        epoch: u64,
+        performance: ConnectionPerformance,
+    },
     Browser {
         request: crate::browser::BrowserRequest,
         complete: oneshot::Sender<Result<crate::browser::BrowserFrame, PeerError>>,
@@ -427,6 +421,13 @@ impl Store {
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
         self.updates.clone()
     }
+    /// Best-effort diagnostics use the owned connection without delaying recovery.
+    pub fn record_connection_performance(&self, performance: ConnectionPerformance) {
+        let _ = self.commands.send(Command::ConnectionPerformance {
+            epoch: self.snapshot().epoch,
+            performance,
+        });
+    }
     /// Publish the pure transition before returning to a native input control.
     /// The watch lock orders publication and effect enqueueing across callers.
     /// Watch releases that lock before waking potentially reentrant FFI consumers.
@@ -763,6 +764,7 @@ async fn run(
     let events = &mut connection.events;
     let mut jobs = FuturesUnordered::new();
     let mut browser_jobs = FuturesUnordered::new();
+    let mut diagnostic_jobs = FuturesUnordered::new();
     let mut subscriptions = tokio_stream::StreamMap::new();
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
@@ -846,6 +848,15 @@ async fn run(
             command = commands.recv() => {
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
+                    Command::ConnectionPerformance { epoch, performance } => {
+                        if epoch == updates.borrow().epoch && diagnostic_jobs.is_empty() {
+                            let peer = peer.clone();
+                            diagnostic_jobs.push(async move {
+                                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), peer.call(&performance)).await;
+                            });
+                        }
+                        continue;
+                    }
                     Command::Dispatch(command) => command,
                     Command::Browser { request, complete } => {
                         if browser_jobs.len() >= 16 {
@@ -876,6 +887,7 @@ async fn run(
                 }
             }
             _ = browser_jobs.next(), if !browser_jobs.is_empty() => {},
+            _ = diagnostic_jobs.next(), if !diagnostic_jobs.is_empty() => {},
             result = jobs.next(), if !jobs.is_empty() => {
                 let mut result = result.unwrap();
                 for (id, stream) in result.subscriptions.drain(..) { subscriptions.insert(id, futures_util::stream::try_unfold(stream, |mut stream| async {
@@ -907,6 +919,7 @@ async fn run(
     }
     drop(jobs);
     drop(browser_jobs);
+    drop(diagnostic_jobs);
     peer.close().await;
     drop(connection);
     apply(&updates, Event::Disconnected(reason));
@@ -927,6 +940,7 @@ async fn run_offline(
             command = commands.recv() => match command { Some(command) => command, None => break },
         };
         let command = match command {
+            Command::ConnectionPerformance { .. } => continue,
             Command::Dispatch(command) => command,
             Command::Browser { complete, .. } => {
                 let _ = complete.send(Err(PeerError::ConnectionClosed(

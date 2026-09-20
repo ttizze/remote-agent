@@ -142,10 +142,7 @@ impl AgentStore {
     }
 
     /// Foreground recovery reuses a responsive session and the endpoint identity.
-    pub async fn resume(
-        &self,
-        connection: Connection,
-    ) -> Result<crate::store::ConnectionPerformance, AgentError> {
+    pub async fn resume(&self, connection: Connection) -> Result<(), AgentError> {
         let started = std::time::Instant::now();
         let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
         let endpoint_ms = started.elapsed().as_millis() as u64;
@@ -158,7 +155,15 @@ impl AgentStore {
                 .map_err(error)
         }?;
         performance.endpoint_ms = endpoint_ms;
-        Ok(performance)
+        performance.total_ms = started.elapsed().as_millis() as u64;
+        performance.platform = match std::env::consts::OS {
+            "ios" => crate::diagnostics::ClientPlatform::Ios,
+            "android" => crate::diagnostics::ClientPlatform::Android,
+            "macos" => crate::diagnostics::ClientPlatform::Macos,
+            _ => crate::diagnostics::ClientPlatform::Other,
+        };
+        self.store.record_connection_performance(performance);
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -411,6 +416,7 @@ mod tests {
                     let response = |request: &Value, text: &str| {
                         let result = match request["method"].as_str().unwrap() {
                             "host/session/scope" => json!("fixture-storage"),
+                            "host/diagnostics/connection" => json!({}),
                             "host/thread/list" => json!({"data":[{"id":"thread","name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":text}]}]}}}),
                             "model/list" => json!({"data":[],"nextCursor":null}),
@@ -429,8 +435,10 @@ mod tests {
                             // Do not answer the Host check. Recovery must replace this
                             // transport without waiting for the normal 30-second deadline.
                             let (next, mut next_reader, next_writer) = scoped_incoming(&host, &trust).await;
-                            for _ in 0..(2 + usize::from(selected)) {
+                            let mut reads = 0;
+                            while reads < 2 + usize::from(selected) {
                                 let request = next_reader.read_request().await.unwrap().unwrap();
+                                reads += usize::from(request["method"] != "host/diagnostics/connection");
                                 next_writer.reply(&request, response(&request, "after")).await.unwrap();
                             }
                             assert!(!matches!(reader.read_request().await, Ok(Some(_))));
@@ -469,9 +477,7 @@ mod tests {
                             .expect("foreground recovery must not wait for provider reads or shutdown deadlines");
                         eprintln!("foreground mode={mode} selected={selected} elapsed_ms={}", started.elapsed().as_millis());
                         if mode == "error" { assert!(resumed.is_err()); } else {
-                            let performance = resumed.unwrap();
-                            assert_eq!(performance.reused, !silent);
-                            assert_eq!(performance.route, "direct");
+                            resumed.unwrap();
                         }
                         if mode != "error" { loop {
                             let ready = {
@@ -491,6 +497,56 @@ mod tests {
                     first.close(); host.close().await;
                 }).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn resume_reports_connection_without_waiting_for_diagnostic_reply() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let identity = Identity::generate();
+            let trust = crate::transport::Trust {
+                allowed: [identity.node_id()].into(),
+                ..Default::default()
+            };
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                .await
+                .unwrap();
+            let store = AgentStore::offline(Vec::new()).await.unwrap();
+            let connection = Connection {
+                ticket: host.ticket().to_string(),
+                identity: identity.to_bytes().to_vec(),
+                invitation: None,
+                use_relays: false,
+            };
+            let (resumed, (session, mut reader, _writer)) = tokio::join!(
+                tokio::time::timeout(Duration::from_millis(500), store.resume(connection)),
+                scoped_incoming(&host, &trust),
+            );
+            resumed
+                .expect("connection readiness must not await diagnostics")
+                .unwrap();
+            assert!(store.snapshot().connected());
+            let report = loop {
+                let request = reader.read_request().await.unwrap().unwrap();
+                if request["method"] == "host/diagnostics/connection" {
+                    break request;
+                }
+            };
+            assert_eq!(report["params"]["route"], "Direct");
+            assert_eq!(report["params"]["reused"], false);
+            assert!(
+                report["params"]["total_ms"].as_u64().unwrap()
+                    >= report["params"]["endpoint_ms"].as_u64().unwrap()
+            );
+            // Never acknowledge the report; shutdown must cancel its pending stream.
+            tokio::time::timeout(Duration::from_millis(500), store.shutdown())
+                .await
+                .unwrap()
+                .unwrap();
+            session.close();
+            host.close().await;
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

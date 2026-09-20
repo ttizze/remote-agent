@@ -22,21 +22,21 @@ pub struct Client {
     timeout: Duration,
 }
 impl Client {
-    pub(crate) fn route(&self) -> String {
+    pub(crate) fn route(&self) -> crate::diagnostics::ConnectionRoute {
+        use crate::diagnostics::ConnectionRoute;
         self.connection
             .paths()
             .iter()
             .find(|path| path.is_selected())
-            .map_or("unknown", |path| {
+            .map_or(ConnectionRoute::Unknown, |path| {
                 if path.is_ip() {
-                    "direct"
+                    ConnectionRoute::Direct
                 } else if path.is_relay() {
-                    "relay"
+                    ConnectionRoute::Relay
                 } else {
-                    "unknown"
+                    ConnectionRoute::Unknown
                 }
             })
-            .into()
     }
 
     pub(crate) async fn connect(

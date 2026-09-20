@@ -19,7 +19,6 @@ final class BexAppViewModel: ObservableObject {
     @Published var isConnecting = false
     @Published var pairingError: String?
     @Published var connectionError: String?
-    @Published private(set) var connectionReport = "まだ接続していません"
     @Published var notice: String?
     @Published var loadingThreads = false
     @Published var loadingHistory = false
@@ -78,7 +77,6 @@ final class BexAppViewModel: ObservableObject {
         }
         isConnecting = false
         selectedProfileId = id
-        connectionReport = "接続を準備中…"
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
         publish(AgentCore.Snapshot.empty())
         let writing = persistenceWrite
@@ -238,29 +236,17 @@ extension BexAppViewModel {
         connection?.cancel()
         isConnecting = true
         connectionError = nil
-        connectionReport = "接続中…"
         notice = nil
         connection = Task { [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
             connectionPerformance.info("connection_started foreground=\(afterForeground)")
             do {
-                let performance = try await owner.resume(connection: Connection(ticket: profile.ticket,
-                                                                                identity: DeviceIdentity
-                                                                                    .loadOrGenerate(profile.id),
-                                                                                invitation: nil, useRelays: true))
+                try await owner.resume(connection: Connection(ticket: profile.ticket,
+                                                              identity: DeviceIdentity.loadOrGenerate(profile.id),
+                                                              invitation: nil, useRelays: true))
                 guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
                 let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
                 connectionPerformance.info("connection_ready elapsed_ms=\(elapsed)")
-                let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-                connectionReport = """
-                BEX build \(build) / \(afterForeground ? "復帰" : "接続")
-                接続完了まで: \(Int(elapsed)) ms
-                通信準備: \(performance.endpointMs) ms
-                通信確立: \(performance.transportMs) ms
-                Host確認: \(performance.verificationMs) ms
-                接続の再利用: \(performance.reused ? "あり" : "なし")
-                接続時の経路: \(performance.route)
-                """
                 publish(owner.snapshot())
                 notice = snapshot.error()
                 isConnecting = false
@@ -269,7 +255,6 @@ extension BexAppViewModel {
                 connectionPerformance.info("connection_ended elapsed_ms=\(elapsed) cancelled=\(Task.isCancelled)")
                 guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
                 self?.isConnecting = false
-                self?.connectionReport = "接続できませんでした（\(Int(elapsed)) ms）"
                 self?.connectionError = error.localizedDescription
                 self?.notice = error.localizedDescription
             }

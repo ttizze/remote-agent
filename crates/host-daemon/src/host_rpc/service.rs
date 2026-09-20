@@ -736,6 +736,7 @@ impl HostRpcService {
                 })?)
             .into(),
             Call::SessionScope(_) => {
+                let started = std::time::Instant::now();
                 let codex = self
                     .inner
                     .projects
@@ -751,7 +752,13 @@ impl HostRpcService {
                     .iter()
                     .map(|byte| format!("{byte:02x}"))
                     .collect();
+                tracing::info!(target: "bex", operation = "host.connection.scope",
+                    message = %format_args!("elapsed_ms={}", started.elapsed().as_millis()));
                 scope.into()
+            }
+            Call::ConnectionPerformance(performance) => {
+                agent_core::diagnostics::connection_performance(performance);
+                agent_core::models::Empty {}.into()
             }
             Call::AnswerSession(params) => (self
                 .answer_request(session, params.request_id.clone(), params.result.clone())
@@ -762,7 +769,13 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("project_add_failed", error))?)
             .into(),
-            Call::ListThreads(params) => (self.host_title_list(params.query.clone()).await?).into(),
+            Call::ListThreads(params) => {
+                let started = std::time::Instant::now();
+                let result = self.host_title_list(params.query.clone()).await;
+                tracing::info!(target: "bex", operation = "host.thread.list.performance",
+                    message = %format_args!("elapsed_ms={} success={}", started.elapsed().as_millis(), result.is_ok()));
+                result?.into()
+            }
             Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
                 let update = if let Call::UpdateWorktreeSettings(settings) = request {
                     Some(settings.clone())

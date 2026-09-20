@@ -122,6 +122,7 @@ contracts! {
     RenameThread, "thread/name/set" => (c::RenameThread, m::Empty) [clone],
     Provider, "provider" => (ProviderCall, Opaque),
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
+    ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-//! Explicit error records, never request/response payloads or third-party traces.
+//! Explicit diagnostic fields, never arbitrary payloads or third-party traces.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -15,6 +15,45 @@ use tracing_subscriber::{Layer, layer::SubscriberExt};
 const FILE_BYTES: usize = 5 * 1024 * 1024;
 const ARCHIVES: usize = 4;
 const MESSAGE_BYTES: usize = 8192;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum ConnectionRoute {
+    Direct,
+    Relay,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum ClientPlatform {
+    Ios,
+    Android,
+    Macos,
+    #[default]
+    Other,
+}
+
+/// Fixed categories and durations only: no identifiers or conversation content.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConnectionPerformance {
+    pub total_ms: u64,
+    pub endpoint_ms: u64,
+    pub transport_ms: u64,
+    pub verification_ms: u64,
+    pub reused: bool,
+    pub route: ConnectionRoute,
+    pub platform: ClientPlatform,
+}
+
+pub fn connection_performance(performance: &ConnectionPerformance) {
+    tracing::info!(target: "bex", operation = "client.connection",
+    message = %format_args!(
+        "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?}",
+        performance.platform, performance.total_ms, performance.endpoint_ms,
+        performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
+    ));
+}
+
 thread_local! {
     static WRITING: Cell<bool> = const { Cell::new(false) };
 }
@@ -409,6 +448,39 @@ mod tests {
         log.write("info", "shutdown", "Bex stopped", None, None)
             .unwrap();
         assert!(fs::read_to_string(&log.path).unwrap().contains("shutdown"));
+    }
+
+    #[test]
+    fn connection_measurements_are_written_to_the_private_host_log() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = Log::open(
+            directory.path(),
+            Component::Host,
+            FILE_BYTES,
+            "test-version",
+        )
+        .unwrap();
+        let path = log.path.clone();
+        let subscriber = tracing_subscriber::registry().with(log);
+        tracing::subscriber::with_default(subscriber, || {
+            connection_performance(&ConnectionPerformance {
+                total_ms: 1743,
+                endpoint_ms: 53,
+                transport_ms: 1083,
+                verification_ms: 580,
+                route: ConnectionRoute::Relay,
+                platform: ClientPlatform::Ios,
+                ..Default::default()
+            });
+        });
+        let record: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(record["operation"], "client.connection");
+        assert_eq!(
+            record["message"],
+            "platform=Ios total_ms=1743 endpoint_ms=53 transport_ms=1083 verification_ms=580 reused=false route=Relay"
+        );
+        assert_eq!(record["component"], "host");
+        assert!(record.get("requestId").is_none());
     }
 
     #[test]
