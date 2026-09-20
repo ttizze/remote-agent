@@ -55,9 +55,14 @@ impl PairingServer {
                     Ok(response) => response,
                     Err(_) => (503, b"Isolated Host is unavailable".to_vec()),
                 };
+                let content_type = if request.url() == "/browser-test" {
+                    "text/html; charset=utf-8"
+                } else {
+                    "application/json"
+                };
                 let response = Response::from_data(body)
                     .with_status_code(status)
-                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+                    .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
                     .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap());
                 // A disconnected Simulator request must not stop the fixture.
                 let _ = request.respond(response);
@@ -113,6 +118,9 @@ fn route(
     method: &Method,
     path: &str,
 ) -> Result<(u16, Vec<u8>)> {
+    if method == &Method::Get && path == "/browser-test" {
+        return Ok((200, br#"<title>BEX browser fixture</title><body style="margin:0"><input style="position:absolute;left:20px;top:20px;width:300px;height:40px" oninput="document.title=this.value"><p style="position:absolute;top:100px">Shared browser on the Host</p>"#.to_vec()));
+    }
     if method == &Method::Get && path == "/pairing" {
         return Ok((
             200,

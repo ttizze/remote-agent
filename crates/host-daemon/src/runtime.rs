@@ -75,6 +75,11 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     }
     let account_directory = config.account_state_dir.as_deref().unwrap_or(&directory);
     let service = HostRpcService::new(app_server.clone(), projects);
+    #[cfg(unix)]
+    service
+        .enable_browser(directory.join("browser"))
+        .await
+        .map_err(anyhow::Error::msg)?;
     service
         .enable_claude(
             config.claude,

@@ -193,7 +193,7 @@ impl Accounts {
         Ok(async move {
             cache.read(async {
                 let (mut process, _) = super::process::Process::start(
-                    &program, &home, &directory, None, None, None,
+                    &program, &home, &directory, None, None, None, None,
                 ).await?;
                 let result = async {
                     process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
