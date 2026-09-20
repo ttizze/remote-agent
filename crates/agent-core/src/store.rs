@@ -12,6 +12,17 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
+/// Durations and path kind only; never addresses, keys or conversation data.
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ConnectionPerformance {
+    pub endpoint_ms: u64,
+    pub transport_ms: u64,
+    pub verification_ms: u64,
+    pub reused: bool,
+    pub route: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Outcome {
@@ -56,6 +67,40 @@ struct Connection {
     peer: Arc<Client>,
     events: Updates,
     session: Option<crate::transport::Session>,
+}
+impl Connection {
+    async fn open(
+        endpoint: &crate::transport::Endpoint,
+        ticket: &crate::transport::Ticket,
+        invitation: Option<uuid::Uuid>,
+    ) -> Result<(Self, String, ConnectionPerformance), crate::transport::TransportError> {
+        let started = std::time::Instant::now();
+        let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| session.close());
+        let transport_ms = started.elapsed().as_millis() as u64;
+        let started = std::time::Instant::now();
+        let (peer, events) = session
+            .open_peer(std::time::Duration::from_secs(30), 64)
+            .await?;
+        if let Some(invitation) = invitation {
+            peer.call(&Pair { invitation }).await?;
+        }
+        let scope = read_storage_scope(&peer).await?;
+        let performance = ConnectionPerformance {
+            transport_ms,
+            verification_ms: started.elapsed().as_millis() as u64,
+            route: peer.route(),
+            ..Default::default()
+        };
+        Ok((
+            Self {
+                peer: Arc::new(peer),
+                events,
+                session: Some(scopeguard::ScopeGuard::into_inner(session)),
+            },
+            format!("{}:{scope}", ticket.node_id()),
+            performance,
+        ))
+    }
 }
 impl Drop for Connection {
     fn drop(&mut self) {
@@ -197,7 +242,7 @@ impl Store {
         &self,
         endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
-    ) -> Result<(), crate::transport::TransportError> {
+    ) -> Result<ConnectionPerformance, crate::transport::TransportError> {
         let attempt = {
             let mut current = self.connection_attempt.lock().unwrap();
             current.cancel();
@@ -205,64 +250,102 @@ impl Store {
             current.clone()
         };
         let guard = attempt.clone().drop_guard();
-        let (complete, receiver) = oneshot::channel();
-        self.commands
-            .send(Command::ResumePeer {
-                endpoint: endpoint.clone(),
-                remote: ticket.node_id(),
-                complete,
-            })
-            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
-        let reusable = tokio::select! {
-            biased;
-            _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
-            result = receiver => result.unwrap_or(None),
-        };
-        if let Some(peer) = reusable {
-            // Provider reads can be slow even when QUIC is healthy. Check the Host
-            // itself through the paired-client scope read so provider latency cannot
-            // force replacement and changed storage cannot reuse stale state.
-            let responsive = tokio::select! {
-                biased;
-                _ = attempt.cancelled() => return Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
-                result = tokio::time::timeout(std::time::Duration::from_secs(1), read_storage_scope(&peer)) => result,
+        let setup = async {
+            let (complete, receiver) = oneshot::channel();
+            self.commands
+                .send(Command::ResumePeer {
+                    endpoint: endpoint.clone(),
+                    remote: ticket.node_id(),
+                    complete,
+                })
+                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+            let reusable = receiver.await.unwrap_or(None);
+            let replacement = async {
+                let (connection, scope, performance) =
+                    Connection::open(endpoint, ticket, None).await?;
+                Ok::<_, crate::transport::TransportError>((Some((connection, scope)), performance))
             };
-            match responsive {
-                Ok(Ok(scope))
-                    if self.snapshot().storage_scope == format!("{}:{scope}", ticket.node_id()) =>
-                {
-                    let snapshot = self.snapshot();
-                    if let Some(id) = &snapshot.navigation.thread_id {
-                        drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
+            let (prepared, performance) = if let Some(peer) = reusable {
+                // Recovery and the liveness read start together. A dead old path
+                // cannot add its probe deadline to a working replacement's latency.
+                let scope = self.snapshot().storage_scope.clone();
+                let probe = async {
+                    let started = std::time::Instant::now();
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        read_storage_scope(&peer),
+                    )
+                    .await
+                    {
+                        Ok(Ok(current)) => Ok((scope == format!("{}:{current}", ticket.node_id()))
+                            .then(|| ConnectionPerformance {
+                                reused: true,
+                                verification_ms: started.elapsed().as_millis() as u64,
+                                route: peer.route(),
+                                ..Default::default()
+                            })),
+                        Ok(Err(
+                            error @ (PeerError::Remote { .. } | PeerError::InvalidResponse { .. }),
+                        )) => Err(error),
+                        _ => Ok(None),
                     }
-                    drop(self.dispatch(Intent::ListThreads(op::ListThreads::new(
-                        (*snapshot.list_query).clone(),
-                    ))));
-                    drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
-                    guard.disarm();
-                    return Ok(());
+                };
+                tokio::pin!(probe, replacement);
+                tokio::select! {
+                    biased;
+                    responsive = &mut probe => {
+                        if let Some(performance) = responsive? { (None, performance) } else { replacement.await? }
+                    }
+                    candidate = &mut replacement => match candidate {
+                        Ok(candidate) => candidate,
+                        // A new connection can fail while the current one remains
+                        // healthy. Never discard that working session on this error.
+                        Err(error) => {
+                            if let Some(performance) = probe.await? { (None, performance) } else { return Err(error); }
+                        }
+                    }
                 }
-                // An application response proves reachability; reconnecting cannot fix it.
-                Ok(Err(error @ (PeerError::Remote { .. } | PeerError::InvalidResponse { .. }))) => {
-                    return Err(error.into());
+            } else {
+                replacement.await?
+            };
+            let Some((connection, storage_scope)) = prepared else {
+                let snapshot = self.snapshot();
+                if let Some(id) = &snapshot.navigation.thread_id {
+                    drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
                 }
-                _ => {}
+                drop(self.dispatch(Intent::ListThreads(op::ListThreads::new(
+                    (*snapshot.list_query).clone(),
+                ))));
+                drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
+                return Ok(performance);
+            };
+            let disconnected = {
+                // Only a fully authorized replacement may retire the old session.
+                // Cancellation and the disconnect enqueue share the attempt lock.
+                let _current = self.connection_attempt.lock().unwrap();
+                if attempt.is_cancelled() {
+                    return Err(
+                        PeerError::ConnectionClosed("connection attempt cancelled".into()).into(),
+                    );
+                }
+                self.request_disconnect()?
+            };
+            disconnected
+                .await
+                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
+            self.attach_connection(connection, storage_scope, attempt.clone())
+                .await?;
+            Ok(performance)
+        };
+        tokio::select! {
+            biased;
+            _ = attempt.cancelled() => Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
+            result = setup => {
+                let performance = result?;
+                guard.disarm();
+                Ok(performance)
             }
         }
-        let disconnected = {
-            // Atomically move this same recovery attempt into replacement. A newer
-            // attempt must not be cancelled by an older read reaching its deadline.
-            let _current = self.connection_attempt.lock().unwrap();
-            if attempt.is_cancelled() {
-                return Err(
-                    PeerError::ConnectionClosed("connection attempt cancelled".into()).into(),
-                );
-            }
-            self.request_disconnect()?
-        };
-        guard.disarm();
-        self.attach_connection(endpoint, ticket, None, attempt, disconnected)
-            .await
     }
     /// Replace transport while retaining local edits. A newer reconnect or
     /// disconnect cancels setup before it can attach an obsolete connection.
@@ -271,71 +354,54 @@ impl Store {
         endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
         invitation: Option<uuid::Uuid>,
-    ) -> Result<(), crate::transport::TransportError> {
+    ) -> Result<ConnectionPerformance, crate::transport::TransportError> {
         let (attempt, disconnected) = {
             let mut current = self.connection_attempt.lock().unwrap();
             current.cancel();
             *current = self.stop.child_token();
-            // Queue replacement under the same lock as cancellation so callers
-            // cannot reorder a newer attempt behind an older disconnect.
+            // Explicit replacement releases the old connection before pairing.
             (current.clone(), self.request_disconnect()?)
         };
-        self.attach_connection(endpoint, ticket, invitation, attempt, disconnected)
-            .await
-    }
-    async fn attach_connection(
-        &self,
-        endpoint: &crate::transport::Endpoint,
-        ticket: &crate::transport::Ticket,
-        invitation: Option<uuid::Uuid>,
-        attempt: CancellationToken,
-        disconnected: oneshot::Receiver<Result<(), PeerError>>,
-    ) -> Result<(), crate::transport::TransportError> {
         let guard = attempt.clone().drop_guard();
         let setup = async {
             disconnected
                 .await
                 .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            // Explicit replacement never waits for a read on the old transport.
-            // Foreground resume has already applied its separate short deadline.
-            let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| {
-                session.close();
-            });
-            let (peer, events) = session
-                .open_peer(std::time::Duration::from_secs(30), 64)
+            let (connection, scope, performance) =
+                Connection::open(endpoint, ticket, invitation).await?;
+            self.attach_connection(connection, scope, attempt.clone())
                 .await?;
-            if let Some(invitation) = invitation {
-                peer.call(&Pair { invitation }).await?;
-            }
-            let scope = read_storage_scope(&peer).await?;
-            let (complete, result) = oneshot::channel();
-            let command = Command::Attach {
-                connection: Box::new(Connection {
-                    peer: Arc::new(peer),
-                    events,
-                    session: Some(scopeguard::ScopeGuard::into_inner(session)),
-                }),
-                attempt: attempt.clone(),
-                storage_scope: format!("{}:{scope}", ticket.node_id()),
-                complete,
-            };
-            self.commands
-                .send(command)
-                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
-            result
-                .await
-                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            Ok::<_, crate::transport::TransportError>(())
+            Ok::<_, crate::transport::TransportError>(performance)
         };
         tokio::select! {
             biased;
             _ = attempt.cancelled() => Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
             result = setup => {
-                result?;
+                let performance = result?;
                 guard.disarm();
-                Ok(())
+                Ok(performance)
             }
         }
+    }
+    async fn attach_connection(
+        &self,
+        connection: Connection,
+        storage_scope: String,
+        attempt: CancellationToken,
+    ) -> Result<(), crate::transport::TransportError> {
+        let (complete, result) = oneshot::channel();
+        self.commands
+            .send(Command::Attach {
+                connection: Box::new(connection),
+                attempt,
+                storage_scope,
+                complete,
+            })
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+        result
+            .await
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
+        Ok(())
     }
     /// Release the current transport while retaining offline editing and observers.
     pub async fn disconnect(&self) -> Result<(), PeerError> {

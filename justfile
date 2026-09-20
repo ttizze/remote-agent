@@ -47,6 +47,7 @@ android-e2e:
 # Native conversation contracts used by the post-commit Swift check.
 conversation-ui:
     scripts/ios-e2e.sh \
+        testSimulatorSharesConnectionMeasurementsAfterForeground \
         testSimulatorNativeTerminalRetainsShellAfterReopening \
         testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \

@@ -19,6 +19,7 @@ final class BexAppViewModel: ObservableObject {
     @Published var isConnecting = false
     @Published var pairingError: String?
     @Published var connectionError: String?
+    @Published private(set) var connectionReport = "まだ接続していません"
     @Published var notice: String?
     @Published var loadingThreads = false
     @Published var loadingHistory = false
@@ -77,6 +78,7 @@ final class BexAppViewModel: ObservableObject {
         }
         isConnecting = false
         selectedProfileId = id
+        connectionReport = "接続を準備中…"
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
         publish(AgentCore.Snapshot.empty())
         let writing = persistenceWrite
@@ -123,9 +125,8 @@ final class BexAppViewModel: ObservableObject {
 
     private func initialize(_ id: String, previous old: AgentStore?) async {
         connectionPerformance.info("store_initialization_started")
-        if let old {
-            try? await old.shutdown()
-        }
+        // Draining the previous Host's transport must not delay opening this Host.
+        async let previousClosed: Void? = try? old?.shutdown()
         do {
             let bytes = try await SnapshotFiles.load(id)
             connectionPerformance.info("persisted_snapshot_loaded")
@@ -153,6 +154,7 @@ final class BexAppViewModel: ObservableObject {
                 complete(.failure(error))
             }
         }
+        _ = await previousClosed
     }
 
     func pair(_ contents: String) {
@@ -197,37 +199,6 @@ final class BexAppViewModel: ObservableObject {
         } catch { pairingError = error.localizedDescription }
     }
 
-    func connect(afterForeground: Bool = false) {
-        guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
-              !isConnecting || afterForeground else { return }
-        connection?.cancel()
-        isConnecting = true
-        connectionError = nil
-        notice = nil
-        connection = Task { [weak self] in
-            let started = ProcessInfo.processInfo.systemUptime
-            connectionPerformance.info("connection_started foreground=\(afterForeground)")
-            do {
-                try await owner.resume(connection: Connection(ticket: profile.ticket,
-                                                              identity: DeviceIdentity.loadOrGenerate(profile.id),
-                                                              invitation: nil, useRelays: true))
-                guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
-                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                connectionPerformance.info("connection_ready elapsed_ms=\(elapsed)")
-                publish(owner.snapshot())
-                notice = snapshot.error()
-                isConnecting = false
-            } catch {
-                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                connectionPerformance.info("connection_ended elapsed_ms=\(elapsed) cancelled=\(Task.isCancelled)")
-                guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
-                self?.isConnecting = false
-                self?.connectionError = error.localizedDescription
-                self?.notice = error.localizedDescription
-            }
-        }
-    }
-
     func perform(_ intent: Intent, completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
         guard let owner = store else {
             if initialization != nil {
@@ -261,6 +232,50 @@ final class BexAppViewModel: ObservableObject {
 
 /// Snapshot observation, persistence and foreground recovery.
 extension BexAppViewModel {
+    func connect(afterForeground: Bool = false) {
+        guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
+              !isConnecting || afterForeground else { return }
+        connection?.cancel()
+        isConnecting = true
+        connectionError = nil
+        connectionReport = "接続中…"
+        notice = nil
+        connection = Task { [weak self] in
+            let started = ProcessInfo.processInfo.systemUptime
+            connectionPerformance.info("connection_started foreground=\(afterForeground)")
+            do {
+                let performance = try await owner.resume(connection: Connection(ticket: profile.ticket,
+                                                                                identity: DeviceIdentity
+                                                                                    .loadOrGenerate(profile.id),
+                                                                                invitation: nil, useRelays: true))
+                guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
+                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                connectionPerformance.info("connection_ready elapsed_ms=\(elapsed)")
+                let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+                connectionReport = """
+                BEX build \(build) / \(afterForeground ? "復帰" : "接続")
+                接続完了まで: \(Int(elapsed)) ms
+                通信準備: \(performance.endpointMs) ms
+                通信確立: \(performance.transportMs) ms
+                Host確認: \(performance.verificationMs) ms
+                接続の再利用: \(performance.reused ? "あり" : "なし")
+                接続時の経路: \(performance.route)
+                """
+                publish(owner.snapshot())
+                notice = snapshot.error()
+                isConnecting = false
+            } catch {
+                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
+                connectionPerformance.info("connection_ended elapsed_ms=\(elapsed) cancelled=\(Task.isCancelled)")
+                guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
+                self?.isConnecting = false
+                self?.connectionReport = "接続できませんでした（\(Int(elapsed)) ms）"
+                self?.connectionError = error.localizedDescription
+                self?.notice = error.localizedDescription
+            }
+        }
+    }
+
     func browser(_ request: BrowserRequest) async throws -> BrowserFrame {
         guard let owner = store else { throw URLError(.notConnectedToInternet) }
         let host = selectedProfileId

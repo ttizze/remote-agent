@@ -3,6 +3,25 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorSharesConnectionMeasurementsAfterForeground() throws {
+        let app = try connectedSimulatorApp()
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        app.buttons["tasks.menu"].tap()
+        app.buttons["tasks.connection-report"].tap()
+        let report = app.staticTexts["connection.report"]
+        let ready = expectation(for: NSPredicate(format: "label CONTAINS %@", "接続完了まで:"), evaluatedWith: report)
+        wait(for: [ready], timeout: 10)
+        XCTAssertTrue(report.label.contains("通信準備:"))
+        XCTAssertTrue(report.label.contains("Host確認:"))
+        XCTAssertTrue(report.label.contains("接続時の経路: direct"))
+        XCTAssertTrue(app.buttons["計測結果を共有"].isHittable)
+        app.buttons["コピー"].tap()
+        captureScreen(app, named: "Connection timing report can be shared from iPhone")
+        app.buttons["閉じる"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].exists)
+    }
+
     func testSimulatorRemovesHostAndRequiresPairingAfterRelaunch() throws {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.hosts"].tap()

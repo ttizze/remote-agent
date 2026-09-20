@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 struct ThreadsScreen: View {
     @ObservedObject var model: BexAppViewModel
@@ -7,6 +8,7 @@ struct ThreadsScreen: View {
     @State private var expandedProjectIds = Set<String>()
     @State private var worktreeHost: WorktreeSettingsHost?
     @State private var showingSettings = false
+    @State private var showingConnectionReport = false
 
     var body: some View {
         let groupedThreads = Dictionary(grouping: model.list?.threads ?? [], by: \.projectId)
@@ -208,12 +210,15 @@ struct ThreadsScreen: View {
                         .disabled(!model.isConnected)
                         .accessibilityIdentifier("tasks.worktree-settings")
                     Button { model.showProfiles() } label: { Label("PC一覧", systemImage: "laptopcomputer") }
+                    Button { showingConnectionReport = true } label: { Label("接続の計測", systemImage: "stopwatch") }
+                        .accessibilityIdentifier("tasks.connection-report")
                 } label: { Image(systemName: "ellipsis") }
                     .accessibilityLabel("その他")
                     .accessibilityIdentifier("tasks.menu")
             }
         }
         .sheet(isPresented: $showingSettings) { AppSettingsSheet(model: model) }
+        .sheet(isPresented: $showingConnectionReport) { ConnectionReportSheet(report: model.connectionReport) }
         .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(
             connected: model.isConnected && model.selectedProfileId == host.id,
             request: model.requestSnapshot,
@@ -264,5 +269,34 @@ private struct ThreadListRow: View {
         .accessibilityIdentifier("tasks.row.\(thread.id)")
         .accessibilityValue(thread.active ? "実行中" : thread.unread ? "完了・未確認" : "")
         .taskListRowStyle()
+    }
+}
+
+private struct ConnectionReportSheet: View {
+    let report: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(report)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("connection.report")
+                Text("直近の接続処理の計測です。一覧取得・画面描画の時間は含みません。")
+                    .font(.footnote).foregroundStyle(.secondary)
+                ShareLink(item: report) { Label("計測結果を共有", systemImage: "square.and.arrow.up") }
+                Button("コピー") { UIPasteboard.general.string = report }
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("接続の計測")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("閉じる") { dismiss() }
+                }
+            }
+        }
     }
 }

@@ -22,6 +22,23 @@ pub struct Client {
     timeout: Duration,
 }
 impl Client {
+    pub(crate) fn route(&self) -> String {
+        self.connection
+            .paths()
+            .iter()
+            .find(|path| path.is_selected())
+            .map_or("unknown", |path| {
+                if path.is_ip() {
+                    "direct"
+                } else if path.is_relay() {
+                    "relay"
+                } else {
+                    "unknown"
+                }
+            })
+            .into()
+    }
+
     pub(crate) async fn connect(
         connection: iroh::endpoint::Connection,
         timeout: Duration,

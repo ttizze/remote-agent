@@ -137,20 +137,28 @@ impl AgentStore {
         self.store
             .reconnect(&endpoint, &ticket, invitation)
             .await
+            .map(|_| ())
             .map_err(error)
     }
 
     /// Foreground recovery reuses a responsive session and the endpoint identity.
-    pub async fn resume(&self, connection: Connection) -> Result<(), AgentError> {
+    pub async fn resume(
+        &self,
+        connection: Connection,
+    ) -> Result<crate::store::ConnectionPerformance, AgentError> {
+        let started = std::time::Instant::now();
         let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
-        if invitation.is_none() {
+        let endpoint_ms = started.elapsed().as_millis() as u64;
+        let mut performance = if invitation.is_none() {
             self.store.resume(&endpoint, &ticket).await.map_err(error)
         } else {
             self.store
                 .reconnect(&endpoint, &ticket, invitation)
                 .await
                 .map_err(error)
-        }
+        }?;
+        performance.endpoint_ms = endpoint_ms;
+        Ok(performance)
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -378,6 +386,7 @@ mod tests {
             (false, "slow"),
             (true, "slow"),
             (true, "silent"),
+            (true, "replacement-error"),
             (true, "error"),
         ] {
             let silent = mode == "silent";
@@ -398,7 +407,7 @@ mod tests {
                     let store = AgentStore::offline(serde_json::to_vec(&snapshot).unwrap()).await.unwrap();
                     let (connected, (first, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
                     connected.unwrap();
-                    let old_ticket = store.endpoint.lock().await.as_ref().unwrap().endpoint.ticket().to_string();
+                    let old_identity = store.endpoint.lock().await.as_ref().unwrap().endpoint.node_id();
                     let response = |request: &Value, text: &str| {
                         let result = match request["method"].as_str().unwrap() {
                             "host/session/scope" => json!("fixture-storage"),
@@ -428,6 +437,15 @@ mod tests {
                             while let Ok(Some(_)) = next_reader.read_request().await {}
                             next.close();
                         } else {
+                            if mode == "replacement-error" {
+                                let incoming = host.accept().await.unwrap().unwrap().authorize(&trust).unwrap();
+                                let (candidate, mut candidate_reader, candidate_writer) = host_fixture::accept(incoming).await;
+                                let check = candidate_reader.read_request().await.unwrap().unwrap();
+                                assert_eq!(check["method"], "host/session/scope");
+                                candidate_writer.reply(&check, json!({"error":{"code":-32000,"message":"candidate rejected"}})).await.unwrap();
+                                assert!(!matches!(candidate_reader.read_request().await, Ok(Some(_))), "failed replacement must close before old connection succeeds");
+                                candidate.close();
+                            }
                             let reply = if mode == "error" {
                                 json!({"error":{"code":-32000,"message":"history unavailable"}})
                             } else { response(&request, "after") };
@@ -446,9 +464,15 @@ mod tests {
                             updates.changed().await.unwrap();
                         }
                         store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "keep draft".into() }).unwrap().wait().await.unwrap();
-                        let resumed = tokio::time::timeout(if silent { Duration::from_secs(2) } else { Duration::from_millis(500) }, store.resume(connection())).await
+                        let started = std::time::Instant::now();
+                        let resumed = tokio::time::timeout(Duration::from_millis(500), store.resume(connection())).await
                             .expect("foreground recovery must not wait for provider reads or shutdown deadlines");
-                        if mode == "error" { assert!(resumed.is_err()); } else { resumed.unwrap(); }
+                        eprintln!("foreground mode={mode} selected={selected} elapsed_ms={}", started.elapsed().as_millis());
+                        if mode == "error" { assert!(resumed.is_err()); } else {
+                            let performance = resumed.unwrap();
+                            assert_eq!(performance.reused, !silent);
+                            assert_eq!(performance.route, "direct");
+                        }
                         if mode != "error" { loop {
                             let ready = {
                                 let snapshot = updates.borrow_and_update();
@@ -460,7 +484,7 @@ mod tests {
                         } }
                         assert!(store.snapshot().connected());
                         assert_eq!(store.snapshot().drafts["thread"].text, "keep draft");
-                        assert_eq!(store.endpoint.lock().await.as_ref().unwrap().endpoint.ticket().to_string(), old_ticket, "recovery retains the endpoint");
+                        assert_eq!(store.endpoint.lock().await.as_ref().unwrap().endpoint.node_id(), old_identity, "recovery retains the endpoint identity; discovered addresses can change");
                         store.shutdown().await.unwrap();
                     };
                     tokio::join!(server, client);
@@ -513,6 +537,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(request["method"], "host/session/scope");
+        let candidate = host
+            .accept()
+            .await
+            .unwrap()
+            .unwrap()
+            .authorize(&trust)
+            .unwrap();
+        let (candidate, mut candidate_reader, _candidate_writer) =
+            host_fixture::accept(candidate).await;
+        let check =
+            tokio::time::timeout(Duration::from_millis(500), candidate_reader.read_request())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(check["method"], "host/session/scope");
         tokio::time::timeout(Duration::from_millis(500), store.disconnect())
             .await
             .unwrap()
@@ -526,11 +566,21 @@ mod tests {
         );
         assert!(!store.snapshot().connected);
         assert!(
+            !matches!(
+                tokio::time::timeout(Duration::from_millis(500), candidate_reader.read_request())
+                    .await
+                    .unwrap(),
+                Ok(Some(_))
+            ),
+            "cancellation must close a fully established speculative session without issuing further reads"
+        );
+        assert!(
             tokio::time::timeout(Duration::from_millis(1100), host.accept())
                 .await
                 .is_err(),
-            "cancelled recovery must not reconnect after its read deadline"
+            "cancelled recovery must not start another connection"
         );
+        candidate.close();
         store.close().await.unwrap();
         drop((old_reader, old_writer));
         old.close();
