@@ -34,6 +34,9 @@ impl Accounts {
                 id,
                 &json!({"account":self.current,"requiresOpenaiAuth":true}),
             ),
+            "account/rateLimits/read" if self.current["type"] == "apiKey" => {
+                context.error(id, -32602, "API accounts have no subscription limits")
+            }
             "account/rateLimits/read" => {
                 let context = context.clone();
                 let id = id.clone();
@@ -49,6 +52,10 @@ impl Accounts {
                 Ok(())
             }
 
+            "getAuthStatus" if self.current["type"] == "apiKey" => context.respond(
+                id,
+                &json!({"authMethod":"apikey","authToken":"fixture-api-key"}),
+            ),
             "getAuthStatus" => {
                 let token = if self.current.is_null()
                     || context.home.join("auth-token-unavailable").exists()
@@ -62,6 +69,13 @@ impl Accounts {
                     ))
                 };
                 context.respond(id, &json!({"authMethod":if token.is_some() { Some("chatgpt") } else { None },"authToken":token}))
+            }
+            "account/login/start" if params["type"] == "apiKey" => {
+                if params["apiKey"] != "fixture-api-key" {
+                    return context.error(id, -32602, "API key mismatch");
+                }
+                self.current = json!({"type":"apiKey"});
+                context.respond(id, &json!({"type":"apiKey"}))
             }
             "account/login/start" if params["type"] == "chatgptAuthTokens" => {
                 let payload = params["accessToken"]

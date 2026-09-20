@@ -45,6 +45,12 @@ pub(crate) struct StartupConfig {
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Mode {
+    /// Print a one-use iPhone/Android pairing invitation as JSON (valid for five minutes).
+    Invite,
+    /// Print the running Host's identity, paired devices and provider errors as JSON.
+    Status,
+    /// Revoke a paired device and close its active connections.
+    Revoke { node_id: String },
     #[command(hide = true)]
     BrowserMcp {
         #[arg(long)]

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Recognize native Codex API-key accounts on shared Hosts, including account selection and restoration after restart. Keep API billing separate from ChatGPT subscription usage and verify selection, logout and credential exclusion from the account registry.
+
+- Add `host-daemon invite`, `status` and `revoke` for headless Linux administration. Reuse the running Host's local identity and core RPC operations to pair iPhone/Android, inspect devices and revoke access without a desktop. Verify one-use pairing, revocation, unchanged credentials and stopped-Host rejection against a real isolated daemon.
+
 - Reuse responsive iPhone connections on foreground return. Check Host reachability with a one-second recovery deadline, refresh the open conversation and task list in the background, retain the endpoint when replacement is needed, and close the old session without waiting for graceful delivery acknowledgments. Preserve drafts, avoid reconnecting on application errors, and cancel obsolete foreground attempts. Acceptance: real-iroh foreground reuse, timeout, error and cancellation tests plus isolated iOS foreground conversation/list tests.
 
 - Replace the iOS expanded-image thumbnail sidebar with native Quick Look paging, keeping selection stable during image downloads; prepare iOS build 53. Acceptance: `testSimulatorBrowsesAllSessionImagesAndSavesTheSelection` verifies the missing sidebar, traversal of all eight images, both boundaries, saving the selection and returning to the conversation.
