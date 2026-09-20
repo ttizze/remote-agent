@@ -58,7 +58,7 @@ Host 切替時は旧 Store の終了と新 Store の初期化を並行し、旧�
 Host の scope 検証は `host.connection.scope`、一覧処理は
 `host.thread.list.performance` に Host 内部の所要時間を記録する。
 
-## 初回一覧の並行取得（Dev 6）
+## 初回一覧の並行取得（Dev 7）
 
 TLS 接続・ペアリング後、scope 確認と初回の一覧要求を同時に送る。
 scope が検証されるまで Store に接続を採用せず、一覧を公開しない。
