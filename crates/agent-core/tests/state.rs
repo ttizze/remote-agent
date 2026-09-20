@@ -938,19 +938,21 @@ fn unknown_submission_can_be_restored_or_discarded() {
             delivery_unknown: true,
         })
     };
-    let mut snapshot = Snapshot::default();
-    snapshot.pending_submissions = Arc::new(BTreeMap::from([
-        ("restore".into(), pending("uncertain")),
-        ("discard".into(), pending("unwanted")),
-    ]));
-    snapshot.drafts = Arc::new(BTreeMap::from([(
-        "thread".into(),
-        Arc::new(Draft {
-            text: "newer".into(),
-            attachments: vec![attachment("/newer")],
-            ..Default::default()
-        }),
-    )]));
+    let snapshot = Snapshot {
+        pending_submissions: Arc::new(BTreeMap::from([
+            ("restore".into(), pending("uncertain")),
+            ("discard".into(), pending("unwanted")),
+        ])),
+        drafts: Arc::new(BTreeMap::from([(
+            "thread".into(),
+            Arc::new(Draft {
+                text: "newer".into(),
+                attachments: vec![attachment("/newer")],
+                ..Default::default()
+            }),
+        )])),
+        ..Default::default()
+    };
 
     let (snapshot, effects) = reduce(
         &snapshot,
@@ -981,22 +983,24 @@ fn unknown_submission_can_be_restored_or_discarded() {
 
 #[test]
 fn unresolved_submission_actions_ignore_known_delivery_states() {
-    let mut snapshot = Snapshot::default();
-    snapshot.pending_submissions = Arc::new(BTreeMap::from([(
-        "sending".into(),
-        Arc::new(agent_core::state::PendingSubmission {
-            sequence: 0,
-            draft_key: "thread".into(),
-            draft: Arc::new(Draft {
-                text: "sending".into(),
-                ..Default::default()
+    let snapshot = Snapshot {
+        pending_submissions: Arc::new(BTreeMap::from([(
+            "sending".into(),
+            Arc::new(agent_core::state::PendingSubmission {
+                sequence: 0,
+                draft_key: "thread".into(),
+                draft: Arc::new(Draft {
+                    text: "sending".into(),
+                    ..Default::default()
+                }),
+                turn_id: None,
+                after_item_id: None,
+                accepted: false,
+                delivery_unknown: false,
             }),
-            turn_id: None,
-            after_item_id: None,
-            accepted: false,
-            delivery_unknown: false,
-        }),
-    )]));
+        )])),
+        ..Default::default()
+    };
 
     for intent in [
         Intent::RestoreUnknownSubmission {
