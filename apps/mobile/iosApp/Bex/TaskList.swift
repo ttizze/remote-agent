@@ -140,6 +140,16 @@ struct ThreadsScreen: View {
             }
             .listSectionSeparator(.hidden)
         }
+        .onChange(of: model.threadLoadState) { _, state in
+            if state == .ready {
+                model.recordListViewUpdate()
+            }
+        }
+        .onAppear {
+            if model.threadLoadState == .ready {
+                model.recordListViewUpdate()
+            }
+        }
         .listStyle(.plain)
         .environment(\.defaultMinListRowHeight, 52)
         .background(Color(UIColor.systemBackground))

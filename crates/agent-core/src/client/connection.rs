@@ -1,4 +1,5 @@
 //! Bex requests own independent QUIC streams. Provider JSONL state stays in `peer`.
+use crate::diagnostics::{ConnectionPhase as Phase, connection::Trace};
 use crate::{
     peer::{Delivery, PeerError},
     protocol::{self, Call, Response},
@@ -21,26 +22,32 @@ pub type HostPeer = iroh::endpoint::SendStream;
 pub struct HostRequest {
     pub call: Call,
     pub send: iroh::endpoint::SendStream,
+    pub accepted_at: std::time::Instant,
+    pub decoded_at: std::time::Instant,
 }
 pub struct Client {
     connection: iroh::endpoint::Connection,
+    pub(crate) trace: Arc<Trace>,
+    pub(crate) diagnostic_id: u64,
     permits: Arc<Semaphore>,
     timeout: Duration,
     initial_list: Mutex<Option<(crate::models::ListQuery, PendingReply)>>,
 }
 struct PendingReply {
-    reader: Updates,
-    deadline: Instant,
+    response: tokio_util::task::AbortOnDropHandle<
+        Result<(tokio_util::bytes::BytesMut, Updates), PeerError>,
+    >,
+    stream: u64,
     _permit: OwnedSemaphorePermit,
 }
 impl Client {
-    pub(crate) fn connection_path(&self) -> (crate::diagnostics::ConnectionRoute, u64) {
+    fn path_sample(&self) -> (crate::diagnostics::ConnectionRoute, Option<u64>) {
         use crate::diagnostics::ConnectionRoute;
         self.connection
             .paths()
             .iter()
             .find(|path| path.is_selected())
-            .map_or((ConnectionRoute::Unknown, 0), |path| {
+            .map_or((ConnectionRoute::Unknown, None), |path| {
                 let route = if path.is_ip() {
                     ConnectionRoute::Direct
                 } else if path.is_relay() {
@@ -48,14 +55,20 @@ impl Client {
                 } else {
                     ConnectionRoute::Unknown
                 };
-                (route, path.rtt().as_millis() as u64)
+                (route, Some(path.rtt().as_micros() as u64))
             })
+    }
+    pub(crate) fn connection_path(&self) -> (crate::diagnostics::ConnectionRoute, u64) {
+        let (route, rtt) = self.path_sample();
+        (route, rtt.unwrap_or(0) / 1000)
     }
 
     pub(crate) async fn connect(
         connection: iroh::endpoint::Connection,
         timeout: Duration,
         max_requests: usize,
+        trace: Arc<Trace>,
+        diagnostic_id: u64,
     ) -> Result<(Self, Updates), PeerError> {
         if max_requests == 0 {
             return Err(invalid("max_requests must be positive"));
@@ -63,15 +76,17 @@ impl Client {
         let (mut send, recv) = connection.open_bi().await.map_err(invalid)?;
         send.write_all(&[EVENTS]).await.map_err(invalid)?;
         send.finish().map_err(invalid)?;
-        Ok((
-            Self {
-                connection,
-                permits: Arc::new(Semaphore::new(max_requests)),
-                timeout,
-                initial_list: Mutex::new(None),
-            },
-            protocol::Reader::new(recv),
-        ))
+        trace.record(Phase::EventsOpened, diagnostic_id, u64::from(send.id()), 0);
+        let client = Self {
+            connection,
+            trace,
+            diagnostic_id,
+            permits: Arc::new(Semaphore::new(max_requests)),
+            timeout,
+            initial_list: Mutex::new(None),
+        };
+        client.record_path();
+        Ok((client, protocol::Reader::new(recv)))
     }
     pub async fn close(&self) {
         // Observe shutdown before a short-lived CLI exits its runtime.
@@ -95,10 +110,19 @@ impl Client {
         call: &Call,
     ) -> Result<(T, Updates), PeerError> {
         let (initial, updates) = self.call_stream(call).await?;
-        Ok((
-            response(protocol::decode(&initial).map_err(invalid)?)?,
-            updates,
-        ))
+        let started = std::time::Instant::now();
+        let result = protocol::decode(&initial)
+            .map_err(invalid)
+            .and_then(response);
+        if !matches!(call, Call::ConnectionPerformance(_)) {
+            self.trace.record(
+                Phase::ResponseDecoded,
+                self.diagnostic_id,
+                updates.stream_id(),
+                started.elapsed().as_micros() as u64,
+            );
+        }
+        result.map(|result| (result, updates))
     }
     /// Send the first title read while storage-scope verification is in flight.
     /// Its ordinary caller consumes the reply once, with the original deadline.
@@ -113,7 +137,9 @@ impl Client {
         Ok(())
     }
     async fn start_call(&self, call: &Call) -> Result<PendingReply, PeerError> {
+        let started = std::time::Instant::now();
         let deadline = Instant::now() + self.timeout;
+        let measured = !matches!(call, Call::ConnectionPerformance(_));
         let work = async {
             let permit = self
                 .permits
@@ -122,12 +148,51 @@ impl Client {
                 .await
                 .map_err(invalid)?;
             let (mut send, recv) = self.connection.open_bi().await.map_err(invalid)?;
+            let stream = u64::from(send.id());
+            if measured {
+                self.trace.record(
+                    Phase::RequestOpened,
+                    self.diagnostic_id,
+                    stream,
+                    started.elapsed().as_micros() as u64,
+                );
+            }
             send.write_all(&[CALL]).await.map_err(invalid)?;
-            protocol::write(&mut send, call).await.map_err(invalid)?;
+            let bytes = protocol::encode(call).map_err(invalid)?;
+            protocol::write_frame(&mut send, &bytes)
+                .await
+                .map_err(invalid)?;
             send.finish().map_err(invalid)?;
+            if measured {
+                self.trace.record(
+                    Phase::RequestSent,
+                    self.diagnostic_id,
+                    stream,
+                    bytes.len() as u64,
+                );
+            }
+            let mut reader = if measured {
+                protocol::Reader::observed(recv, self.trace.clone(), self.diagnostic_id)
+            } else {
+                protocol::Reader::new(recv)
+            };
+            let method = call.method().to_owned();
+            let response = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                let read = async {
+                    let initial = reader
+                        .read_frame()
+                        .await
+                        .map_err(invalid)?
+                        .ok_or_else(|| invalid("response stream ended before its result"))?;
+                    Ok((initial, reader))
+                };
+                tokio::time::timeout_at(deadline, read)
+                    .await
+                    .unwrap_or_else(|_| Err(PeerError::RequestTimeout { method }))
+            }));
             Ok(PendingReply {
-                reader: protocol::Reader::new(recv),
-                deadline,
+                response,
+                stream,
                 _permit: permit,
             })
         };
@@ -156,25 +221,105 @@ impl Client {
             Some(reply) => reply,
             None => self.start_call(call).await?,
         };
-        let deadline = reply.deadline;
-        let work = async {
-            let initial = reply
-                .reader
-                .read_frame()
-                .await
-                .map_err(invalid)?
-                .ok_or_else(|| invalid("response stream ended before its result"))?;
-            Ok((initial, reply.reader))
-        };
-        tokio::select! {
-            reason = self.connection.closed() => Err(PeerError::ConnectionClosed(reason.to_string())),
-            result = tokio::time::timeout_at(deadline, work) => result.unwrap_or_else(|_| Err(PeerError::RequestTimeout {method: call.method().into()})),
+        let stream = reply.stream;
+        let measured = !matches!(call, Call::ConnectionPerformance(_));
+        if measured {
+            self.trace
+                .record(Phase::ReplyAdopted, self.diagnostic_id, stream, 0);
         }
+        let result = tokio::select! {
+            reason = self.connection.closed() => Err(PeerError::ConnectionClosed(reason.to_string())),
+            result = &mut reply.response => result.map_err(invalid).and_then(|result| result),
+        };
+        if measured {
+            if result.is_err() {
+                self.trace
+                    .record(Phase::RequestFailed, self.diagnostic_id, stream, 0);
+            }
+            self.record_path();
+        }
+        result
+    }
+    pub(crate) async fn observe_paths(&self) {
+        use futures_util::StreamExt;
+        use iroh::endpoint::PathEvent;
+        let mut events = self.connection.path_events();
+        while let Some(event) = events.next().await {
+            let (phase, value) = match event {
+                PathEvent::Opened { remote_addr, .. } => {
+                    (Phase::PathOpened, route_code(&remote_addr))
+                }
+                PathEvent::Closed { remote_addr, .. } => {
+                    (Phase::PathClosed, route_code(&remote_addr))
+                }
+                PathEvent::Selected { remote_addr, .. } => {
+                    (Phase::PathSelected, route_code(&remote_addr))
+                }
+                PathEvent::Lagged { missed, .. } => (Phase::PathEventsDropped, missed),
+                _ => continue,
+            };
+            self.trace.record(phase, self.diagnostic_id, 0, value);
+            self.record_path();
+        }
+    }
+    pub(crate) fn record_path(&self) {
+        use crate::diagnostics::ConnectionRoute;
+        let (route, rtt) = self.path_sample();
+        let phase = match route {
+            ConnectionRoute::Direct => Phase::PathDirect,
+            ConnectionRoute::Relay => Phase::PathRelay,
+            ConnectionRoute::Unknown => Phase::PathUnknown,
+        };
+        self.trace.record(phase, self.diagnostic_id, 0, 0);
+        if let Some(rtt) = rtt {
+            self.trace
+                .record(Phase::RttMicros, self.diagnostic_id, 0, rtt);
+        }
+        let stats = self.connection.stats();
+        self.trace.record(
+            Phase::LostPackets,
+            self.diagnostic_id,
+            0,
+            stats.lost_packets,
+        );
+        self.trace
+            .record(Phase::LostBytes, self.diagnostic_id, 0, stats.lost_bytes);
+        self.trace.record(
+            Phase::CryptoFramesSent,
+            self.diagnostic_id,
+            0,
+            stats.frame_tx.crypto,
+        );
+        self.trace.record(
+            Phase::CryptoFramesReceived,
+            self.diagnostic_id,
+            0,
+            stats.frame_rx.crypto,
+        );
+        self.trace.record(
+            Phase::SentPackets,
+            self.diagnostic_id,
+            0,
+            stats.udp_tx.datagrams,
+        );
+        self.trace.record(
+            Phase::ReceivedPackets,
+            self.diagnostic_id,
+            0,
+            stats.udp_rx.datagrams,
+        );
     }
 }
 impl Drop for Client {
     fn drop(&mut self) {
         self.connection.close(0u8.into(), b"peer dropped");
+    }
+}
+fn route_code(address: &iroh::TransportAddr) -> u64 {
+    match address {
+        iroh::TransportAddr::Ip(_) => 1,
+        iroh::TransportAddr::Relay(_) => 2,
+        _ => 0,
     }
 }
 fn response<T>(response: Response<T>) -> Result<T, PeerError> {
@@ -196,6 +341,42 @@ fn invalid(error: impl std::fmt::Display) -> PeerError {
 mod tests {
     use super::*;
     use crate::transport::{Endpoint, Identity, IncomingRequest, Relays, Trust};
+
+    #[tokio::test]
+    async fn early_reply_is_measured_before_adoption_without_exposing_its_payload() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
+            let ticket = host.ticket();
+            let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
+            let session = session.unwrap();
+            let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+            let (remote, events) = tokio::join!(session.open_peer(Duration::from_secs(2), 1), incoming.accept_peer());
+            let (remote, _updates) = remote.unwrap();
+            let _events = events.unwrap();
+            let call = Call::SessionScope(crate::models::Empty {});
+            let mut pending = remote.start_call(&call).await.unwrap();
+            let crate::transport::IncomingRequest::Call(mut request) = incoming.accept_request().await.unwrap() else { panic!("call expected") };
+            let stream = u64::from(request.send.id());
+            protocol::write(&mut request.send, Response::Success { result: "private-payload" }).await.unwrap();
+            request.send.finish().unwrap();
+            loop {
+                if remote.trace.snapshot().events.iter().any(|event| event.phase == Phase::ResponseReceived && event.stream == stream) { break; }
+                tokio::task::yield_now().await;
+            }
+            // The owner has not adopted/awaited this reply, but wire reading is done.
+            let snapshot = remote.trace.snapshot();
+            assert!(snapshot.events.iter().any(|event| event.phase == Phase::ResponseFirstRead && event.stream == stream));
+            assert!(!snapshot.events.iter().any(|event| event.phase == Phase::ReplyAdopted));
+            assert!(!serde_json::to_string(&snapshot).unwrap().contains("private-payload"));
+            let (bytes, _) = (&mut pending.response).await.unwrap().unwrap();
+            assert!(matches!(protocol::decode::<Response<String>>(&bytes).unwrap(), Response::Success { result } if result == "private-payload"));
+            drop(pending);
+            assert_eq!(remote.permits.available_permits(), 1);
+            session.close(); incoming.close(); client.close().await; host.close().await;
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn pipelined_read_keeps_its_deadline_and_releases_its_request_slot() {

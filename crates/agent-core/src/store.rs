@@ -1,7 +1,7 @@
 //! The single state owner. Independent RPC work publishes completed results.
 use crate::{
     client::*,
-    diagnostics::ConnectionPerformance,
+    diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
     peer::PeerError,
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
@@ -90,6 +90,7 @@ impl Connection {
             route,
             rtt_ms,
             resolution_ms: session.resolution_ms(),
+            connection_id: peer.diagnostic_id,
             ..Default::default()
         };
         Ok((
@@ -288,6 +289,7 @@ impl Store {
                                 let (route, rtt_ms) = peer.connection_path();
                                 ConnectionPerformance {
                                     reused: true,
+                                    connection_id: peer.diagnostic_id,
                                     verification_ms: started.elapsed().as_millis() as u64,
                                     route,
                                     rtt_ms,
@@ -404,6 +406,9 @@ impl Store {
         storage_scope: String,
         attempt: CancellationToken,
     ) -> Result<(), crate::transport::TransportError> {
+        let trace = connection.peer.trace.clone();
+        let group = connection.peer.diagnostic_id;
+        trace.record(Phase::AttachStart, group, 0, 0);
         let (complete, result) = oneshot::channel();
         self.commands
             .send(Command::Attach {
@@ -416,6 +421,7 @@ impl Store {
         result
             .await
             .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
+        trace.record(Phase::AttachReady, group, 0, 1);
         Ok(())
     }
     /// Release the current transport while retaining offline editing and observers.
@@ -870,10 +876,30 @@ async fn run(
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
                     Command::ConnectionPerformance { epoch, performance } => {
-                        if epoch == updates.borrow().epoch && diagnostic_jobs.is_empty() {
+                        if epoch == updates.borrow().epoch && performance.connection_id == peer.diagnostic_id {
+                            diagnostic_jobs.clear();
                             let peer = peer.clone();
                             diagnostic_jobs.push(async move {
-                                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), peer.call(&performance)).await;
+                                let reports = async {
+                                let started = tokio::time::Instant::now();
+                                let mut sent_sequence = 0;
+                                for (report, delay) in [0, 1, 3, 10, 25].into_iter().enumerate() {
+                                    tokio::time::sleep_until(started + std::time::Duration::from_secs(delay)).await;
+                                    peer.record_path();
+                                    let mut performance = performance.clone();
+                                    performance.report = report as u8;
+                                    performance.timeline = peer.trace.snapshot();
+                                    performance.timeline.events.retain(|event| event.sequence > sent_sequence);
+                                    let last = performance.timeline.events.last().map_or(sent_sequence, |event| event.sequence);
+                                    if matches!(tokio::time::timeout(std::time::Duration::from_secs(2), peer.call(&performance)).await, Ok(Ok(_))) {
+                                        sent_sequence = last;
+                                    }
+                                }
+                                };
+                                tokio::select! {
+                                    _ = reports => {},
+                                    _ = peer.observe_paths() => {},
+                                }
                             });
                         }
                         continue;

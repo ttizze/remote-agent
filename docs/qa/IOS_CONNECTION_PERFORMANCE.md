@@ -1,84 +1,126 @@
-# iPhone 起動時の接続計測
+# iPhone 接続の自動計測
 
-Host と iOS アプリを同じ作業ツリーからビルドして確認する。シミュレータの
-loopback 接続の値を、実機の Wi-Fi / モバイル回線の改善幅として扱わない。
+Host とクライアントを同じリビジョンからビルドして配布する。
+Dev 7 は接続後に詳細なタイムラインを Host の非公開 `logs/host.jsonl` へ送る。
+iPhone で診断のコピー、共有、計測の開始操作は不要。
+シミュレータや Mac の数値を実機の国際回線の性能として扱わない。
 
-iOS の統合ログで subsystem `app.bex.BEX`、category
-`connection-performance` を選び、Info メッセージを含めて採取する。
-ログは時刻・処理段階・所要時間・真偽値のみで、接続チケット、端末鍵、会話本文を含まない。
-[Apple の Logger.info ドキュメント](https://developer.apple.com/documentation/os/logger/info(_:))
-に従い、Info ログは常時ディスク保存される前提にせず、再現前から収集する。
+## 計測範囲
 
-| イベント | 意味 |
+| 段階 | 記録する境界・値 |
 | --- | --- |
-| `app_model_started` | アプリの ViewModel 初期化開始 |
-| `store_initialization_started` | 保存状態の読み込み前。Host 切替時は旧 Store の終了も含む |
-| `persisted_snapshot_loaded` | 保存ファイル読み込み完了 |
-| `store_ready` | Core の保存状態復元完了 |
-| `connection_started` | 接続・復帰開始。`foreground` は背景からの復帰かどうか |
-| `connection_ready elapsed_ms=…` | Core の接続・復帰処理が返った時点。単調時計による所要時間 |
-| `connection_ended elapsed_ms=… cancelled=…` | 接続処理がエラーまたはキャンセルで終了 |
-| `list_published connected=… has_list=…` | 一覧の変更を ViewModel が公開 |
+| iOS 準備 | 保存状態の読み込み、Core 復元、Keychain 読み込み、接続呼出し・復帰 |
+| Endpoint | 生成開始・完了。再利用なら生成イベントなし |
+| Host の探索 | 接続先準備開始・完了、DNS lookup の開始・成功・終了 |
+| Relay の確立 | DNS 開始、IPv4/IPv6 候補、TCP 試行・成功・失敗、TLS、WebSocket、Relay 認証 |
+| QUIC | 接続開始・完了・失敗、接続直後の RTT と送受信・損失統計 |
+| 各要求 | スロット待ち、ストリーム確保、送信、最初の読み取り、先頭応答フレーム受信完了、デコード |
+| Host | 同じストリームの受理時点、要求読取・デコード、実行待ち、処理・エンコード、書込、応答バイト数 |
+| 一覧 | 先行取得した応答の採用、ViewModel への公開、SwiftUI の一覧状態更新・出現 |
+| 経路 | 各応答後と接続後の直接／中継経路、推定 RTT、損失パケット・バイト数、送受信パケット・暗号ハンドシェイクフレーム数 |
 
-`connection_started` から接続完了までが長ければ接続経路を調べる。
-接続完了後の一覧公開までが長ければ Host の一覧取得を調べる。
-`connected=false` の一覧は保存済み表示として区別する。一覧公開は
-`connection_ready` より先に届くこともあるため、ログの記録順だけで処理順を仮定しない。
-一覧公開は描画完了やサーバー応答そのものの計測ではなく、状態更新の観測点である。
-起動直後の区間で比較し、後続の通知による一覧更新を初回取得と混同しない。
+`vendor/iroh-relay` は固定バージョン 1.1.0 に計測点だけを追加したもの。
+接続先アドレス、秘密鍵、認証ヘッダー、任意のライブラリメッセージ、会話本文は送信しない。
+Relay のリージョンは公開 n0 ドメインの分類だけを数値で記録する。
+`RelayRegion` は 1=aps1、2=usw1、3=use1、4=euw1、0=その他／不明。
+地域名から物理的な経路や所要時間を推定しない。
 
-未起動からの起動と背景からの復帰を分け、同じ Host・回線・保存状態で複数回記録する。
+## 相関と時計
 
-## Host への自動記録
+- `client.connection`: 従来の接続サマリー。`total_ms` は Core の接続処理。
+  UI 準備、一覧取得、描画はこの総時間に含めない。
+- `client.connection.timeline`: ランダムな `trace`、`attempt`、`connection`、
+  `report`、欠落イベント数 `dropped`、クライアントのリビジョン。
+- `client.connection.event`: `trace` 内の `seq`、単調時計の `at_us`、固定の `phase`、
+  `group`、`stream`、数値 `value`。
+- `host.connection.link`: クライアントの `trace` と `connection` を Host の `session` に対応づける。
+- `host.rpc.performance`: `session` と QUIC の `stream` でクライアント側の要求に対応づける。
 
-保存済み Host への接続・復帰（`AgentStore.resume`）に成功すると Core が `host/diagnostics/connection` を送り、ペアリング済み
-Host の `logs/host.jsonl` に `operation: client.connection` として自動記録する。
-iPhone でコピー・共有する操作は不要。送信は接続完了後の独立した処理で、応答を待って
-画面を止めない。同時送信は 1 件、期限は 2 秒とし、切断時に破棄する。
+`at_us` は Trace 作成からのマイクロ秒。同じ `trace` 内でのみ差分を計算する。
+`group` は接続 ID、接続試行 ID、DNS lookup ID、または Relay の dial ID。
+`phase` に応じて区別する。Relay の `stream` は TCP 試行を区別するローカル span ID で、
+RPC の QUIC stream ID とは別物。両者は合成しない。
+Host の `accepted_us` は当該 Host セッション開始からの相対時間。
+Host と iPhone の絶対時刻を引いて片道時間を算出してはいけない。
 
-記録するのはプラットフォーム、所要時間、再利用の有無、経路種別だけ。
-アドレス、端末鍵、会話内容は含まない。既存の非公開・サイズ制限付きログを使う。
+主な `value` の単位は次のとおり。
 
-- `total_ms`: Core の接続処理全体。
-- `endpoint_ms`: Endpoint 取得・生成。
-- `transport_ms`: 接続先の探索、中継への接続、QUIC 確立を含む新規接続の全体。再利用時は 0。
-- `resolution_ms`: `transport_ms` 内の接続先準備・アドレス探索。再利用時は 0。
-- `rtt_ms`: 接続完了時の選択経路の QUIC 推定往復時間。経路を取得できなければ 0。
-- `verification_ms`: イベントストリーム開始と storage scope 検証。再利用時は応答確認。
-- `route`: `Direct` は直接通信、`Relay` は中継、`Unknown` は取得不能。
+- `AppPreparation`、`SnapshotRead`、`StoreRestored`、`IdentityRead`、`UiConnectReady`、
+  `ResumeReady`、`ResumeFailed`、`RequestOpened`、`ResponseDecoded`、`RttMicros`: マイクロ秒。
+  `RequestOpened` は要求開始からスロット取得・ストリーム確保までの時間。
+- `RequestSent`、`ResponseFirstRead`、`ResponseReceived`: バイト数。
+- `ClientBuild`: iOS build 番号。
+- `UiConnectStart`: 1=foreground 復帰、0=通常の接続。
+- `ListPublished`、`ListViewUpdated`: 1=接続状態、0=オフライン状態。
+- DNS 候補・TCP 開始: IP family の 4 または 6。
+- `PathOpened`、`PathClosed`、`PathSelected`: 1=直接、2=Relay、0=その他。
+  経路イベントを継続購読し、`PathEventsDropped` で購読側の欠落数を記録する。
+- 統計イベント: 接続開始からの累積値。差分を取る際は同じ接続 ID に限定する。
 
-経路は接続完了時点のもので、後から直接通信に切り替わる場合がある。
-アプリ起動・Keychain 読み込み・保存状態復元・一覧取得・描画は Core の総時間に含めない。
+## 自動回収と負荷
 
-復帰は既存接続の scope 確認と新規接続を同時に進め、先に検証を完了した経路を採用する。
-新規接続の失敗だけで応答可能な既存接続を捨てない。未採用・キャンセルされた候補は閉じる。
-Host 切替時は旧 Store の終了と新 Store の初期化を並行し、旧接続の終了確認を待たない。
-会話本文を端末に永続保存する仕様は変更していない。
+接続完了直後、1・3・10・25 秒後に未送信の差分を送る。
+応答を待って接続や画面表示を止めない。送信は同時 1 件、各 2 秒で打ち切る。
+Host の ACK がなければ次の送信に同じイベントを含めるため、解析時は `trace` と `seq` で重複除去する。
+新しい復帰は以前の回収処理を取り消す。切断・終了で送信 Future を破棄する。
 
-Host の scope 検証は `host.connection.scope`、一覧処理は
-`host.thread.list.performance` に Host 内部の所要時間を記録する。
+記録期間は接続試行と成功後の各 30 秒。終端の失敗・キャンセルは期間外でも残す。
+最大 768 イベントのリングバッファで、溢れた数は明示する。
+失敗した試行の記録は同じ Store の次の成功時にも送る。
+未送信のメモリ上の記録はプロセス終了を越えて保持しない。
 
-## 初回一覧の並行取得（Dev 7）
+パケットごとの無制限ログや TLS キーログは有効にしない。
+DNS・Relay の所定の境界と必要な親 span だけを収集する。
+診断要求自体を RPC タイムラインに再帰的に記録しない。
+通信統計には診断送信も含むため、診断トラフィックのない測定として扱わない。
 
-TLS 接続・ペアリング後、scope 確認と初回の一覧要求を同時に送る。
-scope が検証されるまで Store に接続を採用せず、一覧を公開しない。
-採用後の通常の一覧処理が送信済みの応答を一度だけ受け取る。
-検索・表示件数が変わった場合は古い応答を捨てて現在の条件で取得する。
-期限は最初の送信時点から数え、切断・キャンセル時には接続ごと破棄する。
+## 測定値の意味
 
-この変更は scope 往復と一覧取得の直列待ちを除く。QUIC 確立時間や
-`client.connection total_ms` 自体の短縮を意味しない。比較対象は一覧を取得するまでの時間。
+`ResponseFirstRead` はアプリがストリームから最初のバイトを読み取った時点。
+ネットワークインターフェースでの受信時刻ではない。
+先行した一覧応答も専用の読み取りタスクが即座に読み、scope 確認や UI の採用を待たない。
+`ReplyAdopted` と比較すれば、届いた応答をアプリが採用するまでの待ちを分離できる。
+読み取りは元の要求期限、接続の request slot、所有者のキャンセルに従う。
 
-2026-09-20 の Dev 5 iPhone 自動ログは総時間 1,940ms、Endpoint 25ms、
-通信確立 1,443ms、scope 確認 469ms、Relay 経由。対応する Host 内部の
-scope 処理は 0ms、一覧処理は 184ms。
+Host の `handle_encode_us` は処理と先頭応答のエンコードを含む。
+`decode_us` はストリーム受理後の要求読取とデコードで、追加バイトを待つ時間も含む。
+`write_us` は QUIC 送信バッファへの書き込み時間で、相手の受信完了ではない。
+各要求の往復時間から Host 処理を引いた残りは、通信と両端のスケジューリングを含む。
+純粋なネットワーク RTT は別の `RttMicros`（QUIC の推定値）を見る。
 
-同日の Mac → 稼働中 Dev Host の強制 Relay 比較では、初回の DNS 探索を
-含むサンプルを除き、接続開始から一覧受信までの中央値は直列 1,393ms
-（3 回）、並行 1,131ms（4 回）。接続確立後の scope + 一覧区間は
-844ms → 605ms。iPhone の 5G 回線における改善幅の実測値ではない。
+`ListViewUpdated` は SwiftUI の状態変化コールバックまたは画面出現であり、
+GPU が描画したフレームの提示完了を測るものではない。
+欠けた境界は未観測／未実行として扱い、0 ms と補完しない。
+DNS は IPv4/IPv6 が競争する。成功した TCP 試行を選び、重なった待ちを合算しない。
+`RelayDialEnded` は失敗やキャンセルでも起きるため、`RelayReady` と区別する。
+損失統計は QUIC が損失と判断した数で、再送回数そのものではない。
 
-接続元の国・回線も比較条件に含め、以前の東京 Fly 中継と現在の
-公開 AP 中継の違いだけで退行原因と断定しない。今回、Fly 中継やリージョンの
-変更は行っていない。今後も iPhone が自動送信する接続先探索時間と経路の
-往復時間を使い、接続準備と国際回線の待ちを区別する。
+## 接続改善と比較
+
+TLS 接続・ペアリング後、scope 確認と初回一覧要求を同時に送る。
+scope 検証前に Store へ接続を採用したり、一覧を公開したりしない。
+検索条件が変わった場合は先行取得を破棄する。
+これは一覧取得までの直列待ちを減らす変更で、QUIC 確立時間の短縮ではない。
+
+復帰では既存接続の確認と新規接続を競争させ、先に検証できた方を使う。
+新規接続の失敗で応答可能な既存接続を捨てない。
+
+2026-09-20 の iPhone 自動ログでは、Relay の新規接続に 1,940〜2,991 ms、
+直接の新規接続に 355 ms、直接接続の再利用に 151〜190 ms という記録があった。
+回線・時刻・再利用条件が揃っていないため、その差を変更による改善幅としない。
+以前の東京 Fly 中継からの変更、接続元の国、ネットワークの影響を分けて検証する。
+
+## 検証
+
+Core のテストは、先行応答が採用前に観測されること、元の期限・キャンセル・
+request slot の解放、検証前の一覧非公開、変更された検索条件の破棄を確認する。
+非公開情報の除外、バッファ上限、タイムラインの順序も検証する。
+公開 Relay の外部接続テストは明示的に実行する。
+
+```sh
+nix develop . --command cargo test -p agent-core --features bindings --lib \
+  real_relay_records_dns_tcp_tls_websocket_and_authentication -- --ignored --nocapture
+```
+
+リリース前に、そのテスト、iOS Simulator の統合テスト、同じリビジョンの
+稼働中 Dev Host に対する自動回収・要求相関を確認する。

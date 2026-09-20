@@ -7,6 +7,9 @@ case "${1:-simulator}" in
     device) rust_target=aarch64-apple-ios; sdk=iphoneos; swift_target=arm64-apple-ios26.0 ;;
     *) echo "usage: $0 [simulator|device]" >&2; exit 2 ;;
 esac
+export BEX_BUILD_REVISION
+BEX_BUILD_REVISION=$(git rev-parse HEAD)
+if ! git diff --quiet HEAD --; then BEX_BUILD_REVISION+=-dirty; fi
 target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
 scripts/build-agent-bindings.sh
 CC=/usr/bin/clang CXX=/usr/bin/clang++ \

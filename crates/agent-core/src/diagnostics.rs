@@ -12,6 +12,9 @@ use std::{
 };
 use tracing_subscriber::{Layer, layer::SubscriberExt};
 
+pub mod connection;
+pub use connection::{ConnectionPhase, ConnectionTimeline};
+
 const FILE_BYTES: usize = 5 * 1024 * 1024;
 const ARCHIVES: usize = 4;
 const MESSAGE_BYTES: usize = 8192;
@@ -45,6 +48,11 @@ pub struct ConnectionPerformance {
     pub platform: ClientPlatform,
     pub resolution_ms: u64,
     pub rtt_ms: u64,
+    pub connection_id: u64,
+    pub attempt_id: u64,
+    pub report: u8,
+    pub client_revision: String,
+    pub timeline: ConnectionTimeline,
 }
 
 pub fn connection_performance(performance: &ConnectionPerformance) {
@@ -55,6 +63,19 @@ pub fn connection_performance(performance: &ConnectionPerformance) {
         performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
         performance.resolution_ms, performance.rtt_ms,
     ));
+    if performance.timeline.id != 0 {
+        tracing::info!(target: "bex", operation = "client.connection.timeline",
+            message = %format_args!("trace={} attempt={} connection={} report={} dropped={} platform={:?} client_revision={}",
+                performance.timeline.id, performance.attempt_id, performance.connection_id,
+                performance.report, performance.timeline.dropped, performance.platform,
+                performance.client_revision.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>()));
+        for event in performance.timeline.events.iter().take(768) {
+            tracing::info!(target: "bex", operation = "client.connection.event",
+                message = %format_args!("trace={} attempt={} report={} seq={} at_us={} phase={:?} group={} stream={} value={}",
+                    performance.timeline.id, performance.attempt_id, performance.report,
+                    event.sequence, event.at_us, event.phase, event.group, event.stream, event.value));
+        }
+    }
 }
 
 thread_local! {
@@ -112,8 +133,12 @@ pub fn initialize(
         version,
     )?;
     log.write("info", "startup", "Bex started", None, None)?;
-    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(log))
-        .map_err(io::Error::other)?;
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry()
+            .with(log.with_filter(tracing_subscriber::filter::filter_fn(private_event)))
+            .with(connection::network_layer()),
+    )
+    .map_err(io::Error::other)?;
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         tracing::error!(target: "bex", operation = "panic", message = %info);
@@ -207,16 +232,15 @@ impl tracing::field::Visit for Fields {
     }
 }
 
-impl<S: tracing::Subscriber> Layer<S> for Log {
-    fn enabled(
-        &self,
-        metadata: &tracing::Metadata<'_>,
-        _: tracing_subscriber::layer::Context<'_, S>,
-    ) -> bool {
-        metadata.target() == "bex" && *metadata.level() <= tracing::Level::INFO
-    }
+fn private_event(metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.target() == "bex" && *metadata.level() <= tracing::Level::INFO
+}
 
+impl<S: tracing::Subscriber> Layer<S> for Log {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if !private_event(event.metadata()) {
+            return;
+        }
         let mut fields = Fields::default();
         event.record(&mut fields);
         let level = match *event.metadata().level() {

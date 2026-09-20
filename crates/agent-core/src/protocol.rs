@@ -100,21 +100,77 @@ pub async fn write_frame(send: &mut iroh::endpoint::SendStream, bytes: &[u8]) ->
         .map_err(io::Error::other)?;
     send.write_all(bytes).await.map_err(io::Error::other)
 }
-pub struct Reader(FramedRead<iroh::endpoint::RecvStream, LengthDelimitedCodec>);
+struct ObservedRecv {
+    recv: iroh::endpoint::RecvStream,
+    observation: Option<(
+        std::sync::Arc<crate::diagnostics::connection::Trace>,
+        u64,
+        bool,
+    )>,
+}
+impl tokio::io::AsyncRead for ObservedRecv {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut self.recv).poll_read(cx, buf);
+        let stream = u64::from(self.recv.id());
+        if let Some((trace, group, first)) = &mut self.observation
+            && *first
+            && buf.filled().len() > before
+        {
+            *first = false;
+            trace.record(
+                crate::diagnostics::ConnectionPhase::ResponseFirstRead,
+                *group,
+                stream,
+                (buf.filled().len() - before) as u64,
+            );
+        }
+        result
+    }
+}
+pub struct Reader(FramedRead<ObservedRecv, LengthDelimitedCodec>);
 impl Reader {
     pub fn new(recv: iroh::endpoint::RecvStream) -> Self {
         Self(
             LengthDelimitedCodec::builder()
                 .max_frame_length(MAX_FRAME_BYTES)
-                .new_read(recv),
+                .new_read(ObservedRecv {
+                    recv,
+                    observation: None,
+                }),
         )
     }
+    pub(crate) fn observed(
+        recv: iroh::endpoint::RecvStream,
+        trace: std::sync::Arc<crate::diagnostics::connection::Trace>,
+        group: u64,
+    ) -> Self {
+        let mut reader = Self::new(recv);
+        reader.0.get_mut().observation = Some((trace, group, true));
+        reader
+    }
+    pub(crate) fn stream_id(&self) -> u64 {
+        u64::from(self.0.get_ref().recv.id())
+    }
     pub async fn read_frame(&mut self) -> io::Result<Option<tokio_util::bytes::BytesMut>> {
-        self.0.next().await.transpose()
+        let frame = self.0.next().await.transpose()?;
+        if let Some((trace, group, _)) = self.0.get_mut().observation.take() {
+            trace.record(
+                crate::diagnostics::ConnectionPhase::ResponseReceived,
+                group,
+                self.stream_id(),
+                frame.as_ref().map_or(0, |bytes| bytes.len() as u64),
+            );
+        }
+        Ok(frame)
     }
     /// FramedRead retains partial frames if this future loses a select.
     pub async fn read<T: DeserializeOwned>(&mut self) -> io::Result<Option<T>> {
-        let Some(bytes) = self.0.next().await.transpose()? else {
+        let Some(bytes) = self.read_frame().await? else {
             return Ok(None);
         };
         decode(&bytes).map(Some)

@@ -1,9 +1,6 @@
 import AgentCore
 import Combine
 import Foundation
-import OSLog
-
-private let connectionPerformance = Logger(subsystem: "app.bex.BEX", category: "connection-performance")
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
@@ -46,7 +43,6 @@ final class BexAppViewModel: ObservableObject {
     private var operations: [UUID: Task<Void, Never>] = [:]
 
     init() {
-        connectionPerformance.info("app_model_started")
         if let data = UserDefaults.standard.data(forKey: "bex.hosts.iroh") {
             do {
                 profiles = try JSONDecoder().decode([HostProfile].self, from: data)
@@ -122,16 +118,24 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func initialize(_ id: String, previous old: AgentStore?) async {
-        connectionPerformance.info("store_initialization_started")
+        let preparationStarted = ProcessInfo.processInfo.systemUptime
         // Draining the previous Host's transport must not delay opening this Host.
         async let previousClosed: Void? = try? old?.shutdown()
         do {
             let bytes = try await SnapshotFiles.load(id)
-            connectionPerformance.info("persisted_snapshot_loaded")
+            let snapshotRead = ProcessInfo.processInfo.systemUptime - preparationStarted
             let owner = try await AgentStore.offline(persisted: bytes)
             guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
             store = owner
-            connectionPerformance.info("store_ready")
+            owner.recordConnectionEvent(phase: .snapshotRead, value: UInt64(snapshotRead * 1_000_000))
+            owner.recordConnectionEvent(
+                phase: .appPreparation,
+                value: UInt64((ProcessInfo.processInfo.systemUptime - preparationStarted) * 1_000_000)
+            )
+            owner.recordConnectionEvent(
+                phase: .clientBuild,
+                value: UInt64(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0") ?? 0
+            )
             initialization = nil
             publish(owner.snapshot())
             perform(.showThreadList)
@@ -239,26 +243,34 @@ extension BexAppViewModel {
         notice = nil
         connection = Task { [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
-            connectionPerformance.info("connection_started foreground=\(afterForeground)")
+            owner.recordConnectionEvent(phase: .uiConnectStart, value: afterForeground ? 1 : 0)
             do {
+                let identityStarted = ProcessInfo.processInfo.systemUptime
+                let identity = try DeviceIdentity.loadOrGenerate(profile.id)
+                owner.recordConnectionEvent(
+                    phase: .identityRead,
+                    value: UInt64((ProcessInfo.processInfo.systemUptime - identityStarted) * 1_000_000)
+                )
                 try await owner.resume(connection: Connection(ticket: profile.ticket,
-                                                              identity: DeviceIdentity.loadOrGenerate(profile.id),
+                                                              identity: identity,
                                                               invitation: nil, useRelays: true))
                 guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
-                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                connectionPerformance.info("connection_ready elapsed_ms=\(elapsed)")
+                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1_000_000
+                owner.recordConnectionEvent(phase: .uiConnectReady, value: UInt64(elapsed))
                 publish(owner.snapshot())
                 notice = snapshot.error()
                 isConnecting = false
             } catch {
-                let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                connectionPerformance.info("connection_ended elapsed_ms=\(elapsed) cancelled=\(Task.isCancelled)")
                 guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
                 self?.isConnecting = false
                 self?.connectionError = error.localizedDescription
                 self?.notice = error.localizedDescription
             }
         }
+    }
+
+    func recordListViewUpdate() {
+        store?.recordConnectionEvent(phase: .listViewUpdated, value: isConnected ? 1 : 0)
     }
 
     func browser(_ request: BrowserRequest) async throws -> BrowserFrame {
@@ -297,8 +309,9 @@ extension BexAppViewModel {
         let listChanged = !next.listUnchanged(other: snapshot)
         if listChanged {
             list = next.threadList()
-            let hasList = list != nil
-            connectionPerformance.info("list_published connected=\(next.connected()) has_list=\(hasList)")
+            if list != nil {
+                store?.recordConnectionEvent(phase: .listPublished, value: next.connected() ? 1 : 0)
+            }
         }
         if !next.modelsUnchanged(other: snapshot) {
             models = next.models()

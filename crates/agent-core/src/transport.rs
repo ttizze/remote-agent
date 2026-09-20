@@ -1,6 +1,10 @@
 //! Authenticated iroh sessions with independent request, subscription, and blob streams.
 use crate::client::Client;
 pub use crate::client::{HostPeer, HostRequest};
+use crate::diagnostics::{
+    ConnectionPhase as Phase,
+    connection::{Trace, identifier},
+};
 use crate::peer::PeerError;
 use iroh::{EndpointAddr, RelayMode, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
@@ -17,6 +21,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tracing::Instrument;
 use uuid::Uuid;
 
 const ALPN: &[u8] = b"remote-agent/streams/2";
@@ -125,9 +130,18 @@ pub fn authorize(
 }
 
 #[derive(Clone)]
-pub struct Endpoint(Arc<iroh::Endpoint>);
+pub struct Endpoint(Arc<iroh::Endpoint>, Arc<Trace>);
 impl Endpoint {
     pub async fn bind(identity: Identity, relays: Relays) -> Result<Self, TransportError> {
+        Self::bind_recording(identity, relays, Trace::new()).await
+    }
+    pub(crate) async fn bind_recording(
+        identity: Identity,
+        relays: Relays,
+        trace: Arc<Trace>,
+    ) -> Result<Self, TransportError> {
+        crate::diagnostics::connection::initialize_mobile();
+        trace.record(Phase::EndpointStart, 0, 0, 0);
         let mut builder = iroh::Endpoint::builder(presets::N0)
             .secret_key(identity.0)
             .alpns(vec![ALPN.to_vec()]);
@@ -144,7 +158,10 @@ impl Endpoint {
                 builder.relay_mode(RelayMode::Custom(urls.into_iter().collect()))
             }
         };
-        Ok(Self(Arc::new(builder.bind().await.map_err(connection)?)))
+        let span = tracing::info_span!(target: "bex.net", "network", trace_id = trace.id);
+        let endpoint = builder.bind().instrument(span).await.map_err(connection)?;
+        trace.record(Phase::EndpointReady, 0, 0, 0);
+        Ok(Self(Arc::new(endpoint), trace))
     }
     pub fn node_id(&self) -> NodeId {
         NodeId(self.0.id())
@@ -156,19 +173,30 @@ impl Endpoint {
         self.0.online().await;
     }
     pub async fn connect(&self, ticket: &Ticket) -> Result<Session, TransportError> {
+        self.1.activate();
+        let group = identifier();
+        self.1.record(Phase::ResolveStart, group, 0, 0);
         let address: EndpointAddr = ticket.0.endpoint_addr().clone();
         let started = std::time::Instant::now();
         let connecting = self
             .0
             .connect_with_opts(address, ALPN, Default::default())
             .await
+            .inspect_err(|_| self.1.record(Phase::ResolveFailed, group, 0, 0))
             .map_err(connection)?;
         let resolution_ms = started.elapsed().as_millis() as u64;
-        let connection = connecting.await.map_err(connection)?;
+        self.1.record(Phase::ResolveReady, group, 0, 0);
+        self.1.record(Phase::QuicStart, group, 0, 0);
+        let connection = connecting
+            .await
+            .inspect_err(|_| self.1.record(Phase::QuicFailed, group, 0, 0))
+            .map_err(connection)?;
+        self.1.record(Phase::QuicReady, group, 0, 0);
         Ok(Session {
             connection,
             _endpoint: self.clone(),
             resolution_ms,
+            diagnostic_id: group,
         })
     }
     /// TLS identifies the peer; RPC and blob streams remain inaccessible until
@@ -184,6 +212,7 @@ impl Endpoint {
                         connection,
                         _endpoint: self.clone(),
                         resolution_ms: 0,
+                        diagnostic_id: identifier(),
                     }))
                 })
                 .map_err(connection),
@@ -260,6 +289,7 @@ pub struct Session {
     connection: iroh::endpoint::Connection,
     _endpoint: Endpoint,
     resolution_ms: u64,
+    diagnostic_id: u64,
 }
 impl Session {
     pub(crate) fn resolution_ms(&self) -> u64 {
@@ -304,6 +334,7 @@ impl Session {
     pub async fn accept_request(&self) -> Result<IncomingRequest, TransportError> {
         use crate::client::{BLOB, CALL, CLOSE};
         let (mut send, mut recv) = self.connection.accept_bi().await.map_err(connection)?;
+        let accepted_at = std::time::Instant::now();
         let mut kind = [0u8; 1];
         recv.read_exact(&mut kind).await.map_err(connection)?;
         match kind[0] {
@@ -319,7 +350,12 @@ impl Session {
                     .await
                     .map_err(connection)?
                     .ok_or_else(|| connection("request stream ended before its request"))?;
-                Ok(IncomingRequest::Call(HostRequest { call, send }))
+                Ok(IncomingRequest::Call(HostRequest {
+                    call,
+                    send,
+                    accepted_at,
+                    decoded_at: std::time::Instant::now(),
+                }))
             }
             CLOSE => {
                 send.write_all(&[0]).await.map_err(connection)?;
@@ -334,7 +370,14 @@ impl Session {
         timeout: Duration,
         max_requests: usize,
     ) -> Result<(Client, crate::protocol::Reader), TransportError> {
-        Ok(Client::connect(self.connection.clone(), timeout, max_requests).await?)
+        Ok(Client::connect(
+            self.connection.clone(),
+            timeout,
+            max_requests,
+            self._endpoint.1.clone(),
+            self.diagnostic_id,
+        )
+        .await?)
     }
     pub fn close(&self) {
         self.connection.close(0u8.into(), b"session closed");

@@ -2,6 +2,10 @@
 mod json;
 mod snapshot;
 
+use crate::diagnostics::{
+    ConnectionPhase,
+    connection::{Trace, identifier},
+};
 use crate::state::Intent;
 use crate::transport::{Endpoint, Identity, Relays, Ticket};
 use crate::{models::Invitation, state::Snapshot, store::Outcome};
@@ -59,6 +63,7 @@ pub fn parse_invitation(contents: String, now: u64) -> Result<Invitation, AgentE
 pub struct AgentStore {
     store: crate::store::Store,
     endpoint: tokio::sync::Mutex<Option<NativeEndpoint>>,
+    trace: Arc<Trace>,
 }
 struct NativeEndpoint {
     endpoint: Endpoint,
@@ -89,13 +94,14 @@ impl AgentStore {
         {
             return Ok((cached.endpoint.clone(), ticket, invitation));
         }
-        let endpoint = Endpoint::bind(
+        let endpoint = Endpoint::bind_recording(
             identity,
             if connection.use_relays {
                 Relays::Default
             } else {
                 Relays::Disabled
             },
+            self.trace.clone(),
         )
         .await
         .map_err(error)?;
@@ -111,14 +117,24 @@ impl AgentStore {
 impl AgentStore {
     #[uniffi::constructor]
     pub async fn offline(persisted: Vec<u8>) -> Result<Arc<Self>, AgentError> {
+        let started = std::time::Instant::now();
+        let trace = Trace::new();
         let snapshot = if persisted.is_empty() {
             crate::state::Snapshot::default()
         } else {
             serde_json::from_slice(&persisted).map_err(error)?
         };
+        let store = crate::store::Store::offline(snapshot);
+        trace.record(
+            ConnectionPhase::StoreRestored,
+            0,
+            0,
+            started.elapsed().as_micros() as u64,
+        );
         Ok(Arc::new(Self {
-            store: crate::store::Store::offline(snapshot),
+            store,
             endpoint: Default::default(),
+            trace,
         }))
     }
 
@@ -144,26 +160,74 @@ impl AgentStore {
     /// Foreground recovery reuses a responsive session and the endpoint identity.
     pub async fn resume(&self, connection: Connection) -> Result<(), AgentError> {
         let started = std::time::Instant::now();
-        let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
-        let endpoint_ms = started.elapsed().as_millis() as u64;
-        let mut performance = if invitation.is_none() {
-            self.store.resume(&endpoint, &ticket).await.map_err(error)
-        } else {
-            self.store
-                .reconnect(&endpoint, &ticket, invitation)
-                .await
-                .map_err(error)
-        }?;
-        performance.endpoint_ms = endpoint_ms;
-        performance.total_ms = started.elapsed().as_millis() as u64;
-        performance.platform = match std::env::consts::OS {
-            "ios" => crate::diagnostics::ClientPlatform::Ios,
-            "android" => crate::diagnostics::ClientPlatform::Android,
-            "macos" => crate::diagnostics::ClientPlatform::Macos,
-            _ => crate::diagnostics::ClientPlatform::Other,
-        };
-        self.store.record_connection_performance(performance);
+        let attempt = identifier();
+        self.trace.activate();
+        self.trace
+            .record(ConnectionPhase::ResumeStart, attempt, 0, 0);
+        let cancelled = scopeguard::guard((), |_| {
+            self.trace
+                .record(ConnectionPhase::ResumeCancelled, attempt, 0, 0)
+        });
+        let result = async {
+            let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
+            let endpoint_ms = started.elapsed().as_millis() as u64;
+            let mut performance = if invitation.is_none() {
+                self.store.resume(&endpoint, &ticket).await.map_err(error)
+            } else {
+                self.store
+                    .reconnect(&endpoint, &ticket, invitation)
+                    .await
+                    .map_err(error)
+            }?;
+            performance.endpoint_ms = endpoint_ms;
+            performance.total_ms = started.elapsed().as_millis() as u64;
+            performance.attempt_id = attempt;
+            performance.client_revision = option_env!("BEX_BUILD_REVISION")
+                .unwrap_or("development")
+                .into();
+            performance.platform = match std::env::consts::OS {
+                "ios" => crate::diagnostics::ClientPlatform::Ios,
+                "android" => crate::diagnostics::ClientPlatform::Android,
+                "macos" => crate::diagnostics::ClientPlatform::Macos,
+                _ => crate::diagnostics::ClientPlatform::Other,
+            };
+            Ok::<_, AgentError>(performance)
+        }
+        .await;
+        scopeguard::ScopeGuard::into_inner(cancelled);
+        self.trace.record(
+            if result.is_ok() {
+                ConnectionPhase::ResumeReady
+            } else {
+                ConnectionPhase::ResumeFailed
+            },
+            attempt,
+            0,
+            started.elapsed().as_micros() as u64,
+        );
+        self.store.record_connection_performance(result?);
+        self.trace.activate();
         Ok(())
+    }
+
+    /// Platform lifecycle boundaries only; shared transport measurements stay in Core.
+    pub fn record_connection_event(&self, phase: ConnectionPhase, value: u64) {
+        if matches!(
+            phase,
+            ConnectionPhase::AppPreparation
+                | ConnectionPhase::SnapshotRead
+                | ConnectionPhase::ClientBuild
+                | ConnectionPhase::IdentityRead
+                | ConnectionPhase::UiConnectStart
+                | ConnectionPhase::UiConnectReady
+                | ConnectionPhase::ListPublished
+                | ConnectionPhase::ListViewUpdated
+        ) {
+            if matches!(phase, ConnectionPhase::UiConnectStart) {
+                self.trace.activate();
+            }
+            self.trace.record(phase, 0, 0, value);
+        }
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -312,7 +376,7 @@ mod tests {
             let restored = AgentStore::offline(serde_json::to_vec(&saved).unwrap()).await.unwrap();
             assert_eq!(*restored.snapshot().list_query, crate::models::ListQuery::default());
             restored.shutdown().await.unwrap();
-            let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached), endpoint: Default::default() });
+            let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached), endpoint: Default::default(), trace: Trace::new() });
             let (connected, (session, reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
             connected.unwrap();
             let first = session;
