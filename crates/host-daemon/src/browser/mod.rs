@@ -63,7 +63,9 @@ impl Browser {
             });
         let bridge_directory = tempfile::Builder::new()
             .prefix("bex-browser-")
-            .tempdir()
+            // macOS Unix sockets have a 104-byte path limit. Nix's TMPDIR may
+            // be nested under a long checkout path; keep the socket root short.
+            .tempdir_in("/tmp")
             .map_err(|e| e.to_string())?;
         crate::platform::create_state_directory(bridge_directory.path())
             .map_err(|e| e.to_string())?;
