@@ -249,7 +249,6 @@ impl Thread {
     pub fn defer_item_details(&mut self, max_inline_bytes: usize) {
         for turn in self.turns.iter_mut().flatten() {
             let turn = Arc::make_mut(turn);
-            let mut deferred = Vec::new();
             for item in turn.items.iter_mut().flatten() {
                 if item.id.is_empty()
                     || fits_inline(
@@ -260,22 +259,19 @@ impl Thread {
                         ) {
                             max_inline_bytes
                         } else {
-                            4096.min(max_inline_bytes)
+                            // Hundreds of individually small, collapsed tool
+                            // bodies otherwise dominate the initial history page.
+                            512.min(max_inline_bytes)
                         },
                     )
                 {
                     continue;
                 }
                 let item = Arc::make_mut(item);
-                deferred.push(item.id.clone());
                 item.retain_header();
-            }
-            if !deferred.is_empty() {
                 let ids = turn.deferred_item_ids.get_or_insert_default();
-                for id in deferred {
-                    if !ids.contains(&id) {
-                        ids.push(id);
-                    }
+                if !ids.contains(&item.id) {
+                    ids.push(item.id.clone());
                 }
             }
             if let Some(item) = &mut turn.opening_user_message
@@ -288,21 +284,20 @@ impl Thread {
 }
 impl Item {
     pub fn retain_header(&mut self) {
-        for text in [
-            &mut self.text,
-            &mut self.command,
-            &mut self.aggregated_output,
-        ]
-        .into_iter()
-        .flatten()
-        {
+        if let Some(text) = &mut self.text {
             truncate_detail(text);
         }
-        if self.kind.as_deref() == Some("imageGeneration") {
-            self.result = None;
+        if let Some(command) = &mut self.command {
+            *command = crate::presentation::compact_title(command);
         }
-        if let Some(result) = &mut self.result
-            && !retain_scalar(result)
+        // Command output is only displayed after expansion, which reads the
+        // original item. A truncated output is not part of its activity header.
+        self.aggregated_output = None;
+        if self.kind.as_deref() == Some("imageGeneration")
+            || self
+                .result
+                .as_mut()
+                .is_some_and(|result| !retain_scalar(result))
         {
             self.result = None;
         }
@@ -507,6 +502,26 @@ pub struct ChangedFile {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn deferred_command_keeps_its_display_title_without_hidden_output() {
+        for command in [
+            format!("{}\nhidden script", "日本語".repeat(60)),
+            "cargo check\nhidden script".into(),
+        ] {
+            let mut item = Item {
+                kind: Some("commandExecution".into()),
+                command: Some(command),
+                aggregated_output: Some("hidden output".repeat(100)),
+                ..Default::default()
+            };
+            let title = crate::presentation::item_presentation(&item).title;
+            item.retain_header();
+            assert_eq!(crate::presentation::item_presentation(&item).title, title);
+            assert_eq!(item.command.as_deref(), Some(title.as_str()));
+            assert_eq!(item.aggregated_output, None);
+        }
+    }
+
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
