@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// Shared Markdown semantics render as native selectable content.
@@ -23,10 +24,7 @@ struct ConversationMarkdown: View {
                 } else if let block = part.image, let imageURL = block.imageURL {
                     image(block, url: imageURL)
                 } else if part.isCode {
-                    ScrollView(.horizontal) {
-                        AssistantSelectableText(blocks: part.blocks, actions: selection)
-                            .fixedSize(horizontal: true, vertical: false).padding(12)
-                    }.background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                    ConversationMarkdownCodeBlock(part: part, selection: selection)
                 } else {
                     AssistantSelectableText(blocks: part.blocks, actions: selection)
                 }
@@ -125,5 +123,44 @@ struct ConversationMarkdown: View {
             }
             .overlay(Rectangle().stroke(Color(UIColor.separator), lineWidth: 0.5))
         }
+    }
+}
+
+private struct ConversationMarkdownCodeBlock: View {
+    let part: ConversationMarkdownContent.Part
+    let selection: ConversationSelectionActions
+    @State private var copied = false
+
+    private var text: String {
+        part.blocks
+            .map { $0.runs.map(\.text).joined() }
+            .joined(separator: "\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Spacer(minLength: 0)
+                Button {
+                    UIPasteboard.general.string = text
+                    copied = true
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                }
+                .font(.system(size: 19))
+                .foregroundColor(.secondary)
+                .buttonStyle(.plain)
+                .accessibilityLabel(copied ? "コピーしました" : "コードをコピー")
+                .accessibilityIdentifier("markdown.code.copy.\(part.id)")
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 4)
+            ScrollView(.horizontal) {
+                AssistantSelectableText(blocks: part.blocks, actions: selection)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(12)
+            }
+        }
+        .background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }
