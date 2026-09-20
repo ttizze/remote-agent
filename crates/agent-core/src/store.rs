@@ -880,26 +880,7 @@ async fn run(
                             diagnostic_jobs.clear();
                             let peer = peer.clone();
                             diagnostic_jobs.push(async move {
-                                let reports = async {
-                                let started = tokio::time::Instant::now();
-                                let mut sent_sequence = 0;
-                                for (report, delay) in [0, 1, 3, 10, 25].into_iter().enumerate() {
-                                    tokio::time::sleep_until(started + std::time::Duration::from_secs(delay)).await;
-                                    peer.record_path();
-                                    let mut performance = performance.clone();
-                                    performance.report = report as u8;
-                                    performance.timeline = peer.trace.snapshot();
-                                    performance.timeline.events.retain(|event| event.sequence > sent_sequence);
-                                    let last = performance.timeline.events.last().map_or(sent_sequence, |event| event.sequence);
-                                    if matches!(tokio::time::timeout(std::time::Duration::from_secs(2), peer.call(&performance)).await, Ok(Ok(_))) {
-                                        sent_sequence = last;
-                                    }
-                                }
-                                };
-                                tokio::select! {
-                                    _ = reports => {},
-                                    _ = peer.observe_paths() => {},
-                                }
+                                peer.collect_connection_diagnostics(performance).await;
                             });
                         }
                         continue;

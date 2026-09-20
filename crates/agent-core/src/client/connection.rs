@@ -32,6 +32,7 @@ pub struct Client {
     permits: Arc<Semaphore>,
     timeout: Duration,
     initial_list: Mutex<Option<(crate::models::ListQuery, PendingReply)>>,
+    _path_monitor: Option<tokio_util::task::AbortOnDropHandle<()>>,
 }
 struct PendingReply {
     response: tokio_util::task::AbortOnDropHandle<
@@ -77,6 +78,33 @@ impl Client {
         send.write_all(&[EVENTS]).await.map_err(invalid)?;
         send.finish().map_err(invalid)?;
         trace.record(Phase::EventsOpened, diagnostic_id, u64::from(send.id()), 0);
+        let path_monitor = trace.enabled().then(|| {
+            let mut paths = connection.path_events();
+            let weak_trace = Arc::downgrade(&trace);
+            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+                use futures_util::StreamExt;
+                use iroh::endpoint::PathEvent;
+                while let Some(event) = paths.next().await {
+                    let Some(trace) = weak_trace.upgrade() else {
+                        break;
+                    };
+                    let (phase, value) = match event {
+                        PathEvent::Opened { remote_addr, .. } => {
+                            (Phase::PathOpened, route_code(&remote_addr))
+                        }
+                        PathEvent::Closed { remote_addr, .. } => {
+                            (Phase::PathClosed, route_code(&remote_addr))
+                        }
+                        PathEvent::Selected { remote_addr, .. } => {
+                            (Phase::PathSelected, route_code(&remote_addr))
+                        }
+                        PathEvent::Lagged { missed, .. } => (Phase::PathEventsDropped, missed),
+                        _ => continue,
+                    };
+                    trace.record(phase, diagnostic_id, 0, value);
+                }
+            }))
+        });
         let client = Self {
             connection,
             trace,
@@ -84,6 +112,7 @@ impl Client {
             permits: Arc::new(Semaphore::new(max_requests)),
             timeout,
             initial_list: Mutex::new(None),
+            _path_monitor: path_monitor,
         };
         client.record_path();
         Ok((client, protocol::Reader::new(recv)))
@@ -139,7 +168,7 @@ impl Client {
     async fn start_call(&self, call: &Call) -> Result<PendingReply, PeerError> {
         let started = std::time::Instant::now();
         let deadline = Instant::now() + self.timeout;
-        let measured = !matches!(call, Call::ConnectionPerformance(_));
+        let measured = self.trace.active() && !matches!(call, Call::ConnectionPerformance(_));
         let work = async {
             let permit = self
                 .permits
@@ -222,7 +251,7 @@ impl Client {
             None => self.start_call(call).await?,
         };
         let stream = reply.stream;
-        let measured = !matches!(call, Call::ConnectionPerformance(_));
+        let measured = self.trace.active() && !matches!(call, Call::ConnectionPerformance(_));
         if measured {
             self.trace
                 .record(Phase::ReplyAdopted, self.diagnostic_id, stream, 0);
@@ -240,29 +269,52 @@ impl Client {
         }
         result
     }
-    pub(crate) async fn observe_paths(&self) {
-        use futures_util::StreamExt;
-        use iroh::endpoint::PathEvent;
-        let mut events = self.connection.path_events();
-        while let Some(event) = events.next().await {
-            let (phase, value) = match event {
-                PathEvent::Opened { remote_addr, .. } => {
-                    (Phase::PathOpened, route_code(&remote_addr))
-                }
-                PathEvent::Closed { remote_addr, .. } => {
-                    (Phase::PathClosed, route_code(&remote_addr))
-                }
-                PathEvent::Selected { remote_addr, .. } => {
-                    (Phase::PathSelected, route_code(&remote_addr))
-                }
-                PathEvent::Lagged { missed, .. } => (Phase::PathEventsDropped, missed),
-                _ => continue,
+    pub(crate) async fn collect_connection_diagnostics(
+        &self,
+        performance: crate::diagnostics::ConnectionPerformance,
+    ) {
+        if !self.trace.enabled() {
+            return;
+        }
+        // Capture first, export afterwards: diagnostic traffic cannot feed back
+        // into this snapshot or compete with the connection being measured.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        let timeline = self.trace.snapshot();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        for (report, events) in timeline.events.chunks(512).enumerate() {
+            let mut performance = performance.clone();
+            performance.report = report as u8;
+            performance.timeline = crate::diagnostics::ConnectionTimeline {
+                id: timeline.id,
+                dropped: timeline.dropped,
+                events: events.to_vec(),
             };
-            self.trace.record(phase, self.diagnostic_id, 0, value);
-            self.record_path();
+            // Retry the same bounded batch; the receiver/analyzer deduplicates
+            // by trace and event sequence if an acknowledgement was lost.
+            let mut delivered = false;
+            for _ in 0..2 {
+                if tokio::time::Instant::now() >= deadline {
+                    return;
+                }
+                let timeout = deadline.min(tokio::time::Instant::now() + Duration::from_secs(2));
+                if matches!(
+                    tokio::time::timeout_at(timeout, self.call(&performance)).await,
+                    Ok(Ok(_))
+                ) {
+                    delivered = true;
+                    break;
+                }
+            }
+            if !delivered {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
     pub(crate) fn record_path(&self) {
+        if !self.trace.active() {
+            return;
+        }
         use crate::diagnostics::ConnectionRoute;
         let (route, rtt) = self.path_sample();
         let phase = match route {
@@ -345,8 +397,10 @@ mod tests {
     #[tokio::test]
     async fn early_reply_is_measured_before_adoption_without_exposing_its_payload() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
-            let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let host_trace = crate::diagnostics::connection::Trace::new();
+            let client_trace = crate::diagnostics::connection::Trace::new();
+            let host = Endpoint::bind_recording(Identity::generate(), Relays::Disabled, host_trace.clone()).await.unwrap();
+            let client = Endpoint::bind_recording(Identity::generate(), Relays::Disabled, client_trace).await.unwrap();
             let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
             let ticket = host.ticket();
             let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
@@ -370,6 +424,15 @@ mod tests {
             assert!(snapshot.events.iter().any(|event| event.phase == Phase::ResponseFirstRead && event.stream == stream));
             assert!(!snapshot.events.iter().any(|event| event.phase == Phase::ReplyAdopted));
             assert!(!serde_json::to_string(&snapshot).unwrap().contains("private-payload"));
+            let server = host_trace.snapshot();
+            let frame = snapshot.events.iter().find(|event| event.phase == Phase::QuicFrameReceived && event.stream == stream && event.detail.is_some_and(|d| d.kind == 1)).expect("received QUIC stream frame");
+            let received = frame.detail.unwrap();
+            assert!(server.events.iter().any(|event| event.phase == Phase::QuicFrameSent && event.group == frame.group && event.stream == stream && event.detail.is_some_and(|d| (d.space,d.packet,d.path,d.offset)==(received.space,received.packet,received.path,received.offset))), "Host and client packet/frame identities must match");
+            assert!(received.source_at_us > 0 && received.source_at_us <= frame.at_us + 1000);
+            for phase in [Phase::ReadPolled, Phase::ReadPending, Phase::ReadWake] {
+                assert!(snapshot.events.iter().any(|event| event.phase == phase && event.stream == stream), "missing {phase:?}");
+            }
+            assert!(!server.events.iter().any(|event| event.phase == Phase::QuicTraceMalformed));
             let (bytes, _) = (&mut pending.response).await.unwrap().unwrap();
             assert!(matches!(protocol::decode::<Response<String>>(&bytes).unwrap(), Response::Success { result } if result == "private-payload"));
             drop(pending);

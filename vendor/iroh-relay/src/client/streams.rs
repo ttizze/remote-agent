@@ -7,8 +7,8 @@ use std::{
 use bytes::Bytes;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
 };
+use super::observed_tcp::ObservedTcp as TcpStream;
 
 use super::util;
 use crate::ExportKeyingMaterial;

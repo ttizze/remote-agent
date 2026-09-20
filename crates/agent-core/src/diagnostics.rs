@@ -56,25 +56,47 @@ pub struct ConnectionPerformance {
 }
 
 pub fn connection_performance(performance: &ConnectionPerformance) {
-    tracing::info!(target: "bex", operation = "client.connection",
-    message = %format_args!(
-        "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?} resolution_ms={} rtt_ms={}",
-        performance.platform, performance.total_ms, performance.endpoint_ms,
-        performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
-        performance.resolution_ms, performance.rtt_ms,
-    ));
+    if performance.report == 0 {
+        tracing::info!(target: "bex", operation = "client.connection",
+        message = %format_args!(
+            "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?} resolution_ms={} rtt_ms={}",
+            performance.platform, performance.total_ms, performance.endpoint_ms,
+            performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
+            performance.resolution_ms, performance.rtt_ms,
+        ));
+    }
     if performance.timeline.id != 0 {
         tracing::info!(target: "bex", operation = "client.connection.timeline",
             message = %format_args!("trace={} attempt={} connection={} report={} dropped={} platform={:?} client_revision={}",
                 performance.timeline.id, performance.attempt_id, performance.connection_id,
                 performance.report, performance.timeline.dropped, performance.platform,
                 performance.client_revision.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>()));
-        for event in performance.timeline.events.iter().take(768) {
-            tracing::info!(target: "bex", operation = "client.connection.event",
-                message = %format_args!("trace={} attempt={} report={} seq={} at_us={} phase={:?} group={} stream={} value={}",
-                    performance.timeline.id, performance.attempt_id, performance.report,
-                    event.sequence, event.at_us, event.phase, event.group, event.stream, event.value));
-        }
+        connection_events(
+            "client.connection.event",
+            &performance.timeline,
+            performance.attempt_id,
+            performance.report,
+        );
+    }
+}
+
+pub(crate) fn host_connection_timeline(timeline: &ConnectionTimeline) {
+    tracing::info!(target: "bex", operation = "host.connection.timeline", message = %format_args!("trace={} dropped={}", timeline.id, timeline.dropped));
+    connection_events("host.connection.event", timeline, 0, 0);
+}
+
+fn connection_events(
+    operation: &'static str,
+    timeline: &ConnectionTimeline,
+    attempt: u64,
+    report: u8,
+) {
+    for event in timeline.events.iter().take(connection::MAX_EVENTS) {
+        let d = event.detail.unwrap_or_default();
+        tracing::info!(target: "bex", operation,
+            message = %format_args!("trace={} attempt={} report={} seq={} at_us={} phase={:?} group={} stream={} value={} detail={} kind={} space={} packet={} packet_valid={} offset={} length={} path={} source_at_us={}",
+                timeline.id, attempt, report, event.sequence, event.at_us, event.phase, event.group, event.stream, event.value,
+                u8::from(event.detail.is_some()), d.kind, d.space, d.packet, u8::from(d.packet_valid), d.offset, d.length, d.path, d.source_at_us));
     }
 }
 

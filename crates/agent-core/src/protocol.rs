@@ -102,11 +102,45 @@ pub async fn write_frame(send: &mut iroh::endpoint::SendStream, bytes: &[u8]) ->
 }
 struct ObservedRecv {
     recv: iroh::endpoint::RecvStream,
-    observation: Option<(
-        std::sync::Arc<crate::diagnostics::connection::Trace>,
-        u64,
-        bool,
-    )>,
+    observation: Option<ReadObservation>,
+}
+struct ReadObservation {
+    trace: std::sync::Arc<crate::diagnostics::connection::Trace>,
+    group: u64,
+    first: bool,
+    wake: Option<std::sync::Arc<ReadWake>>,
+}
+struct ReadWake {
+    trace: std::sync::Weak<crate::diagnostics::connection::Trace>,
+    group: u64,
+    stream: u64,
+    upstream: std::sync::Mutex<Option<std::task::Waker>>,
+}
+impl std::task::Wake for ReadWake {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        let Some(waker) = self.upstream.lock().unwrap().clone() else {
+            return;
+        };
+        if let Some(trace) = self.trace.upgrade() {
+            trace.record_detail(
+                crate::diagnostics::ConnectionPhase::ReadWake,
+                self.group,
+                self.stream,
+                0,
+                Some(Default::default()),
+            );
+        }
+        waker.wake();
+    }
+}
+impl Drop for ReadObservation {
+    fn drop(&mut self) {
+        let Some(wake) = &self.wake else { return };
+        *wake.upstream.lock().unwrap() = None;
+    }
 }
 impl tokio::io::AsyncRead for ObservedRecv {
     fn poll_read(
@@ -115,16 +149,43 @@ impl tokio::io::AsyncRead for ObservedRecv {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
         let before = buf.filled().len();
-        let result = std::pin::Pin::new(&mut self.recv).poll_read(cx, buf);
         let stream = u64::from(self.recv.id());
-        if let Some((trace, group, first)) = &mut self.observation
-            && *first
+        let waker = self.observation.as_ref().and_then(|observation| {
+            let wake = observation.wake.as_ref()?;
+            observation.trace.record_detail(
+                crate::diagnostics::ConnectionPhase::ReadPolled,
+                observation.group,
+                stream,
+                0,
+                Some(Default::default()),
+            );
+            *wake.upstream.lock().unwrap() = Some(cx.waker().clone());
+            Some(std::task::Waker::from(wake.clone()))
+        });
+        let result = match &waker {
+            Some(waker) => std::pin::Pin::new(&mut self.recv)
+                .poll_read(&mut std::task::Context::from_waker(waker), buf),
+            None => std::pin::Pin::new(&mut self.recv).poll_read(cx, buf),
+        };
+        if result.is_pending()
+            && let Some(observation) = &self.observation
+        {
+            observation.trace.record_detail(
+                crate::diagnostics::ConnectionPhase::ReadPending,
+                observation.group,
+                stream,
+                0,
+                Some(Default::default()),
+            );
+        }
+        if let Some(observation) = &mut self.observation
+            && observation.first
             && buf.filled().len() > before
         {
-            *first = false;
-            trace.record(
+            observation.first = false;
+            observation.trace.record(
                 crate::diagnostics::ConnectionPhase::ResponseFirstRead,
-                *group,
+                observation.group,
                 stream,
                 (buf.filled().len() - before) as u64,
             );
@@ -150,7 +211,24 @@ impl Reader {
         group: u64,
     ) -> Self {
         let mut reader = Self::new(recv);
-        reader.0.get_mut().observation = Some((trace, group, true));
+        let stream = reader.stream_id();
+        if !trace.enabled() {
+            return reader;
+        }
+        let wake = trace.packets().then(|| {
+            std::sync::Arc::new(ReadWake {
+                trace: std::sync::Arc::downgrade(&trace),
+                group,
+                stream,
+                upstream: std::sync::Mutex::new(None),
+            })
+        });
+        reader.0.get_mut().observation = Some(ReadObservation {
+            trace,
+            group,
+            first: true,
+            wake,
+        });
         reader
     }
     pub(crate) fn stream_id(&self) -> u64 {
@@ -158,10 +236,10 @@ impl Reader {
     }
     pub async fn read_frame(&mut self) -> io::Result<Option<tokio_util::bytes::BytesMut>> {
         let frame = self.0.next().await.transpose()?;
-        if let Some((trace, group, _)) = self.0.get_mut().observation.take() {
-            trace.record(
+        if let Some(observation) = self.0.get_mut().observation.take() {
+            observation.trace.record(
                 crate::diagnostics::ConnectionPhase::ResponseReceived,
-                group,
+                observation.group,
                 self.stream_id(),
                 frame.as_ref().map_or(0, |bytes| bytes.len() as u64),
             );

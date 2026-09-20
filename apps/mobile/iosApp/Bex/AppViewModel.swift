@@ -1,6 +1,7 @@
 import AgentCore
 import Combine
 import Foundation
+import UIKit
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
@@ -33,7 +34,7 @@ final class BexAppViewModel: ObservableObject {
         let host: String?
     }
 
-    private var store: AgentStore?
+    private(set) var store: AgentStore?
     private var initialization: Task<Void, Never>?
     private var observation: Task<Void, Never>?
     private var persistence: Task<Void, Never>?
@@ -257,6 +258,8 @@ extension BexAppViewModel {
         connection = Task { [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
             owner.recordConnectionEvent(phase: .uiConnectStart, value: afterForeground ? 1 : 0)
+            let state = UIApplication.shared.applicationState
+            owner.recordConnectionEvent(phase: .appScene, value: state == .active ? 1 : state == .inactive ? 2 : 3)
             do {
                 let identityStarted = ProcessInfo.processInfo.systemUptime
                 let identity = try DeviceIdentity.loadOrGenerate(profile.id)
@@ -290,12 +293,8 @@ extension BexAppViewModel {
         store?.recordConnectionEvent(phase: .listViewUpdated, value: isConnected ? 1 : 0)
     }
 
-    func browser(_ request: BrowserRequest) async throws -> BrowserFrame {
-        guard let owner = store else { throw URLError(.notConnectedToInternet) }
-        let host = selectedProfileId
-        let frame = try await owner.browser(request: request)
-        guard host == selectedProfileId else { throw CancellationError() }
-        return frame
+    func recordScene(_ state: UInt64) {
+        store?.recordConnectionEvent(phase: .appScene, value: state)
     }
 
     private func observe(_ owner: AgentStore, host: String) {

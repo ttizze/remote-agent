@@ -36,6 +36,8 @@ use crate::{
 
 pub(crate) mod conn;
 #[cfg(not(wasm_browser))]
+mod observed_tcp;
+#[cfg(not(wasm_browser))]
 pub(crate) mod streams;
 #[cfg(not(wasm_browser))]
 mod tls;

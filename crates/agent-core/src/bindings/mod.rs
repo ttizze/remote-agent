@@ -119,6 +119,7 @@ impl AgentStore {
     pub async fn offline(persisted: Vec<u8>) -> Result<Arc<Self>, AgentError> {
         let started = std::time::Instant::now();
         let trace = Trace::new();
+        trace.sample_runtime();
         let snapshot = if persisted.is_empty() {
             crate::state::Snapshot::default()
         } else {
@@ -224,6 +225,7 @@ impl AgentStore {
                 | ConnectionPhase::UiConnectCancelled
                 | ConnectionPhase::ListPublished
                 | ConnectionPhase::ListViewUpdated
+                | ConnectionPhase::AppScene
         ) {
             if matches!(phase, ConnectionPhase::UiConnectStart) {
                 self.trace.activate();
@@ -569,7 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_reports_connection_without_waiting_for_diagnostic_reply() {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(40), async {
             let identity = Identity::generate();
             let trust = crate::transport::Trust {
                 allowed: [identity.node_id()].into(),
@@ -593,12 +595,17 @@ mod tests {
                 .expect("connection readiness must not await diagnostics")
                 .unwrap();
             assert!(store.snapshot().connected());
+            let connected_at = std::time::Instant::now();
             let report = loop {
                 let request = reader.read_request().await.unwrap().unwrap();
                 if request["method"] == "host/diagnostics/connection" {
                     break request;
                 }
             };
+            assert!(
+                connected_at.elapsed() >= Duration::from_secs(30),
+                "diagnostic traffic must wait until capture is complete"
+            );
             assert_eq!(report["params"]["route"], "Direct");
             assert_eq!(report["params"]["reused"], false);
             assert!(

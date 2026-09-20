@@ -766,7 +766,12 @@ impl HostRpcService {
                 scope.into()
             }
             Call::ConnectionPerformance(performance) => {
-                agent_core::diagnostics::connection_performance(performance);
+                let performance = performance.clone();
+                tokio::task::spawn_blocking(move || {
+                    agent_core::diagnostics::connection_performance(&performance)
+                })
+                .await
+                .map_err(|error| Failure::new("diagnostic_write_failed", error.to_string()))?;
                 agent_core::models::Empty {}.into()
             }
             Call::AnswerSession(params) => (self

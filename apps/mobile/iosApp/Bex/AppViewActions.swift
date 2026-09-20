@@ -5,6 +5,14 @@ import UniformTypeIdentifiers
 typealias SnapshotRequest = (Intent, @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) -> Void
 
 extension BexAppViewModel {
+    func browser(_ request: BrowserRequest) async throws -> BrowserFrame {
+        guard let owner = store else { throw URLError(.notConnectedToInternet) }
+        let host = selectedProfileId
+        let frame = try await owner.browser(request: request)
+        guard host == selectedProfileId else { throw CancellationError() }
+        return frame
+    }
+
     func requestSnapshot(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
         perform(intent) { [self] result in completion(snapshot, result) }
     }

@@ -1,7 +1,7 @@
 # iPhone 接続の自動計測
 
 Host とクライアントを同じリビジョンからビルドして配布する。
-Dev 9 は接続後に詳細なタイムラインを Host の非公開 `logs/host.jsonl` へ送る。
+Dev 10 は接続後30秒の記録を終えてから、詳細なタイムラインを Host の非公開 `logs/host.jsonl` へ送る。
 iPhone で診断のコピー、共有、計測の開始操作は不要。
 シミュレータや Mac の数値を実機の国際回線の性能として扱わない。
 
@@ -13,8 +13,11 @@ iPhone で診断のコピー、共有、計測の開始操作は不要。
 | Endpoint | 生成開始・完了。再利用なら生成イベントなし |
 | Host の探索 | 接続先準備開始・完了、DNS lookup の開始・成功・終了 |
 | Relay の確立 | DNS 開始、IPv4/IPv6 候補、TCP 試行・成功・失敗、TLS、WebSocket、Relay 認証 |
-| QUIC | 接続開始・完了・失敗、接続直後の RTT と送受信・損失統計 |
-| 各要求 | スロット待ち、ストリーム確保、送信、最初の読み取り、先頭応答フレーム受信完了、デコード |
+| QUIC | 接続、送受信・損失パケット、STREAM/ACK/CRYPTO/PATH 等のフレーム、タイマー、RTT・輻輳統計 |
+| Relay データ | 暗号化済み datagram の指紋・長さ、Ping/Pong、WebSocket の送受信待ち・flush |
+| TCP | socket の read/write/pending/wake、累積バイト数、Apple kernel の RTT・再送・受信・送信バッファ統計 |
+| スケジューリング | Tokio の250 ms間隔の実測間隔、アプリの active/inactive/background |
+| 各要求 | スロット待ち、ストリーム確保、送信、読取poll・pending・wake、最初の読み取り、先頭応答フレーム受信完了、デコード |
 | Host | 同じストリームの受理時点、要求読取・デコード、実行待ち、処理・エンコード、書込、応答バイト数 |
 | 一覧 | 先行取得した応答の採用、ViewModel への公開、SwiftUI の一覧状態更新・出現 |
 | 経路 | 各応答後と接続後の直接／中継経路、推定 RTT、損失パケット・バイト数、送受信パケット・暗号ハンドシェイクフレーム数 |
@@ -41,6 +44,18 @@ Relay のリージョンは公開 n0 ドメインの分類だけを数値で記�
 `phase` に応じて区別する。Relay の `stream` は TCP 試行を区別するローカル span ID で、
 RPC の QUIC stream ID とは別物。両者は合成しない。
 Host の `accepted_us` は当該 Host セッション開始からの相対時間。
+追加の `trace` / `accepted_at_us` / `write_started_at_us` / `write_finished_at_us` は Host endpoint の単調時計。
+`host.connection.event` は同じ時計のネットワークイベント。
+
+QUIC の `group` は初期 destination CID の SHA-256 先頭64 bitで、両端で対応する。
+`QuicTraceLinked` はこの値を Bex の接続 ID に対応づける。
+packet の同定には `(group, space, path, packet)` を使い、`packet_valid=0` は未取得とする。
+`space` は1=Initial、2=Handshake、3=0-RTT、4=1-RTT。
+`at_us` は記録時点、`source_at_us` は QUIC がイベントに付けた時点で、計測処理に入る前の時計。
+両端の packet を突合し、片道時間が非負になる時計差の上下限を求める。
+その幅を含む片道時間の区間だけを返し、対称経路や時計同期を仮定した一点値を出さない。
+`python3 scripts/connection_diagnostics.py` は直近の iPhone 試行を自動解析する。
+欠落や両端の時計矛盾はそのまま出力する。Relay内部の転送待ちや他社網の各hopは観測できない。
 Host と iPhone の絶対時刻を引いて片道時間を算出してはいけない。
 
 主な `value` の単位は次のとおり。
@@ -59,20 +74,30 @@ Host と iPhone の絶対時刻を引いて片道時間を算出してはいけ�
 
 ## 自動回収と負荷
 
-接続完了直後、1・3・10・25 秒後に未送信の差分を送る。
-応答を待って接続や画面表示を止めない。送信は同時 1 件、各 2 秒で打ち切る。
-Host の ACK がなければ次の送信に同じイベントを含めるため、解析時は `trace` と `seq` で重複除去する。
+接続成功後31秒待ち、確定したスナップショットを512イベントずつ送る。
+記録対象期間中に診断トラフィックを流さず、送信中に増えたイベントを同じ回収へ追加しない。
+送信は同時1件、2秒の要求期限、各バッチ最大2回、回収全体30秒で打ち切る。
+ACKが失われた場合は同じバッチを再送するため、解析時は `trace` と `seq` で重複除去する。
 新しい復帰は以前の回収処理を取り消す。切断・終了で送信 Future を破棄する。
+Host側のネットワークスナップショットは最初のバッチでだけ出力する。
+大量の診断ファイル書込はblocking workerで行い、ネットワークexecutorを占有しない。
 
-記録期間は接続試行と成功後の各 30 秒。終端の失敗・キャンセルは期間外でも残す。
-最大 768 イベントのリングバッファで、溢れた数は明示する。
+クライアントの記録期間は接続試行と成功後の各30秒。失敗・キャンセル・scene変更は期間外でも残す。
+段階イベント768件とネットワークイベント8192件の別々のリングで、パケットが段階記録を押し出さない。
+溢れた件数 `dropped` を明示する。Host endpoint は継続リングで、回収時に直近45秒のネットワーク記録を出す。
 失敗した試行の記録は同じ Store の次の成功時にも送る。
 未送信のメモリ上の記録はプロセス終了を越えて保持しない。
 
-パケットごとの無制限ログや TLS キーログは有効にしない。
-DNS・Relay の所定の境界と必要な親 span だけを収集する。
-診断要求自体を RPC タイムラインに再帰的に記録しない。
-通信統計には診断送信も含むため、診断トラフィックのない測定として扱わない。
+`BEX_CONNECTION_DIAGNOSTICS=off|stages|packets` を起動前に指定して負荷を比較できる（既定 packets）。
+OFFでは qlog の生成、socket observer、追加waker、サンプリング、接続記録と回収を止める。
+stages はパケット・kernel・pulse計測を省き、段階の記録だけを行う。通常のアプリ診断ログは残る。
+実行中に環境変数を書き換えず、同じバイナリを別プロセスで比較する。
+ON/OFFのローカル比較を iPhone の国際回線の実測値とは扱わない。
+
+qlog は有効な接続についてメモリ内の数値フィールドに変換する。生のqlog、鍵、payloadは保存しない。
+変換元の各レコードも256 KiBで上限を設け、異常は `QuicTraceMalformed` に残す。
+有効期間後も既存QUIC接続のqlog生成自体は upstream 内で続くが、解析・記録は停止する。
+この生成コストもOFFとの比較対象であり、期間後の負荷がゼロとは扱わない。
 
 ## 測定値の意味
 
@@ -92,7 +117,7 @@ Host の `handle_encode_us` は処理と先頭応答のエンコードを含む�
 GPU が描画したフレームの提示完了を測るものではない。
 欠けた境界は未観測／未実行として扱い、0 ms と補完しない。
 DNS は IPv4/IPv6 が競争する。成功した TCP 試行を選び、重なった待ちを合算しない。
-`RelayDialEnded` は失敗やキャンセルでも起きるため、`RelayReady` と区別する。
+`RelayDialEnded` は診断用spanを保持したsocketの破棄でも起きる。確立完了は `RelayReady` を使う。
 損失統計は QUIC が損失と判断した数で、再送回数そのものではない。
 
 ## 接続改善と比較
@@ -124,3 +149,24 @@ nix develop . --command cargo test -p agent-core --features bindings --lib \
 
 リリース前に、そのテスト、iOS Simulator の統合テスト、同じリビジョンの
 稼働中 Dev Host に対する自動回収・要求相関を確認する。
+
+## 詳細フィールド
+
+`NetworkDetail` の `kind` はphaseごとに独立した列挙番号。
+QUIC frameの対応は `crates/agent-core/src/diagnostics/connection/quic.rs` の `frame_type` matchが定義する。
+STREAMは `stream` = stream ID、`offset` = byte offset、`length` = payload length。
+ACKは `offset` = range開始、`length` = range末尾（両端含む）、`value` = ACK delay us。
+接続・要求・flow controlに関係するframeだけを残す。STREAM等の内容は含めない。
+
+TCPのkind 1..11は、現在RTT us、平滑RTT us、RTO us、送信バッファbytes、送信bytes、
+受信bytes、再送bytes、順序外受信bytes、再送packet数、輻輳window bytes、送信window bytes。
+250 msごとに独立スレッドで `TCP_CONNECTION_INFO` を読むため、Tokio停止中のkernel受信も観測する。
+個々のpacketのkernel受信時刻ではなく、隣接サンプル間の受信範囲を示す。
+Darwinの構造体は選択されたApple SDKのCヘッダーで扱い、利用不可なら理由番号を記録する。
+socketの破棄とサンプリングを同期し、fd再利用や寿命延長を避ける。
+
+`RuntimePulse` のvalueは前回からの実経過us。
+アプリのbackground/suspensionによる停止と、active中のexecutor遅延を分けて読む。
+
+独立したkernelサンプリングがTokio停止中の進行を示すため、汎用の別スレッドheartbeatは設けない。
+MainActorの待ちはCore完了と `UiConnectReady` / `ListViewUpdated` の差分で読み、専用の定期Taskは作らない。

@@ -20,6 +20,7 @@ use n0_future::{
 };
 use rustls::client::Resumption;
 use tokio::net::TcpStream;
+use super::observed_tcp::ObservedTcp;
 use tracing::{Instrument, error, info_span};
 
 use super::{
@@ -130,7 +131,7 @@ impl MaybeTlsStreamBuilder {
         &self,
         proxy_url: Url,
         tls_connector: &tokio_rustls::TlsConnector,
-    ) -> Result<util::Chain<std::io::Cursor<Bytes>, MaybeTlsStream<tokio::net::TcpStream>>, DialError>
+    ) -> Result<util::Chain<std::io::Cursor<Bytes>, MaybeTlsStream<ObservedTcp>>, DialError>
     {
         debug!(%self.url, %proxy_url, "dial url via proxy");
 
@@ -219,7 +220,7 @@ impl MaybeTlsStreamBuilder {
             .await
             .map_err(|err| e!(DialError::ProxyConnect, err))?;
         let Parts { io, read_buf, .. } = upgraded
-            .downcast::<TokioIo<MaybeTlsStream<tokio::net::TcpStream>>>()
+            .downcast::<TokioIo<MaybeTlsStream<ObservedTcp>>>()
             .expect("only this upgrade used");
 
         let res = util::chain(std::io::Cursor::new(read_buf), io.into_inner());
@@ -249,7 +250,7 @@ async fn dial_happy_eyeballs(
     dns_resolver: &DnsResolver,
     url: &Url,
     prefer_ipv6: bool,
-) -> Result<TcpStream, DialError> {
+) -> Result<ObservedTcp, DialError> {
     let port = url_port(url).ok_or_else(|| e!(DialError::InvalidTargetPort))?;
 
     // Stream of resolved addresses.
@@ -315,7 +316,7 @@ async fn dial_happy_eyeballs(
             biased;
             // Yields when a dial attempt completed.
             Some(res) = dials.next(), if !dials.is_empty() => match res {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => return Ok(ObservedTcp::new(stream)),
                 Err(err) => {
                     last_err = Some(err);
                     if dials.is_empty() {

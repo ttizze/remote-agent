@@ -4,11 +4,11 @@
 
 use std::{
     pin::Pin,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
 };
 
 use iroh_base::SecretKey;
-use n0_error::{AnyError, anyerr, ensure, stack_error};
+use n0_error::{anyerr, ensure, stack_error, AnyError};
 use n0_future::{Sink, Stream};
 use tracing::trace;
 
@@ -16,13 +16,13 @@ use super::KeyCache;
 #[cfg(not(wasm_browser))]
 use crate::client::streams::{MaybeTlsStream, ProxyStream};
 use crate::{
-    MAX_PACKET_SIZE,
     http::ProtocolVersion,
     protos::{
         handshake,
         relay::{ClientToRelayMsg, Error as ProtoError, RelayToClientMsg},
         streams::WsBytesFramed,
     },
+    MAX_PACKET_SIZE,
 };
 
 /// Error for sending messages to the relay server.
@@ -69,6 +69,7 @@ pub enum RecvError {
 /// - A [`Sink`] for [`ClientToRelayMsg`] to send to the server.
 #[derive(derive_more::Debug)]
 pub(crate) struct Conn {
+    capture: tracing::Span,
     #[cfg(not(wasm_browser))]
     #[debug("tokio_websockets::WebSocketStream")]
     pub(crate) conn: WsBytesFramed<MaybeTlsStream<ProxyStream>>,
@@ -100,6 +101,11 @@ impl Conn {
         tracing::trace!(target: "bex.net.stage", phase = "relay_auth_ready");
 
         Ok(Self {
+            capture: if tracing::event_enabled!(target: "bex.net.packet", tracing::Level::TRACE) {
+                tracing::Span::current()
+            } else {
+                tracing::Span::none()
+            },
             conn,
             key_cache,
             protocol_version,
@@ -110,6 +116,11 @@ impl Conn {
     pub(crate) fn test(io: tokio::io::DuplexStream, protocol_version: ProtocolVersion) -> Self {
         use crate::protos::relay::MAX_FRAME_SIZE;
         Self {
+            capture: if tracing::event_enabled!(target: "bex.net.packet", tracing::Level::TRACE) {
+                tracing::Span::current()
+            } else {
+                tracing::Span::none()
+            },
             conn: WsBytesFramed {
                 io: tokio_websockets::ClientBuilder::new()
                     .limits(
@@ -127,13 +138,32 @@ impl Stream for Conn {
     type Item = Result<RelayToClientMsg, RecvError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match ready!(Pin::new(&mut self.conn).poll_next(cx)) {
+        let this = &mut *self;
+        let _entered = this.capture.enter();
+        let polled = Pin::new(&mut this.conn).poll_next(cx);
+        if polled.is_pending() {
+            tracing::trace!(target: "bex.net.packet", phase = "relay_read_pending");
+        }
+        match ready!(polled) {
             Some(Ok(msg)) => {
                 let message =
-                    RelayToClientMsg::from_bytes(msg, &self.key_cache, self.protocol_version);
+                    RelayToClientMsg::from_bytes(msg, &this.key_cache, this.protocol_version);
+                match &message {
+                    Ok(RelayToClientMsg::Datagrams { datagrams, .. }) => {
+                        record_datagrams("relay_datagram_received", datagrams)
+                    }
+                    Ok(RelayToClientMsg::Pong(data)) => {
+                        tracing::trace!(target: "bex.net.packet", phase = "relay_pong_received", value = fingerprint(data))
+                    }
+                    Err(_) => tracing::trace!(target: "bex.net.packet", phase = "relay_read_error"),
+                    _ => (),
+                }
                 Poll::Ready(Some(message.map_err(Into::into)))
             }
-            Some(Err(e)) => Poll::Ready(Some(Err(anyerr!(e).into()))),
+            Some(Err(e)) => {
+                tracing::trace!(target: "bex.net.packet", phase = "relay_read_error");
+                Poll::Ready(Some(Err(anyerr!(e).into())))
+            }
             None => Poll::Ready(None),
         }
     }
@@ -143,10 +173,16 @@ impl Sink<ClientToRelayMsg> for Conn {
     type Error = SendError;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.conn).poll_ready(cx).map_err(Into::into)
+        let this = &mut *self;
+        let _entered = this.capture.enter();
+        let result = Pin::new(&mut this.conn).poll_ready(cx).map_err(Into::into);
+        tracing::trace!(target: "bex.net.packet", phase = match &result { Poll::Pending => "relay_send_pending", Poll::Ready(Ok(_)) => "relay_send_ready", Poll::Ready(Err(_)) => "relay_write_error" });
+        result
     }
 
     fn start_send(mut self: Pin<&mut Self>, frame: ClientToRelayMsg) -> Result<(), Self::Error> {
+        let this = &mut *self;
+        let _entered = this.capture.enter();
         let size = frame.encoded_len();
         ensure!(
             size <= MAX_PACKET_SIZE,
@@ -154,18 +190,46 @@ impl Sink<ClientToRelayMsg> for Conn {
         );
         if let ClientToRelayMsg::Datagrams { datagrams, .. } = &frame {
             ensure!(!datagrams.contents.is_empty(), SendError::EmptyPacket);
+            record_datagrams("relay_datagram_sent", datagrams);
+        }
+        if let ClientToRelayMsg::Ping(data) = &frame {
+            tracing::trace!(target: "bex.net.packet", phase = "relay_ping_sent", value = fingerprint(data));
         }
 
-        Pin::new(&mut self.conn)
+        Pin::new(&mut this.conn)
             .start_send(frame.to_bytes().freeze())
-            .map_err(Into::into)
+            .map_err(|error| {
+                tracing::trace!(target: "bex.net.packet", phase = "relay_write_error");
+                error.into()
+            })
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.conn).poll_flush(cx).map_err(Into::into)
+        let this = &mut *self;
+        let _entered = this.capture.enter();
+        let result = Pin::new(&mut this.conn).poll_flush(cx).map_err(Into::into);
+        tracing::trace!(target: "bex.net.packet", phase = match &result { Poll::Pending => "relay_flush_pending", Poll::Ready(Ok(_)) => "relay_flush_ready", Poll::Ready(Err(_)) => "relay_write_error" });
+        result
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.conn).poll_close(cx).map_err(Into::into)
+    }
+}
+
+fn fingerprint(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(blake3::hash(bytes).as_bytes()[..8].try_into().unwrap())
+}
+
+fn record_datagrams(phase: &'static str, datagrams: &crate::protos::relay::Datagrams) {
+    if !tracing::event_enabled!(target: "bex.net.packet", tracing::Level::TRACE) {
+        return;
+    }
+    let size = datagrams
+        .segment_size
+        .map_or(datagrams.contents.len(), |size| usize::from(size.get()))
+        .max(1);
+    for packet in datagrams.contents.chunks(size) {
+        tracing::trace!(target: "bex.net.packet", phase, value = fingerprint(packet), length = packet.len() as u64);
     }
 }
