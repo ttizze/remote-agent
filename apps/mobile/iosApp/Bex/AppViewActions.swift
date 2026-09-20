@@ -50,14 +50,6 @@ extension BexAppViewModel {
         set { perform(.setDraftText(threadId: coreDraftKey, text: newValue)) }
     }
 
-    func openPairing() {
-        pairingError = nil; screen = .pairing
-    }
-
-    func dismissPairing() {
-        screen = .profiles
-    }
-
     func showProfiles() {
         screen = .profiles; perform(.showThreadList)
     }

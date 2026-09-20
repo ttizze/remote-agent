@@ -24,7 +24,8 @@ private struct BexScreen: View {
         NavigationStack {
             Group {
                 if model.profiles.isEmpty {
-                    PairingScreen(canCancel: !model.profiles.isEmpty, error: model.pairingError,
+                    PairingScreen(canCancel: !model.profiles.isEmpty, connecting: model.isConnecting,
+                                  error: model.pairingError,
                                   scan: { model.isScanning = true }, pair: model.pair, cancel: model.dismissPairing)
                 } else {
                     ProfilesScreen(profiles: model.profiles, notice: model.notice,
@@ -49,6 +50,7 @@ private struct BexScreen: View {
                         )) {
                             NavigationStack { PairingScreen(
                                 canCancel: !model.profiles.isEmpty,
+                                connecting: model.isConnecting,
                                 error: model.pairingError,
                                 scan: { model.isScanning = true },
                                 pair: model.pair,
@@ -79,12 +81,14 @@ private struct BexScreen: View {
 
 private struct PairingScreen: View {
     let canCancel: Bool
+    let connecting: Bool
     let error: String?
     let scan: () -> Void
     let pair: (String) -> Void
     let cancel: () -> Void
     @State private var contents = ""
     @State private var showsManualPairing = false
+    @FocusState private var editingContents: Bool
 
     var body: some View {
         ScrollView {
@@ -104,6 +108,13 @@ private struct PairingScreen: View {
                         .foregroundColor(.secondary)
                 }
 
+                if connecting {
+                    ProgressView("ペアリング中…")
+                        .accessibilityIdentifier("pairing.progress")
+                } else if let error {
+                    BexNotice(text: error)
+                }
+
                 Button { scan() } label: {
                     Label("QRコードを読み取る", systemImage: "qrcode.viewfinder")
                         .font(.headline)
@@ -111,19 +122,25 @@ private struct PairingScreen: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(connecting)
                 .accessibilityIdentifier("pairing.scan")
 
                 DisclosureGroup("QRの内容を手入力", isExpanded: $showsManualPairing) {
                     VStack(alignment: .leading, spacing: 12) {
                         SecureField("ペアリング情報を貼り付け", text: $contents)
+                            .focused($editingContents)
+                            .disabled(connecting)
                             .font(.system(.footnote, design: .monospaced))
                             .frame(minHeight: 44)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityIdentifier("pairing.contents")
-                        Button("入力内容でペアリング") { pair(contents) }
-                            .buttonStyle(.bordered)
-                            .disabled(contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .accessibilityIdentifier("pairing.submit")
+                        Button("入力内容でペアリング") {
+                            editingContents = false
+                            pair(contents)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(connecting || contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("pairing.submit")
                     }
                     .padding(.top, 12)
                 }
@@ -135,10 +152,6 @@ private struct PairingScreen: View {
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundColor(.secondary)
-
-                if let error {
-                    BexNotice(text: error)
-                }
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 32)

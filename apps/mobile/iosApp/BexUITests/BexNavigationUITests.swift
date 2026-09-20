@@ -94,6 +94,24 @@ extension BexLaunchUITests {
         )).firstMatch
         XCTAssertTrue(host.waitForExistence(timeout: 10)); host.tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
+
+        app.buttons["tasks.hosts"].tap()
+        addHost.tap()
+        app.buttons["QRの内容を手入力"].tap()
+        let contents = app.secureTextFields["pairing.contents"]
+        contents.tap(); contents.typeText("invalid invitation")
+        app.buttons["pairing.submit"].tap()
+        XCTAssertTrue(app.staticTexts["notice"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        contents.tap()
+        contents.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "invalid invitation".count))
+        try contents.typeText(simulatorPairingPayload())
+        app.buttons["pairing.submit"].tap()
+        XCUIDevice.shared.press(.home); app.activate()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
+        XCTAssertFalse(app.buttons["pairing.cancel"].exists)
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
     }
 
     func testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject() throws {

@@ -22,6 +22,8 @@ pub enum ConnectionPhase {
     IdentityRead,
     UiConnectStart,
     UiConnectReady,
+    UiConnectFailed,
+    UiConnectCancelled,
     ListPublished,
     ListViewUpdated,
     ResumeStart,
@@ -143,7 +145,9 @@ impl Trace {
         if Instant::now() > state.until
             && !matches!(
                 phase,
-                ConnectionPhase::ResumeFailed
+                ConnectionPhase::UiConnectFailed
+                    | ConnectionPhase::UiConnectCancelled
+                    | ConnectionPhase::ResumeFailed
                     | ConnectionPhase::ResumeCancelled
                     | ConnectionPhase::RequestFailed
                     | ConnectionPhase::ResolveFailed

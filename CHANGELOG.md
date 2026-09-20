@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep iPhone pairing alive across foreground recovery, save the paired Host before closing the previous connection, and show progress or errors after manual entry. Add iOS Markdown code-block copy buttons and prepare BEX Dev build 8. Verify manual-entry errors, foreground return and saved pairing after relaunch.
+
 - Recognize native Codex API-key accounts on shared Hosts, including account selection and restoration after restart. Keep API billing separate from ChatGPT subscription usage and verify selection, logout and credential exclusion from the account registry.
 
 - Add `host-daemon invite`, `status` and `revoke` for headless Linux administration. Reuse the running Host's local identity and core RPC operations to pair iPhone/Android, inspect devices and revoke access without a desktop. Verify one-use pairing, revocation, unchanged credentials and stopped-Host rejection against a real isolated daemon.

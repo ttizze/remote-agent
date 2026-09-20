@@ -220,6 +220,8 @@ impl AgentStore {
                 | ConnectionPhase::IdentityRead
                 | ConnectionPhase::UiConnectStart
                 | ConnectionPhase::UiConnectReady
+                | ConnectionPhase::UiConnectFailed
+                | ConnectionPhase::UiConnectCancelled
                 | ConnectionPhase::ListPublished
                 | ConnectionPhase::ListViewUpdated
         ) {
