@@ -1,7 +1,7 @@
 use agent_core::{
     models::{Item, Thread, ThreadResponse, Turn},
     state::{
-        Effect, Event, Snapshot,
+        Draft, Effect, Event, Intent, Snapshot,
         operations::{self as op, Operation},
     },
 };
@@ -914,6 +914,102 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
         vec![attachment("/next"), attachment("/sent")]
     );
     assert_eq!(restored.model.as_deref(), Some("new-model"));
+}
+
+#[test]
+fn unknown_submission_can_be_restored_or_discarded() {
+    let attachment = |path: &str| agent_core::state::Attachment {
+        path: path.into(),
+        name: path.into(),
+        is_image: false,
+    };
+    let pending = |text: &str| {
+        Arc::new(agent_core::state::PendingSubmission {
+            sequence: 0,
+            draft_key: "thread".into(),
+            draft: Arc::new(Draft {
+                text: text.into(),
+                attachments: vec![attachment("/sent")],
+                ..Default::default()
+            }),
+            turn_id: None,
+            after_item_id: None,
+            accepted: false,
+            delivery_unknown: true,
+        })
+    };
+    let mut snapshot = Snapshot::default();
+    snapshot.pending_submissions = Arc::new(BTreeMap::from([
+        ("restore".into(), pending("uncertain")),
+        ("discard".into(), pending("unwanted")),
+    ]));
+    snapshot.drafts = Arc::new(BTreeMap::from([(
+        "thread".into(),
+        Arc::new(Draft {
+            text: "newer".into(),
+            attachments: vec![attachment("/newer")],
+            ..Default::default()
+        }),
+    )]));
+
+    let (snapshot, effects) = reduce(
+        &snapshot,
+        Event::Intent(Intent::RestoreUnknownSubmission {
+            client_user_message_id: "restore".into(),
+        }),
+    );
+    assert!(effects.is_empty());
+    assert_eq!(snapshot.drafts["thread"].text, "uncertain\nnewer");
+    assert!(!snapshot.pending_submissions.contains_key("restore"));
+    assert_eq!(
+        snapshot.drafts["thread"].attachments,
+        vec![attachment("/newer"), attachment("/sent")]
+    );
+    let saved_draft = snapshot.drafts["thread"].clone();
+
+    let (snapshot, effects) = reduce(
+        &snapshot,
+        Event::Intent(Intent::DiscardUnknownSubmission {
+            client_user_message_id: "discard".into(),
+        }),
+    );
+    assert!(effects.is_empty());
+    assert!(snapshot.pending_submissions.is_empty());
+    assert_eq!(snapshot.drafts["thread"], saved_draft);
+    assert_eq!(snapshot.drafts["thread"].text, "uncertain\nnewer");
+}
+
+#[test]
+fn unresolved_submission_actions_ignore_known_delivery_states() {
+    let mut snapshot = Snapshot::default();
+    snapshot.pending_submissions = Arc::new(BTreeMap::from([(
+        "sending".into(),
+        Arc::new(agent_core::state::PendingSubmission {
+            sequence: 0,
+            draft_key: "thread".into(),
+            draft: Arc::new(Draft {
+                text: "sending".into(),
+                ..Default::default()
+            }),
+            turn_id: None,
+            after_item_id: None,
+            accepted: false,
+            delivery_unknown: false,
+        }),
+    )]));
+
+    for intent in [
+        Intent::RestoreUnknownSubmission {
+            client_user_message_id: "sending".into(),
+        },
+        Intent::DiscardUnknownSubmission {
+            client_user_message_id: "sending".into(),
+        },
+    ] {
+        let (next, effects) = reduce(&snapshot, Event::Intent(intent));
+        assert!(effects.is_empty());
+        assert_eq!(next, snapshot);
+    }
 }
 
 #[test]

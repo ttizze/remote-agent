@@ -382,6 +382,9 @@ results after navigation.
 - Acknowledgement never clears content typed or attached after submission.
 - A definite failure restores the sent content alongside newer draft content for
   retry. Unknown delivery remains visible and is never automatically resent.
+- iPhone unknown-delivery messages offer “入力欄へ戻す” and “破棄”. Restoring
+  merges the saved text and attachments into any newer draft; discarding removes
+  only that pending message. Neither action is available for known delivery states.
 - Pending messages retain submission order and their saved conversation position,
   including unknown delivery, later turns, and reopening. IDs do not define order.
 
@@ -389,7 +392,8 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 `successful_submission_does_not_erase_a_newer_draft`,
 `failed_new_submission_keeps_retry_at_the_last_successful_step`,
 `unknown_submissions_keep_send_order_and_position_after_reopening`, and
-`queued_submissions_keep_send_order_without_history`.
+`queued_submissions_keep_send_order_without_history`, plus
+`unknown_submission_can_be_restored_or_discarded`.
 
 ## Image preview and draft attachments
 

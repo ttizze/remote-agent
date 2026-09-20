@@ -146,6 +146,8 @@ struct ThreadMessageRow: View {
     let media: ConversationMediaAccess
     let selection: ConversationSelectionActions
     var fork: ((@escaping (String?) -> Void) -> Void)?
+    var restoreUnknown: ((String) -> Void)?
+    var discardUnknown: ((String) -> Void)?
     @State private var forking = false
     @State private var forkError: String?
     @State private var copied = false
@@ -205,6 +207,16 @@ struct ThreadMessageRow: View {
             }
             if isUser, item.data.nativeId == nil {
                 Text(item.data.title).font(.caption).foregroundStyle(.secondary)
+                if let id = item.source.unknownSubmissionId() {
+                    HStack(spacing: 18) {
+                        Button("入力欄へ戻す") { restoreUnknown?(id) }
+                            .accessibilityIdentifier("submission.restore." + id)
+                        Button("破棄", role: .destructive) { discardUnknown?(id) }
+                            .accessibilityIdentifier("submission.discard." + id)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.plain)
+                }
             }
             if item.data.kind == "agent" {
                 HStack(spacing: 20) {

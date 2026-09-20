@@ -116,6 +116,14 @@ extension BexAppViewModel {
         }
     }
 
+    func restoreUnknownSubmission(_ id: String) {
+        perform(.restoreUnknownSubmission(clientUserMessageId: id)) { [weak self] _ in self?.persist() }
+    }
+
+    func discardUnknownSubmission(_ id: String) {
+        perform(.discardUnknownSubmission(clientUserMessageId: id)) { [weak self] _ in self?.persist() }
+    }
+
     func removeAttachment(_ id: Int) {
         perform(.removeAttachment(draftKey: coreDraftKey, index: UInt32(id))) { [weak self] _ in self?.persist() }
     }

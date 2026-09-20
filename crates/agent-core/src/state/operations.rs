@@ -126,6 +126,12 @@ pub enum Intent {
         thread_id: Option<String>,
         client_user_message_id: String,
     },
+    RestoreUnknownSubmission {
+        client_user_message_id: String,
+    },
+    DiscardUnknownSubmission {
+        client_user_message_id: String,
+    },
     Respond(Respond),
 }
 

@@ -125,6 +125,13 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
         .unwrap()
         .as_ref(),
     );
+    diagnostics::rpc_error(
+        "thread/resume",
+        Some(44),
+        serde_json::value::RawValue::from_string(
+            r#"{"delivery":"unknown","providerError":{"code":-32600,"message":"thread example already has an active writer","data":"PRIVATE_DATA"}}"#.into(),
+        ).unwrap().as_ref(),
+    );
     let contents = fs::read_to_string(&path).unwrap();
     assert!(contents.starts_with(&after));
     assert!(!contents.contains("PRIVATE_"), "{contents}");
@@ -132,10 +139,16 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 3);
     assert_eq!(records[0]["requestId"], 42);
     assert_eq!(records[0]["operation"], "upload");
     assert_eq!(records[0]["message"], "failed [credential omitted]");
     assert_eq!(records[1]["errorCode"], "provider_failed");
     assert_eq!(records[1]["requestId"], 43);
+    assert_eq!(records[2]["errorCode"], -32600);
+    assert_eq!(records[2]["requestId"], 44);
+    assert_eq!(
+        records[2]["message"],
+        "thread example already has an active writer"
+    );
 }

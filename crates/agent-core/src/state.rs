@@ -387,6 +387,24 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 None,
             );
         }
+        Intent::RestoreUnknownSubmission { client_user_message_id } => {
+            if previous
+                .pending_submissions
+                .get(&client_user_message_id)
+                .is_some_and(|pending| pending.delivery_unknown)
+            {
+                return reduce(previous, Event::SubmissionFailed(client_user_message_id));
+            }
+        }
+        Intent::DiscardUnknownSubmission { client_user_message_id } => {
+            if previous
+                .pending_submissions
+                .get(&client_user_message_id)
+                .is_some_and(|pending| pending.delivery_unknown)
+            {
+                Arc::make_mut(&mut next.pending_submissions).remove(&client_user_message_id);
+            }
+        }
         Intent::AddAttachment {
             draft_key,
             attachment,

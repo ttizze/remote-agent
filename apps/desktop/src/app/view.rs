@@ -5,7 +5,7 @@ mod settings;
 mod sidebar;
 mod workbench;
 use super::*;
-use agent_core::state::operations as op;
+use agent_core::{presentation::error::error_message, state::operations as op};
 use base64::Engine;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
@@ -525,48 +525,5 @@ impl Desktop {
                 action(s, w, cx);
                 cx.notify();
             }))
-    }
-}
-
-fn error_message(error: &str) -> String {
-    let Some(raw) = error.strip_prefix("remote RPC error: ") else {
-        return error.into();
-    };
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return "接続先で操作に失敗しました。もう一度お試しください。".into();
-    };
-    if value["code"] == "dictation_failed" {
-        let reason = value["message"]
-            .as_str()
-            .filter(|message| !message.trim().is_empty())
-            .map(agent_core::diagnostics::sanitize)
-            .unwrap_or_else(|| "もう一度録音してください。".into());
-        return format!("音声を文字起こしできませんでした。{reason}");
-    }
-    value["message"]
-        .as_str()
-        .unwrap_or("接続先で操作に失敗しました。もう一度お試しください。")
-        .into()
-}
-
-#[cfg(test)]
-mod error_tests {
-    use super::error_message;
-    #[test]
-    fn dictation_errors_explain_recovery_without_rendering_rpc_payloads() {
-        let message = error_message(
-            r#"remote RPC error: {"code":"dictation_failed","message":"provider failed","data":{"audio":"private"}}"#,
-        );
-        assert!(message.contains("音声を文字起こしできませんでした。provider failed"));
-        assert!(!message.contains("private") && !message.contains("{"));
-        assert!(error_message(r#"remote RPC error: {"code":"dictation_failed","message":"Codexにログインしてください。"}"#).contains("Codexにログインしてください。"));
-        assert_eq!(
-            error_message(r#"remote RPC error: {"code":-1,"message":"permission denied"}"#),
-            "permission denied"
-        );
-        assert_eq!(
-            error_message("マイクへのアクセスを許可してください"),
-            "マイクへのアクセスを許可してください"
-        );
     }
 }

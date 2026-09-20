@@ -15,7 +15,7 @@ extension ThreadScreen {
         case .olderTurns: historyBoundary(nil)
         case let .native(content, item): nativeConversationRow(content, item: item)
         case let .queued(item):
-            ThreadMessageRow(item: item, isUser: true, media: model.mediaAccess, selection: model.selectionActions)
+            userMessageRow(item)
         }
     }
 
@@ -24,7 +24,7 @@ extension ThreadScreen {
         switch (row.content, item) {
         case let (.olderItems(turnId), _): historyBoundary(turnId)
         case let (.user, item?):
-            ThreadMessageRow(item: item, isUser: true, media: model.mediaAccess, selection: model.selectionActions)
+            userMessageRow(item)
                 .padding(
                     .top,
                     16
@@ -43,6 +43,17 @@ extension ThreadScreen {
         case let (.error(error), _): ThreadErrorRow(error: error)
         case (.inProgress, _), (_, nil): EmptyView()
         }
+    }
+
+    func userMessageRow(_ item: ConversationItem) -> some View {
+        ThreadMessageRow(
+            item: item,
+            isUser: true,
+            media: model.mediaAccess,
+            selection: model.selectionActions,
+            restoreUnknown: { model.restoreUnknownSubmission($0) },
+            discardUnknown: { model.discardUnknownSubmission($0) }
+        )
     }
 
     func activityItem(_ item: ConversationItem, turnId: String) -> some View {
