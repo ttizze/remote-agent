@@ -4,7 +4,11 @@ use agent_core::{
     transport::{Endpoint, Identity, Relays},
 };
 use serde_json::Value;
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    path::Path,
+    process::Stdio,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::process::Command;
 
 fn command(directory: &Path) -> Command {
@@ -49,6 +53,10 @@ async fn headless_invitation_pairs_once_and_status_uses_the_running_host() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let original_keys = std::fs::read(state.join("identity.keys")).unwrap();
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let output = command(&state).arg("invite").output().await.unwrap();
         assert!(
             output.status.success(),
@@ -56,6 +64,11 @@ async fn headless_invitation_pairs_once_and_status_uses_the_running_host() {
             String::from_utf8_lossy(&output.stderr)
         );
         let invitation: Invitation = serde_json::from_slice(&output.stdout).unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!((before + 604_800..=after + 604_800).contains(&invitation.expires_at));
         let ticket = invitation.endpoint.parse().unwrap();
         let phone = Endpoint::bind(Identity::generate(), Relays::Disabled)
             .await

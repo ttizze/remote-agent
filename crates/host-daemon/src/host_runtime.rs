@@ -317,7 +317,7 @@ impl HostRuntime {
                 let ticket = Invitation {
                     endpoint: self.endpoint.ticket().to_string(),
                     invitation: uuid::Uuid::new_v4(),
-                    expires_at: now() + 300,
+                    expires_at: now() + 7 * 24 * 60 * 60,
                 };
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();

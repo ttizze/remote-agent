@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extend pairing invitations to seven days so developers can accept shared Host access later. Keep each invitation limited to one new device.
+
 - Keep iPhone pairing alive across foreground recovery, save the paired Host before closing the previous connection, and show progress or errors after manual entry. Add iOS Markdown code-block copy buttons and prepare BEX Dev build 8. Verify manual-entry errors, foreground return and saved pairing after relaunch.
 
 - Recognize native Codex API-key accounts on shared Hosts, including account selection and restoration after restart. Keep API billing separate from ChatGPT subscription usage and verify selection, logout and credential exclusion from the account registry.

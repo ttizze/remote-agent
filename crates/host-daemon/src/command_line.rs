@@ -45,7 +45,7 @@ pub(crate) struct StartupConfig {
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Mode {
-    /// Print a one-use iPhone/Android pairing invitation as JSON (valid for five minutes).
+    /// Print a one-use iPhone/Android pairing invitation as JSON (valid for seven days).
     Invite,
     /// Print the running Host's identity, paired devices and provider errors as JSON.
     Status,
