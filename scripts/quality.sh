@@ -10,7 +10,7 @@ if [[ $language == all || $language == rust ]]; then
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
     cargo test --locked -p agent-core -p bex-desktop --lib --bins || failed=1
     cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
-    cargo test --locked -p host-daemon -p host-fixture --lib --test iroh_host --test browser_bridge || failed=1
+    cargo test --locked -p host-daemon -p host-fixture --lib --test iroh_host --test browser_bridge --test management --test codex_accounts || failed=1
 fi
 if [[ $language == all || $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1

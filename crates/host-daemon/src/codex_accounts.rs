@@ -18,9 +18,9 @@ use zeroize::Zeroizing;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Account {
     id: String,
-    email: String,
+    email: Option<String>,
     plan_type: String,
-    chatgpt_account_id: String,
+    chatgpt_account_id: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -154,9 +154,24 @@ impl Accounts {
         &mut self,
         id: &str,
     ) -> Result<impl std::future::Future<Output = op::AccountUsage> + use<>, String> {
+        let api_key = self
+            .registry
+            .accounts
+            .iter()
+            .any(|account| account.id == id && account.chatgpt_account_id.is_none());
         let helper = self.helper(id)?;
         let cache = self.usage.entry(id.to_owned()).or_default().clone();
         Ok(async move {
+            if api_key {
+                return op::AccountUsage {
+                    windows: Vec::new(),
+                    fetched_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                    error: None,
+                };
+            }
             cache
                 .read(async {
                     let value =
@@ -179,13 +194,20 @@ impl Accounts {
         let helper = self.helper("desktop")?;
         let helper = helper.server().await?;
         let info = rpc(helper, "account/read", json!({"refreshToken":false})).await?;
-        if info["account"]["type"] != "chatgpt" {
-            return Ok(());
-        }
-        let auth = credentials(helper, false).await?;
-        self.registry
-            .accounts
-            .push(account("desktop".into(), &info, &auth)?);
+        let entry = match info["account"]["type"].as_str() {
+            Some("apiKey") => Account {
+                id: "desktop".into(),
+                email: None,
+                plan_type: "API key".into(),
+                chatgpt_account_id: None,
+            },
+            Some("chatgpt") => {
+                let auth = credentials(helper, false).await?;
+                account("desktop".into(), &info, &auth)?
+            }
+            _ => return Ok(()),
+        };
+        self.registry.accounts.push(entry);
         self.save().await
     }
 
@@ -216,7 +238,7 @@ impl Accounts {
                         .map(|account| op::Account {
                             id: account.id.clone(),
                             provider: agent_core::session::ProviderKind::Codex,
-                            email: Some(account.email.clone()),
+                            email: account.email.clone(),
                             plan_type: Some(account.plan_type.clone()),
                             usage: None,
                         })
@@ -427,22 +449,24 @@ impl Accounts {
     }
 
     async fn select(&mut self, primary: &CodexAppServer, id: &str) -> Result<(), String> {
-        if !self
+        let entry = self
             .registry
             .accounts
             .iter()
-            .any(|account| account.id == id)
-        {
-            return Err("アカウントが見つかりません。".into());
-        }
-        let auth = credentials(self.helper(id)?.server().await?, false).await?;
-        rpc(
-            primary,
-            "account/login/start",
+            .find(|account| account.id == id)
+            .ok_or("アカウントが見つかりません。")?;
+        let api_key = entry.chatgpt_account_id.is_none();
+        let helper = self.helper(id)?;
+        let helper = helper.server().await?;
+        let params = if api_key {
+            let key = auth_token(helper, false, &["apikey"]).await?;
+            json!({"type":"apiKey","apiKey":key.as_str()})
+        } else {
+            let auth = credentials(helper, false).await?;
             json!({"type":"chatgptAuthTokens","accessToken":auth.token.as_str(),
-            "chatgptAccountId":auth.account_id,"chatgptPlanType":auth.plan}),
-        )
-        .await?;
+                "chatgptAccountId":auth.account_id,"chatgptPlanType":auth.plan})
+        };
+        rpc(primary, "account/login/start", params).await?;
         self.registry.selected_id = Some(id.to_owned());
         self.registry.signed_out = false;
         self.restoration_error.send_replace(None);
@@ -471,7 +495,7 @@ impl Accounts {
                 .registry
                 .accounts
                 .iter()
-                .find(|account| account.chatgpt_account_id == previous)
+                .find(|account| account.chatgpt_account_id.as_deref() == Some(previous))
                 .map(|account| account.id.clone()),
             None => self.registry.selected_id.clone(),
         }
@@ -511,22 +535,31 @@ pub(crate) async fn access_token(
     server: &CodexAppServer,
     refresh: bool,
 ) -> Result<Zeroizing<String>, String> {
+    auth_token(server, refresh, &["chatgpt", "chatgptAuthTokens"]).await
+}
+
+async fn auth_token(
+    server: &CodexAppServer,
+    refresh: bool,
+    methods: &[&str],
+) -> Result<Zeroizing<String>, String> {
     let mut result = rpc(
         server,
         "getAuthStatus",
         json!({"includeToken":true,"refreshToken":refresh}),
     )
     .await?;
-    if !matches!(
-        result["authMethod"].as_str(),
-        Some("chatgpt" | "chatgptAuthTokens")
-    ) {
-        return Err("ChatGPTアカウントでCodexにログインしてください。".into());
-    }
     let Value::String(token) = result["authToken"].take() else {
         return Err("Codexにログインしてください。".into());
     };
-    Ok(Zeroizing::new(token))
+    let token = Zeroizing::new(token);
+    if !result["authMethod"]
+        .as_str()
+        .is_some_and(|method| methods.contains(&method))
+    {
+        return Err("Codexの認証方法が一致しません。ログイン状態を確認してください。".into());
+    }
+    Ok(token)
 }
 
 pub(crate) fn token_claims(token: &str) -> Option<Value> {
@@ -555,15 +588,17 @@ async fn credentials(server: &CodexAppServer, refresh: bool) -> Result<Credentia
 fn account(id: String, info: &Value, auth: &Credentials) -> Result<Account, String> {
     Ok(Account {
         id,
-        email: info["account"]["email"]
-            .as_str()
-            .ok_or("アカウント情報がありません。")?
-            .to_owned(),
+        email: Some(
+            info["account"]["email"]
+                .as_str()
+                .ok_or("アカウント情報がありません。")?
+                .to_owned(),
+        ),
         plan_type: info["account"]["planType"]
             .as_str()
             .unwrap_or("")
             .to_owned(),
-        chatgpt_account_id: auth.account_id.clone(),
+        chatgpt_account_id: Some(auth.account_id.clone()),
     })
 }
 

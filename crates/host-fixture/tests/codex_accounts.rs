@@ -32,7 +32,7 @@ async fn call(
         .unwrap()
         .to_string();
     assert!(
-        !line.contains("invalid-test-signature"),
+        !line.contains("invalid-test-signature") && !line.contains("fixture-api-key"),
         "Host leaked a credential into the mobile session"
     );
     assert!(
@@ -292,12 +292,16 @@ async fn helper_initialization_does_not_block_completed_turns() {
 }
 
 #[tokio::test]
-async fn logout_removes_credentials_survives_restart_and_allows_login_again() {
-    tokio::time::timeout(std::time::Duration::from_secs(45), async {
+async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() {
+    for account in [
+        json!({"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}),
+        json!({"type":"apiKey"}),
+    ] {
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("codex");
         std::fs::create_dir(&home).unwrap();
-        std::fs::write(home.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
+        std::fs::write(home.join("account-fixture.json"), serde_json::to_vec(&account).unwrap()).unwrap();
         let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
         let accounts_dir = directory.path().join("accounts");
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
@@ -306,16 +310,35 @@ async fn logout_removes_credentials_survives_restart_and_allows_login_again() {
         let mut session = service.open_session(256);
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["selectedId"], "desktop");
+        if account["type"] == "apiKey" {
+            assert_eq!(listed["result"]["accounts"][0]["planType"], "API key");
+            assert!(listed["result"]["accounts"][0]["email"].is_null());
+            let usage = call(&service, &mut session, "host/account/usage", json!({"accountId":"desktop"})).await;
+            assert_eq!(usage["result"]["windows"], json!([]));
+            assert!(usage["result"]["error"].is_null());
+            let voice = call(&service, &mut session, "host/dictation/transcribe", json!({"audio":"AAA="})).await;
+            assert!(voice["error"]["message"].as_str().unwrap().contains("認証方法が一致しません"));
+        }
+        assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":"desktop"})).await["result"]["selectedId"], "desktop");
+        let stored = std::fs::read_to_string(accounts_dir.join("accounts.json")).unwrap();
+        assert!(!stored.contains("fixture-api-key") && !stored.contains("invalid-test-signature"));
+        drop(session); drop(service);
+        server.shutdown().await.unwrap();
+        let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
+        service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
+        let mut session = service.open_session(256);
+        assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selectedId"], "desktop");
         let invalid = call(&service, &mut session, "host/account/logout", json!({"accountId":"missing"})).await;
         assert!(invalid.get("error").is_some());
-        assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "desktop");
+        assert_eq!(rpc(&server, "account/read", json!({})).await["account"], account);
         // Failed persistence must leave the account and its credentials usable.
         let registry = std::fs::read(accounts_dir.join("accounts.json")).unwrap();
         std::fs::remove_file(accounts_dir.join("accounts.json")).unwrap();
         std::fs::create_dir(accounts_dir.join("accounts.json")).unwrap();
         let failed = call(&service, &mut session, "host/account/logout", json!({"accountId":"desktop"})).await;
         assert!(failed.get("error").is_some());
-        assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "desktop");
+        assert_eq!(rpc(&server, "account/read", json!({})).await["account"], account);
         assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selectedId"], "desktop");
         std::fs::remove_dir(accounts_dir.join("accounts.json")).unwrap();
         std::fs::write(accounts_dir.join("accounts.json"), registry).unwrap();
@@ -353,4 +376,5 @@ async fn logout_removes_credentials_survives_restart_and_allows_login_again() {
         drop(session); drop(service);
         server.shutdown().await.unwrap();
     }).await.expect("logout and login stalled");
+    }
 }

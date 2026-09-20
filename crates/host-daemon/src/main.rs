@@ -1,4 +1,5 @@
 mod command_line;
+mod management;
 mod runtime;
 
 use std::env;
@@ -21,7 +22,11 @@ async fn main() {
         return;
     }
 
-    if let Err(error) = runtime::run(config).await {
+    let result = match config.mode {
+        Some(mode) => management::run(mode, config.state_dir, config.isolated).await,
+        None => runtime::run(config).await,
+    };
+    if let Err(error) = result {
         let error = format!("{error:#}");
         tracing::error!(target: "bex", operation = "host.runtime", message = %error);
         eprintln!(
