@@ -35,6 +35,65 @@ use agent_core::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+#[tokio::test]
+async fn browser_frames_are_ephemeral_and_pending_reads_end_with_the_connection() {
+    use agent_core::browser::{BrowserAction, BrowserFrame, BrowserRequest};
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let snapshot = store.snapshot();
+    let request = BrowserRequest {
+        thread_id: "browser-thread".into(),
+        control_token: String::new(),
+        tab_id: String::new(),
+        image_id: String::new(),
+        action: BrowserAction::Read,
+    };
+    let received = tokio::spawn({
+        let store = store.clone();
+        let request = request.clone();
+        async move { store.browser(request).await }
+    });
+    let rpc = read(&mut reader).await;
+    assert_eq!(rpc["method"], "host/browser");
+    let frame = BrowserFrame {
+        image: vec![1, 2, 3],
+        ..Default::default()
+    };
+    writer.reply(&rpc, json!({"result":frame})).await.unwrap();
+    assert_eq!(received.await.unwrap().unwrap(), frame);
+    assert!(
+        Arc::ptr_eq(&snapshot, &store.snapshot()),
+        "browser frames must not update or persist conversation state"
+    );
+    assert!(
+        store
+            .browser(BrowserRequest {
+                action: BrowserAction::Navigate {
+                    url: "file:///private/data".into()
+                },
+                ..request.clone()
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        Arc::ptr_eq(&snapshot, &store.snapshot()),
+        "input validation must not contaminate conversation errors"
+    );
+    let pending = tokio::spawn({
+        let store = store.clone();
+        async move { store.browser(request).await }
+    });
+    assert_eq!(read(&mut reader).await["method"], "host/browser");
+    store.close().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
+}
+
 async fn connected(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fixture::Writer) {
     let (peer, reader, writer) = host_fixture::connect(&snapshot).await;
     (Arc::new(Store::new(peer, snapshot)), reader, writer)

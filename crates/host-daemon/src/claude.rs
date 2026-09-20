@@ -63,6 +63,7 @@ struct AccountModels {
 }
 
 pub(crate) struct Claude {
+    browser: Option<Arc<crate::browser::Browser>>,
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
@@ -133,6 +134,7 @@ impl Claude {
         directory: PathBuf,
         native_home: Option<PathBuf>,
         router: SessionRouter,
+        browser: Option<Arc<crate::browser::Browser>>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
@@ -143,6 +145,7 @@ impl Claude {
         )
         .await?;
         Ok(Self {
+            browser,
             accounts: AsyncMutex::new(accounts),
             program,
             directory,
@@ -193,8 +196,16 @@ impl Claude {
         }
         let models = {
             let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-            let (process, initialized) =
-                Process::start(&self.program, &auth_home, cwd.path(), None, None, None).await?;
+            let (process, initialized) = Process::start(
+                &self.program,
+                &auth_home,
+                cwd.path(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
             process.finish().await?;
             let entries = initialized["models"]
                 .as_array()
@@ -766,6 +777,10 @@ impl Claude {
                 Some((&session, state.resumable)),
                 Some(&model_name),
                 effort,
+                self.browser
+                    .as_ref()
+                    .map(|browser| browser.provider_config(&format!("claude:{session}")))
+                    .transpose()?,
             )
             .await?;
             process.retain_capacity(permit);

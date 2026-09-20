@@ -23,11 +23,6 @@ fn error(error: impl std::fmt::Display) -> AgentError {
     }
 }
 
-#[uniffi::export]
-pub fn browser_url(input: String) -> Result<String, AgentError> {
-    crate::presentation::browser::browser_url(&input).map_err(error)
-}
-
 #[derive(uniffi::Record)]
 pub struct Connection {
     pub ticket: String,
@@ -177,6 +172,19 @@ impl AgentStore {
             }
             updates.changed().await.map_err(error)?;
         }
+    }
+
+    pub async fn browser(
+        &self,
+        request: crate::browser::BrowserRequest,
+    ) -> Result<crate::browser::BrowserFrame, AgentError> {
+        self.store
+            .browser(request)
+            .await
+            .map_err(|reason| match reason {
+                crate::peer::PeerError::InvalidMessage(reason) => error(reason),
+                reason => error(reason),
+            })
     }
 
     /// Enqueue synchronously; native task scheduling cannot reorder UI intents.

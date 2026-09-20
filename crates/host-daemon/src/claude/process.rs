@@ -23,6 +23,7 @@ impl Process {
         session: Option<(&str, bool)>,
         model: Option<&str>,
         effort: Option<&str>,
+        browser: Option<Value>,
     ) -> Result<(Self, Value), String> {
         let mut command = bex_process::command(program).map_err(|error| error.to_string())?;
         command
@@ -44,6 +45,12 @@ impl Process {
                 "--permission-prompt-tool",
                 "stdio",
             ]);
+        if let Some(browser) = browser {
+            command
+                .arg("--mcp-config")
+                .arg(json!({"mcpServers":{"bex_browser":browser}}).to_string())
+                .env("MCP_TOOL_TIMEOUT", "1800000");
+        }
         if let Some((session, resume)) = session {
             command
                 .arg(if resume { "--resume" } else { "--session-id" })

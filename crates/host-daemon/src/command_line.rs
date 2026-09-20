@@ -9,6 +9,8 @@ use std::path::PathBuf;
     about = "Agent Host over authenticated iroh sessions"
 )]
 pub(crate) struct StartupConfig {
+    #[command(subcommand)]
+    pub(crate) mode: Option<Mode>,
     #[arg(long, default_value = "codex")]
     pub(crate) codex: PathBuf,
     /// Claude Code executable. Uses the Host user's Claude subscription login.
@@ -39,4 +41,15 @@ pub(crate) struct StartupConfig {
     /// Override the public iroh relay list.
     #[arg(long)]
     pub(crate) relay_url: Vec<String>,
+}
+
+#[derive(clap::Subcommand)]
+pub(crate) enum Mode {
+    #[command(hide = true)]
+    BrowserMcp {
+        #[arg(long)]
+        socket: PathBuf,
+        #[arg(long)]
+        thread: String,
+    },
 }

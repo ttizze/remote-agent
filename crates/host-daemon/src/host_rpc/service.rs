@@ -98,6 +98,7 @@ pub struct HostRpcService {
 }
 
 struct ServiceInner {
+    browser: OnceLock<Arc<crate::browser::Browser>>,
     claude: OnceLock<crate::claude::Claude>,
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
@@ -120,6 +121,7 @@ impl HostRpcService {
         );
         Self {
             inner: Arc::new(ServiceInner {
+                browser: OnceLock::new(),
                 claude: OnceLock::new(),
                 accounts: tokio::sync::Mutex::new(None),
                 restoration_error: tokio::sync::watch::channel(None).0,
@@ -200,6 +202,28 @@ impl HostRpcService {
         Ok(result.into())
     }
 
+    pub async fn enable_browser(&self, profile: std::path::PathBuf) -> Result<(), String> {
+        let browser = crate::browser::Browser::start(profile).await?;
+        self.inner
+            .browser
+            .set(browser)
+            .map_err(|_| "BEX browser is already configured".to_owned())
+    }
+
+    fn browser_config(&self, thread: &str) -> Result<Option<serde_json::Value>, Failure> {
+        self.inner
+            .browser
+            .get()
+            .map(|browser| {
+                let mut config = browser
+                    .provider_config(thread)
+                    .map_err(|e| Failure::new("browser_unavailable", e))?;
+                config["tool_timeout_sec"] = 1800.into();
+                Ok(serde_json::json!({"mcp_servers.bex_browser":config}))
+            })
+            .transpose()
+    }
+
     pub async fn enable_accounts(
         &self,
         directory: std::path::PathBuf,
@@ -225,9 +249,14 @@ impl HostRpcService {
         directory: std::path::PathBuf,
         native_home: Option<std::path::PathBuf>,
     ) -> anyhow::Result<()> {
-        let claude =
-            crate::claude::Claude::load(program, directory, native_home, self.inner.router.clone())
-                .await?;
+        let claude = crate::claude::Claude::load(
+            program,
+            directory,
+            native_home,
+            self.inner.router.clone(),
+            self.inner.browser.get().cloned(),
+        )
+        .await?;
         self.inner
             .claude
             .set(claude)
@@ -235,14 +264,20 @@ impl HostRpcService {
     }
 
     pub(crate) async fn shutdown_owned_processes(&self) {
+        if let Some(browser) = self.inner.browser.get() {
+            browser.shutdown().await;
+        }
         self.inner.terminals.shutdown().await;
         if let Some(claude) = self.inner.claude.get() {
             claude.shutdown().await;
         }
     }
 
-    pub(crate) fn revoke_terminals(&self, principal: &str) {
+    pub(crate) async fn revoke_device(&self, principal: &str) {
         self.inner.terminals.revoke_device(principal);
+        if let Some(browser) = self.inner.browser.get() {
+            browser.revoke_device(principal).await;
+        }
     }
     pub fn open_session(&self, capacity: usize) -> HostSession {
         self.start_codex_event_pump();
@@ -494,6 +529,24 @@ impl HostRpcService {
         request: &Call,
         target_session: Option<&agent_core::session::SessionRef>,
     ) -> Result<Body, Failure> {
+        if let Call::Browser(params) = request {
+            let browser = self.inner.browser.get().ok_or_else(|| {
+                Failure::new(
+                    "browser_unavailable",
+                    "このHostではBEXブラウザが有効になっていません。",
+                )
+            })?;
+            let principal = self
+                .inner
+                .router
+                .principal(session)
+                .map_err(|e| Failure::new("invalid_session", e))?;
+            return browser
+                .request(&principal, params)
+                .await
+                .map(Into::into)
+                .map_err(|e| Failure::new("browser_failed", e));
+        }
         let method = request.method();
         if matches!(request, Call::Provider(_))
             && !matches!(
@@ -787,6 +840,8 @@ impl HostRpcService {
             | Call::Interrupt(_)
             | Call::RenameThread(_)
             | Call::Provider(_) => {
+                let browser_scope = matches!(request, Call::ForkThread(_))
+                    .then(|| uuid::Uuid::new_v4().to_string());
                 let response = self
                     .inner
                     .codex
@@ -794,6 +849,16 @@ impl HostRpcService {
                         let mut params = request.params_json()?;
                         if let Some(target) = target_session {
                             params["threadId"] = target.id.clone().into();
+                            if matches!(request, Call::ResumeThread(_))
+                                && let Some(config) = self.browser_config(&target.id)?
+                            {
+                                params["config"] = config;
+                            }
+                        }
+                        if let Some(scope) = &browser_scope
+                            && let Some(config) = self.browser_config(scope)?
+                        {
+                            params["config"] = config;
                         }
                         agent_core::peer::request_line(method, &params)
                             .expect("provider request serializes")
@@ -801,6 +866,12 @@ impl HostRpcService {
                     .await?;
                 let mut body = codex_response(method, response)?;
                 if let Body::Thread(response) = &mut body {
+                    if let Some(scope) = browser_scope
+                        && let Some(browser) = self.inner.browser.get()
+                        && let Some(id) = &response.thread.id
+                    {
+                        browser.bind_scope(scope, id.clone()).await;
+                    }
                     describe_thread(
                         &mut response.thread,
                         agent_core::session::ProviderKind::Codex,
@@ -1173,7 +1244,20 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("claude_unavailable", error))?
         } else {
-            self.inner.codex.request("thread/start", &serde_json::json!({"cwd":params.cwd,"model":params.model,"projectId":project_id})).await?
+            let scope = uuid::Uuid::new_v4().to_string();
+            let mut request =
+                serde_json::json!({"cwd":params.cwd,"model":params.model,"projectId":project_id});
+            if let Some(config) = self.browser_config(&scope)? {
+                request["config"] = config;
+            }
+            let response: ThreadResponse =
+                self.inner.codex.request("thread/start", &request).await?;
+            if let Some(browser) = self.inner.browser.get()
+                && let Some(id) = &response.thread.id
+            {
+                browser.bind_scope(scope, id.clone()).await;
+            }
+            response
         };
         describe_thread(
             &mut response.thread,

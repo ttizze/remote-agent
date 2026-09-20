@@ -13,6 +13,14 @@ async fn main() {
         Err(error) => error.exit(),
     };
 
+    if let Some(command_line::Mode::BrowserMcp { socket, thread }) = &config.mode {
+        if let Err(error) = host_daemon::browser::mcp::serve(socket, thread).await {
+            eprintln!("BEX browser bridge: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Err(error) = runtime::run(config).await {
         let error = format!("{error:#}");
         tracing::error!(target: "bex", operation = "host.runtime", message = %error);

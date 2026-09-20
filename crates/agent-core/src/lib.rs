@@ -1,3 +1,4 @@
+pub mod browser;
 #[cfg(test)]
 extern crate self as agent_core;
 

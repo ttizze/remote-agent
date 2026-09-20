@@ -34,6 +34,10 @@ pub enum Outcome {
     },
 }
 enum Command {
+    Browser {
+        request: crate::browser::BrowserRequest,
+        complete: oneshot::Sender<Result<crate::browser::BrowserFrame, PeerError>>,
+    },
     Dispatch(Dispatch),
     ResumePeer {
         endpoint: crate::transport::Endpoint,
@@ -399,6 +403,21 @@ impl Store {
             }
         }
     }
+    /// Ephemeral frames never enter persisted conversation snapshots.
+    pub async fn browser(
+        &self,
+        request: crate::browser::BrowserRequest,
+    ) -> Result<crate::browser::BrowserFrame, PeerError> {
+        request.validate().map_err(PeerError::InvalidMessage)?;
+        let (complete, result) = oneshot::channel();
+        self.commands
+            .send(Command::Browser { request, complete })
+            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+        result
+            .await
+            .map_err(|_| PeerError::ConnectionClosed("browser connection ended".into()))?
+    }
+
     pub async fn close(&self) -> Result<(), PeerError> {
         self.stop.cancel();
         self.publications.lock().unwrap().take();
@@ -677,6 +696,7 @@ async fn run(
     let session = &connection.session;
     let events = &mut connection.events;
     let mut jobs = FuturesUnordered::new();
+    let mut browser_jobs = FuturesUnordered::new();
     let mut subscriptions = tokio_stream::StreamMap::new();
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
@@ -761,6 +781,15 @@ async fn run(
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
                     Command::Dispatch(command) => command,
+                    Command::Browser { request, complete } => {
+                        if browser_jobs.len() >= 16 {
+                            let _ = complete.send(Err(PeerError::InvalidMessage("ブラウザ操作が混み合っています。少し待って再試行してください。".into())));
+                        } else {
+                            let peer = peer.clone();
+                            browser_jobs.push(async move { let _ = complete.send(peer.call(&request).await); });
+                        }
+                        continue;
+                    }
                     Command::ResumePeer { endpoint, remote, complete } => {
                         let _ = complete.send(session.as_ref().filter(|session| session.uses_endpoint(&endpoint) && session.node_id() == remote).map(|_| peer.clone()));
                         continue;
@@ -780,6 +809,7 @@ async fn run(
                     effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: complete.take() });
                 }
             }
+            _ = browser_jobs.next(), if !browser_jobs.is_empty() => {},
             result = jobs.next(), if !jobs.is_empty() => {
                 let mut result = result.unwrap();
                 for (id, stream) in result.subscriptions.drain(..) { subscriptions.insert(id, futures_util::stream::try_unfold(stream, |mut stream| async {
@@ -810,6 +840,7 @@ async fn run(
         session.as_ref().unwrap().close();
     }
     drop(jobs);
+    drop(browser_jobs);
     peer.close().await;
     drop(connection);
     apply(&updates, Event::Disconnected(reason));
@@ -831,6 +862,12 @@ async fn run_offline(
         };
         let command = match command {
             Command::Dispatch(command) => command,
+            Command::Browser { complete, .. } => {
+                let _ = complete.send(Err(PeerError::ConnectionClosed(
+                    "Hostに接続してください。".into(),
+                )));
+                continue;
+            }
             Command::ResumePeer { complete, .. } => {
                 let _ = complete.send(None);
                 continue;

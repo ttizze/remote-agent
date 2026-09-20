@@ -131,6 +131,7 @@ macro_rules! results {
     }
 }
 results! {
+    Browser(crate::browser::BrowserFrame),
     Opened(crate::session::OpenedSession), Item(crate::client::ItemResponse),
     Thread(crate::models::ThreadResponse), Threads(crate::models::ThreadList),
     ComposerCatalog(crate::composer::ComposerCatalog),

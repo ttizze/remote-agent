@@ -261,6 +261,14 @@ final class BexAppViewModel: ObservableObject {
 
 /// Snapshot observation, persistence and foreground recovery.
 extension BexAppViewModel {
+    func browser(_ request: BrowserRequest) async throws -> BrowserFrame {
+        guard let owner = store else { throw URLError(.notConnectedToInternet) }
+        let host = selectedProfileId
+        let frame = try await owner.browser(request: request)
+        guard host == selectedProfileId else { throw CancellationError() }
+        return frame
+    }
+
     private func observe(_ owner: AgentStore, host: String) {
         let initial = snapshot
         observation = Task { [weak self] in
