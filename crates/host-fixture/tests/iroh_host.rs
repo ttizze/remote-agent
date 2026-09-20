@@ -1914,7 +1914,14 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
             ProjectStore::new(root.join("bex-worktrees.json")),
         );
         let runtime = Arc::new(
-            HostRuntime::new(service, host_endpoint, credentials, "shared Host".into()).await,
+            HostRuntime::new(
+                service,
+                host_endpoint,
+                credentials,
+                "shared Host".into(),
+                std::time::Duration::from_secs(30 * 24 * 60 * 60),
+            )
+            .await,
         );
         lease.publish(&runtime.ticket()).unwrap();
         let stop = CancellationToken::new();
@@ -1946,6 +1953,19 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
             .dispatch(Intent::CreateInvitation(op::CreateInvitation {}))
             .await
             .unwrap();
+        let expires_at = desktop
+            .snapshot()
+            .management
+            .invitation
+            .as_ref()
+            .unwrap()
+            .expires_at;
+        let remaining = expires_at
+            - std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+        assert!((30 * 24 * 60 * 60 - 5..=30 * 24 * 60 * 60).contains(&remaining));
         let invitation = desktop
             .snapshot()
             .management

@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        C0DE00000000000000000401 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402 /* PrivacyInfo.xcprivacy */; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
         C30000000000000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C30000000000000000000002; };
         C30000000000000000000003 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000004; };
@@ -54,6 +55,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+        C0DE00000000000000000402 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
         C30000000000000000000004 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
 		123AEE37BEE0000000000002 /* ConversationVisualization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationVisualization.swift; sourceTree = "<group>"; };
@@ -182,6 +184,7 @@
 				8EBF6098B8AA6B2CA425B5C9 /* ChatMediaPickers.swift */,
 				A10000000000000000000016 /* Info.plist */,
 				A10000000000000000000018 /* Assets.xcassets */,
+                C0DE00000000000000000402 /* PrivacyInfo.xcprivacy */,
 			);
 			path = Bex;
 			sourceTree = "<group>";
@@ -284,7 +287,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000007 /* Assets.xcassets in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000007 /* Assets.xcassets in Resources */, C0DE00000000000000000401 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 		B20000000000000000000022 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;

@@ -7,6 +7,7 @@ pub mod composer;
 pub mod diagnostics;
 pub mod models;
 pub mod peer;
+pub mod privacy;
 pub mod protocol;
 pub mod session;
 pub mod state;

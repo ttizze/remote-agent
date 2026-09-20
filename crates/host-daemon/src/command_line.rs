@@ -35,6 +35,9 @@ pub(crate) struct StartupConfig {
     pub(crate) key_storage: Option<KeyStorage>,
     #[arg(long, default_value = "BEX Host")]
     pub(crate) name: String,
+    /// Lifetime of newly issued one-use pairing invitations (1–90 days).
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u64).range(1..=90))]
+    pub(crate) invitation_days: u64,
     /// Use only local addresses; intended for isolated fixtures.
     #[arg(long, conflicts_with = "relay_url")]
     pub(crate) no_relay: bool,
@@ -45,7 +48,7 @@ pub(crate) struct StartupConfig {
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Mode {
-    /// Print a one-use iPhone/Android pairing invitation as JSON (valid for seven days).
+    /// Print a one-use pairing invitation as JSON (seven days by default).
     Invite,
     /// Print the running Host's identity, paired devices and provider errors as JSON.
     Status,
@@ -58,4 +61,28 @@ pub(crate) enum Mode {
         #[arg(long)]
         thread: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invitation_lifetime_defaults_to_a_week_and_is_bounded() {
+        assert_eq!(
+            StartupConfig::try_parse_from([] as [&str; 0])
+                .unwrap()
+                .invitation_days,
+            7
+        );
+        assert_eq!(
+            StartupConfig::try_parse_from(["--invitation-days", "90"])
+                .unwrap()
+                .invitation_days,
+            90
+        );
+        for value in ["0", "91", "-1"] {
+            assert!(StartupConfig::try_parse_from(["--invitation-days", value]).is_err());
+        }
+    }
 }

@@ -459,7 +459,9 @@ impl Accounts {
         let helper = self.helper(id)?;
         let helper = helper.server().await?;
         let params = if api_key {
-            let key = auth_token(helper, false, &["apikey"]).await?;
+            let AuthToken::ApiKey(key) = auth_token(helper, false).await? else {
+                return Err("CodexのAPIキー認証が見つかりません。".into());
+            };
             json!({"type":"apiKey","apiKey":key.as_str()})
         } else {
             let auth = credentials(helper, false).await?;
@@ -535,14 +537,21 @@ pub(crate) async fn access_token(
     server: &CodexAppServer,
     refresh: bool,
 ) -> Result<Zeroizing<String>, String> {
-    auth_token(server, refresh, &["chatgpt", "chatgptAuthTokens"]).await
+    match auth_token(server, refresh).await? {
+        AuthToken::ChatGpt(token) => Ok(token),
+        AuthToken::ApiKey(_) => Err("ChatGPTアカウントでCodexにログインしてください。".into()),
+    }
 }
 
-async fn auth_token(
+pub(crate) enum AuthToken {
+    ApiKey(Zeroizing<String>),
+    ChatGpt(Zeroizing<String>),
+}
+
+pub(crate) async fn auth_token(
     server: &CodexAppServer,
     refresh: bool,
-    methods: &[&str],
-) -> Result<Zeroizing<String>, String> {
+) -> Result<AuthToken, String> {
     let mut result = rpc(
         server,
         "getAuthStatus",
@@ -553,13 +562,11 @@ async fn auth_token(
         return Err("Codexにログインしてください。".into());
     };
     let token = Zeroizing::new(token);
-    if !result["authMethod"]
-        .as_str()
-        .is_some_and(|method| methods.contains(&method))
-    {
-        return Err("Codexの認証方法が一致しません。ログイン状態を確認してください。".into());
+    match result["authMethod"].as_str() {
+        Some("apikey") => Ok(AuthToken::ApiKey(token)),
+        Some("chatgpt" | "chatgptAuthTokens") => Ok(AuthToken::ChatGpt(token)),
+        _ => Err("Codexの認証方法を確認できません。ログイン状態を確認してください。".into()),
     }
-    Ok(token)
 }
 
 pub(crate) fn token_claims(token: &str) -> Option<Value> {

@@ -95,8 +95,16 @@ impl HostFixture {
                 .map_err(anyhow::Error::msg)?;
         }
         service.start();
-        let runtime =
-            Arc::new(HostRuntime::new(service, endpoint, credentials.clone(), name.into()).await);
+        let runtime = Arc::new(
+            HostRuntime::new(
+                service,
+                endpoint,
+                credentials.clone(),
+                name.into(),
+                std::time::Duration::from_secs(7 * 24 * 60 * 60),
+            )
+            .await,
+        );
         let stop = CancellationToken::new();
         let running = tokio::spawn(runtime.run(stop.clone()));
         Ok(Self {
