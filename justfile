@@ -52,6 +52,7 @@ conversation-ui:
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
+        testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \

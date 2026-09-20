@@ -67,14 +67,9 @@ final class BexAppViewModel: ObservableObject {
         persist()
         connection?.cancel()
         observation?.cancel()
-        initialization?.cancel()
+        cancelInitialization()
         let old = store
         store = nil
-        let cancelled = pending
-        pending.removeAll()
-        for (_, complete) in cancelled {
-            complete(.failure(CancellationError()))
-        }
         isConnecting = false
         selectedProfileId = id
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
@@ -96,17 +91,11 @@ final class BexAppViewModel: ObservableObject {
                 persist()
                 connection?.cancel()
                 observation?.cancel()
-                initialization?.cancel()
-                initialization = nil
+                cancelInitialization()
                 let old = store
                 store = nil
                 selectedProfileId = nil
                 UserDefaults.standard.removeObject(forKey: "bex.selected-host")
-                let cancelled = pending
-                pending.removeAll()
-                for (_, complete) in cancelled {
-                    complete(.failure(CancellationError()))
-                }
                 isConnecting = false
                 notice = nil
                 connectionError = nil
@@ -119,6 +108,16 @@ final class BexAppViewModel: ObservableObject {
             UserDefaults.standard.set(encoded, forKey: "bex.hosts.iroh")
             screen = .profiles
         } catch { notice = error.localizedDescription }
+    }
+
+    private func cancelInitialization() {
+        initialization?.cancel()
+        initialization = nil
+        let cancelled = pending
+        pending.removeAll()
+        for (_, complete) in cancelled {
+            complete(.failure(CancellationError()))
+        }
     }
 
     private func initialize(_ id: String, previous old: AgentStore?) async {
@@ -143,7 +142,7 @@ final class BexAppViewModel: ObservableObject {
             observe(owner, host: id)
             connect()
         } catch {
-            guard selectedProfileId == id else { return }
+            guard !Task.isCancelled, selectedProfileId == id else { return }
             connectionError = error.localizedDescription
             initialization = nil
             let queued = pending
@@ -155,11 +154,26 @@ final class BexAppViewModel: ObservableObject {
         _ = await previousClosed
     }
 
+    func openPairing() {
+        connection?.cancel()
+        isConnecting = false
+        pairingError = nil
+        screen = .pairing
+    }
+
+    func dismissPairing() {
+        connection?.cancel()
+        isConnecting = false
+        screen = .profiles
+    }
+
     func pair(_ contents: String) {
+        guard !isConnecting else { return }
         do {
             let invitation = try parseInvitation(contents: contents, now: UInt64(Date().timeIntervalSince1970))
             let id = try ticketIdentity(ticket: invitation.endpoint)
             pairingError = nil
+            screen = .pairing
             isConnecting = true
             connection?.cancel()
             connection = Task { [weak self] in
@@ -174,11 +188,8 @@ final class BexAppViewModel: ObservableObject {
                     guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
                     persist()
                     observation?.cancel()
-                    initialization?.cancel()
-                    if let old = store {
-                        try? await old.shutdown()
-                    }
-                    guard !Task.isCancelled else { try? await owner.shutdown(); return }
+                    cancelInitialization()
+                    let old = store
                     profiles.removeAll { $0.id == id }
                     profiles.append(HostProfile(id: id, name: "PC Host", ticket: invitation.endpoint))
                     try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
@@ -189,6 +200,7 @@ final class BexAppViewModel: ObservableObject {
                     screen = .threads
                     isConnecting = false
                     observe(owner, host: id)
+                    try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
                     self?.isConnecting = false; self?.pairingError = error.localizedDescription
@@ -231,7 +243,8 @@ final class BexAppViewModel: ObservableObject {
 /// Snapshot observation, persistence and foreground recovery.
 extension BexAppViewModel {
     func connect(afterForeground: Bool = false) {
-        guard let owner = store, let profile = profiles.first(where: { $0.id == selectedProfileId }),
+        guard screen != .pairing, let owner = store,
+              let profile = profiles.first(where: { $0.id == selectedProfileId }),
               !isConnecting || afterForeground else { return }
         connection?.cancel()
         isConnecting = true
