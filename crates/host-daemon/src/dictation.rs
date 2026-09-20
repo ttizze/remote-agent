@@ -73,6 +73,14 @@ async fn transcribe_request(
     Ok(agent_core::client::Transcription { text })
 }
 
+// Both TLS backends are linked on desktop; iroh does not install a global one.
+// Each independent HTTP/WebSocket entry point must work on a cold Host.
+fn install_tls_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 async fn transcribe_authenticated(
     token: &str,
     user_agent: &str,
@@ -81,12 +89,7 @@ async fn transcribe_authenticated(
     stream_url: &str,
     recording_url: &str,
 ) -> Result<String, String> {
-    // The desktop build enables both Rustls backends. Choose before the first
-    // WebSocket handshake; iroh configures its own provider without installing
-    // a process default. Preserve a provider already selected by another caller.
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
+    install_tls_provider();
     // The desktop retains a recording alongside its stream and submits that
     // recording to /transcribe when streaming cannot produce a transcript.
     let stream_result = tokio::time::timeout(
@@ -168,6 +171,7 @@ async fn transcribe_recording(
     pcm: &[u8],
     url: &str,
 ) -> Result<String, String> {
+    install_tls_provider();
     static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
     let client = CLIENT
         .get_or_init(|| {
@@ -637,39 +641,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_secure_dictation_falls_back_after_tls_failure() {
+    async fn first_dictation_initializes_tls_for_both_auth_methods() {
         const CHILD: &str = "BEX_TEST_COLD_DICTATION_TLS";
         if std::env::var_os(CHILD).is_none() {
             // A separate process prevents another test from installing the
             // global TLS provider first and hiding cold-start failures.
-            let output = tokio::time::timeout(
+            for method in ["api", "chatgpt"] {
+                let output = tokio::time::timeout(
                 Duration::from_secs(15),
                 tokio::process::Command::new(std::env::current_exe().unwrap())
                     .args([
                         "--exact",
-                        "dictation::tests::first_secure_dictation_falls_back_after_tls_failure",
+                        "dictation::tests::first_dictation_initializes_tls_for_both_auth_methods",
                         "--nocapture",
                     ])
-                    .env(CHILD, "1")
+                    .env(CHILD, method)
                     .kill_on_drop(true)
                     .output(),
             )
             .await
             .expect("cold dictation process stalled")
             .unwrap();
-            assert!(
-                output.status.success(),
-                "cold dictation failed: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+                assert!(
+                    output.status.success(),
+                    "cold dictation failed: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             return;
         }
+        let api_key = std::env::var(CHILD).unwrap() == "api";
         assert!(rustls::crypto::CryptoProvider::get_default().is_none());
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"TLS後も文字起こし成功"}"#, true, false)
-                .await
-                .unwrap(),
+            recording_fallback(
+                "200 OK",
+                r#"{"text":"TLS後も文字起こし成功"}"#,
+                !api_key,
+                api_key
+            )
+            .await
+            .unwrap(),
             "TLS後も文字起こし成功"
         );
     }
