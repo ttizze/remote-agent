@@ -4,8 +4,14 @@ use crate::{
     protocol::{self, Call, Response},
 };
 use serde::de::DeserializeOwned;
-use std::time::Duration;
-use tokio::sync::Semaphore;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    time::Instant,
+};
 pub(crate) const EVENTS: u8 = 0;
 pub(crate) const CALL: u8 = 1;
 pub(crate) const BLOB: u8 = 2;
@@ -18,24 +24,31 @@ pub struct HostRequest {
 }
 pub struct Client {
     connection: iroh::endpoint::Connection,
-    permits: Semaphore,
+    permits: Arc<Semaphore>,
     timeout: Duration,
+    initial_list: Mutex<Option<(crate::models::ListQuery, PendingReply)>>,
+}
+struct PendingReply {
+    reader: Updates,
+    deadline: Instant,
+    _permit: OwnedSemaphorePermit,
 }
 impl Client {
-    pub(crate) fn route(&self) -> crate::diagnostics::ConnectionRoute {
+    pub(crate) fn connection_path(&self) -> (crate::diagnostics::ConnectionRoute, u64) {
         use crate::diagnostics::ConnectionRoute;
         self.connection
             .paths()
             .iter()
             .find(|path| path.is_selected())
-            .map_or(ConnectionRoute::Unknown, |path| {
-                if path.is_ip() {
+            .map_or((ConnectionRoute::Unknown, 0), |path| {
+                let route = if path.is_ip() {
                     ConnectionRoute::Direct
                 } else if path.is_relay() {
                     ConnectionRoute::Relay
                 } else {
                     ConnectionRoute::Unknown
-                }
+                };
+                (route, path.rtt().as_millis() as u64)
             })
     }
 
@@ -53,8 +66,9 @@ impl Client {
         Ok((
             Self {
                 connection,
-                permits: Semaphore::new(max_requests),
+                permits: Arc::new(Semaphore::new(max_requests)),
                 timeout,
+                initial_list: Mutex::new(None),
             },
             protocol::Reader::new(recv),
         ))
@@ -86,28 +100,75 @@ impl Client {
             updates,
         ))
     }
-    async fn call_stream(
+    /// Send the first title read while storage-scope verification is in flight.
+    /// Its ordinary caller consumes the reply once, with the original deadline.
+    pub(crate) async fn start_initial_list(
         &self,
-        call: &Call,
-    ) -> Result<(tokio_util::bytes::BytesMut, Updates), PeerError> {
-        let method = call.method().to_owned();
+        query: crate::models::ListQuery,
+    ) -> Result<(), PeerError> {
+        let reply = self
+            .start_call(&Call::ListThreads(super::ListThreads::new(query.clone())))
+            .await?;
+        *self.initial_list.lock().unwrap() = Some((query, reply));
+        Ok(())
+    }
+    async fn start_call(&self, call: &Call) -> Result<PendingReply, PeerError> {
+        let deadline = Instant::now() + self.timeout;
         let work = async {
-            let _permit = self.permits.acquire().await.map_err(invalid)?;
+            let permit = self
+                .permits
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(invalid)?;
             let (mut send, recv) = self.connection.open_bi().await.map_err(invalid)?;
             send.write_all(&[CALL]).await.map_err(invalid)?;
             protocol::write(&mut send, call).await.map_err(invalid)?;
             send.finish().map_err(invalid)?;
-            let mut replies = protocol::Reader::new(recv);
-            let initial = replies
+            Ok(PendingReply {
+                reader: protocol::Reader::new(recv),
+                deadline,
+                _permit: permit,
+            })
+        };
+        tokio::select! {
+            reason = self.connection.closed() => Err(PeerError::ConnectionClosed(reason.to_string())),
+            result = tokio::time::timeout_at(deadline, work) => result.unwrap_or_else(|_| Err(PeerError::RequestTimeout {method: call.method().into()})),
+        }
+    }
+    async fn call_stream(
+        &self,
+        call: &Call,
+    ) -> Result<(tokio_util::bytes::BytesMut, Updates), PeerError> {
+        let initial = if let Call::ListThreads(params) = call {
+            // A changed query discards the old read instead of publishing it or
+            // retaining a semaphore slot for the lifetime of the connection.
+            self.initial_list
+                .lock()
+                .unwrap()
+                .take()
+                .filter(|(query, _)| *query == params.query)
+                .map(|(_, reply)| reply)
+        } else {
+            None
+        };
+        let mut reply = match initial {
+            Some(reply) => reply,
+            None => self.start_call(call).await?,
+        };
+        let deadline = reply.deadline;
+        let work = async {
+            let initial = reply
+                .reader
                 .read_frame()
                 .await
                 .map_err(invalid)?
                 .ok_or_else(|| invalid("response stream ended before its result"))?;
-            Ok((initial, replies))
+            Ok((initial, reply.reader))
         };
         tokio::select! {
             reason = self.connection.closed() => Err(PeerError::ConnectionClosed(reason.to_string())),
-            result = tokio::time::timeout(self.timeout, work) => result.unwrap_or_else(|_| Err(PeerError::RequestTimeout {method})),
+            result = tokio::time::timeout_at(deadline, work) => result.unwrap_or_else(|_| Err(PeerError::RequestTimeout {method: call.method().into()})),
         }
     }
 }
@@ -135,6 +196,59 @@ fn invalid(error: impl std::fmt::Display) -> PeerError {
 mod tests {
     use super::*;
     use crate::transport::{Endpoint, Identity, IncomingRequest, Relays, Trust};
+
+    #[tokio::test]
+    async fn pipelined_read_keeps_its_deadline_and_releases_its_request_slot() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                .await
+                .unwrap();
+            let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                .await
+                .unwrap();
+            let trust = Trust {
+                allowed: [client.node_id()].into(),
+                ..Default::default()
+            };
+            let ticket = host.ticket();
+            let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
+            let session = session.unwrap();
+            let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+            let (remote, events) = tokio::join!(
+                session.open_peer(Duration::from_millis(100), 1),
+                incoming.accept_peer()
+            );
+            let (remote, _updates) = remote.unwrap();
+            let _events = events.unwrap();
+            let query = crate::models::ListQuery::default();
+            remote.start_initial_list(query.clone()).await.unwrap();
+            let IncomingRequest::Call(pending) = incoming.accept_request().await.unwrap() else {
+                panic!("title read expected")
+            };
+            assert!(matches!(pending.call, Call::ListThreads(_)));
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            assert!(matches!(
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    remote.call(&super::super::ListThreads::new(query))
+                )
+                .await
+                .unwrap(),
+                Err(PeerError::RequestTimeout { .. })
+            ));
+            assert_eq!(remote.permits.available_permits(), 1);
+            tokio::time::timeout(Duration::from_millis(100), pending.send.stopped())
+                .await
+                .unwrap()
+                .unwrap();
+            session.close();
+            incoming.close();
+            client.close().await;
+            host.close().await;
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn unread_response_cancellation_and_timeout_do_not_block_other_calls() {

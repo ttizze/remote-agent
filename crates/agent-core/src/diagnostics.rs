@@ -43,14 +43,17 @@ pub struct ConnectionPerformance {
     pub reused: bool,
     pub route: ConnectionRoute,
     pub platform: ClientPlatform,
+    pub resolution_ms: u64,
+    pub rtt_ms: u64,
 }
 
 pub fn connection_performance(performance: &ConnectionPerformance) {
     tracing::info!(target: "bex", operation = "client.connection",
     message = %format_args!(
-        "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?}",
+        "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?} resolution_ms={} rtt_ms={}",
         performance.platform, performance.total_ms, performance.endpoint_ms,
         performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
+        performance.resolution_ms, performance.rtt_ms,
     ));
 }
 
@@ -470,6 +473,8 @@ mod tests {
                 verification_ms: 580,
                 route: ConnectionRoute::Relay,
                 platform: ClientPlatform::Ios,
+                resolution_ms: 7,
+                rtt_ms: 90,
                 ..Default::default()
             });
         });
@@ -477,7 +482,7 @@ mod tests {
         assert_eq!(record["operation"], "client.connection");
         assert_eq!(
             record["message"],
-            "platform=Ios total_ms=1743 endpoint_ms=53 transport_ms=1083 verification_ms=580 reused=false route=Relay"
+            "platform=Ios total_ms=1743 endpoint_ms=53 transport_ms=1083 verification_ms=580 reused=false route=Relay resolution_ms=7 rtt_ms=90"
         );
         assert_eq!(record["component"], "host");
         assert!(record.get("requestId").is_none());

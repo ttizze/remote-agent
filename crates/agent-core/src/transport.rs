@@ -157,10 +157,18 @@ impl Endpoint {
     }
     pub async fn connect(&self, ticket: &Ticket) -> Result<Session, TransportError> {
         let address: EndpointAddr = ticket.0.endpoint_addr().clone();
-        let connection = self.0.connect(address, ALPN).await.map_err(connection)?;
+        let started = std::time::Instant::now();
+        let connecting = self
+            .0
+            .connect_with_opts(address, ALPN, Default::default())
+            .await
+            .map_err(connection)?;
+        let resolution_ms = started.elapsed().as_millis() as u64;
+        let connection = connecting.await.map_err(connection)?;
         Ok(Session {
             connection,
             _endpoint: self.clone(),
+            resolution_ms,
         })
     }
     /// TLS identifies the peer; RPC and blob streams remain inaccessible until
@@ -175,6 +183,7 @@ impl Endpoint {
                     IncomingSession(Some(Session {
                         connection,
                         _endpoint: self.clone(),
+                        resolution_ms: 0,
                     }))
                 })
                 .map_err(connection),
@@ -250,8 +259,12 @@ impl PairingRequest {
 pub struct Session {
     connection: iroh::endpoint::Connection,
     _endpoint: Endpoint,
+    resolution_ms: u64,
 }
 impl Session {
+    pub(crate) fn resolution_ms(&self) -> u64 {
+        self.resolution_ms
+    }
     pub(crate) fn uses_endpoint(&self, endpoint: &Endpoint) -> bool {
         Arc::ptr_eq(&self._endpoint.0, &endpoint.0)
     }

@@ -1968,6 +1968,83 @@ async fn disconnected_store_keeps_editing_and_persisting_drafts() {
 }
 
 #[tokio::test]
+async fn initial_titles_overlap_scope_verification_without_publishing_unverified_or_old_queries() {
+    use agent_core::{
+        models::ListQuery,
+        transport::{Endpoint, Identity, Relays, Trust},
+    };
+    for mode in ["ready", "zero-limits", "changed-query", "rejected"] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
+            let store = Arc::new(Store::offline(Snapshot {
+                list_query: Arc::new(if mode == "zero-limits" {
+                    ListQuery { project_limit: 0, chat_limit: 0, ..Default::default() }
+                } else { ListQuery::default() }),
+                ..Default::default()
+            }));
+            let connecting = tokio::spawn({
+                let store = store.clone();
+                let client = client.clone();
+                let ticket = host.ticket();
+                async move { store.reconnect(&client, &ticket, None).await }
+            });
+            let incoming = host.accept().await.unwrap().unwrap().authorize(&trust).unwrap();
+            let (session, mut reader, writer) = host_fixture::accept(incoming).await;
+            let scope = read(&mut reader).await;
+            assert_eq!(scope["method"], "host/session/scope");
+            // Deliberately withhold the scope reply: the old serial implementation
+            // cannot send this request and times out here.
+            let initial = read(&mut reader).await;
+            assert_eq!(initial["method"], "host/thread/list");
+            assert_eq!(initial["params"]["projectLimit"], 5);
+            assert_eq!(initial["params"]["chatLimit"], 5);
+            assert!(!store.snapshot().connected);
+            assert!(store.snapshot().threads.is_none());
+            let titles = |id| json!({"result":{"data":[{"id":id,"name":"title"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}});
+            if matches!(mode, "changed-query" | "rejected") {
+                writer.reply(&initial, titles("old")).await.unwrap();
+            }
+            if mode == "changed-query" {
+                let _ = store.dispatch(Intent::ListThreads(op::ListThreads::new(ListQuery { search_term: "new query".into(), ..Default::default() }))).await;
+            }
+            writer.reply(&scope, json!({"result":if mode == "rejected" { "" } else { "verified-storage" }})).await.unwrap();
+            let connected = connecting.await.unwrap();
+            if mode == "rejected" {
+                assert!(connected.is_err());
+                assert!(!store.snapshot().connected);
+                assert!(store.snapshot().threads.is_none());
+                assert!(!matches!(reader.read_request().await, Ok(Some(_))));
+            } else {
+                connected.unwrap();
+                if mode != "changed-query" {
+                    // A slow title response must not delay readiness or duplicate
+                    // the read already sent before verification.
+                    assert!(store.snapshot().connected);
+                    assert!(store.snapshot().threads.is_none());
+                    writer.reply(&initial, titles("fresh")).await.unwrap();
+                } else {
+                    let current = read(&mut reader).await;
+                    assert_eq!(current["method"], "host/thread/list");
+                    assert_eq!(current["params"]["searchTerm"], "new query");
+                    writer.reply(&current, titles("fresh")).await.unwrap();
+                }
+                let models = read(&mut reader).await;
+                assert_eq!(models["method"], "model/list");
+                writer.reply(&models, json!({"result":{"data":[],"nextCursor":null}})).await.unwrap();
+                wait_for(&store, |state| state.threads.is_some()).await;
+                assert_eq!(store.snapshot().threads.as_ref().unwrap().data[0].id.as_deref(), Some("fresh"));
+            }
+            session.close();
+            store.close().await.unwrap();
+            client.close().await;
+            host.close().await;
+        }).await.unwrap_or_else(|_| panic!("pipeline timed out: {mode}"));
+    }
+}
+
+#[tokio::test]
 async fn reconnect_preserves_edits_made_during_pairing() {
     use agent_core::transport::{Endpoint, Identity, Relays, Trust};
     use std::collections::BTreeSet;

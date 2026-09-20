@@ -679,15 +679,9 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             reset_session(&mut next);
             next.connected = true;
             next.error = None;
-            let query = Arc::make_mut(&mut next.list_query);
-            if query.project_limit == 0 {
-                query.project_limit = 5;
-            }
-            if query.chat_limit == 0 {
-                query.chat_limit = 5;
-            }
+            next.list_query = Arc::new((*next.list_query).clone().for_connection());
             let mut effects = vec![
-                Effect::execute(op::ListThreads::new(query.clone())),
+                Effect::execute(op::ListThreads::new((*next.list_query).clone())),
                 Effect::execute(op::LoadModels {}),
             ];
             if let Some(thread_id) = &next.navigation.thread_id {

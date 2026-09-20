@@ -67,6 +67,7 @@ impl Connection {
         endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
         invitation: Option<uuid::Uuid>,
+        list_query: crate::models::ListQuery,
     ) -> Result<(Self, String, ConnectionPerformance), crate::transport::TransportError> {
         let started = std::time::Instant::now();
         let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| session.close());
@@ -78,11 +79,17 @@ impl Connection {
         if let Some(invitation) = invitation {
             peer.call(&Pair { invitation }).await?;
         }
-        let scope = read_storage_scope(&peer).await?;
+        let (scope, ()) = tokio::try_join!(
+            read_storage_scope(&peer),
+            peer.start_initial_list(list_query.for_connection()),
+        )?;
+        let (route, rtt_ms) = peer.connection_path();
         let performance = ConnectionPerformance {
             transport_ms,
             verification_ms: started.elapsed().as_millis() as u64,
-            route: peer.route(),
+            route,
+            rtt_ms,
+            resolution_ms: session.resolution_ms(),
             ..Default::default()
         };
         Ok((
@@ -255,8 +262,13 @@ impl Store {
                 .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
             let reusable = receiver.await.unwrap_or(None);
             let replacement = async {
-                let (connection, scope, performance) =
-                    Connection::open(endpoint, ticket, None).await?;
+                let (connection, scope, performance) = Connection::open(
+                    endpoint,
+                    ticket,
+                    None,
+                    (*self.snapshot().list_query).clone(),
+                )
+                .await?;
                 Ok::<_, crate::transport::TransportError>((Some((connection, scope)), performance))
             };
             let (prepared, performance) = if let Some(peer) = reusable {
@@ -272,11 +284,15 @@ impl Store {
                     .await
                     {
                         Ok(Ok(current)) => Ok((scope == format!("{}:{current}", ticket.node_id()))
-                            .then(|| ConnectionPerformance {
-                                reused: true,
-                                verification_ms: started.elapsed().as_millis() as u64,
-                                route: peer.route(),
-                                ..Default::default()
+                            .then(|| {
+                                let (route, rtt_ms) = peer.connection_path();
+                                ConnectionPerformance {
+                                    reused: true,
+                                    verification_ms: started.elapsed().as_millis() as u64,
+                                    route,
+                                    rtt_ms,
+                                    ..Default::default()
+                                }
                             })),
                         Ok(Err(
                             error @ (PeerError::Remote { .. } | PeerError::InvalidResponse { .. }),
@@ -361,8 +377,13 @@ impl Store {
             disconnected
                 .await
                 .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            let (connection, scope, performance) =
-                Connection::open(endpoint, ticket, invitation).await?;
+            let (connection, scope, performance) = Connection::open(
+                endpoint,
+                ticket,
+                invitation,
+                (*self.snapshot().list_query).clone(),
+            )
+            .await?;
             self.attach_connection(connection, scope, attempt.clone())
                 .await?;
             Ok::<_, crate::transport::TransportError>(performance)

@@ -450,6 +450,8 @@ mod tests {
                                 let (candidate, mut candidate_reader, candidate_writer) = host_fixture::accept(incoming).await;
                                 let check = candidate_reader.read_request().await.unwrap().unwrap();
                                 assert_eq!(check["method"], "host/session/scope");
+                                let initial = candidate_reader.read_request().await.unwrap().unwrap();
+                                assert_eq!(initial["method"], "host/thread/list");
                                 candidate_writer.reply(&check, json!({"error":{"code":-32000,"message":"candidate rejected"}})).await.unwrap();
                                 assert!(!matches!(candidate_reader.read_request().await, Ok(Some(_))), "failed replacement must close before old connection succeeds");
                                 candidate.close();
@@ -609,6 +611,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(check["method"], "host/session/scope");
+        let initial = candidate_reader.read_request().await.unwrap().unwrap();
+        assert_eq!(initial["method"], "host/thread/list");
         tokio::time::timeout(Duration::from_millis(500), store.disconnect())
             .await
             .unwrap()
@@ -628,7 +632,7 @@ mod tests {
                     .unwrap(),
                 Ok(Some(_))
             ),
-            "cancellation must close a fully established speculative session without issuing further reads"
+            "cancellation must close the speculative session and its pipelined read"
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(1100), host.accept())

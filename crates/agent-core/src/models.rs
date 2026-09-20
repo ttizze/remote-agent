@@ -431,6 +431,17 @@ impl Default for ListQuery {
         }
     }
 }
+impl ListQuery {
+    pub(crate) fn for_connection(mut self) -> Self {
+        if self.project_limit == 0 {
+            self.project_limit = 5;
+        }
+        if self.chat_limit == 0 {
+            self.chat_limit = 5;
+        }
+        self
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
