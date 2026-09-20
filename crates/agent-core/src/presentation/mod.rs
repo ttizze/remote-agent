@@ -371,6 +371,18 @@ pub fn item_presentation(item: &Item) -> ItemPresentation {
 fn tool_title(item: &Item) -> String {
     let tool = item.tool.as_deref().unwrap_or_default();
     match item.kind.as_deref().unwrap_or_default() {
+        "nativeAttachment" => match item
+            .result
+            .as_ref()
+            .and_then(|value| value["type"].as_str())
+        {
+            Some(
+                "hook_success" | "hook_error" | "hook_non_blocking_error" | "hook_blocking_error",
+            ) => "フックの実行結果".into(),
+            Some("edited_text_file") => "ファイルの編集内容".into(),
+            Some("remote_session_change") => "セッションの更新情報".into(),
+            _ => "会話の添付情報".into(),
+        },
         "hookPrompt" => "追加指示".into(),
         "plan" => "計画を更新しました".into(),
         "mcpToolCall" => match (item.server.as_deref().unwrap_or_default(), tool) {

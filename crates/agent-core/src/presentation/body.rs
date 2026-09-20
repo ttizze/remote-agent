@@ -152,6 +152,10 @@ pub fn expanded_body(item: &Item) -> String {
             }
             result
         }
+        Some("nativeAttachment") => {
+            serde_json::to_string_pretty(item.result.as_ref().unwrap_or(&Value::Null))
+                .expect("attachment serializes")
+        }
         Some("fileChange") => {
             let mut result = String::new();
             for (index, change) in file_changes(item).enumerate() {
