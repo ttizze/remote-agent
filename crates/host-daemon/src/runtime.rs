@@ -96,7 +96,16 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
             .context("cannot enable Codex accounts")?;
     }
     service.start();
-    let runtime = Arc::new(HostRuntime::new(service, endpoint, credentials, config.name).await);
+    let runtime = Arc::new(
+        HostRuntime::new(
+            service,
+            endpoint,
+            credentials,
+            config.name,
+            std::time::Duration::from_secs(config.invitation_days * 24 * 60 * 60),
+        )
+        .await,
+    );
     let ticket = runtime.ticket();
     let lease = tokio::task::spawn_blocking(move || {
         lease.publish(&ticket)?;

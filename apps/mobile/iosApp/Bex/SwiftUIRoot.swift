@@ -19,14 +19,17 @@ struct BexSwiftUIRoot: View {
 
 private struct BexScreen: View {
     @ObservedObject var model: BexAppViewModel
+    @AppStorage("bex.data-sharing-consent") private var acceptedRevision = ""
+
+    private var disclosure: DataSharingNotice {
+        dataSharingNotice(acceptedRevision: acceptedRevision)
+    }
 
     var body: some View {
         NavigationStack {
             Group {
-                if model.profiles.isEmpty {
-                    PairingScreen(canCancel: !model.profiles.isEmpty, connecting: model.isConnecting,
-                                  error: model.pairingError,
-                                  scan: { model.isScanning = true }, pair: model.pair, cancel: model.dismissPairing)
+                if model.profiles.isEmpty || disclosure.requiresConsent {
+                    pairingScreen
                 } else {
                     ProfilesScreen(profiles: model.profiles, notice: model.notice,
                                    select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
@@ -48,20 +51,22 @@ private struct BexScreen: View {
                                 }
                             }
                         )) {
-                            NavigationStack { PairingScreen(
-                                canCancel: !model.profiles.isEmpty,
-                                connecting: model.isConnecting,
-                                error: model.pairingError,
-                                scan: { model.isScanning = true },
-                                pair: model.pair,
-                                cancel: model.dismissPairing
-                            ) }
+                            NavigationStack { pairingScreen }
                         }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var pairingScreen: some View {
+        PairingScreen(canCancel: !model.profiles.isEmpty && !disclosure.requiresConsent,
+                      connecting: model.isConnecting, error: model.pairingError, notice: disclosure,
+                      savedHost: disclosure.requiresConsent ? model.profiles.first : nil,
+                      agree: { acceptedRevision = disclosure.revision },
+                      reconnect: model.selectProfile, scan: { model.isScanning = true },
+                      pair: model.pair, cancel: model.dismissPairing)
     }
 
     private var threadList: some View {
@@ -83,6 +88,10 @@ private struct PairingScreen: View {
     let canCancel: Bool
     let connecting: Bool
     let error: String?
+    let notice: DataSharingNotice
+    let savedHost: HostProfile?
+    let agree: () -> Void
+    let reconnect: (String) -> Void
     let scan: () -> Void
     let pair: (String) -> Void
     let cancel: () -> Void
@@ -115,8 +124,24 @@ private struct PairingScreen: View {
                     BexNotice(text: error)
                 }
 
-                Button { scan() } label: {
-                    Label("QRコードを読み取る", systemImage: "qrcode.viewfinder")
+                if notice.requiresConsent {
+                    Text(notice.summary)
+                        .font(.footnote).foregroundColor(.secondary)
+                        .accessibilityIdentifier("privacy.disclosure")
+                    PrivacyPolicyButton()
+                    if let savedHost {
+                        Button("同意して\(savedHost.name)に接続") {
+                            agree()
+                            reconnect(savedHost.id)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("pairing.reconnect")
+                    }
+                }
+
+                Button { agree(); scan() } label: {
+                    Label(notice.requiresConsent ? "同意してQRコードを読み取る" : "QRコードを読み取る",
+                          systemImage: "qrcode.viewfinder")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                 }
@@ -134,8 +159,9 @@ private struct PairingScreen: View {
                             .frame(minHeight: 44)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityIdentifier("pairing.contents")
-                        Button("入力内容でペアリング") {
+                        Button(notice.requiresConsent ? "同意してペアリング" : "入力内容でペアリング") {
                             editingContents = false
+                            agree()
                             pair(contents)
                         }
                         .buttonStyle(.bordered)
@@ -152,6 +178,9 @@ private struct PairingScreen: View {
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundColor(.secondary)
+                if !notice.requiresConsent {
+                    PrivacyPolicyButton()
+                }
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 32)
@@ -187,7 +216,7 @@ private struct ProfilesScreen: View {
                     Button { select(profile.id) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(profile.name).font(.headline)
-                            Text(profile.hostIdentity).font(.caption).foregroundColor(.secondary)
+                            Text(profile.id).font(.caption).foregroundColor(.secondary)
                         }
                     }
                     .buttonStyle(.borderless)
@@ -201,6 +230,7 @@ private struct ProfilesScreen: View {
             Section {
                 Button("PCを追加") { add() }
                     .accessibilityIdentifier("profiles.add")
+                PrivacyPolicyButton()
             }
         }
         .navigationTitle("PC Hosts")

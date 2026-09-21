@@ -113,6 +113,7 @@ contracts! {
     DetachTerminal, "host/terminal/detach" => (op::DetachTerminal, m::Empty) [clone],
     KillTerminal, "process/kill" => (c::TerminalKill, m::Empty),
     Pair, "host/pair" => (c::Pair, m::Empty) [clone],
+    HostName, "host/name" => (m::Empty, String),
     HostStatus, "host/status" => (m::Empty, m::HostStatus),
     Invite, "host/invite" => (m::Empty, m::Invitation),
     ListRemotes, "host/listRemotes" => (m::Empty, Vec<m::RemoteHost>),

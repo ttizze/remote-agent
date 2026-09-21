@@ -208,8 +208,7 @@ extension BexLaunchUITests {
 
         let firstItem = assertLoadedTaskDetails(app)
 
-        app.terminate()
-        app.launch()
+        app.terminate(); app.launch()
 
         XCTAssertTrue(taskList.waitForExistence(timeout: 30), "Relaunch did not open the task list")
         XCTAssertFalse(taskDetail.exists)

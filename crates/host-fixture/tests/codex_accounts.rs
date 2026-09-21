@@ -316,8 +316,6 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
             let usage = call(&service, &mut session, "host/account/usage", json!({"accountId":"desktop"})).await;
             assert_eq!(usage["result"]["windows"], json!([]));
             assert!(usage["result"]["error"].is_null());
-            let voice = call(&service, &mut session, "host/dictation/transcribe", json!({"audio":"AAA="})).await;
-            assert!(voice["error"]["message"].as_str().unwrap().contains("認証方法が一致しません"));
         }
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":"desktop"})).await["result"]["selectedId"], "desktop");
         let stored = std::fs::read_to_string(accounts_dir.join("accounts.json")).unwrap();

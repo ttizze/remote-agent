@@ -79,6 +79,7 @@ pub enum Intent {
     DownloadFile(DownloadFile),
     LoadSessionImages(LoadSessionImages),
     LoadVisualization(LoadVisualization),
+    LoadHostName(LoadHostName),
     LoadHostManagement(LoadHostManagement),
     PairRemoteHost(PairRemoteHost),
     NewChat {

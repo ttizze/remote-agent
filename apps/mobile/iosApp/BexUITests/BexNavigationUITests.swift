@@ -15,9 +15,16 @@ extension BexLaunchUITests {
         XCTAssertTrue(remove.exists)
         remove.tap()
         app.alerts.buttons["接続を解除"].tap()
-        XCTAssertTrue(app.buttons["pairing.scan"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["privacy.disclosure"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["pairing.scan"].exists)
+        XCTAssertEqual(app.buttons["pairing.scan"].label, "同意してQRコードを読み取る")
+        XCTAssertFalse(app.buttons["privacy.agree"].exists)
         XCTAssertFalse(app.descendants(matching: .any)["tasks.list"].exists)
         app.terminate(); app.launch()
+        XCTAssertTrue(app.staticTexts["privacy.disclosure"].waitForExistence(timeout: 10))
+        app.buttons["privacy.policy"].tap()
+        XCTAssertTrue(app.navigationBars["Privacy"].waitForExistence(timeout: 5))
+        app.buttons["閉じる / Done"].tap()
         XCTAssertTrue(app.buttons["pairing.scan"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.descendants(matching: .any)["tasks.list"].exists)
         captureScreen(app, named: "Removed Host stays unpaired after relaunch")
@@ -76,6 +83,9 @@ extension BexLaunchUITests {
 
     func testSimulatorUsesNativeHostNavigationAndPairingDismissal() throws {
         let app = try connectedSimulatorApp()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "検証 Host、"
+        )).firstMatch.waitForExistence(timeout: 10))
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let addHost = app.buttons["profiles.add"]
         XCTAssertTrue(addHost.waitForExistence(timeout: 10)); addHost.tap()
@@ -92,7 +102,9 @@ extension BexLaunchUITests {
             "profiles.",
             "profiles.add"
         )).firstMatch
-        XCTAssertTrue(host.waitForExistence(timeout: 10)); host.tap()
+        XCTAssertTrue(host.waitForExistence(timeout: 10))
+        XCTAssertTrue(host.label.contains("検証 Host"))
+        host.tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
 
         app.buttons["tasks.hosts"].tap()
@@ -110,8 +122,14 @@ extension BexLaunchUITests {
         XCUIDevice.shared.press(.home); app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
         XCTAssertFalse(app.buttons["pairing.cancel"].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "検証 Host、"
+        )).firstMatch.waitForExistence(timeout: 10))
         app.terminate(); app.launch()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "検証 Host、"
+        )).firstMatch.waitForExistence(timeout: 10))
     }
 
     func testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject() throws {

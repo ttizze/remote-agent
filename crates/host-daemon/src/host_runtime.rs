@@ -22,6 +22,7 @@ pub struct HostRuntime {
     credentials: Arc<HostCredentials>,
     local_node: NodeId,
     name: String,
+    invitation_lifetime: Duration,
     active: Mutex<BTreeMap<SessionId, Session>>,
 }
 impl HostRuntime {
@@ -30,6 +31,7 @@ impl HostRuntime {
         endpoint: Endpoint,
         credentials: Arc<HostCredentials>,
         name: String,
+        invitation_lifetime: Duration,
     ) -> Self {
         let local_node = credentials.local_identity().await.node_id();
         Self {
@@ -38,6 +40,7 @@ impl HostRuntime {
             credentials,
             local_node,
             name,
+            invitation_lifetime,
             active: Mutex::new(BTreeMap::new()),
         }
     }
@@ -273,6 +276,12 @@ impl HostRuntime {
         session: SessionId,
         message: &Call,
     ) -> Result<crate::host_rpc::routing::HostReply> {
+        if matches!(message, Call::HostName(_)) {
+            return Ok(Response::Success {
+                result: Body::from(self.name.clone()),
+            }
+            .into());
+        }
         let management = matches!(
             message,
             Call::Pair(_)
@@ -326,7 +335,7 @@ impl HostRuntime {
                 let ticket = Invitation {
                     endpoint: self.endpoint.ticket().to_string(),
                     invitation: uuid::Uuid::new_v4(),
-                    expires_at: now() + 7 * 24 * 60 * 60,
+                    expires_at: now() + self.invitation_lifetime.as_secs(),
                 };
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();

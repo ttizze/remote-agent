@@ -1,3 +1,4 @@
+import AgentCore
 import SwiftUI
 
 @main
@@ -36,6 +37,35 @@ struct BexIOSApp: App {
                         break
                     }
                 }
+        }
+    }
+}
+
+struct PrivacyPolicyButton: View {
+    @State private var showing = false
+
+    var body: some View {
+        Button("プライバシー / Privacy") { showing = true }
+            .accessibilityIdentifier("privacy.policy")
+            .sheet(isPresented: $showing) { PrivacyPolicyScreen() }
+    }
+}
+
+private struct PrivacyPolicyScreen: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let policy = dataSharingNotice(acceptedRevision: "").policy
+        NavigationStack {
+            ScrollView {
+                Text((try? AttributedString(
+                    markdown: policy,
+                    options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                )) ?? AttributedString(policy))
+                    .textSelection(.enabled).padding()
+            }
+            .navigationTitle("Privacy")
+            .toolbar { Button("閉じる / Done") { dismiss() } }
         }
     }
 }

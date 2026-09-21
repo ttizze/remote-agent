@@ -67,6 +67,9 @@ impl Snapshot {
     pub fn connected(&self) -> bool {
         self.connected
     }
+    pub fn host_name(&self) -> Option<String> {
+        self.host_name.clone()
+    }
     pub fn error(&self) -> Option<String> {
         self.error.clone()
     }

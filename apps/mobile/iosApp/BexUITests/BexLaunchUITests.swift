@@ -84,6 +84,9 @@ final class BexLaunchUITests: XCTestCase {
         let manualPairing = app.buttons["QRの内容を手入力"]
         if manualPairing.waitForExistence(timeout: 3) {
             let payload = try simulatorPairingPayload()
+            for _ in 0 ..< 5 where !manualPairing.isHittable {
+                app.swipeUp()
+            }
             manualPairing.tap()
             let contents = app.secureTextFields["pairing.contents"]
             XCTAssertTrue(contents.waitForExistence(timeout: 10))

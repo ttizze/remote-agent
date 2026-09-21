@@ -81,6 +81,18 @@ async fn headless_invitation_pairs_once_and_status_uses_the_running_host() {
         .await
         .unwrap();
 
+        assert_eq!(
+            peer.call(&agent_core::state::operations::LoadHostName {})
+                .await
+                .unwrap(),
+            "Linux fixture"
+        );
+        assert!(
+            peer.call(&agent_core::client::ReadHostStatus {})
+                .await
+                .is_err()
+        );
+
         let output = command(&state).arg("status").output().await.unwrap();
         assert!(
             output.status.success(),
