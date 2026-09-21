@@ -230,9 +230,7 @@ private struct ProfilesScreen: View {
             Section {
                 Button("PCを追加") { add() }
                     .accessibilityIdentifier("profiles.add")
-                if !notice.requiresConsent {
-                    PrivacyPolicyButton()
-                }
+                PrivacyPolicyButton()
             }
         }
         .navigationTitle("PC Hosts")
