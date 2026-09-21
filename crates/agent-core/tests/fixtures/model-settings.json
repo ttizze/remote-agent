@@ -110,7 +110,7 @@
     }
   },
   {
-    "name": "empty catalog clears all settings",
+    "name": "empty catalog preserves selected model and clears unsupported options",
     "draft": {
       "text": "keep text",
       "attachments": [],
@@ -122,7 +122,7 @@
     "expected": {
       "text": "keep text",
       "attachments": [],
-      "model": null,
+      "model": "model-a",
       "effort": null
     }
   },
