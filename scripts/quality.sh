@@ -5,6 +5,7 @@ case "${1:-all}" in all|rust|kotlin|swift) language=${1:-all} ;; *) echo 'qualit
 export CARGO_INCREMENTAL=0
 failed=0
 if [[ $language == all || $language == rust ]]; then
+    nix build .#agent-peer --no-link || failed=1
     python3 -B -m unittest discover -s scripts/tests || failed=1
     cargo fmt --all --check || failed=1
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1

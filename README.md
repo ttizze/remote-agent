@@ -155,6 +155,31 @@ agent-cli <connection> approve '"request-id"' --decision 2   # string request ID
 
 `--stdio <fixture-executable>` replaces the ticket for local fixtures. Results print as JSON on stdout, errors on stderr.
 
+## Agent peer CLI and skill
+
+[`tools/agent-peer`](tools/agent-peer) is the source of the shared Claude/Codex
+consultation CLI, skill, tests, and standalone Nix package. Develop it here with
+its BEX consumers; the directory also builds independently on macOS and Linux.
+
+```sh
+nix profile add .#agent-peer
+agent-peer-install-skills
+```
+
+The public `ttizze/agent-peer` repository contains only that directory, under MIT.
+Publish a committed revision using a subtree split; this excludes the rest of
+the BEX source and history:
+
+```sh
+peer_commit=$(git subtree split --prefix=tools/agent-peer HEAD)
+git push git@github.com:ttizze/agent-peer.git "$peer_commit:refs/heads/main"
+```
+
+Make changes here, then publish the subtree again. Install a pinned public
+commit on a VPS with `nix profile add github:ttizze/agent-peer/<commit>` and run
+`agent-peer-install-skills` as the agent's service user. Provider CLIs and their
+authentication remain machine-local; see the standalone README for details.
+
 ## Verify
 
 ```sh

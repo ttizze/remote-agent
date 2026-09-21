@@ -20,6 +20,9 @@
           }));
     in
     {
+      packages = forEachSystem (pkgs: {
+        agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
+      });
       devShells = forEachSystem (pkgs:
         let
           rustToolchain = pkgs.rust-bin.stable.latest.minimal.override {
