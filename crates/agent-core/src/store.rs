@@ -566,6 +566,7 @@ fn publish_locked(
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
         composer_catalog,
+        host_name,
         storage_scope,
         archived_scopes,
         account,
@@ -593,7 +594,8 @@ fn publish_locked(
         (None, None) => true,
         _ => false,
     };
-    if current.composer_catalog == *composer_catalog
+    if current.host_name == *host_name
+        && current.composer_catalog == *composer_catalog
         && current.storage_scope == *storage_scope
         && Arc::ptr_eq(&current.archived_scopes, archived_scopes)
         && Arc::ptr_eq(&current.terminals, terminals)

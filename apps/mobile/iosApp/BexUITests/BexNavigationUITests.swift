@@ -76,6 +76,9 @@ extension BexLaunchUITests {
 
     func testSimulatorUsesNativeHostNavigationAndPairingDismissal() throws {
         let app = try connectedSimulatorApp()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "検証 Host、"
+        )).firstMatch.waitForExistence(timeout: 10))
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let addHost = app.buttons["profiles.add"]
         XCTAssertTrue(addHost.waitForExistence(timeout: 10)); addHost.tap()
@@ -92,7 +95,9 @@ extension BexLaunchUITests {
             "profiles.",
             "profiles.add"
         )).firstMatch
-        XCTAssertTrue(host.waitForExistence(timeout: 10)); host.tap()
+        XCTAssertTrue(host.waitForExistence(timeout: 10))
+        XCTAssertTrue(host.label.contains("検証 Host"))
+        host.tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
 
         app.buttons["tasks.hosts"].tap()
@@ -110,8 +115,14 @@ extension BexLaunchUITests {
         XCUIDevice.shared.press(.home); app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
         XCTAssertFalse(app.buttons["pairing.cancel"].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "検証 Host、"
+        )).firstMatch.waitForExistence(timeout: 10))
         app.terminate(); app.launch()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "検証 Host、"
+        )).firstMatch.waitForExistence(timeout: 10))
     }
 
     func testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject() throws {

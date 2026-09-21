@@ -146,6 +146,8 @@ pub struct TerminalView {
 pub struct Snapshot {
     #[serde(skip)]
     pub composer_catalog: Option<Arc<crate::composer::ComposerCatalog>>,
+    #[serde(skip)]
+    pub host_name: Option<String>,
     pub storage_scope: String,
     pub archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(default)]
@@ -345,7 +347,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
-        LoadHostManagement, LoadModels,
+        LoadHostName, LoadHostManagement, LoadModels,
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
         Intent::ReadOlder { thread_id } => {

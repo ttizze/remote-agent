@@ -264,6 +264,12 @@ impl HostRuntime {
         session: SessionId,
         message: &Call,
     ) -> Result<crate::host_rpc::routing::HostReply> {
+        if matches!(message, Call::HostName(_)) {
+            return Ok(Response::Success {
+                result: Body::from(self.name.clone()),
+            }
+            .into());
+        }
         let management = matches!(
             message,
             Call::Pair(_)

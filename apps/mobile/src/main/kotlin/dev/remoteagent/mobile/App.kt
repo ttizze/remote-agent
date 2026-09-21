@@ -34,6 +34,7 @@ import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.Connection
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.LoadHostName
 import dev.remoteagent.core.ListThreads
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
@@ -228,13 +229,14 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 initialization?.cancel()
                 observation?.cancel()
                 owner?.shutdown()
-                profiles = profiles.filterNot { it.id == id } + HostProfile(id, "PC Host", invitation.endpoint)
+                profiles = profiles.filterNot { it.id == id } + HostProfile(id, id, invitation.endpoint)
                 repository.saveProfiles(profiles)
                 repository.selected = id
                 profileId = id
                 owner = store
                 publish(store.snapshot())
                 observe(store, id)
+                perform(Intent.LoadHostName(LoadHostName()))
                 screen = Screen.Threads
                 busy = false
             } catch (error: AgentException) {
@@ -271,6 +273,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 if (profileId != profile.id) return@launch
                 publish(store.snapshot())
+                perform(Intent.LoadHostName(LoadHostName()))
                 notice = null
                 busy = false
             } catch (error: AgentException) {
@@ -301,6 +304,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun publish(next: Snapshot) {
+        val name = next.hostName()
+        if (name != null && profiles.any { it.id == profileId && it.name != name }) {
+            profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
+            repository.saveProfiles(profiles)
+        }
         if (!next.listUnchanged(snapshot)) list = next.threadList()
         conversation = projectConversationRows(next, next.conversationSource(), conversation)
         snapshot = next

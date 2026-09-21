@@ -187,7 +187,7 @@ private struct ProfilesScreen: View {
                     Button { select(profile.id) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(profile.name).font(.headline)
-                            Text(profile.hostIdentity).font(.caption).foregroundColor(.secondary)
+                            Text(profile.id).font(.caption).foregroundColor(.secondary)
                         }
                     }
                     .buttonStyle(.borderless)

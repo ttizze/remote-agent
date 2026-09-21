@@ -6,11 +6,23 @@ enum AppScreen { case pairing, profiles, threads, thread }
 enum LoadState { case idle, loading, ready, failed }
 struct HostProfile: Codable, Identifiable {
     let id: String
-    let name: String
+    var name: String
     let ticket: String
-    var hostIdentity: String {
-        id
+
+    static func load() throws -> [HostProfile] {
+        guard let data = UserDefaults.standard.data(forKey: "bex.hosts.iroh") else { return [] }
+        return try JSONDecoder().decode([HostProfile].self, from: data)
     }
+
+    static func save(_ profiles: [HostProfile]) throws {
+        try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
+    }
+}
+
+struct ConversationPresentationInput {
+    let source: AgentCore.Thread?
+    let snapshot: AgentCore.Snapshot
+    let host: String?
 }
 
 extension JsonValue {

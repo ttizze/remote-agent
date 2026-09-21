@@ -26,12 +26,7 @@ final class BexAppViewModel: ObservableObject {
     private(set) var list: ThreadList?
     private(set) var models: [Model] = []
     private var presentationTask: Task<Void, Never>?
-    private var pendingPresentation: PresentationInput?
-    private struct PresentationInput {
-        let source: AgentCore.Thread?
-        let snapshot: AgentCore.Snapshot
-        let host: String?
-    }
+    private var pendingPresentation: ConversationPresentationInput?
 
     private var store: AgentStore?
     private var initialization: Task<Void, Never>?
@@ -43,11 +38,7 @@ final class BexAppViewModel: ObservableObject {
     private var operations: [UUID: Task<Void, Never>] = [:]
 
     init() {
-        if let data = UserDefaults.standard.data(forKey: "bex.hosts.iroh") {
-            do {
-                profiles = try JSONDecoder().decode([HostProfile].self, from: data)
-            } catch { notice = error.localizedDescription }
-        }
+        do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
         if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
            profiles.contains(where: { $0.id == id }) {
             selectProfile(id)
@@ -81,7 +72,6 @@ final class BexAppViewModel: ObservableObject {
         guard profiles.contains(where: { $0.id == id }) else { return }
         do {
             let remaining = profiles.filter { $0.id != id }
-            let encoded = try JSONEncoder().encode(remaining)
             try DeviceIdentity.remove(id)
             if selectedProfileId == id {
                 persist()
@@ -101,7 +91,7 @@ final class BexAppViewModel: ObservableObject {
                 }
             }
             profiles = remaining
-            UserDefaults.standard.set(encoded, forKey: "bex.hosts.iroh")
+            try HostProfile.save(profiles)
             screen = .profiles
         } catch { notice = error.localizedDescription }
     }
@@ -195,8 +185,8 @@ final class BexAppViewModel: ObservableObject {
                     cancelInitialization()
                     let old = store
                     profiles.removeAll { $0.id == id }
-                    profiles.append(HostProfile(id: id, name: "PC Host", ticket: invitation.endpoint))
-                    try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
+                    profiles.append(HostProfile(id: id, name: id, ticket: invitation.endpoint))
+                    try HostProfile.save(profiles)
                     UserDefaults.standard.set(id, forKey: "bex.selected-host")
                     selectedProfileId = id
                     store = owner
@@ -204,6 +194,7 @@ final class BexAppViewModel: ObservableObject {
                     screen = .threads
                     isConnecting = false
                     observe(owner, host: id)
+                    perform(.loadHostName(LoadHostName()))
                     try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -271,6 +262,7 @@ extension BexAppViewModel {
                 let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1_000_000
                 owner.recordConnectionEvent(phase: .uiConnectReady, value: UInt64(elapsed))
                 publish(owner.snapshot())
+                perform(.loadHostName(LoadHostName()))
                 notice = snapshot.error()
                 isConnecting = false
             } catch {
@@ -320,6 +312,14 @@ extension BexAppViewModel {
     }
 
     private func publish(_ next: AgentCore.Snapshot) {
+        if let name = next.hostName(),
+           let index = profiles.firstIndex(where: { $0.id == selectedProfileId }),
+           profiles[index].name != name {
+            profiles[index].name = name
+            do {
+                try HostProfile.save(profiles)
+            } catch { notice = error.localizedDescription }
+        }
         if snapshot.error() != next.error() {
             notice = next.error()
         }
@@ -355,7 +355,7 @@ extension BexAppViewModel {
         if conversation?.id != source?.id() {
             conversation = nil
         }
-        pendingPresentation = PresentationInput(source: source, snapshot: snapshot, host: selectedProfileId)
+        pendingPresentation = ConversationPresentationInput(source: source, snapshot: snapshot, host: selectedProfileId)
         guard presentationTask == nil else { return }
         presentationTask = Task { [weak self] in
             while let self, let input = pendingPresentation {

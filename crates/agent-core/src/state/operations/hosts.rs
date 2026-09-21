@@ -2,6 +2,19 @@ use super::*;
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadHostName {}
+rpc::rpc_method!(LoadHostName, HostName, |self| crate::models::Empty {});
+
+impl Operation for LoadHostName {
+    rpc_operation!();
+    fn apply(self, snapshot: &mut Snapshot, name: Self::Output) -> Vec<Effect> {
+        snapshot.host_name = Some(name);
+        Vec::new()
+    }
+}
+
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInvitation {}
 rpc::rpc_method!(CreateInvitation, Invite, |self| crate::models::Empty {});
 
