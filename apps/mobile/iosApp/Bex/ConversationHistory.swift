@@ -30,7 +30,7 @@ extension ThreadScreen {
                     16
                 )
         case (let .response(_, turnId), let item?):
-            ThreadMessageRow(item: item, isUser: false, media: model.mediaAccess, selection: model.selectionActions,
+            ThreadMessageRow(item: item, isUser: false, media: model.mediaAccess, selection: selectionActions,
                              fork: turnId
                                  .map { id in { complete in model.forkAndOpen(through: id, completion: complete) } })
         case let (.activityHeader(activity), _): activityHeader(activity)
@@ -50,7 +50,7 @@ extension ThreadScreen {
             item: item,
             isUser: true,
             media: model.mediaAccess,
-            selection: model.selectionActions,
+            selection: selectionActions,
             restoreUnknown: { model.restoreUnknownSubmission($0) },
             discardUnknown: { model.discardUnknownSubmission($0) }
         )
@@ -60,7 +60,7 @@ extension ThreadScreen {
         ThreadItemRow(
             item: item,
             media: model.mediaAccess,
-            selection: model.selectionActions,
+            selection: selectionActions,
             isExpanded: expandedItemIds.contains(item.data.id),
             toggleExpanded: {
                 isFollowingLatest = false

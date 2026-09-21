@@ -1,16 +1,94 @@
 import AgentCore
 import SwiftUI
 
-struct SideChatRequest: Identifiable {
+@MainActor
+final class SideChatRequest: ObservableObject {
     let id = UUID()
     let text: String
     let host: String
     let originalThreadId: String
     let originalConversation: ConversationPresentation?
     let cwd: String
+    private(set) var threadId: String?
+    private var draftInitialized = false
+    private var transition: Task<Void, Never>?
+    @Published private(set) var preparing = true
+    @Published private(set) var error: String?
+
+    init(text: String, host: String, originalThreadId: String,
+         originalConversation: ConversationPresentation?, cwd: String) {
+        self.text = text
+        self.host = host
+        self.originalThreadId = originalThreadId
+        self.originalConversation = originalConversation
+        self.cwd = cwd
+    }
+
+    func activate(_ active: Bool, model: BexAppViewModel) {
+        if active {
+            preparing = true
+        }
+        let previous = transition
+        transition = Task {
+            await previous?.value
+            guard model.screen == .thread, model.selectedProfileId == host,
+                  model.sideChatRequest?.id == id,
+                  model.selectedThreadId == originalThreadId || model.selectedThreadId == threadId else { return }
+            if active {
+                await prepare(model)
+            } else {
+                await restoreOriginal(model)
+            }
+        }
+    }
+
+    private func prepare(_ model: BexAppViewModel) async {
+        if model.notice == error {
+            model.notice = nil
+        }
+        error = nil
+        do {
+            if threadId == nil {
+                let result = try await model.outcome(for: .startThread(StartThread(cwd: cwd, model: nil)))
+                guard case let .startedThread(id) = result else { throw CocoaError(.coderInvalidValue) }
+                threadId = id
+            }
+            guard model.selectedProfileId == host, model.sideChatRequest?.id == id, let threadId else { return }
+            if !draftInitialized {
+                if !text.isEmpty {
+                    _ = try await model.outcome(for: .setDraftText(
+                        threadId: threadId, text: BexAppViewModel.selectionQuote(text)
+                    ))
+                }
+                draftInitialized = true
+            }
+            guard model.screen == .thread, model.selectedProfileId == host,
+                  model.sideChatRequest?.id == id else { return }
+            _ = try await model.outcome(for: .readThread(ReadThread(threadId: threadId, open: true)))
+            model.composerFocusRequest = UUID()
+        } catch {
+            self.error = model.snapshot.error() ?? error.localizedDescription
+            await restoreOriginal(model)
+        }
+        preparing = false
+    }
+
+    private func restoreOriginal(_ model: BexAppViewModel) async {
+        guard model.screen == .thread, model.selectedProfileId == host,
+              model.sideChatRequest?.id == id, model.selectedThreadId == threadId else { return }
+        do {
+            _ = try await model.outcome(for: .readThread(ReadThread(threadId: originalThreadId, open: true)))
+            model.persist()
+        } catch { model.notice = error.localizedDescription }
+    }
 }
 
 extension BexAppViewModel {
+    var isShowingSideChat: Bool {
+        guard let request = sideChatRequest else { return false }
+        return selectedProfileId == request.host && selectedThreadId == request.threadId
+    }
+
     func addSelectionToChat(_ text: String) {
         let quote = Self.selectionQuote(text)
         draft = draft.isEmpty ? quote : draft + "\n\n" + quote
@@ -22,94 +100,41 @@ extension BexAppViewModel {
     }
 
     func askSelectionInSideChat(_ text: String) {
-        guard sideChatRequest == nil, let host = selectedProfileId, let thread = selectedThreadId else { return }
+        guard !isShowingSideChat, let host = selectedProfileId, let thread = selectedThreadId else { return }
         sideChatRequest = SideChatRequest(text: text, host: host, originalThreadId: thread,
                                           originalConversation: conversation, cwd: selectedDirectory)
     }
 }
 
+extension ThreadScreen {
+    var selectionActions: ConversationSelectionActions {
+        let ask: ((String) -> Void)? = isSideChat ? nil : { text in
+            model.askSelectionInSideChat(text)
+            openTools?(.sideChat, false)
+        }
+        return ConversationSelectionActions(addToChat: model.addSelectionToChat, askInSideChat: ask)
+    }
+}
+
 struct ConversationSideChat: View {
     @ObservedObject var model: BexAppViewModel
-    let request: SideChatRequest
-    @State private var threadId: String?
-    @State private var draftInitialized = false
-    @State private var preparing = true
-    @State private var error: String?
-    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var request: SideChatRequest
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if preparing {
-                    ProgressView("サイドチャットを準備中…")
-                } else if let error {
-                    VStack(spacing: 16) {
-                        Text(error).foregroundStyle(.red)
-                        Button("再試行") { Task { await prepare() } }
-                    }.padding()
-                } else {
-                    ThreadScreen(model: model, conversation: model.conversation, isSideChat: true)
-                }
-            }
-            .navigationTitle("サイドチャット")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("閉じる") { dismiss() }.accessibilityIdentifier("side-chat.close")
-                }
+        VStack(spacing: 0) {
+            if request.preparing {
+                ProgressView("サイドチャットを準備中…")
+            } else if let error = request.error {
+                VStack(spacing: 16) {
+                    Text(error).foregroundStyle(.red)
+                    Button("再試行") { request.activate(true, model: model) }
+                }.padding()
+            } else {
+                ThreadScreen(model: model, conversation: model.conversation, isSideChat: true)
             }
         }
-        .accessibilityIdentifier("side-chat.sheet")
-        .task { await prepare() }
-        .onDisappear { restoreOriginal() }
-    }
-
-    private func run(_ intent: Intent) async throws -> Outcome {
-        try await withCheckedThrowingContinuation { continuation in
-            model.perform(intent) { continuation.resume(with: $0) }
-        }
-    }
-
-    private func prepare() async {
-        preparing = true
-        if model.notice == error {
-            model.notice = nil
-        }
-        error = nil
-        do {
-            if threadId == nil {
-                let result = try await run(.startThread(StartThread(cwd: request.cwd, model: nil)))
-                guard case let .startedThread(id) = result else { throw CocoaError(.coderInvalidValue) }
-                threadId = id
-            }
-            if !draftInitialized, let id = threadId {
-                let quote = BexAppViewModel.selectionQuote(request.text)
-                _ = try await run(.setDraftText(threadId: id, text: quote))
-                draftInitialized = true
-            }
-            guard !Task.isCancelled, model.selectedProfileId == request.host,
-                  model.sideChatRequest?.id == request.id, let threadId else { return }
-            // A newly started thread has no persisted turns to hydrate yet.
-            _ = try await run(.readThread(ReadThread(
-                threadId: threadId, open: true
-            )))
-            if Task.isCancelled || model.sideChatRequest?.id != request.id {
-                restoreOriginal(); return
-            }
-            model.composerFocusRequest = UUID()
-        } catch {
-            self.error = model.snapshot.error() ?? error.localizedDescription
-            restoreOriginal()
-        }
-        preparing = false
-    }
-
-    private func restoreOriginal() {
-        guard model.selectedProfileId == request.host, model.selectedThreadId == threadId else { return }
-        model.perform(.readThread(ReadThread(threadId: request.originalThreadId, open: true))) { result in
-            if case .success = result {
-                model.persist()
-            }
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { request.activate(true, model: model) }
+        .onDisappear { request.activate(false, model: model) }
     }
 }

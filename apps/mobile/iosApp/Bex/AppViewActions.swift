@@ -225,15 +225,10 @@ extension BexAppViewModel {
         }
     }
 
-    private func outcome(for intent: Intent) async throws -> Outcome {
+    func outcome(for intent: Intent) async throws -> Outcome {
         try await withCheckedThrowingContinuation { continuation in
             perform(intent) { continuation.resume(with: $0) }
         }
-    }
-
-    var selectionActions: ConversationSelectionActions {
-        let ask: ((String) -> Void)? = sideChatRequest == nil ? { [self] text in askSelectionInSideChat(text) } : nil
-        return ConversationSelectionActions(addToChat: addSelectionToChat, askInSideChat: ask)
     }
 
     var mediaAccess: ConversationMediaAccess {

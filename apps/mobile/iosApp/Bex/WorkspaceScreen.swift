@@ -12,7 +12,8 @@ struct ConversationDestination: View {
     var body: some View {
         GeometryReader { geometry in
             ThreadScreen(model: model,
-                         conversation: model.sideChatRequest?.originalConversation ?? model.conversation,
+                         conversation: model.isShowingSideChat ? model.sideChatRequest?.originalConversation : model
+                             .conversation,
                          openTools: { tab, diff in
                              if let tab {
                                  self.tab = tab
@@ -36,10 +37,11 @@ struct ConversationDestination: View {
 }
 
 enum WorkspaceTab: String, CaseIterable {
-    case terminal, browser, files
+    case terminal, browser, files, sideChat
 
     var icon: String {
         switch self {
+        case .sideChat: "bubble.left.and.bubble.right"
         case .terminal: "terminal"
         case .files: "folder"
         case .browser: "globe"
@@ -48,6 +50,7 @@ enum WorkspaceTab: String, CaseIterable {
 
     var label: String {
         switch self {
+        case .sideChat: "サイドチャット"
         case .terminal: "ターミナル"
         case .files: "ファイル"
         case .browser: "ブラウザ"
@@ -84,8 +87,19 @@ private struct WorkspaceToolsScreen: View {
             }
             Divider()
             Group {
-                if tab == .browser {
-                    if let thread = model.selectedThreadId {
+                if tab == .sideChat {
+                    if let request = model.sideChatRequest,
+                       request.host == model.selectedProfileId,
+                       request.originalThreadId == model.selectedThreadId || model.isShowingSideChat {
+                        ConversationSideChat(model: model, request: request)
+                            .id(request.id)
+                    } else {
+                        Text("会話を始めるとサイドチャットを利用できます。")
+                            .foregroundStyle(.secondary).padding()
+                    }
+                } else if tab == .browser {
+                    if let thread = model.isShowingSideChat ? model.sideChatRequest?.originalThreadId : model
+                        .selectedThreadId {
                         WorkspaceBrowserScreen(model: model, thread: thread)
                             .id("\(model.selectedProfileId ?? "")/\(thread)")
                     } else {
@@ -98,14 +112,25 @@ private struct WorkspaceToolsScreen: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if tab == .terminal {
                     TerminalScreen(model: model, cwd: model.cwd)
+                        .id(model.cwd)
                 } else {
                     WorkspaceScreen(model: model, root: model.cwd, showingDiff: $showingDiff, close: close)
+                        .id(model.cwd)
                 }
             }
-            .id(model.cwd)
         }
+        .onAppear { prepareSideChat() }
+        .onChange(of: tab) { _ in prepareSideChat() }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func prepareSideChat() {
+        guard tab == .sideChat else { return }
+        if model.sideChatRequest?.host != model.selectedProfileId ||
+            (model.sideChatRequest?.originalThreadId != model.selectedThreadId && !model.isShowingSideChat) {
+            model.askSelectionInSideChat("")
+        }
     }
 }
 
