@@ -48,6 +48,8 @@ android-e2e:
 conversation-ui:
     scripts/ios-e2e.sh \
         testSimulatorNativeTerminalRetainsShellAfterReopening \
+        testSimulatorNativeTerminalPastesMultilineText \
+        testSimulatorNativeTerminalDoesNotDuplicateQueryResponses \
         testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
         testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \

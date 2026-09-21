@@ -1,8 +1,57 @@
 import Foundation
+import UIKit
 import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorNativeTerminalPastesMultilineText() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        app.buttons["task.tools"].tap()
+        app.buttons["workbench.terminal"].tap()
+        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        let terminal = app.descendants(matching: .any)["terminal.screen"]
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.tap()
+        UIPasteboard.general.string = "BEX_PASTE='日本語\nsecond line'"
+        terminal.press(forDuration: 1.2)
+        let paste = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Paste", "ペースト"])).firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 5)); paste.tap()
+        terminal.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        terminal.typeText("\n")
+        let expected = "\\346\\227\\245\\346\\234\\254\\350\\252\\236\\nsecond line"
+        terminal.typeText("[ \"$BEX_PASTE\" = \"$(printf '\(expected)')\" ]; exit $?\n")
+        XCTAssertTrue(app.staticTexts["終了 · 0"].waitForExistence(timeout: 15))
+        captureScreen(app, named: "Native terminal pastes Unicode and multiline text")
+        closeWorkbench(app)
+    }
+
+    func testSimulatorNativeTerminalDoesNotDuplicateQueryResponses() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        app.buttons["task.tools"].tap()
+        app.buttons["workbench.terminal"].tap()
+        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        let terminal = app.descendants(matching: .any)["terminal.screen"]
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.tap()
+        let probe = #"""
+        import os,re,select,sys,termios,tty
+        saved=termios.tcgetattr(0)
+        tty.setraw(0)
+        os.write(1,b"\x1b[6n")
+        data=os.read(0,128) if select.select([0],[],[],5)[0] else b""
+        extra=select.select([0],[],[],1)[0]
+        termios.tcsetattr(0,termios.TCSANOW,saved)
+        sys.exit(0 if re.fullmatch(rb"\x1b\[[0-9]+;[0-9]+R",data) and not extra else 1)
+        """#.split(separator: "\n").joined(separator: "; ")
+        terminal.typeText("python3 -c '\(probe)'; exit $?\n")
+        XCTAssertTrue(app.staticTexts["終了 · 0"].waitForExistence(timeout: 20))
+        captureScreen(app, named: "Only the Host responds to terminal queries")
+        closeWorkbench(app)
+    }
+
     func testSimulatorNativeTerminalRetainsShellAfterReopening() throws {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.new.project.simulator-project"].tap()

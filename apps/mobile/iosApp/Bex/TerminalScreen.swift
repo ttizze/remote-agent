@@ -110,5 +110,16 @@ private struct NativeTerminalView: UIViewRepresentable {
 
 /// Emulator responses are produced by the Host; SwiftTerm still handles native user input.
 private final class HostTerminalView: SwiftTerm.TerminalView {
-    override nonisolated func send(source _: SwiftTerm.Terminal, data _: ArraySlice<UInt8>) {}
+    @TaskLocal private nonisolated static var isPasting = false
+
+    override func paste(_ sender: Any?) {
+        // SwiftTerm sends paste bytes synchronously through the emulator delegate.
+        // Scope forwarding to this call, without enabling replies from its parser thread.
+        Self.$isPasting.withValue(true) { super.paste(sender) }
+    }
+
+    override nonisolated func send(source: SwiftTerm.Terminal, data: ArraySlice<UInt8>) {
+        guard Self.isPasting else { return }
+        super.send(source: source, data: data)
+    }
 }
