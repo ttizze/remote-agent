@@ -212,13 +212,23 @@ impl Chrome {
     pub async fn screenshot(&mut self, session: &str) -> Result<Vec<u8>, String> {
         self.call(Some(session), "Page.bringToFront", json!({}))
             .await?;
-        let frame = self
-            .call(
-                Some(session),
-                "Page.captureScreenshot",
-                json!({"format":"jpeg","quality":65,"captureBeyondViewport":false}),
-            )
-            .await?;
+        let mut retries = 0;
+        let frame = loop {
+            let result = self
+                .call(
+                    Some(session),
+                    "Page.captureScreenshot",
+                    json!({"format":"jpeg","quality":65,"captureBeyondViewport":false}),
+                )
+                .await;
+            if result.is_ok() || self.broken || retries == 2 {
+                break result?;
+            }
+            // Navigation can briefly leave no active page to capture. Retry
+            // only the frame capture, never the user's navigation or input.
+            retries += 1;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
         let data = frame["data"]
             .as_str()
             .filter(|s| s.len() <= 4 * 1024 * 1024)

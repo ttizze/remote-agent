@@ -63,9 +63,22 @@ final class BexLaunchUITests: XCTestCase {
         try simulatorFixture(path)
     }
 
+    func acceptDataSharingIfNeeded(_ app: XCUIApplication) {
+        let agree = app.buttons["privacy.agree"]
+        if agree.waitForExistence(timeout: 3) {
+            XCTAssertFalse(app.buttons["pairing.scan"].exists)
+            XCTAssertFalse(app.descendants(matching: .any)["tasks.list"].exists)
+            for _ in 0 ..< 5 where !agree.isHittable {
+                app.swipeUp()
+            }
+            agree.tap()
+        }
+    }
+
     func connectedSimulatorApp(expandProject: Bool = true) throws -> XCUIApplication {
         let app = XCUIApplication()
         app.launch()
+        acceptDataSharingIfNeeded(app)
         defer {
             if expandProject {
                 expandSimulatorProject(app)

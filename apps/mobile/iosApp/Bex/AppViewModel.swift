@@ -93,6 +93,9 @@ final class BexAppViewModel: ObservableObject {
             profiles = remaining
             try HostProfile.save(profiles)
             screen = .profiles
+            if remaining.isEmpty {
+                UserDefaults.standard.removeObject(forKey: "bex.data-sharing-consent")
+            }
         } catch { notice = error.localizedDescription }
     }
 
@@ -235,7 +238,6 @@ final class BexAppViewModel: ObservableObject {
     }
 }
 
-/// Snapshot observation, persistence and foreground recovery.
 extension BexAppViewModel {
     func connect(afterForeground: Bool = false) {
         guard screen != .pairing, let owner = store,
@@ -301,8 +303,7 @@ extension BexAppViewModel {
                     let latest = owner.snapshot()
                     publish(latest)
                     if previous.connected(), !latest.connected(), !isConnecting {
-                        // Recover a lost established connection once. If it
-                        // fails, the next foreground activation retries it.
+                        // Retry a lost connection once, then wait for the next foreground activation.
                         connect()
                     }
                     previous = latest
@@ -368,8 +369,7 @@ extension BexAppViewModel {
                    snapshot.navigation().draftKey == input.snapshot.navigation().draftKey {
                     conversation = rendered
                 }
-                // Keep one background projection in flight and coalesce stream deltas.
-                // Rows enter the lazy stack with parsed Markdown and a stable initial height.
+                // Coalesce updates off MainActor before publishing parsed, stably sized rows.
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
             self?.presentationTask = nil

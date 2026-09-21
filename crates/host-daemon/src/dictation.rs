@@ -1,5 +1,6 @@
 use std::{sync::OnceLock, time::Duration};
 
+use crate::codex_accounts::AuthToken;
 use async_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
@@ -15,6 +16,7 @@ use zeroize::Zeroizing;
 // 100ms of PCM16 at 24kHz. Base64 and sample boundaries both remain aligned.
 const AUDIO_CHUNK_BASE64_BYTES: usize = 6_400;
 const DICTATION_URL: &str = "wss://chatgpt.com/backend-api/dictation/stream";
+const API_TRANSCRIBE_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const TRANSCRIBE_URL: &str = "https://chatgpt.com/backend-api/transcribe";
 
 pub(crate) struct Dictation {
@@ -51,18 +53,32 @@ async fn transcribe_request(
 
     // Keep the desktop account token on the Host. Neither the RPC response nor
     // an error contains the token or the authenticated WebSocket request.
-    let token = crate::codex_accounts::access_token(app_server, false).await?;
-    let audio = Zeroizing::new(STANDARD.encode(pcm));
-    let text = transcribe_authenticated(
-        &token,
-        &app_server.initialize_response().user_agent,
-        &audio,
-        pcm,
-        DICTATION_URL,
-        TRANSCRIBE_URL,
-    )
-    .await?;
+    let text = match crate::codex_accounts::auth_token(app_server, false).await? {
+        AuthToken::ApiKey(key) => {
+            transcribe_recording(&key, RecordingService::OpenAi, pcm, API_TRANSCRIBE_URL).await?
+        }
+        AuthToken::ChatGpt(token) => {
+            let audio = Zeroizing::new(STANDARD.encode(pcm));
+            transcribe_authenticated(
+                &token,
+                &app_server.initialize_response().user_agent,
+                &audio,
+                pcm,
+                DICTATION_URL,
+                TRANSCRIBE_URL,
+            )
+            .await?
+        }
+    };
     Ok(agent_core::client::Transcription { text })
+}
+
+// Both TLS backends are linked on desktop; iroh does not install a global one.
+// Each independent HTTP/WebSocket entry point must work on a cold Host.
+fn install_tls_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
 }
 
 async fn transcribe_authenticated(
@@ -73,12 +89,7 @@ async fn transcribe_authenticated(
     stream_url: &str,
     recording_url: &str,
 ) -> Result<String, String> {
-    // The desktop build enables both Rustls backends. Choose before the first
-    // WebSocket handshake; iroh configures its own provider without installing
-    // a process default. Preserve a provider already selected by another caller.
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
+    install_tls_provider();
     // The desktop retains a recording alongside its stream and submits that
     // recording to /transcribe when streaming cannot produce a transcript.
     let stream_result = tokio::time::timeout(
@@ -89,9 +100,14 @@ async fn transcribe_authenticated(
     .unwrap_or_else(|_| Err("音声ストリームがタイムアウトしました。".into()));
     match stream_result {
         Ok(text) => Ok(text),
-        Err(stream_error) => transcribe_recording(token, user_agent, pcm, recording_url)
-            .await
-            .map_err(|error| format!("{stream_error}\n録音ファイルの文字起こし: {error}")),
+        Err(stream_error) => transcribe_recording(
+            token,
+            RecordingService::ChatGpt(user_agent),
+            pcm,
+            recording_url,
+        )
+        .await
+        .map_err(|error| format!("{stream_error}\n録音ファイルの文字起こし: {error}")),
     }
 }
 
@@ -144,12 +160,18 @@ async fn transcribe_stream(
     transcribe_socket(socket, audio).await
 }
 
+enum RecordingService<'a> {
+    ChatGpt(&'a str),
+    OpenAi,
+}
+
 async fn transcribe_recording(
     token: &str,
-    user_agent: &str,
+    service: RecordingService<'_>,
     pcm: &[u8],
     url: &str,
 ) -> Result<String, String> {
+    install_tls_provider();
     static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
     let client = CLIENT
         .get_or_init(|| {
@@ -177,27 +199,30 @@ async fn transcribe_recording(
         .file_name("codex.wav")
         .mime_str("audio/wav")
         .map_err(|_| "録音形式が無効です。")?;
-    let mut request = client
-        .post(url)
-        .bearer_auth(token)
-        .header("originator", "Codex Desktop")
-        // Use the running App Server's own identity, as the native Codex CLI
-        // does for transcription, rather than inventing a browser identity.
-        .header("User-Agent", user_agent)
-        .multipart(reqwest::multipart::Form::new().part("file", file));
-
-    // As in the desktop's authenticated fetch, route to the token's account.
-    // These unverified claims only select headers; the service verifies the JWT.
-    if let Some(claims) = crate::codex_accounts::token_claims(token) {
-        let auth = &claims["https://api.openai.com/auth"];
-        if let Some(account_id) = auth["chatgpt_account_id"].as_str() {
-            let mut account = HeaderValue::from_str(account_id)
-                .map_err(|_| "Codexのアカウント情報が無効です。")?;
-            account.set_sensitive(true);
-            request = request.header("ChatGPT-Account-Id", account);
+    let mut form = reqwest::multipart::Form::new().part("file", file);
+    let mut request = client.post(url).bearer_auth(token);
+    match service {
+        RecordingService::OpenAi => {
+            form = form.text("model", "gpt-4o-mini-transcribe");
+        }
+        RecordingService::ChatGpt(user_agent) => {
+            request = request
+                .header("originator", "Codex Desktop")
+                .header("User-Agent", user_agent);
+            // Claims select a header only; the service verifies the token.
+            if let Some(claims) = crate::codex_accounts::token_claims(token)
+                && let Some(account_id) =
+                    claims["https://api.openai.com/auth"]["chatgpt_account_id"].as_str()
+            {
+                let mut account = HeaderValue::from_str(account_id)
+                    .map_err(|_| "Codexのアカウント情報が無効です。")?;
+                account.set_sensitive(true);
+                request = request.header("ChatGPT-Account-Id", account);
+            }
         }
     }
     let response = request
+        .multipart(form)
         .send()
         .await
         .map_err(|_| "Codexへの録音ファイル送信に失敗しました。")?;
@@ -458,14 +483,14 @@ mod tests {
             );
         }
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"  "}"#, false)
+            recording_fallback("200 OK", r#"{"text":"  "}"#, false, false)
                 .await
                 .unwrap()
                 .trim(),
             ""
         );
         assert!(
-            recording_fallback("200 OK", r#"{"text":42}"#, false)
+            recording_fallback("200 OK", r#"{"text":42}"#, false, false)
                 .await
                 .is_err()
         );
@@ -496,6 +521,7 @@ mod tests {
         response_status: &str,
         response_body: &str,
         secure_stream: bool,
+        api_key: bool,
     ) -> Result<String, String> {
         tokio::time::timeout(Duration::from_secs(3), async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -503,7 +529,7 @@ mod tests {
             let token = format!("local.{}.signature", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
                 br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"isolated-test-account"}}"#));
             let provider = async {
-                for streaming in [true, false] {
+                for streaming in [true, false].into_iter().filter(|stream| !api_key || !stream) {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     if streaming && secure_stream {
                         // Reject TLS after ClientHello, before any credentials
@@ -522,7 +548,7 @@ mod tests {
                         if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") { break end + 4; }
                     };
                     let headers = String::from_utf8(request[..header_end].to_vec()).unwrap().to_ascii_lowercase();
-                    assert!(headers.contains("user-agent: isolated-codex/1.0"));
+                    assert_eq!(headers.contains("user-agent: isolated-codex/1.0"), !api_key);
                     if streaming {
                         assert!(headers.starts_with("get /stream "));
                         assert!(headers.contains("upgrade: websocket"));
@@ -531,8 +557,8 @@ mod tests {
                     }
                     assert!(headers.starts_with("post /transcribe "));
                     assert!(headers.contains(&format!("authorization: bearer {}", token.to_ascii_lowercase())));
-                    assert!(headers.contains("chatgpt-account-id: isolated-test-account"));
-                    assert!(headers.contains("originator: codex desktop"));
+                    assert_eq!(headers.contains("chatgpt-account-id: isolated-test-account"), !api_key);
+                    assert_eq!(headers.contains("originator: codex desktop"), !api_key);
                     assert!(headers.contains("content-type: multipart/form-data; boundary="));
                     let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length: ")).unwrap().parse().unwrap();
                     assert!(length < 8192);
@@ -542,6 +568,7 @@ mod tests {
                         socket.read_exact(&mut request[received..]).await.unwrap();
                     }
                     let body = &request[header_end..];
+                    assert_eq!(String::from_utf8_lossy(body).contains("gpt-4o-mini-transcribe"), api_key);
                     assert!(body.windows(16).any(|bytes| bytes == b"filename=\"codex."));
                     let wav_start = body.windows(4).position(|bytes| bytes == b"RIFF").unwrap();
                     let wav = &body[wav_start..wav_start + 48];
@@ -556,16 +583,42 @@ mod tests {
             let scheme = if secure_stream { "wss" } else { "ws" };
             let stream_url = format!("{scheme}://{address}/stream");
             let recording_url = format!("http://{address}/transcribe");
-            let operation = transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url);
+            let operation = async {
+                if api_key {
+                    transcribe_recording(&token, RecordingService::OpenAi, &[1, 0, 255, 127], &recording_url).await
+                } else {
+                    transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url).await
+                }
+            };
             let (result, ()) = tokio::join!(operation, provider);
             result
         }).await.expect("recording fallback stalled")
     }
 
     #[tokio::test]
+    async fn api_key_recording_sends_model_without_chatgpt_headers_or_streaming() {
+        assert_eq!(
+            recording_fallback("200 OK", r#"{"text":"API transcription"}"#, false, true)
+                .await
+                .unwrap(),
+            "API transcription"
+        );
+        let error = recording_fallback(
+            "401 Unauthorized",
+            r#"{"error":"private provider payload"}"#,
+            false,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("HTTP 401"));
+        assert!(!error.contains("private provider payload"));
+    }
+
+    #[tokio::test]
     async fn submits_the_original_recording_when_streaming_is_rejected() {
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"文字起こし成功"}"#, false)
+            recording_fallback("200 OK", r#"{"text":"文字起こし成功"}"#, false, false)
                 .await
                 .unwrap(),
             "文字起こし成功"
@@ -578,6 +631,7 @@ mod tests {
             "500 Internal Server Error",
             r#"{"error":"private provider payload"}"#,
             false,
+            false,
         )
         .await
         .unwrap_err();
@@ -587,39 +641,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_secure_dictation_falls_back_after_tls_failure() {
+    async fn first_dictation_initializes_tls_for_both_auth_methods() {
         const CHILD: &str = "BEX_TEST_COLD_DICTATION_TLS";
         if std::env::var_os(CHILD).is_none() {
             // A separate process prevents another test from installing the
             // global TLS provider first and hiding cold-start failures.
-            let output = tokio::time::timeout(
+            for method in ["api", "chatgpt"] {
+                let output = tokio::time::timeout(
                 Duration::from_secs(15),
                 tokio::process::Command::new(std::env::current_exe().unwrap())
                     .args([
                         "--exact",
-                        "dictation::tests::first_secure_dictation_falls_back_after_tls_failure",
+                        "dictation::tests::first_dictation_initializes_tls_for_both_auth_methods",
                         "--nocapture",
                     ])
-                    .env(CHILD, "1")
+                    .env(CHILD, method)
                     .kill_on_drop(true)
                     .output(),
             )
             .await
             .expect("cold dictation process stalled")
             .unwrap();
-            assert!(
-                output.status.success(),
-                "cold dictation failed: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+                assert!(
+                    output.status.success(),
+                    "cold dictation failed: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
             return;
         }
+        let api_key = std::env::var(CHILD).unwrap() == "api";
         assert!(rustls::crypto::CryptoProvider::get_default().is_none());
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"TLS後も文字起こし成功"}"#, true)
-                .await
-                .unwrap(),
+            recording_fallback(
+                "200 OK",
+                r#"{"text":"TLS後も文字起こし成功"}"#,
+                !api_key,
+                api_key
+            )
+            .await
+            .unwrap(),
             "TLS後も文字起こし成功"
         );
     }

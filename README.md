@@ -83,7 +83,7 @@ target/release/host-daemon invite | qrencode -t ANSIUTF8
 target/release/host-daemon revoke <node-id>
 ```
 
-On iPhone, open **PC一覧 → PCを追加 → QRコードを読み取る**, or paste the invitation JSON into **QRの内容を手入力**. Each invitation expires after seven days and can pair only one new device. Generate a separate invitation for each device; keep invitation output out of logs and source control. Paired devices can reconnect after the invitation expires. The Host retains its identity and paired devices across restarts. For an isolated development Host, put the same `--isolated --state-dir <directory>` before `invite` or `status`.
+On iPhone, open **PC一覧 → PCを追加 → QRコードを読み取る**, or paste the invitation JSON into **QRの内容を手入力**. Each invitation expires after seven days by default and can pair only one new device. Host administrators can set `--invitation-days <1–90>` when starting the Host; this affects newly issued invitations only. Generate a separate invitation for each device; keep invitation output out of logs and source control. Paired devices can reconnect after the invitation expires. The Host retains its identity and paired devices across restarts. For an isolated development Host, put the same `--isolated --state-dir <directory>` before `invite` or `status`.
 
 Keep the default iroh relays enabled for Internet access. Run the service as the development user, with Git, the agent executables and Chromium on its PATH. Authenticate the agent accounts for that user and keep `bex-provider-supervisor` beside `host-daemon`. The iPhone operates the Linux filesystem, terminals and browser; select the Linux checkout when starting a project task. For systemd, use `KillSignal=SIGINT` so the Host shuts down its providers cleanly.
 

@@ -152,6 +152,7 @@ private struct PairingScreen: View {
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundColor(.secondary)
+                PrivacyPolicyButton()
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 32)
@@ -201,6 +202,7 @@ private struct ProfilesScreen: View {
             Section {
                 Button("PCを追加") { add() }
                     .accessibilityIdentifier("profiles.add")
+                PrivacyPolicyButton()
             }
         }
         .navigationTitle("PC Hosts")
