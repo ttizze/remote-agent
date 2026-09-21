@@ -133,9 +133,7 @@ pub fn authorize(
 pub struct Endpoint(Arc<iroh::Endpoint>, Arc<Trace>);
 impl Endpoint {
     pub async fn bind(identity: Identity, relays: Relays) -> Result<Self, TransportError> {
-        let trace = Trace::continuous();
-        trace.sample_runtime();
-        Self::bind_recording(identity, relays, trace).await
+        Self::bind_recording(identity, relays, Trace::new()).await
     }
     pub(crate) async fn bind_recording(
         identity: Identity,
@@ -143,10 +141,10 @@ impl Endpoint {
         trace: Arc<Trace>,
     ) -> Result<Self, TransportError> {
         crate::diagnostics::connection::initialize_mobile();
+        trace.activate();
         trace.record(Phase::EndpointStart, 0, 0, 0);
         let mut builder = iroh::Endpoint::builder(presets::N0)
             .secret_key(identity.0)
-            .transport_config(trace.quic_config(0))
             .alpns(vec![ALPN.to_vec()]);
         builder = match relays {
             Relays::Default => builder,
@@ -183,12 +181,7 @@ impl Endpoint {
         let started = std::time::Instant::now();
         let connecting = self
             .0
-            .connect_with_opts(
-                address,
-                ALPN,
-                iroh::endpoint::ConnectOptions::default()
-                    .with_transport_config(self.1.quic_config(group)),
-            )
+            .connect_with_opts(address, ALPN, Default::default())
             .await
             .inspect_err(|_| self.1.record(Phase::ResolveFailed, group, 0, 0))
             .map_err(connection)?;
@@ -226,19 +219,24 @@ impl Endpoint {
                 .map_err(connection),
         )
     }
-    pub async fn close(&self) {
-        self.0.close().await;
-    }
-
-    pub fn connection_diagnostics_enabled(&self) -> bool {
-        self.1.enabled()
-    }
-
-    pub fn log_connection_diagnostics(&self) {
-        self.1.log_host_snapshot();
+    pub fn connection_diagnostics_active(&self) -> bool {
+        self.1.active()
     }
     pub fn connection_time(&self, at: std::time::Instant) -> (u64, u64) {
         (self.1.id, self.1.elapsed_at(at))
+    }
+    pub fn log_connection_diagnostics(&self) {
+        let mut timeline = self.1.snapshot();
+        let cutoff = self
+            .1
+            .elapsed_at(std::time::Instant::now())
+            .saturating_sub(45_000_000);
+        timeline.events.retain(|event| event.at_us >= cutoff);
+        tracing::info!(target: "bex", operation = "host.connection.timeline", message = %format_args!("trace={} dropped={}", timeline.id, timeline.dropped));
+        crate::diagnostics::connection_events("host.connection.event", &timeline);
+    }
+    pub async fn close(&self) {
+        self.0.close().await;
     }
 }
 /// An authenticated node identity without permission to exchange application data.
@@ -369,6 +367,9 @@ impl Session {
                     .await
                     .map_err(connection)?
                     .ok_or_else(|| connection("request stream ended before its request"))?;
+                if matches!(call, crate::protocol::Call::SessionScope(_)) {
+                    self._endpoint.1.activate();
+                }
                 Ok(IncomingRequest::Call(HostRequest {
                     call,
                     send,

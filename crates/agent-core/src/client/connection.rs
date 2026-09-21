@@ -143,7 +143,7 @@ impl Client {
         let result = protocol::decode(&initial)
             .map_err(invalid)
             .and_then(response);
-        if !matches!(call, Call::ConnectionPerformance(_)) {
+        if self.trace.active() && !matches!(call, Call::ConnectionPerformance(_)) {
             self.trace.record(
                 Phase::ResponseDecoded,
                 self.diagnostic_id,
@@ -176,9 +176,16 @@ impl Client {
                 .acquire_owned()
                 .await
                 .map_err(invalid)?;
+            let permit_wait = started.elapsed().as_micros() as u64;
             let (mut send, recv) = self.connection.open_bi().await.map_err(invalid)?;
             let stream = u64::from(send.id());
             if measured {
+                self.trace.record(
+                    Phase::RequestSlotWait,
+                    self.diagnostic_id,
+                    stream,
+                    permit_wait,
+                );
                 self.trace.record(
                     Phase::RequestOpened,
                     self.diagnostic_id,
@@ -187,7 +194,16 @@ impl Client {
                 );
             }
             send.write_all(&[CALL]).await.map_err(invalid)?;
+            let encoding = std::time::Instant::now();
             let bytes = protocol::encode(call).map_err(invalid)?;
+            if measured {
+                self.trace.record(
+                    Phase::RequestEncoded,
+                    self.diagnostic_id,
+                    stream,
+                    encoding.elapsed().as_micros() as u64,
+                );
+            }
             protocol::write_frame(&mut send, &bytes)
                 .await
                 .map_err(invalid)?;
@@ -271,45 +287,15 @@ impl Client {
     }
     pub(crate) async fn collect_connection_diagnostics(
         &self,
-        performance: crate::diagnostics::ConnectionPerformance,
+        mut performance: crate::diagnostics::ConnectionPerformance,
     ) {
         if !self.trace.enabled() {
             return;
         }
-        // Capture first, export afterwards: diagnostic traffic cannot feed back
-        // into this snapshot or compete with the connection being measured.
-        tokio::time::sleep(Duration::from_secs(31)).await;
-        let timeline = self.trace.snapshot();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        for (report, events) in timeline.events.chunks(512).enumerate() {
-            let mut performance = performance.clone();
-            performance.report = report as u8;
-            performance.timeline = crate::diagnostics::ConnectionTimeline {
-                id: timeline.id,
-                dropped: timeline.dropped,
-                events: events.to_vec(),
-            };
-            // Retry the same bounded batch; the receiver/analyzer deduplicates
-            // by trace and event sequence if an acknowledgement was lost.
-            let mut delivered = false;
-            for _ in 0..2 {
-                if tokio::time::Instant::now() >= deadline {
-                    return;
-                }
-                let timeout = deadline.min(tokio::time::Instant::now() + Duration::from_secs(2));
-                if matches!(
-                    tokio::time::timeout_at(timeout, self.call(&performance)).await,
-                    Ok(Ok(_))
-                ) {
-                    delivered = true;
-                    break;
-                }
-            }
-            if !delivered {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // Freeze capture before sending, so export cannot generate its own timeline.
+        tokio::time::sleep(crate::diagnostics::connection::WINDOW + Duration::from_secs(1)).await;
+        performance.timeline = self.trace.snapshot();
+        let _ = tokio::time::timeout(Duration::from_secs(10), self.call(&performance)).await;
     }
     pub(crate) fn record_path(&self) {
         if !self.trace.active() {
@@ -397,10 +383,8 @@ mod tests {
     #[tokio::test]
     async fn early_reply_is_measured_before_adoption_without_exposing_its_payload() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let host_trace = crate::diagnostics::connection::Trace::new();
-            let client_trace = crate::diagnostics::connection::Trace::new();
-            let host = Endpoint::bind_recording(Identity::generate(), Relays::Disabled, host_trace.clone()).await.unwrap();
-            let client = Endpoint::bind_recording(Identity::generate(), Relays::Disabled, client_trace).await.unwrap();
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
             let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
             let ticket = host.ticket();
             let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
@@ -424,15 +408,6 @@ mod tests {
             assert!(snapshot.events.iter().any(|event| event.phase == Phase::ResponseFirstRead && event.stream == stream));
             assert!(!snapshot.events.iter().any(|event| event.phase == Phase::ReplyAdopted));
             assert!(!serde_json::to_string(&snapshot).unwrap().contains("private-payload"));
-            let server = host_trace.snapshot();
-            let frame = snapshot.events.iter().find(|event| event.phase == Phase::QuicFrameReceived && event.stream == stream && event.detail.is_some_and(|d| d.kind == 1)).expect("received QUIC stream frame");
-            let received = frame.detail.unwrap();
-            assert!(server.events.iter().any(|event| event.phase == Phase::QuicFrameSent && event.group == frame.group && event.stream == stream && event.detail.is_some_and(|d| (d.space,d.packet,d.path,d.offset)==(received.space,received.packet,received.path,received.offset))), "Host and client packet/frame identities must match");
-            assert!(received.source_at_us > 0 && received.source_at_us <= frame.at_us + 1000);
-            for phase in [Phase::ReadPolled, Phase::ReadPending, Phase::ReadWake] {
-                assert!(snapshot.events.iter().any(|event| event.phase == phase && event.stream == stream), "missing {phase:?}");
-            }
-            assert!(!server.events.iter().any(|event| event.phase == Phase::QuicTraceMalformed));
             let (bytes, _) = (&mut pending.response).await.unwrap().unwrap();
             assert!(matches!(protocol::decode::<Response<String>>(&bytes).unwrap(), Response::Success { result } if result == "private-payload"));
             drop(pending);

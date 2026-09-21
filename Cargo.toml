@@ -38,4 +38,3 @@ zeroize = "1.8.1"
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 vte = { path = "vendor/vte" }
-iroh-relay = { path = "vendor/iroh-relay" }

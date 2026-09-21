@@ -119,7 +119,7 @@ impl AgentStore {
     pub async fn offline(persisted: Vec<u8>) -> Result<Arc<Self>, AgentError> {
         let started = std::time::Instant::now();
         let trace = Trace::new();
-        trace.sample_runtime();
+        trace.activate();
         let snapshot = if persisted.is_empty() {
             crate::state::Snapshot::default()
         } else {
@@ -206,7 +206,14 @@ impl AgentStore {
             0,
             started.elapsed().as_micros() as u64,
         );
-        self.store.record_connection_performance(result?);
+        let performance = result?;
+        self.trace.record(
+            ConnectionPhase::ResumeConnection,
+            attempt,
+            performance.connection_id,
+            u64::from(performance.reused),
+        );
+        self.store.record_connection_performance(performance);
         self.trace.activate();
         Ok(())
     }
@@ -587,6 +594,7 @@ mod tests {
                 invitation: None,
                 use_relays: false,
             };
+            let started = std::time::Instant::now();
             let (resumed, (session, mut reader, _writer)) = tokio::join!(
                 tokio::time::timeout(Duration::from_millis(500), store.resume(connection)),
                 scoped_incoming(&host, &trust),
@@ -595,7 +603,6 @@ mod tests {
                 .expect("connection readiness must not await diagnostics")
                 .unwrap();
             assert!(store.snapshot().connected());
-            let connected_at = std::time::Instant::now();
             let report = loop {
                 let request = reader.read_request().await.unwrap().unwrap();
                 if request["method"] == "host/diagnostics/connection" {
@@ -603,8 +610,8 @@ mod tests {
                 }
             };
             assert!(
-                connected_at.elapsed() >= Duration::from_secs(30),
-                "diagnostic traffic must wait until capture is complete"
+                started.elapsed() >= Duration::from_secs(30),
+                "diagnostic export must not run during capture"
             );
             assert_eq!(report["params"]["route"], "Direct");
             assert_eq!(report["params"]["reused"], false);

@@ -50,53 +50,33 @@ pub struct ConnectionPerformance {
     pub rtt_ms: u64,
     pub connection_id: u64,
     pub attempt_id: u64,
-    pub report: u8,
     pub client_revision: String,
     pub timeline: ConnectionTimeline,
 }
 
 pub fn connection_performance(performance: &ConnectionPerformance) {
-    if performance.report == 0 {
-        tracing::info!(target: "bex", operation = "client.connection",
-        message = %format_args!(
-            "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?} resolution_ms={} rtt_ms={}",
-            performance.platform, performance.total_ms, performance.endpoint_ms,
-            performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
-            performance.resolution_ms, performance.rtt_ms,
-        ));
-    }
+    tracing::info!(target: "bex", operation = "client.connection",
+    message = %format_args!(
+        "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?} resolution_ms={} rtt_ms={} trace={} attempt={} connection={}",
+        performance.platform, performance.total_ms, performance.endpoint_ms,
+        performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
+        performance.resolution_ms, performance.rtt_ms, performance.timeline.id, performance.attempt_id, performance.connection_id,
+    ));
     if performance.timeline.id != 0 {
         tracing::info!(target: "bex", operation = "client.connection.timeline",
-            message = %format_args!("trace={} attempt={} connection={} report={} dropped={} platform={:?} client_revision={}",
+            message = %format_args!("trace={} attempt={} connection={} dropped={} platform={:?} client_revision={}",
                 performance.timeline.id, performance.attempt_id, performance.connection_id,
-                performance.report, performance.timeline.dropped, performance.platform,
-                performance.client_revision.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>()));
-        connection_events(
-            "client.connection.event",
-            &performance.timeline,
-            performance.attempt_id,
-            performance.report,
-        );
+                performance.timeline.dropped, performance.platform,
+                performance.client_revision.chars().filter(|value| value.is_ascii_alphanumeric() || *value == '-').take(64).collect::<String>()));
+        connection_events("client.connection.event", &performance.timeline);
     }
 }
 
-pub(crate) fn host_connection_timeline(timeline: &ConnectionTimeline) {
-    tracing::info!(target: "bex", operation = "host.connection.timeline", message = %format_args!("trace={} dropped={}", timeline.id, timeline.dropped));
-    connection_events("host.connection.event", timeline, 0, 0);
-}
-
-fn connection_events(
-    operation: &'static str,
-    timeline: &ConnectionTimeline,
-    attempt: u64,
-    report: u8,
-) {
-    for event in timeline.events.iter().take(connection::MAX_EVENTS) {
-        let d = event.detail.unwrap_or_default();
+pub(crate) fn connection_events(operation: &'static str, timeline: &ConnectionTimeline) {
+    for event in timeline.events.iter().take(connection::CAPACITY) {
         tracing::info!(target: "bex", operation,
-            message = %format_args!("trace={} attempt={} report={} seq={} at_us={} phase={:?} group={} stream={} value={} detail={} kind={} space={} packet={} packet_valid={} offset={} length={} path={} source_at_us={}",
-                timeline.id, attempt, report, event.sequence, event.at_us, event.phase, event.group, event.stream, event.value,
-                u8::from(event.detail.is_some()), d.kind, d.space, d.packet, u8::from(d.packet_valid), d.offset, d.length, d.path, d.source_at_us));
+            message = %format_args!("trace={} seq={} at_us={} phase={:?} group={} stream={} value={}",
+                timeline.id, event.sequence, event.at_us, event.phase, event.group, event.stream, event.value));
     }
 }
 
@@ -528,7 +508,7 @@ mod tests {
         assert_eq!(record["operation"], "client.connection");
         assert_eq!(
             record["message"],
-            "platform=Ios total_ms=1743 endpoint_ms=53 transport_ms=1083 verification_ms=580 reused=false route=Relay resolution_ms=7 rtt_ms=90"
+            "platform=Ios total_ms=1743 endpoint_ms=53 transport_ms=1083 verification_ms=580 reused=false route=Relay resolution_ms=7 rtt_ms=90 trace=0 attempt=0 connection=0"
         );
         assert_eq!(record["component"], "host");
         assert!(record.get("requestId").is_none());

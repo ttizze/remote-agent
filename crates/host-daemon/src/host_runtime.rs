@@ -195,13 +195,11 @@ impl HostRuntime {
                                 let queue_us = started.duration_since(request.decoded_at).as_micros();
                                 let accepted_us = request.accepted_at.duration_since(session_started).as_micros();
                                 if let Call::ConnectionPerformance(performance) = &request.call {
-                                    tracing::info!(target: "bex", operation = "host.connection.link", message = %format_args!("session={} trace={} connection={} attempt={} report={}", id, performance.timeline.id, performance.connection_id, performance.attempt_id, performance.report));
-                                    if performance.report == 0 {
-                                        let endpoint = runtime.endpoint.clone();
-                                        tokio::task::spawn_blocking(move || endpoint.log_connection_diagnostics()).await?;
-                                    }
+                                    let endpoint = runtime.endpoint.clone();
+                                    tokio::task::spawn_blocking(move || endpoint.log_connection_diagnostics()).await?;
+                                    tracing::info!(target: "bex", operation = "host.connection.link", message = %format_args!("session={} trace={} connection={} attempt={}", id, performance.timeline.id, performance.connection_id, performance.attempt_id));
                                 }
-                                let measured = runtime.endpoint.connection_diagnostics_enabled() && !matches!(request.call, Call::ConnectionPerformance(_));
+                                let measured = runtime.endpoint.connection_diagnostics_active() && !matches!(request.call, Call::ConnectionPerformance(_));
                                 let stopped = request.send.stopped();
                                 tokio::pin!(stopped);
                                 let mut send = request.send;
@@ -218,7 +216,10 @@ impl HostRuntime {
                                     let (trace, accepted_at_us) = runtime.endpoint.connection_time(request.accepted_at);
                                     let (_, write_started_at_us) = runtime.endpoint.connection_time(writing);
                                     let (_, write_finished_at_us) = runtime.endpoint.connection_time(finished);
-                                    tracing::info!(target: "bex", operation = "host.rpc.performance", message = %format_args!("session={} stream={} method={} accepted_us={} decode_us={} queue_us={} handle_encode_us={} write_us={} bytes={} trace={} accepted_at_us={} write_started_at_us={} write_finished_at_us={}", id, stream, parsed.method(), accepted_us, decode_us, queue_us, handled_us, finished.duration_since(writing).as_micros(), response.initial.len(), trace, accepted_at_us, write_started_at_us, write_finished_at_us));
+                                    let message = format!("session={} stream={} method={} accepted_us={} decode_us={} queue_us={} handle_encode_us={} write_us={} bytes={} trace={} accepted_at_us={} write_started_at_us={} write_finished_at_us={}", id, stream, parsed.method(), accepted_us, decode_us, queue_us, handled_us, finished.duration_since(writing).as_micros(), response.initial.len(), trace, accepted_at_us, write_started_at_us, write_finished_at_us);
+                                    tokio::task::spawn_blocking(move || {
+                                        tracing::info!(target: "bex", operation = "host.rpc.performance", message);
+                                    });
                                 }
                                 if let Some(mut updates) = response.updates {
                                     loop {

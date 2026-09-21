@@ -257,9 +257,8 @@ extension BexAppViewModel {
         notice = nil
         connection = Task { [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
+            recordScene(UIApplication.shared.applicationState == .active ? 1 : 2)
             owner.recordConnectionEvent(phase: .uiConnectStart, value: afterForeground ? 1 : 0)
-            let state = UIApplication.shared.applicationState
-            owner.recordConnectionEvent(phase: .appScene, value: state == .active ? 1 : state == .inactive ? 2 : 3)
             do {
                 let identityStarted = ProcessInfo.processInfo.systemUptime
                 let identity = try DeviceIdentity.loadOrGenerate(profile.id)
@@ -289,12 +288,12 @@ extension BexAppViewModel {
         }
     }
 
-    func recordListViewUpdate() {
-        store?.recordConnectionEvent(phase: .listViewUpdated, value: isConnected ? 1 : 0)
+    func recordScene(_ value: UInt64) {
+        store?.recordConnectionEvent(phase: .appScene, value: value)
     }
 
-    func recordScene(_ state: UInt64) {
-        store?.recordConnectionEvent(phase: .appScene, value: state)
+    func recordListViewUpdate() {
+        store?.recordConnectionEvent(phase: .listViewUpdated, value: isConnected ? 1 : 0)
     }
 
     private func observe(_ owner: AgentStore, host: String) {
