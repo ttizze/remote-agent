@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Combine iOS data-sharing permission with the first pairing action, removing the separate consent screen while retaining disclosure before connecting.
+
 - Prepare BEX Dev build 11 and show each Host's configured name on iOS and Android, refreshing saved profiles after pairing and reconnection. Expose only the name to paired devices while keeping Host management local-only.
 
 - Preserve Claude native attachments and queued prompts in conversation history, and show the provider cause of Host errors.

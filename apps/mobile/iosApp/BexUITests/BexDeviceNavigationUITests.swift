@@ -177,7 +177,6 @@ extension BexLaunchUITests {
 
         let app = XCUIApplication()
         app.launch()
-        acceptDataSharingIfNeeded(app)
         allowFirstSystemPermissionIfPresent()
 
         submitManualPairing(app, payload: payload)

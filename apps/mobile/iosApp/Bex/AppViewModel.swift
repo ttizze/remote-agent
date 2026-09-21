@@ -39,7 +39,9 @@ final class BexAppViewModel: ObservableObject {
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
-        if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
+        let accepted = UserDefaults.standard.string(forKey: "bex.data-sharing-consent") ?? ""
+        if !dataSharingNotice(acceptedRevision: accepted).requiresConsent,
+           let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
            profiles.contains(where: { $0.id == id }) {
             selectProfile(id)
         }
@@ -317,9 +319,7 @@ extension BexAppViewModel {
            let index = profiles.firstIndex(where: { $0.id == selectedProfileId }),
            profiles[index].name != name {
             profiles[index].name = name
-            do {
-                try HostProfile.save(profiles)
-            } catch { notice = error.localizedDescription }
+            do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
         }
         if snapshot.error() != next.error() {
             notice = next.error()
