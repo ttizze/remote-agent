@@ -51,7 +51,7 @@ class PeerTests(unittest.TestCase):
         for provider in ("claude", "codex"):
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
                 fake = Path(directory) / provider
-                fake.write_text('''#!/usr/bin/env python3
+                fake.write_text(f'#!{sys.executable}\n' + '''
 import json, pathlib, sys, uuid
 args = sys.argv[1:]
 if "--resume" in args:
@@ -77,12 +77,14 @@ else:
                 prompt = "Literal $(touch UNEXPECTED) `touch UNEXPECTED`\n日本語"
                 first = subprocess.run([sys.executable, str(SCRIPT), "ask", provider,
                                         "--cwd", directory, "-"], input=prompt, text=True,
-                                       capture_output=True, env=env, check=True)
+                                       capture_output=True, env=env)
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
                 result = json.loads(first.stdout)
                 self.assertEqual(result["text"], prompt)
                 reply = subprocess.run([sys.executable, str(SCRIPT), "reply", provider,
                                         result["session_id"], "--cwd", directory, "recall"],
-                                       text=True, capture_output=True, env=env, check=True)
+                                       text=True, capture_output=True, env=env)
+                self.assertEqual(reply.returncode, 0, reply.stdout + reply.stderr)
                 resumed = json.loads(reply.stdout)
                 self.assertEqual(resumed["session_id"], result["session_id"])
                 self.assertEqual(resumed["text"], prompt)
