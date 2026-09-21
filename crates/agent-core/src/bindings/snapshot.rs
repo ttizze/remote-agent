@@ -180,6 +180,16 @@ impl RenderedItem {
     pub fn presentation(&self) -> ItemPresentation {
         self.data.clone()
     }
+    pub fn unknown_submission_id(&self) -> Option<String> {
+        match &self.source {
+            crate::presentation::conversation::ItemSource::Pending(id, pending)
+                if pending.delivery_unknown =>
+            {
+                Some(id.clone())
+            }
+            _ => None,
+        }
+    }
 }
 
 // The conversation badge reads counts without copying the potentially large diff.

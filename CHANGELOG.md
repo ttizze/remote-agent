@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve Claude native attachments and queued prompts in conversation history, and show the provider cause of Host errors.
+- Let iOS users restore or discard messages with unknown delivery without automatically resending them.
+- Add the iOS UserDefaults privacy manifest, local-network permission explanation, and App Store submission preparation notes.
+
 - Extend pairing invitations to seven days so developers can accept shared Host access later. Keep each invitation limited to one new device.
 
 - Keep iPhone pairing alive across foreground recovery, save the paired Host before closing the previous connection, and show progress or errors after manual entry. Add iOS Markdown code-block copy buttons and prepare BEX Dev build 8. Verify manual-entry errors, foreground return and saved pairing after relaunch.

@@ -150,27 +150,24 @@ pub fn initialize(
 }
 
 pub fn rpc_error(operation: &str, request_id: Option<u64>, raw: &RawValue) {
-    #[derive(Deserialize)]
-    struct RpcError {
-        message: Option<String>,
-        code: Option<Value>,
+    match serde_json::from_str::<Value>(raw.get()) {
+        Ok(value) => {
+            let error = rpc_cause(&value);
+            tracing::error!(target: "bex",
+                operation,
+                message = error.get("message").and_then(serde_json::Value::as_str)
+                    .or_else(|| error.as_str()).unwrap_or("RPC error without a message"),
+                request_id,
+                error_code = %error.get("code").filter(|code| code.is_number() || code.is_string()).unwrap_or(&serde_json::Value::Null),
+            );
+        }
+        Err(_) => tracing::error!(target: "bex", operation, request_id, "Malformed RPC error"),
     }
-    match serde_json::from_str::<RpcError>(raw.get()) {
-        Ok(error) => tracing::error!(target: "bex",
-            operation,
-            message = %(
-            error
-                .message
-                .as_deref()
-                .unwrap_or("RPC error without a message")),
-            request_id,
-            error_code = %(error.code.filter(|code| code.is_number() || code.is_string()).unwrap_or(serde_json::Value::Null)),
-        ),
-        Err(_) => match serde_json::from_str::<String>(raw.get()) {
-            Ok(message) => tracing::error!(target: "bex", operation, message, request_id),
-            Err(_) => tracing::error!(target: "bex", operation, request_id, "Malformed RPC error"),
-        },
-    }
+}
+
+/// Select the provider cause from a Host failure without changing delivery evidence.
+pub(crate) fn rpc_cause(error: &Value) -> &Value {
+    error.get("providerError").unwrap_or(error)
 }
 
 /// Decode only error fields; ignore conversation bodies in turn notifications.
@@ -376,6 +373,7 @@ pub fn sanitize(message: &str) -> String {
     let envelope = serde_json::from_str::<Value>(value).ok();
     let message = envelope
         .as_ref()
+        .map(rpc_cause)
         .and_then(|v| v.get("message"))
         .and_then(Value::as_str)
         .unwrap_or(message);

@@ -31,6 +31,8 @@
     </dict>
     <key>NSCameraUsageDescription</key>
     <string>PCのペアリング用QRコードの読み取りと、チャットに添付する写真・動画の撮影にカメラを使用します。</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>同じネットワーク上のペアリング済みPCに接続して、会話やファイル、ターミナルを操作します。</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>会話の画像を写真ライブラリに保存します。</string>
     <key>NSMicrophoneUsageDescription</key>

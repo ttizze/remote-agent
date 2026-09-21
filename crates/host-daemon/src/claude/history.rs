@@ -309,6 +309,22 @@ fn convert(
     let mut model = None;
     let mut block_indices: HashMap<String, usize> = HashMap::new();
     for node in chain {
+        // Queued prompts are user input stored as attachments rather than messages.
+        let queued;
+        let node = if node["type"] == "attachment"
+            && node["attachment"]["type"] == "queued_command"
+            && (node["attachment"]["prompt"].is_string() || node["attachment"]["prompt"].is_array())
+        {
+            queued = json!({
+                "type": "user",
+                "uuid": node["uuid"],
+                "cwd": node["cwd"],
+                "message": {"content": node["attachment"]["prompt"]}
+            });
+            &queued
+        } else {
+            node
+        };
         let kind = node["type"].as_str().unwrap_or_default();
         if let Some(cwd) = node["cwd"].as_str() {
             thread.cwd = Some(cwd.into());
@@ -335,7 +351,33 @@ fn convert(
                     | "bash_output_audience_note"
                     | "task_reminder",
                 ) => {}
-                _ => warnings.push("native attachment content is not fully decoded"),
+                _ => {
+                    let attachment = &node["attachment"];
+                    if !attachment.is_object() {
+                        warnings.push("native attachment content is unavailable");
+                        continue;
+                    }
+                    if turns.is_empty() {
+                        turns.push(Arc::new(Turn {
+                            id: node["uuid"].as_str().unwrap_or_default().into(),
+                            status: Some("completed".into()),
+                            items: Some(Vec::new()),
+                            ..Default::default()
+                        }));
+                    }
+                    // Keep the complete payload, including unfamiliar attachment
+                    // types, inspectable without pretending it was a tool call.
+                    Arc::make_mut(turns.last_mut().unwrap())
+                        .items
+                        .as_mut()
+                        .unwrap()
+                        .push(Arc::new(Item {
+                            id: node["uuid"].as_str().unwrap_or_default().into(),
+                            kind: Some("nativeAttachment".into()),
+                            result: Some(attachment.clone()),
+                            ..Default::default()
+                        }));
+                }
             }
             continue;
         }
@@ -472,6 +514,80 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         (root, path)
     }
+    #[test]
+    fn attachments_and_queued_prompts_are_preserved_in_the_active_history() {
+        let attachments = [
+            json!({"type":"hook_success","hookName":"SessionStart","stdout":"hook output","exitCode":0}),
+            json!({"type":"edited_text_file","filename":"example.txt","snippet":"new content"}),
+            json!({"type":"remote_session_change","pr":"13","url":null}),
+            json!({"type":"unrecognized_attachment","nested":{"content":"retained"}}),
+        ];
+        let mut rows = vec![
+            json!({"type":"user","uuid":"u","parentUuid":null,"message":{"content":"question"}}),
+        ];
+        let mut parent = "u".to_owned();
+        for (index, attachment) in attachments.iter().enumerate() {
+            let id = format!("attachment-{index}");
+            rows.push(
+                json!({"type":"attachment","uuid":id,"parentUuid":parent,"attachment":attachment}),
+            );
+            parent = id;
+        }
+        for (id, prompt) in [
+            ("queued-text", json!("additional instruction")),
+            (
+                "queued-image",
+                json!([
+                    {"type":"text","text":"look at this"},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}
+                ]),
+            ),
+        ] {
+            rows.push(json!({"type":"attachment","uuid":id,"parentUuid":parent,
+                "attachment":{"type":"queued_command","prompt":prompt}}));
+            parent = id.into();
+        }
+        let source = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let (_root, path) = fixture(&source);
+        let response = read(&path, 100).unwrap();
+        assert_eq!(
+            response.thread.history_read_state.unwrap().kind,
+            agent_core::session::HistoryReadKind::Complete
+        );
+        let turns = response.thread.turns.unwrap();
+        assert_eq!(turns.len(), 3);
+        let items = turns[0].items.as_ref().unwrap();
+        assert_eq!(items.len(), 5);
+        for (item, attachment) in items[1..].iter().zip(&attachments) {
+            assert_eq!(item.kind.as_deref(), Some("nativeAttachment"));
+            assert_eq!(item.result.as_ref(), Some(attachment));
+            let presentation = agent_core::presentation::item_presentation(item);
+            assert!(presentation.visible && presentation.collapsible);
+            let body = agent_core::presentation::body::expanded_body(item);
+            assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), *attachment);
+        }
+        let text = &turns[1].items.as_ref().unwrap()[0];
+        assert_eq!(text.kind.as_deref(), Some("userMessage"));
+        assert_eq!(
+            text.content.as_ref().unwrap()[0]["text"],
+            "additional instruction"
+        );
+        let image = &turns[2].items.as_ref().unwrap()[0];
+        assert_eq!(
+            image.content.as_ref().unwrap()[1]["url"],
+            "data:image/png;base64,aW1hZ2U="
+        );
+        let page = read(&path, 1).unwrap();
+        assert_eq!(page.thread.history_has_more, Some(true));
+        assert_eq!(page.thread.turns.unwrap()[0].id, "queued-image");
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
+    }
+
     #[test]
     fn native_cli_fixture_is_read_without_modification_or_execution() {
         let (root, path) = fixture(NATIVE);
