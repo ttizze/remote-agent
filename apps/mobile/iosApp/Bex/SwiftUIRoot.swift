@@ -7,8 +7,10 @@ struct BexSwiftUIRoot: View {
 
     var body: some View {
         BexScreen(model: model)
-            .sheet(item: $model.sideChatRequest) { request in
-                ConversationSideChat(model: model, request: request)
+            .onChange(of: model.screen) { screen in
+                if screen != .thread {
+                    model.sideChatRequest = nil
+                }
             }
             .sheet(isPresented: $model.isScanning) {
                 BexQrScannerSheet { model.scanned($0) }

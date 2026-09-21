@@ -31,7 +31,7 @@ struct ThreadScreen: View {
         chatContent
             .onDisappear { dictation.cancel() }
             .onChange(of: model.composerFocusRequest) { _ in
-                if (model.sideChatRequest != nil) == isSideChat {
+                if model.isShowingSideChat == isSideChat {
                     composerFocused = true
                 }
             }

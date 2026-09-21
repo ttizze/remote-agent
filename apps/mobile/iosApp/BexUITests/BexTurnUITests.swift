@@ -76,6 +76,9 @@ extension BexLaunchUITests {
         let originalID = original.identifier
         let message = app.textFields["task.message"]
         message.tap(); message.typeText("Keep my original draft")
+        if !retryRead {
+            verifyEmptySideChatTab(app)
+        }
         let text = original.textViews["message.assistant-text"]
         text.tap()
         text.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 25, dy: 10)).press(forDuration: 1.2)
@@ -86,21 +89,46 @@ extension BexLaunchUITests {
         if retryRead {
             let retry = app.buttons["再試行"]
             XCTAssertTrue(retry.waitForExistence(timeout: 10))
-            XCTAssertEqual(message.value as? String, "Keep my original draft")
             retry.tap()
         }
-        let sheet = app.descendants(matching: .any)["side-chat.sheet"]
-        let sideMessage = sheet.textFields["task.message"]
+        let sideMessage = app.textFields["task.message"]
         XCTAssertTrue(sideMessage.waitForExistence(timeout: 15), app.debugDescription)
         XCTAssertEqual(sideMessage.value as? String, "> Needle\n\n")
         if !retryRead {
-            app.buttons["side-chat.close"].tap()
+            sideMessage.tap()
+            sideMessage.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
+            sideMessage.typeText("Keep my side draft")
+            app.buttons["workbench.terminal"].tap()
+            XCTAssertTrue(app.buttons["workbench.sideChat"].exists)
+            app.buttons["workbench.sideChat"].tap()
+            XCTAssertTrue(sideMessage.waitForExistence(timeout: 15))
+            XCTAssertEqual(sideMessage.value as? String, "> Needle\n\nKeep my side draft")
+            closeWorkbench(app)
             XCTAssertTrue(app.descendants(matching: .any)[originalID].waitForExistence(timeout: 15))
             XCTAssertEqual(message.value as? String, "Keep my original draft")
             XCTAssertFalse(app.staticTexts["notice"].exists)
+            app.buttons["task.tools"].tap()
+            XCTAssertTrue(sideMessage.waitForExistence(timeout: 15))
+            XCTAssertEqual(sideMessage.value as? String, "> Needle\n\nKeep my side draft")
+            closeWorkbench(app)
             return
         }
-        try verifySideChatSubmissionAndRestore(app, sheet: sheet, originalID: originalID)
+        try verifySideChatSubmissionAndRestore(app, originalID: originalID)
+    }
+
+    private func verifyEmptySideChatTab(_ app: XCUIApplication) {
+        app.buttons["task.tools"].tap()
+        let tab = app.buttons["workbench.sideChat"]
+        XCTAssertTrue(tab.waitForExistence(timeout: 5)); tab.tap()
+        let input = app.textFields["task.message"]
+        XCTAssertTrue(input.waitForExistence(timeout: 15))
+        XCTAssertEqual(input.value as? String, input.placeholderValue)
+        closeWorkbench(app)
+        let restored = expectation(
+            for: NSPredicate(format: "value == %@", "Keep my original draft"),
+            evaluatedWith: app.textFields["task.message"]
+        )
+        wait(for: [restored], timeout: 10)
     }
 
     private func openAssistantSelectionSideChat(_ app: XCUIApplication) {
@@ -111,29 +139,31 @@ extension BexLaunchUITests {
             XCTAssertTrue(forward.waitForExistence(timeout: 5)); forward.tap()
         }
         XCTAssertTrue(side.waitForExistence(timeout: 5)); side.tap()
-        XCTAssertTrue(app.buttons["side-chat.close"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["workbench.sideChat"].waitForExistence(timeout: 15), app.debugDescription)
+        XCTAssertTrue(app.buttons["workbench.terminal"].exists)
+        XCTAssertTrue(app.buttons["workbench.browser"].exists)
+        XCTAssertTrue(app.buttons["workbench.files"].exists)
     }
 
     private func verifySideChatSubmissionAndRestore(
         _ app: XCUIApplication,
-        sheet: XCUIElement,
         originalID: String
     ) throws {
-        let sideMessage = sheet.textFields["task.message"]
+        let sideMessage = app.textFields["task.message"]
         sideMessage.tap()
         sideMessage.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.95)).tap()
         sideMessage.typeText("[success] Explain this selection")
         XCTAssertEqual(
             sideMessage.value as? String, "> Needle\n\n[success] Explain this selection", app.debugDescription
         )
-        sheet.buttons["task.send"].tap()
-        let final = sheet.descendants(matching: .any)
+        app.buttons["task.send"].tap()
+        let final = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "item.fixture-final-")).firstMatch
         XCTAssertTrue(final.waitForExistence(timeout: 30))
         let sideID = final.identifier
         XCTAssertNotEqual(sideID, originalID)
-        XCTAssertTrue(sheet.staticTexts["> Needle\n\n[success] Explain this selection"].exists, app.debugDescription)
-        let running = sheet.buttons
+        XCTAssertTrue(app.staticTexts["> Needle\n\n[success] Explain this selection"].exists, app.debugDescription)
+        let running = app.buttons
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "turn.interrupt.")).firstMatch
         let completed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: running)
         wait(for: [completed], timeout: 10)
@@ -141,7 +171,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.staticTexts["notice"].exists)
         captureScreen(app, named: "Selected quote submitted in side chat")
         let message = app.textFields["task.message"]
-        app.buttons["side-chat.close"].tap()
+        closeWorkbench(app)
         XCTAssertTrue(app.descendants(matching: .any)[originalID].waitForExistence(timeout: 15))
         let restored = expectation(
             for: NSPredicate(format: "value == %@", "Keep my original draft"),
