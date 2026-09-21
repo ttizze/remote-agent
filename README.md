@@ -162,7 +162,7 @@ consultation CLI, skill, tests, and standalone Nix package. Develop it here with
 its BEX consumers; the directory also builds independently on macOS and Linux.
 
 ```sh
-nix profile add .#agent-peer
+nix profile install .#agent-peer
 agent-peer-install-skills
 ```
 
@@ -176,7 +176,7 @@ git push git@github.com:ttizze/agent-peer.git "$peer_commit:refs/heads/main"
 ```
 
 Make changes here, then publish the subtree again. Install a pinned public
-commit on a VPS with `nix profile add github:ttizze/agent-peer/<commit>` and run
+commit on a VPS with `nix profile install github:ttizze/agent-peer/<commit>` and run
 `agent-peer-install-skills` as the agent's service user. Provider CLIs and their
 authentication remain machine-local; see the standalone README for details.
 

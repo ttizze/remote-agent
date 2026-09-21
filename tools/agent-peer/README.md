@@ -9,7 +9,7 @@ native conversation. No team registration, database, or daemon.
 On Apple Silicon macOS or x86-64/ARM64 Linux, including a VPS with Nix:
 
 ```sh
-nix profile add github:ttizze/agent-peer
+nix profile install github:ttizze/agent-peer
 agent-peer-install-skills
 ```
 
