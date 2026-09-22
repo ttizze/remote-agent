@@ -1,0 +1,22 @@
+[package]
+name = "agent-peer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Ask Claude Code or Codex and resume their native conversations"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["env"] }
+nix = { version = "0.31", features = ["signal", "process"] }
+serde_json = "1.0"
+tempfile = "3.27"
+tokio = { version = "1.53", features = ["io-util", "macros", "process", "rt", "signal", "time"] }
+uuid = "1.26"
+
+[[test]]
+name = "cli"
+harness = false
