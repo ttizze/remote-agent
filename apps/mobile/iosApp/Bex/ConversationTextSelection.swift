@@ -70,7 +70,10 @@ struct AssistantSelectableText: UIViewRepresentable {
                 : UIFont.systemFont(ofSize: size, weight: style.header == nil ? .regular : .semibold)
             let font = UIFontMetrics.default.scaledFont(for: base)
             if let marker = style.marker {
-                text.append(NSAttributedString(string: marker + " ", attributes: [.font: font]))
+                text.append(NSAttributedString(
+                    string: marker + " ",
+                    attributes: [.font: font, .foregroundColor: UIColor.label]
+                ))
             }
             for run in block.runs {
                 text.append(NSAttributedString(
