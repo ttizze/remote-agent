@@ -45,6 +45,7 @@ pub(crate) struct Accounts {
     native_home: PathBuf,
     registry: Registry,
     revision: u64,
+    native_checked_at: Option<Instant>,
     login: Option<Login>,
     usage: crate::account_usage::UsageCache,
 }
@@ -85,6 +86,7 @@ impl Accounts {
             native_home,
             registry,
             revision: 0,
+            native_checked_at: None,
             login: None,
             usage: Default::default(),
         })
@@ -148,24 +150,32 @@ impl Accounts {
     }
 
     pub(crate) async fn list(&mut self) -> Result<(Vec<Account>, Option<String>), String> {
-        let native = self
-            .info(&self.native_home, "claude:desktop".into())
-            .await?;
-        let previous = self
-            .registry
-            .accounts
-            .iter()
-            .find(|account| account.id == "claude:desktop");
-        if previous.and_then(|account| account.email.as_deref())
-            != native.as_ref().and_then(|account| account.email.as_deref())
+        // Opening settings must not launch a CLI for every refresh. Selection
+        // still verifies credentials, and native logout invalidates this label cache.
+        if self
+            .native_checked_at
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
         {
-            self.usage.remove("claude:desktop");
-        }
-        self.registry
-            .accounts
-            .retain(|account| account.id != "claude:desktop");
-        if let Some(account) = native {
-            self.registry.accounts.insert(0, account);
+            let native = self
+                .info(&self.native_home, "claude:desktop".into())
+                .await?;
+            let previous = self
+                .registry
+                .accounts
+                .iter()
+                .find(|account| account.id == "claude:desktop");
+            if previous.and_then(|account| account.email.as_deref())
+                != native.as_ref().and_then(|account| account.email.as_deref())
+            {
+                self.usage.remove("claude:desktop");
+            }
+            self.registry
+                .accounts
+                .retain(|account| account.id != "claude:desktop");
+            if let Some(account) = native {
+                self.registry.accounts.insert(0, account);
+            }
+            self.native_checked_at = Some(Instant::now());
         }
         let selected = self
             .registry
@@ -234,6 +244,9 @@ impl Accounts {
                 .into())
             }
             Call::LogoutAccount(params) => {
+                if params.id == "claude:desktop" {
+                    self.native_checked_at = None;
+                }
                 self.usage.remove(&params.id);
                 let home = self.account_home(&params.id)?;
                 if self.registry.selected_id.as_ref() == Some(&params.id) {
@@ -525,4 +538,44 @@ async fn read_output(
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repeated_listing_reuses_native_identity_but_expiration_rechecks_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut accounts = Accounts::load(
+            directory.path().join("missing-claude"),
+            directory.path().join("accounts"),
+            directory.path().join("native"),
+        )
+        .await
+        .unwrap();
+        accounts.registry.accounts.push(Account {
+            id: "claude:desktop".into(),
+            provider: ProviderKind::Claude,
+            email: Some("native@example.invalid".into()),
+            plan_type: None,
+            usage: None,
+        });
+        accounts.native_checked_at = Some(Instant::now());
+        let (listed, selected) = accounts.list().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(selected.as_deref(), Some("claude:desktop"));
+        accounts.native_checked_at = Some(Instant::now() - Duration::from_secs(61));
+        assert!(accounts.list().await.is_err());
+        accounts.native_checked_at = Some(Instant::now());
+        assert!(
+            accounts
+                .request(Call::LogoutAccount(agent_core::client::LogoutAccount {
+                    id: "claude:desktop".into(),
+                }))
+                .await
+                .is_err()
+        );
+        assert!(accounts.native_checked_at.is_none());
+    }
 }

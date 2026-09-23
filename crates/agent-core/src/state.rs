@@ -703,6 +703,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             let mut effects = vec![
                 Effect::execute(op::ListThreads::new((*next.list_query).clone())),
                 Effect::execute(op::LoadModels {}),
+                Effect::execute(op::ListAccounts {}),
             ];
             if let Some(thread_id) = &next.navigation.thread_id {
                 effects.push(Effect::execute(op::ReadThread::open(thread_id.clone())));

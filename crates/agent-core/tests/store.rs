@@ -108,11 +108,12 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
     let cwd = selected.map_or(snapshot.navigation.cwd.as_str(), |thread| {
         thread.cwd.as_deref().unwrap_or_default()
     });
-    for _ in 0..2 + usize::from(selected.is_some()) + usize::from(!cwd.is_empty()) {
+    for _ in 0..3 + usize::from(selected.is_some()) + usize::from(!cwd.is_empty()) {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/thread/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
                 .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
+            "host/account/list" => json!({"accounts":[]}),
             "model/list" => json!({"data":snapshot.models,"nextCursor":null}),
             "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
             "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
@@ -2033,6 +2034,9 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
                 let models = read(&mut reader).await;
                 assert_eq!(models["method"], "model/list");
                 writer.reply(&models, json!({"result":{"data":[],"nextCursor":null}})).await.unwrap();
+                let accounts = read(&mut reader).await;
+                assert_eq!(accounts["method"], "host/account/list");
+                writer.reply(&accounts, json!({"result":{"accounts":[]}})).await.unwrap();
                 wait_for(&store, |state| state.threads.is_some()).await;
                 assert_eq!(store.snapshot().threads.as_ref().unwrap().data[0].id.as_deref(), Some("fresh"));
             }
@@ -2167,10 +2171,11 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 session.close();
             }
             if let Some((session, mut reader, writer)) = replacement {
-                for _ in 0..2 {
+                for _ in 0..3 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
                         "host/thread/list" => json!({"data":[{"id":"replacement","name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                        "host/account/list" => json!({"accounts":[]}),
                         "model/list" => json!({"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
                     };
@@ -2488,7 +2493,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     let (store, mut reader, writer) = connected(initial).await;
     let epoch = store.snapshot().epoch;
     let mut requests = BTreeMap::new();
-    for _ in 0..3 {
+    for _ in 0..4 {
         let request = read(&mut reader).await;
         assert!(
             requests
@@ -2510,6 +2515,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
             "host/workspace/review",
             json!({"branch":"main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
         ),
+        ("host/account/list", json!({"accounts":[]})),
         (
             "model/list",
             json!({"data":[{"id":"fresh","model":"fresh","displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
@@ -2525,7 +2531,8 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
             .unwrap();
     }
     wait_for(&store, |snapshot| {
-        snapshot.workspace.review.is_some()
+        snapshot.account.accounts.is_some()
+            && snapshot.workspace.review.is_some()
             && !snapshot.models.is_empty()
             && snapshot.threads.is_some()
     })
@@ -2569,6 +2576,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/thread/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                        "host/account/list" => json!({"accounts":[]}),
                         "model/list" => json!({"data":[],"nextCursor":null}),
                         "host/session/open" => {
                             let a = request["params"]["session"]["id"] == "A";

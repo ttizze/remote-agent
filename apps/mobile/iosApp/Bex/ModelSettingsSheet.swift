@@ -11,6 +11,19 @@ struct ModelSettingsSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    NavigationLink {
+                        AccountSettingsView(model: model, signInProvider: .codex)
+                    } label: {
+                        Label("Codex にサインイン", systemImage: "person.badge.plus")
+                    }.accessibilityIdentifier("model.signin.codex")
+                    NavigationLink {
+                        AccountSettingsView(model: model, signInProvider: .claude)
+                    } label: {
+                        Label("Claude にサインイン", systemImage: "person.badge.plus")
+                    }.accessibilityIdentifier("model.signin.claude")
+                }
+                .disabled(changingAccount || !model.isConnected || model.snapshot.accountLogin() != nil)
                 Section("アカウント") {
                     ForEach(model.accounts, id: \.id) { account in
                         let selected = model.snapshot.accountIsActiveForDraft(
@@ -37,15 +50,16 @@ struct ModelSettingsSheet: View {
                                         set: model.chooseServiceTier
                                     )
                                 )
-                                .disabled(changingAccount || loadingModels || !model.isConnected)
+                                .disabled(changingAccount || !model.isConnected)
                             }
+                            AccountSignOutButton(model: model, accountId: account.id, changingAccount: $changingAccount)
                         }.padding(.vertical, 4)
                     }
                     if loadingAccounts {
                         ProgressView("アカウントを読み込み中…")
                     }
                     if !loadingAccounts, model.accounts.isEmpty {
-                        Text("アカウントを管理から追加できます。")
+                        Text("上のボタンからサインインしてください。")
                     }
                 }
 

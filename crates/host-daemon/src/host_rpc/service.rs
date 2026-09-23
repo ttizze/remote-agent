@@ -701,29 +701,34 @@ impl HostRpcService {
 
             Call::ListModels(params) if self.inner.claude.get().is_some() => {
                 let first_page = params.cursor.is_none();
-                let mut page = self
-                    .inner
-                    .codex
-                    .request::<_, op::ModelPage>(method, &params)
-                    .await
-                    .unwrap_or_else(|error| op::ModelPage {
-                        data: Vec::new(),
-                        next_cursor: None,
-                        provider_errors: Some(serde_json::Map::from_iter([(
-                            "codex".into(),
-                            serde_json::to_value(error).expect("Failure serializes"),
-                        )])),
-                    });
-                if first_page {
-                    match self.inner.claude.get().unwrap().models().await {
-                        Ok(models) => page.data.extend(models),
-                        Err(error) => {
-                            let errors = page.provider_errors.get_or_insert_default();
-                            errors.insert(
-                                "claude".into(),
-                                serde_json::json!({"message":format!("{error:#}")}),
-                            );
+                let (codex, claude) = tokio::join!(
+                    self.inner
+                        .codex
+                        .request::<_, op::ModelPage>(method, &params),
+                    async {
+                        if first_page {
+                            self.inner.claude.get().unwrap().models().await
+                        } else {
+                            Ok(Vec::new())
                         }
+                    }
+                );
+                let mut page = codex.unwrap_or_else(|error| op::ModelPage {
+                    data: Vec::new(),
+                    next_cursor: None,
+                    provider_errors: Some(serde_json::Map::from_iter([(
+                        "codex".into(),
+                        serde_json::to_value(error).expect("Failure serializes"),
+                    )])),
+                });
+                match claude {
+                    Ok(models) => page.data.extend(models),
+                    Err(error) => {
+                        let errors = page.provider_errors.get_or_insert_default();
+                        errors.insert(
+                            "claude".into(),
+                            serde_json::json!({"message":format!("{error:#}")}),
+                        );
                     }
                 }
                 if first_page && page.data.is_empty() && page.provider_errors.is_some() {

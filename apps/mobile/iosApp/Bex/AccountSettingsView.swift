@@ -3,6 +3,8 @@ import SwiftUI
 
 struct AccountSettingsView: View {
     @ObservedObject var model: BexAppViewModel
+    var signInProvider: ProviderKind?
+    @State private var appeared = false
     @Environment(\.scenePhase) private var scenePhase
     @State private var loginCode = ""
     @State private var changingAccount = false
@@ -16,39 +18,6 @@ struct AccountSettingsView: View {
 
     var body: some View {
         List {
-            Section {
-                ForEach(model.accounts, id: \.id) { account in
-                    VStack(alignment: .leading, spacing: 12) {
-                        Button { chooseAccount(account.id) } label: {
-                            AccountIdentityRow(
-                                account: account,
-                                selected: model.snapshot.accountIsSelected(id: account.id)
-                            )
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityIdentifier("model.account." + account.id)
-                        .accessibilityValue(model.snapshot.accountIsSelected(id: account.id) ? "選択中" : "")
-                        .disabled(changingAccount || login != nil || !model.isConnected)
-                        AccountUsageView(usage: account.usage)
-                        Button("ログアウト", role: .destructive) {
-                            changingAccount = true
-                            model
-                                .perform(.logoutAccount(LogoutAccount(id: account.id))) { _ in changingAccount = false }
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(changingAccount || login != nil || !model.isConnected)
-                        .accessibilityIdentifier("account.logout." + account.id)
-                    }.padding(.vertical, 4)
-                }
-                if loadingAccounts {
-                    ProgressView("アカウントを読み込み中…")
-                }
-                if !loadingAccounts, model.accounts.isEmpty {
-                    Text("アカウントを追加してください。")
-                }
-            } footer: {
-                Text("接続先に保存したアカウントを管理します。選択はサービスごとに接続先のHostで共有されます。")
-            }
             Section {
                 if let login {
                     if login.requiresCodeSubmission {
@@ -72,18 +41,48 @@ struct AccountSettingsView: View {
                     }
                     Button("ログインをキャンセル") { cancelLogin() }
                 } else {
-                    Button { startLogin(.codex) } label: { Label("Codex アカウントを追加", systemImage: "plus") }
-                        .disabled(startingLogin || !model.isConnected)
+                    Button { startLogin(.codex) } label: { Label("Codex にサインイン", systemImage: "person.badge.plus") }
+                        .disabled(startingLogin || changingAccount || !model.isConnected)
                         .accessibilityIdentifier("model.account.add")
-                    Button { startLogin(.claude) } label: { Label("Claude アカウントを追加", systemImage: "plus") }
-                        .disabled(startingLogin || !model.isConnected)
+                    Button { startLogin(.claude) } label: { Label("Claude にサインイン", systemImage: "person.badge.plus") }
+                        .disabled(startingLogin || changingAccount || !model.isConnected)
                         .accessibilityIdentifier("model.account.add.claude")
+                }
+                if startingLogin {
+                    ProgressView("サインインを準備中…")
                 }
                 if let error = loginError ?? model.accountError ?? model.modelError {
                     Text(error).font(.caption).foregroundColor(.red)
                     Button("再読み込み") { refresh() }
                 }
             }
+            Section {
+                ForEach(model.accounts, id: \.id) { account in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Button { chooseAccount(account.id) } label: {
+                            AccountIdentityRow(
+                                account: account,
+                                selected: model.snapshot.accountIsSelected(id: account.id)
+                            )
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier("model.account." + account.id)
+                        .accessibilityValue(model.snapshot.accountIsSelected(id: account.id) ? "選択中" : "")
+                        .disabled(changingAccount || login != nil || !model.isConnected)
+                        AccountUsageView(usage: account.usage)
+                        AccountSignOutButton(model: model, accountId: account.id, changingAccount: $changingAccount)
+                    }.padding(.vertical, 4)
+                }
+                if loadingAccounts {
+                    ProgressView("アカウントを読み込み中…")
+                }
+                if !loadingAccounts, model.accounts.isEmpty {
+                    Text("サインインしてください。")
+                }
+            } footer: {
+                Text("接続先に保存したアカウントを管理します。選択はサービスごとに接続先のHostで共有されます。")
+            }
+            .disabled(startingLogin)
         }
         .navigationTitle("アカウント")
         .navigationBarTitleDisplayMode(.inline)
@@ -95,7 +94,14 @@ struct AccountSettingsView: View {
         }
         .navigationBarBackButtonHidden(login != nil || startingLogin)
         .interactiveDismissDisabled(login != nil || startingLogin)
-        .onAppear { refresh() }
+        .onAppear {
+            if !appeared, let signInProvider, login == nil {
+                startLogin(signInProvider)
+            } else {
+                refresh()
+            }
+            appeared = true
+        }
         .onChange(of: scenePhase) { phase in
             if phase == .active, let id = login?.loginId {
                 pollLogin(id)
@@ -195,5 +201,21 @@ struct AppSettingsSheet: View {
                 Button("完了") { dismiss() }.accessibilityIdentifier("settings.close")
             } }
         }
+    }
+}
+
+struct AccountSignOutButton: View {
+    @ObservedObject var model: BexAppViewModel
+    let accountId: String
+    @Binding var changingAccount: Bool
+
+    var body: some View {
+        Button("サインアウト", role: .destructive) {
+            changingAccount = true
+            model.perform(.logoutAccount(LogoutAccount(id: accountId))) { _ in changingAccount = false }
+        }
+        .buttonStyle(.borderless)
+        .disabled(changingAccount || model.snapshot.accountLogin() != nil || !model.isConnected)
+        .accessibilityIdentifier("account.logout." + accountId)
     }
 }

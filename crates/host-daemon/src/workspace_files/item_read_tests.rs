@@ -101,6 +101,7 @@ impl Fixture {
                         "host/thread/list" => {
                             json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                         }
+                        "host/account/list" => json!({"accounts":[]}),
                         "model/list" => json!({"data":[],"nextCursor":null}),
                         "host/session/open" => {
                             let items = if automatic_reads {

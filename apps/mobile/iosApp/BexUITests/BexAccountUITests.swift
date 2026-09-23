@@ -66,6 +66,36 @@ extension BexLaunchUITests {
         app.buttons["model.close"].tap()
     }
 
+    func testSimulatorSignsInDirectlyFromModelSettings() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        app.buttons["model.settings"].tap()
+        let signIn = app.buttons["model.signin.claude"]
+        XCTAssertTrue(signIn.waitForExistence(timeout: 10))
+        let existingIDs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'model.account.claude:'"))
+            .allElementsBoundByIndex.map(\.identifier)
+        XCTAssertTrue(signIn.isHittable); signIn.tap()
+        let code = app.secureTextFields["model.login.input"]
+        XCTAssertTrue(code.waitForExistence(timeout: 15))
+        code.tap(); code.typeText("fixture-code")
+        app.buttons["model.login.submit"].tap()
+        let account = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH 'model.account.claude:' AND NOT (identifier IN %@)", existingIDs
+        )).firstMatch
+        XCTAssertTrue(account.waitForExistence(timeout: 20))
+        let selected = expectation(for: NSPredicate(format: "value == %@", "選択中"), evaluatedWith: account)
+        wait(for: [selected], timeout: 15)
+        let accountId = String(account.identifier.dropFirst("model.account.".count))
+        app.navigationBars["アカウント"].buttons.element(boundBy: 0).tap()
+        let logout = app.buttons["account.logout." + accountId]
+        for _ in 0 ..< 6 where !logout.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(logout.isHittable); logout.tap()
+        let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: logout)
+        wait(for: [removed], timeout: 15)
+    }
+
     func addFixtureClaudeAccount(_ app: XCUIApplication) -> String {
         let existingIDs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'model.account.claude:'"))
             .allElementsBoundByIndex.map(\.identifier)
@@ -112,6 +142,9 @@ extension BexLaunchUITests {
         app.buttons["model.settings"].tap()
         XCTAssertTrue(desktop.waitForExistence(timeout: 15))
         XCTAssertTrue(app.staticTexts["残り 72%"].exists)
+        XCTAssertTrue(app.buttons["model.signin.codex"].exists)
+        XCTAssertTrue(app.buttons["model.signin.claude"].exists)
+        XCTAssertTrue(app.buttons["account.logout.desktop"].exists)
         captureScreen(app, named: "Account usage in model picker")
         openAccountManagement(app)
         XCTAssertTrue(app.buttons["account.logout.desktop"].exists)

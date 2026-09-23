@@ -31,6 +31,7 @@ if [[ $# == 0 ]]; then
         testSimulatorReviewsTheOpenSessionsWorktree \
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorOpensAccountManagementFromSettingsAndModelPicker \
+        testSimulatorSignsInDirectlyFromModelSettings \
         testSimulatorAccountOwnsModelEffortAndSpeed \
         testSimulatorSwitchesCodexAccountsAndForksConversation \
         testSimulatorAddsClaudeAccountAndKeepsCodexSelected \
