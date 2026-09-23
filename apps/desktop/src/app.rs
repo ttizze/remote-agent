@@ -927,9 +927,7 @@ impl Desktop {
             self.diffs.clear();
             self.markdown_cache.clear();
         }
-        if (navigated || self.composer_pending.is_none())
-            && self.composer_value.as_ref() != self.draft().text
-        {
+        if self.composer_pending.is_none() && self.composer_value.as_ref() != self.draft().text {
             let value: SharedString = self.draft().text.clone().into();
             self.composer_value = value.clone();
             self.composer
@@ -956,29 +954,22 @@ impl Desktop {
                 cx.notify();
             });
         }
-        if let Some(file) = &self.snapshot.workspace.file {
-            let changed = self.editor_path.as_deref() != Some(&file.path);
-            if changed || self.editor_pending.is_none() {
-                let text = self
-                    .snapshot
-                    .file_drafts
-                    .get(&file.path)
-                    .map_or(&file.text, |draft| &draft.text);
-                if changed || self.editor_value.as_ref() != text {
-                    let value: SharedString = text.clone().into();
-                    self.editor_path = Some(file.path.clone());
-                    self.editor_value = value.clone();
-                    self.editor_pending = None;
-                    self.editor_input
-                        .update(cx, |input, cx| input.set_value(value, window, cx));
-                }
-            }
-        }
-        if self.snapshot.workspace.file.is_none() && self.editor_path.take().is_some() {
+        let file = self.snapshot.workspace.file.as_ref();
+        let path = file.map(|file| file.path.as_str());
+        let file_changed = self.editor_path.as_deref() != path;
+        let text = file.map_or("", |file| {
+            self.snapshot
+                .file_drafts
+                .get(&file.path)
+                .map_or(file.text.as_str(), |draft| draft.text.as_str())
+        });
+        if file_changed || (self.editor_pending.is_none() && self.editor_value.as_ref() != text) {
+            self.editor_path = path.map(str::to_owned);
+            self.editor_value = text.to_owned().into();
             self.editor_pending = None;
-            self.editor_value = SharedString::default();
-            self.editor_input
-                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.editor_input.update(cx, |input, cx| {
+                input.set_value(self.editor_value.clone(), window, cx)
+            });
         }
         if !self.worktree_dirty
             && !self.worktree_saving
