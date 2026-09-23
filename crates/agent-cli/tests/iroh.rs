@@ -35,6 +35,15 @@ async fn exercise(command: &[&str], expected: Value) {
         let mut lists = 0;
         // Connected owns initial reads; the command consumes that same state.
         while let Ok(Some(request)) = reader.read_request().await {
+            // The CLI closes once its command completes, cancelling unrelated initial reads.
+            if handled
+                && matches!(
+                    request["method"].as_str(),
+                    Some("model/list" | "host/account/list")
+                )
+            {
+                continue;
+            }
             let result = match request["method"].as_str() {
                 Some("host/session/scope") => json!("fixture-storage"),
                 Some("host/session/request") => {
@@ -51,6 +60,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     json!({})
                 }
                 Some("model/list") => json!({"data":[],"nextCursor":null}),
+                Some("host/account/list") => json!({"accounts":[]}),
                 Some("host/thread/list") => {
                     lists += 1;
                     let (projects, chats, search) = if mode == "list" {

@@ -10,6 +10,7 @@ if [[ $language == all || $language == rust ]]; then
     cargo fmt --all --check || failed=1
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
     cargo test --locked -p agent-core -p bex-desktop --lib --bins || failed=1
+    cargo test --locked -p agent-cli || failed=1
     cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
     cargo test --locked -p host-daemon -p host-fixture --lib --test iroh_host --test browser_bridge --test management --test codex_accounts || failed=1
 fi
