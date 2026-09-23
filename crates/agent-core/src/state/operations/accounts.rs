@@ -117,11 +117,12 @@ impl Operation for SelectAccountForDraft {
             .get(&self.thread_id)
             .map(|draft| (**draft).clone())
             .unwrap_or_default();
+        let provider = selection.provider;
         apply_selection(snapshot, selection);
         match catalog {
             Ok(catalog) => {
                 LoadModels {}.apply(snapshot, catalog);
-                let models = snapshot.account_models(self.id);
+                let models = crate::models::provider_models(&snapshot.models, provider);
                 if !models.is_empty() {
                     if !was_active {
                         draft.model = None;
@@ -156,7 +157,17 @@ impl Operation for StartAccountLogin {
     }
 }
 
-pub use crate::client::ReadAccountLogin;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ReadAccountLogin {
+    pub id: String,
+    pub thread_id: Option<String>,
+}
+rpc::rpc_method!(ReadAccountLogin, ReadAccountLogin, |self| {
+    crate::client::ReadAccountLogin {
+        id: self.id.clone(),
+    }
+});
 
 impl Operation for ReadAccountLogin {
     rpc_operation!();
@@ -164,10 +175,13 @@ impl Operation for ReadAccountLogin {
         if status.completed {
             Arc::make_mut(&mut snapshot.account).login = None;
             if let Some(id) = status.account_id {
-                let (updated, effects) = reduce(
-                    snapshot,
-                    Event::Intent(Intent::SelectAccount(SelectAccount { id })),
-                );
+                let intent = match self.thread_id {
+                    Some(thread_id) => {
+                        Intent::SelectAccountForDraft(SelectAccountForDraft { id, thread_id })
+                    }
+                    None => Intent::SelectAccount(SelectAccount { id }),
+                };
+                let (updated, effects) = reduce(snapshot, Event::Intent(intent));
                 *snapshot = updated;
                 return effects;
             }

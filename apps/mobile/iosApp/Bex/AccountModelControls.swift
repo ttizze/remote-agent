@@ -9,8 +9,9 @@ struct AccountModelControls: View {
     @Binding var selectedServiceTier: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("モデル").font(.caption).foregroundColor(.secondary)
+        HStack {
+            Text("モデル")
+            Spacer()
             Menu {
                 ForEach(choices, id: \.id) { choice in
                     Button { selectedModel = choice.model } label: {
@@ -25,8 +26,7 @@ struct AccountModelControls: View {
             } label: {
                 HStack {
                     Text(currentModel?.displayName ?? "モデルを選択")
-                    Spacer()
-                    Image(systemName: "chevron.up.chevron.down")
+                    Image(systemName: "chevron.down").font(.caption)
                 }
             }
             .buttonStyle(.borderless)
@@ -50,15 +50,58 @@ struct AccountModelControls: View {
             }
         }
         if let tiers = currentModel?.serviceTiers, !tiers.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("速度").font(.caption).foregroundColor(.secondary)
-                Picker(
-                    "サービス階層",
-                    selection: $selectedServiceTier
-                ) {
-                    Text("既定").tag("")
-                    ForEach(tiers, id: \.id) { Text($0.id).tag($0.id) }
-                }.accessibilityIdentifier("model.service-tier")
+            Picker(
+                "速度",
+                selection: $selectedServiceTier
+            ) {
+                Text("標準").tag("")
+                ForEach(tiers, id: \.id) { Text($0.id).tag($0.id) }
+            }.accessibilityIdentifier("model.service-tier")
+        }
+    }
+}
+
+struct AccountUsageView: View {
+    let usage: AccountUsage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let usage {
+                if let error = usage.error {
+                    Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text(window.label)
+                            Spacer()
+                            Text("残り \(window.remainingPercent)%").monospacedDigit()
+                        }.font(.caption)
+                        ProgressView(value: Double(window.remainingPercent), total: 100)
+                            .tint(window.remainingPercent <= 20 ? .orange : .green)
+                    }
+                }
+                if usage.windows.contains(where: { $0.resetsAt != nil }) {
+                    DisclosureGroup("リセット時刻") {
+                        ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
+                            if let reset = window.resetsAt {
+                                let date = Date(timeIntervalSince1970: Double(reset))
+                                LabeledContent(
+                                    window.label,
+                                    value: date.formatted(date: .abbreviated, time: .shortened)
+                                )
+                            }
+                        }
+                    }.font(.caption)
+                }
+                if usage.error == nil {
+                    let date = Date(timeIntervalSince1970: Double(usage.fetchedAt))
+                    Text("\(date.formatted(date: .omitted, time: .shortened)) 更新")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("使用量を取得中…").font(.caption).foregroundStyle(.secondary)
             }
         }
     }

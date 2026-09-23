@@ -387,6 +387,17 @@ pub struct Model {
     pub default_service_tier: Option<String>,
     pub is_default: Option<bool>,
 }
+pub(crate) fn provider_models(
+    models: &[Model],
+    provider: crate::session::ProviderKind,
+) -> Vec<Model> {
+    models
+        .iter()
+        .filter(|model| model_provider(&model.model) == provider)
+        .cloned()
+        .collect()
+}
+
 pub fn model_provider(model: &str) -> crate::session::ProviderKind {
     if model.starts_with("claude:") {
         crate::session::ProviderKind::Claude

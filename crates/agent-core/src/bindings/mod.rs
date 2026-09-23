@@ -36,6 +36,11 @@ pub struct Connection {
 }
 
 #[uniffi::export]
+pub fn account_error_message(message: String) -> String {
+    crate::presentation::error::error_message(&message)
+}
+
+#[uniffi::export]
 pub fn generate_identity() -> Vec<u8> {
     Identity::generate().to_bytes().to_vec()
 }

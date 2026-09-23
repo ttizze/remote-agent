@@ -195,11 +195,7 @@ impl Snapshot {
         }) else {
             return Vec::new();
         };
-        self.models
-            .iter()
-            .filter(|model| crate::models::model_provider(&model.model) == account.provider)
-            .cloned()
-            .collect()
+        crate::models::provider_models(&self.models, account.provider)
     }
 
     pub fn account_is_active_for_draft(&self, id: String, thread_id: String) -> bool {

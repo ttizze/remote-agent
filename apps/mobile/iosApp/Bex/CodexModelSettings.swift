@@ -7,11 +7,7 @@ extension BexAppViewModel {
     }
 
     var accountError: String? {
-        snapshot.accounts()?.error ?? notice
-    }
-
-    var modelError: String? {
-        notice ?? connectionError ?? snapshot.error()
+        snapshot.accounts()?.error ?? snapshot.error()
     }
 
     var selectedModel: String {

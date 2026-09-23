@@ -174,10 +174,7 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.chat"].tap()
         XCTAssertTrue(app.buttons["model.settings"].waitForExistence(timeout: 10))
         app.buttons["model.settings"].tap()
-        openAccountManagement(app)
-        let accountID = addFixtureClaudeAccount(app)
-        app.navigationBars["アカウント"].buttons.element(boundBy: 0).tap()
-        app.buttons[accountID].tap()
+        _ = addFixtureClaudeAccount(app)
         openModelChoices(app)
         let choice = app.buttons["model.choice.claude:default"]
         XCTAssertTrue(choice.waitForExistence(timeout: 15))

@@ -1907,6 +1907,7 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
 
     let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
         id: "login".into(),
+        thread_id: None,
     }));
     let poll = read(&mut reader).await;
     let cancelling = store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin {
@@ -2694,54 +2695,70 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
 #[tokio::test]
 async fn completed_login_selects_its_account_before_refreshing_without_client_logic() {
     for (provider, id) in [("codex", "added"), ("claude", "claude:added")] {
-        let (store, mut reader, writer) = setup(Snapshot::default()).await;
-        let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
-            id: "login".into(),
-        }));
-        let request = read(&mut reader).await;
-        writer
-            .reply(
-                &request,
-                json!({"result":{"completed":true,"accountId":id}}),
-            )
-            .await
-            .unwrap();
-        polling.await.unwrap();
-        let select = read(&mut reader).await;
-        assert_eq!(select["method"], "host/account/select");
-        assert_eq!(select["params"], json!({"accountId":id}));
-        writer
-            .reply(
-                &select,
-                json!({"result":{"provider":provider,"selectedId":id}}),
-            )
-            .await
-            .unwrap();
-        for _ in 0..2 {
-            let request = read(&mut reader).await;
-            let result = match request["method"].as_str().unwrap() {
-                "host/account/list" => {
-                    json!({"accounts":[{"provider":provider,"id":id}],"selectedId":if provider == "codex" {Some(id)} else {None},"selectedClaudeId":if provider == "claude" {Some(id)} else {None},"error":null})
-                }
-                "model/list" => json!({"data":[]}),
-                method => panic!("unexpected login effect: {method}"),
+        for thread_id in [None, Some("draft")] {
+            let model_id = if provider == "claude" {
+                "claude:sonnet"
+            } else {
+                "gpt"
             };
+            let (store, mut reader, writer) = setup(Snapshot::default()).await;
+            let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
+                id: "login".into(),
+                thread_id: thread_id.map(str::to_owned),
+            }));
+            let request = read(&mut reader).await;
+            assert_eq!(request["params"], json!({"loginId":"login"}));
             writer
-                .reply(&request, json!({"result":result}))
+                .reply(
+                    &request,
+                    json!({"result":{"completed":true,"accountId":id}}),
+                )
                 .await
                 .unwrap();
-        }
-        wait_for(&store, |snapshot| {
-            snapshot.account.accounts.as_ref().is_some_and(|accounts| {
-                accounts
-                    .accounts
-                    .iter()
-                    .any(|account| account.id == id && accounts.is_selected(account))
+            polling.await.unwrap();
+            let select = read(&mut reader).await;
+            assert_eq!(select["method"], "host/account/select");
+            assert_eq!(select["params"], json!({"accountId":id}));
+            writer
+                .reply(
+                    &select,
+                    json!({"result":{"provider":provider,"selectedId":id}}),
+                )
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                let request = read(&mut reader).await;
+                let result = match request["method"].as_str().unwrap() {
+                    "host/account/list" => {
+                        json!({"accounts":[{"provider":provider,"id":id}],"selectedId":if provider == "codex" {Some(id)} else {None},"selectedClaudeId":if provider == "claude" {Some(id)} else {None},"error":null})
+                    }
+                    "model/list" => {
+                        json!({"data":[{"id":model_id,"model":model_id,"displayName":model_id,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]})
+                    }
+                    method => panic!("unexpected login effect: {method}"),
+                };
+                writer
+                    .reply(&request, json!({"result":result}))
+                    .await
+                    .unwrap();
+            }
+            wait_for(&store, |snapshot| {
+                thread_id.is_none_or(|key| {
+                    snapshot
+                        .drafts
+                        .get(key)
+                        .is_some_and(|draft| draft.model.as_deref() == Some(model_id))
+                }) && snapshot.account.accounts.as_ref().is_some_and(|accounts| {
+                    accounts
+                        .accounts
+                        .iter()
+                        .any(|account| account.id == id && accounts.is_selected(account))
+                })
             })
-        })
-        .await;
-        assert!(store.snapshot().account.login.is_none());
-        store.close().await.unwrap();
+            .await;
+            assert!(store.snapshot().account.login.is_none());
+            store.close().await.unwrap();
+        }
     }
 }
 

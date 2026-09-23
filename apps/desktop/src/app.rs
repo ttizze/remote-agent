@@ -278,7 +278,10 @@ impl Desktop {
                             let id = login.login_id.clone();
                             view.account_busy = true;
                             view.perform(
-                                Intent::ReadAccountLogin(op::ReadAccountLogin { id }),
+                                Intent::ReadAccountLogin(op::ReadAccountLogin {
+                                    id,
+                                    thread_id: None,
+                                }),
                                 OperationCompletion::Account,
                             );
                         }

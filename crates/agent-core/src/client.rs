@@ -927,7 +927,6 @@ pub struct LogoutAccount {
     pub id: String,
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountLogin {
     #[serde(rename = "loginId")]

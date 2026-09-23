@@ -46,7 +46,6 @@
 		C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* CodexModelSettings.swift */; };
 		C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000002 /* ModelSettingsSheet.swift */; };
 		C0DE00000000000000000202 /* AccountModelControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000203 /* AccountModelControls.swift */; };
-		C0DE00000000000000000199 /* AccountSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000099 /* AccountSettingsView.swift */; };
 		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
 		C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000004 /* ConversationPresentation.swift */; };
 		C0DE00000000000000000105 /* ConversationTextSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000005 /* ConversationTextSelection.swift */; };
@@ -97,7 +96,6 @@
 		C0DE00000000000000000001 /* CodexModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelSettings.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000002 /* ModelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsSheet.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000203 /* AccountModelControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountModelControls.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000099 /* AccountSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSettingsView.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000004 /* ConversationPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationPresentation.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000005 /* ConversationTextSelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationTextSelection.swift; sourceTree = "<group>"; };
@@ -165,7 +163,6 @@
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
 				C0DE00000000000000000203 /* AccountModelControls.swift */,
-				C0DE00000000000000000099 /* AccountSettingsView.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
 				04926FF582DA33DFFF64E6C5 /* TaskList.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
@@ -314,7 +311,6 @@
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
 				C0DE00000000000000000202 /* AccountModelControls.swift in Sources */,
-				C0DE00000000000000000199 /* AccountSettingsView.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
 				D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,

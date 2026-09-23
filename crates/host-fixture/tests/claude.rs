@@ -1055,7 +1055,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         assert!(store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: "claude:wrong".into(), code: "fixture-code".into() })).await.is_err());
         store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: login.login_id.clone(), code: "fixture-code".into() })).await.unwrap();
         loop {
-            store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin { id: login.login_id.clone() })).await.unwrap();
+            store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin { id: login.login_id.clone(), thread_id: None })).await.unwrap();
             if store.snapshot().account.login.is_none() { break; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

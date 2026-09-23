@@ -223,7 +223,7 @@ struct ThreadsScreen: View {
                     .accessibilityIdentifier("tasks.menu")
             }
         }
-        .sheet(isPresented: $showingSettings) { AppSettingsSheet(model: model) }
+        .sheet(isPresented: $showingSettings) { ModelSettingsSheet(model: model) }
         .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(
             connected: model.isConnected && model.selectedProfileId == host.id,
             request: model.requestSnapshot,
