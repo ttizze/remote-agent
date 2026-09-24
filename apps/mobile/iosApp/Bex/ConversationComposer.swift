@@ -121,7 +121,9 @@ extension ThreadScreen {
                     Spacer(minLength: 0)
                     Button { showingModelSettings = true } label: {
                         HStack(spacing: 4) {
-                            Text(model.currentModel?.displayName ?? "モデル").lineLimit(1)
+                            Text(model.currentModel?
+                                .displayName ?? (model.selectedModel.isEmpty ? "モデルを選択" : model.selectedModel))
+                                .lineLimit(1)
                             Image(systemName: "chevron.down").font(.caption)
                         }
                         .font(.subheadline)

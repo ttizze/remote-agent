@@ -2484,6 +2484,56 @@ async fn saving_after_navigation_rebases_newer_edits_without_restoring_the_old_f
 }
 
 #[tokio::test]
+async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_model() {
+    let (store, mut reader, writer) = connected(Snapshot::default()).await;
+    let mut pending = BTreeMap::new();
+    for _ in 0..3 {
+        let request = read(&mut reader).await;
+        pending.insert(request["method"].as_str().unwrap().to_owned(), request);
+    }
+    writer.reply(&pending["host/thread/list"], json!({"result":{
+        "data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+    }})).await.unwrap();
+    wait_for(&store, |state| state.threads.is_some()).await;
+    store
+        .dispatch(Intent::NewChat { cwd: String::new() })
+        .await
+        .unwrap();
+    writer
+        .reply(&pending["model/list"], json!({"result":{"data":[]}}))
+        .await
+        .unwrap();
+    writer
+        .reply(
+            &pending["host/account/list"],
+            json!({"result":{"accounts":[]}}),
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let request = read(&mut reader).await;
+        let result = match request["method"].as_str().unwrap() {
+            "model/list" => json!({"data":[{
+                "id":"fresh","model":"fresh","displayName":"Fresh model",
+                "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
+            }]}),
+            "host/account/list" => json!({"accounts":[]}),
+            method => panic!("unexpected retry: {method}"),
+        };
+        writer
+            .reply(&request, json!({"result":result}))
+            .await
+            .unwrap();
+    }
+    wait_for(&store, |state| {
+        state.drafts["new:"].model.as_deref() == Some("fresh") && state.account.accounts.is_some()
+    })
+    .await;
+    assert_eq!(store.snapshot().models[0].display_name, "Fresh model");
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn connection_loads_workspace_and_lists_in_one_epoch() {
     let initial = Snapshot {
         navigation: Arc::new(agent_core::state::Navigation {

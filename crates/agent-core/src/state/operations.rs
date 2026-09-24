@@ -136,12 +136,18 @@ pub enum Intent {
     Respond(Respond),
 }
 
+pub enum StalePolicy {
+    Discard,
+    Apply,
+    /// Fetch current data again instead of publishing a response from an older epoch.
+    Retry,
+}
+
 /// Typed state application after the Store has checked its single epoch.
-/// Only operations with durable side effects apply stale results or override `stale`.
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     type Output: Send + std::fmt::Debug + 'static;
     const INVALIDATES: bool = false;
-    const APPLY_WHEN_STALE: bool = false;
+    const STALE_POLICY: StalePolicy = StalePolicy::Discard;
     /// Identifies a submission step whose completion and failure belong to the same dispatch.
     fn submission_id(&self) -> Option<&str> {
         None
@@ -166,10 +172,10 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
         Vec::new()
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        if Self::APPLY_WHEN_STALE {
-            self.apply(snapshot, output)
-        } else {
-            Vec::new()
+        match Self::STALE_POLICY {
+            StalePolicy::Apply => self.apply(snapshot, output),
+            StalePolicy::Retry if snapshot.connected => vec![Effect::execute(self)],
+            StalePolicy::Discard | StalePolicy::Retry => Vec::new(),
         }
     }
     fn complete(

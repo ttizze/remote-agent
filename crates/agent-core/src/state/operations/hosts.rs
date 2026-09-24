@@ -78,7 +78,7 @@ pub struct PairRemoteHost {
 
 impl Operation for PairRemoteHost {
     type Output = RemoteHost;
-    const APPLY_WHEN_STALE: bool = true;
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

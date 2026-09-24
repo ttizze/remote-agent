@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AccountModelControls: View {
     let choices: [Model]
+    let loading: Bool
     let currentModel: Model?
     @Binding var selectedModel: String
     @Binding var selectedEffort: String
@@ -11,6 +12,10 @@ struct AccountModelControls: View {
     var body: some View {
         HStack {
             Text("モデル")
+            if loading {
+                ProgressView()
+                    .accessibilityLabel("モデルを更新中")
+            }
             Spacer()
             Menu {
                 ForEach(choices, id: \.id) { choice in

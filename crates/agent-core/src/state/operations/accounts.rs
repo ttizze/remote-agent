@@ -8,6 +8,7 @@ rpc::rpc_method!(ListAccounts, ListAccounts, |self| crate::models::Empty {});
 
 impl Operation for ListAccounts {
     rpc_operation!();
+    const STALE_POLICY: StalePolicy = StalePolicy::Retry;
     fn apply(self, snapshot: &mut Snapshot, mut output: Self::Output) -> Vec<Effect> {
         let effects = output
             .accounts

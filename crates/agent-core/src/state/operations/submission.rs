@@ -77,7 +77,7 @@ pub struct Respond {
 }
 impl Operation for Respond {
     type Output = ();
-    const APPLY_WHEN_STALE: bool = true;
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let request = context
             .snapshot
@@ -188,7 +188,7 @@ pub enum SubmissionProgress {
     Sent(Option<String>),
 }
 impl Operation for SendSubmission {
-    const APPLY_WHEN_STALE: bool = true;
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
@@ -292,7 +292,7 @@ pub struct UploadAttachment {
 
 impl Operation for UploadAttachment {
     type Output = String;
-    const APPLY_WHEN_STALE: bool = true;
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.error = None;
         Ok(())
