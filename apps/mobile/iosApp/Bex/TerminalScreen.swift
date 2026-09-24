@@ -11,9 +11,13 @@ struct TerminalScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(model.snapshot.terminalView(handle: handle)?.status ?? "接続中…")
-                .font(.caption).foregroundStyle(.secondary)
-            NativeTerminalView(model: model, handle: handle, cwd: cwd)
+            let terminal = model.snapshot.terminalView(handle: handle)
+            if terminal?.loading ?? true {
+                ProgressView().accessibilityIdentifier("terminal.loading")
+            } else if let status = terminal?.status {
+                Text(status).font(.caption).foregroundStyle(.secondary)
+            }
+            NativeTerminalView(model: model, handle: handle, cwd: cwd, terminal: terminal)
         }
     }
 }
@@ -22,6 +26,7 @@ private struct NativeTerminalView: UIViewRepresentable {
     @ObservedObject var model: BexAppViewModel
     let handle: String
     let cwd: String
+    let terminal: AgentCore.TerminalView?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(model: model, handle: handle, cwd: cwd)
@@ -45,7 +50,8 @@ private struct NativeTerminalView: UIViewRepresentable {
 
     func updateUIView(_ view: SwiftTerm.TerminalView, context: Context) {
         let coordinator = context.coordinator
-        guard let terminal = model.snapshot.terminalView(handle: handle) else { return }
+        guard let terminal else { return }
+        view.accessibilityValue = terminal.acceptsInput && !terminal.loading ? "入力可能" : nil
         let previousSequence = coordinator.sequence
         for chunk in terminal.output where chunk.sequence > coordinator.sequence {
             if let size = chunk.resetSize {

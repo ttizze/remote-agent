@@ -135,7 +135,8 @@ pub struct Terminal {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TerminalView {
-    pub status: String,
+    pub status: Option<String>,
+    pub loading: bool,
     pub accepts_input: bool,
     pub output: Vec<TerminalOutput>,
 }
@@ -215,7 +216,11 @@ impl Snapshot {
 
     pub fn terminal_view(&self, handle: String) -> Option<TerminalView> {
         self.terminals.get(&handle).map(|terminal| TerminalView {
-            status: terminal.phase.label(),
+            status: match terminal.phase {
+                TerminalPhase::Starting | TerminalPhase::Running => None,
+                _ => Some(terminal.phase.label()),
+            },
+            loading: matches!(terminal.phase, TerminalPhase::Starting),
             accepts_input: matches!(
                 terminal.phase,
                 TerminalPhase::Starting | TerminalPhase::Running

@@ -821,6 +821,42 @@ fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
 }
 
 #[test]
+fn terminal_presentation_only_shows_loading_or_exceptional_status() {
+    use agent_core::state::{Terminal, TerminalPhase};
+    let mut snapshot = Snapshot::default();
+    for (phase, loading, status) in [
+        (TerminalPhase::Starting, true, None),
+        (TerminalPhase::Running, false, None),
+        (TerminalPhase::Exited(0), false, Some("終了 · 0")),
+        (
+            TerminalPhase::Failed("failure".into()),
+            false,
+            Some("failure"),
+        ),
+        (
+            TerminalPhase::Suspended,
+            false,
+            Some("再接続を待っています"),
+        ),
+        (TerminalPhase::Detached, false, Some("切断済み")),
+    ] {
+        std::sync::Arc::make_mut(&mut snapshot.terminals).insert(
+            "test".into(),
+            std::sync::Arc::new(Terminal {
+                cwd: "/fixture".into(),
+                size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },
+                phase,
+                output: Default::default(),
+                sequence: 0,
+            }),
+        );
+        let view = snapshot.terminal_view("test".into()).unwrap();
+        assert_eq!(view.loading, loading);
+        assert_eq!(view.status.as_deref(), status);
+    }
+}
+
+#[test]
 fn terminal_disconnect_keeps_resumption_and_host_switch_drops_old_handles() {
     use agent_core::state::{Event, Intent, Snapshot, TerminalPhase, operations as op, reduce};
     let snapshot = Snapshot {

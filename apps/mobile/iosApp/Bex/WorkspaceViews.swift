@@ -30,12 +30,21 @@ private struct WorkspaceNavigation: UIViewControllerRepresentable {
         }
     }
 
-    final class Coordinator {
+    final class Coordinator: NSObject, UINavigationControllerDelegate {
         let navigation = UINavigationController()
         var content: (String, @escaping (String) -> Void) -> WorkspaceDirectoryScreen
 
         init(content: @escaping (String, @escaping (String) -> Void) -> WorkspaceDirectoryScreen) {
             self.content = content
+            super.init()
+            navigation.delegate = self
+        }
+
+        func navigationController(_ navigationController: UINavigationController,
+                                  willShow viewController: UIViewController, animated: Bool) {
+            navigationController.setNavigationBarHidden(
+                viewController === navigationController.viewControllers.first, animated: animated
+            )
         }
 
         func screen(_ directory: String) -> WorkspaceDirectoryScreen {
@@ -44,7 +53,8 @@ private struct WorkspaceNavigation: UIViewControllerRepresentable {
 
         func open(_ directory: String) {
             let page = UIHostingController(rootView: screen(directory))
-            page.title = directory == page.rootView.root ? "" : URL(fileURLWithPath: directory).lastPathComponent
+            page.edgesForExtendedLayout = []
+            page.title = URL(fileURLWithPath: directory).lastPathComponent
             page.navigationItem.largeTitleDisplayMode = .never
             navigation.pushViewController(page, animated: !navigation.viewControllers.isEmpty)
         }
@@ -85,7 +95,7 @@ struct WorkspaceScreen: View {
                 }
             } else {
                 WorkspaceNavigation(root: root) { directory, openDirectory in
-                    WorkspaceDirectoryScreen(snapshot: model.snapshot, root: root, directory: directory,
+                    WorkspaceDirectoryScreen(snapshot: model.snapshot, directory: directory,
                                              perform: request, fileDraft: fileDraft,
                                              downloadFile: model.download,
                                              aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
@@ -114,7 +124,6 @@ struct WorkspaceScreen: View {
 
 private struct WorkspaceDirectoryScreen: View {
     let snapshot: AgentCore.Snapshot
-    let root: String
     let directory: String
     let perform: SnapshotRequest
     let fileDraft: (String) -> Binding<String>
@@ -143,7 +152,7 @@ private struct WorkspaceDirectoryScreen: View {
                     .textFieldStyle(.roundedBorder)
                 Button("開く") { openDirectory(path) }
                     .accessibilityIdentifier("files.open-path")
-            }.padding()
+            }.padding(.horizontal).padding(.vertical, 8)
             List {
                 Button("親ディレクトリ") { openDirectory((directory as NSString).deletingLastPathComponent) }
                     .disabled(directory == "/")
@@ -167,6 +176,7 @@ private struct WorkspaceDirectoryScreen: View {
                     }
                 }
             }
+            .listStyle(.plain)
         }
         .onAppear {
             if path.isEmpty {

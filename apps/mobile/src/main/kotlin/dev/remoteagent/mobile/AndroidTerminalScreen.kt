@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -50,7 +51,12 @@ internal fun TerminalDialog(
     Dialog(onDismissRequest = dismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize().imePadding()) {
             Column {
-                Text(snapshot.terminalView(handle)?.status ?: "接続中…")
+                val terminal = snapshot.terminalView(handle)
+                if (terminal?.loading != false) {
+                    CircularProgressIndicator()
+                } else {
+                    terminal.status?.let { Text(it) }
+                }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     TextButton(onClick = dismiss) { Text("閉じる") }
                     TextButton(onClick = {

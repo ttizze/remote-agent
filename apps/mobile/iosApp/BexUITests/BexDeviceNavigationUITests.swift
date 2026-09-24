@@ -4,12 +4,21 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    private func assertTerminalReady(_ app: XCUIApplication) {
+        let terminal = app.descendants(matching: .any)["terminal.screen"]
+        let ready = expectation(for: NSPredicate(format: "value == %@", "入力可能"), evaluatedWith: terminal)
+        wait(for: [ready], timeout: 10)
+        XCTAssertFalse(app.staticTexts["実行中"].exists)
+        XCTAssertFalse(app.staticTexts["起動中"].exists)
+        XCTAssertFalse(app.progressIndicators["terminal.loading"].exists)
+    }
+
     func testSimulatorNativeTerminalPastesMultilineText() throws {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.new.project.simulator-project"].tap()
         app.buttons["task.tools"].tap()
         app.buttons["workbench.terminal"].tap()
-        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        assertTerminalReady(app)
         let terminal = app.descendants(matching: .any)["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
         terminal.tap()
@@ -32,7 +41,7 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.project.simulator-project"].tap()
         app.buttons["task.tools"].tap()
         app.buttons["workbench.terminal"].tap()
-        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        assertTerminalReady(app)
         let terminal = app.descendants(matching: .any)["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
         terminal.tap()
@@ -59,7 +68,7 @@ extension BexLaunchUITests {
             app.buttons["task.tools"].tap()
             let action = app.buttons["workbench.terminal"]
             XCTAssertTrue(action.waitForExistence(timeout: 10)); action.tap()
-            XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+            assertTerminalReady(app)
         }
         let composer = app.textFields["task.message"]
         composer.tap(); composer.typeText("Keep my draft")
@@ -68,7 +77,7 @@ extension BexLaunchUITests {
         let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0))
             .withOffset(CGVector(dx: 0, dy: chat.frame.midY - app.frame.minY))
         edge.press(forDuration: 0.05, thenDragTo: edge.withOffset(CGVector(dx: -200, dy: 0)))
-        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        assertTerminalReady(app)
         let terminal = app.descendants(matching: .any)["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
         terminal.tap(); terminal.typeText("BEX_NATIVE=17\n")
@@ -83,7 +92,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.textViews["file.editor"].waitForExistence(timeout: 10))
         app.buttons["file.close"].tap()
         app.buttons["workbench.terminal"].tap()
-        XCTAssertTrue(app.staticTexts["実行中"].waitForExistence(timeout: 10))
+        assertTerminalReady(app)
         XCTAssertEqual(terminal.frame.width, app.frame.width, accuracy: 2)
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.22))
             .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.22)))
@@ -120,7 +129,13 @@ extension BexLaunchUITests {
         XCTAssertTrue(answer.waitForExistence(timeout: 25))
         openFiles(app)
         let nested = app.buttons["file.nested"]
-        XCTAssertTrue(nested.waitForExistence(timeout: 10)); nested.tap()
+        XCTAssertTrue(nested.waitForExistence(timeout: 10))
+        let pathField = app.textFields["絶対パス"]
+        let filter = app.buttons["すべてのファイル"]
+        XCTAssertLessThan(pathField.frame.minY - filter.frame.maxY, 40)
+        XCTAssertLessThan(app.buttons["親ディレクトリ"].frame.minY - pathField.frame.maxY, 30)
+        captureScreen(app, named: "Compact root directory layout")
+        nested.tap()
         let child = app.buttons["file.child.txt"]
         XCTAssertTrue(child.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["workbench.files"].exists)

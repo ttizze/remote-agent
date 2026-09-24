@@ -391,8 +391,7 @@ extension BexAppViewModel {
     }
 
     func persistBeforeBackground() async {
-        let active = Array(operations.values)
-        for operation in active {
+        for operation in Array(operations.values) {
             await operation.value
         }
         persist()
