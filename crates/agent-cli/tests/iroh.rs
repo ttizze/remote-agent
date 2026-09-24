@@ -94,7 +94,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     assert_eq!(request["params"], json!({"cwd":"/fixture"}));
                     json!({"branch":"main","additions":0,"deletions":0,"files":[],"diff":""})
                 }
-                Some("turn/start") => {
+                Some("host/session/submit") => {
                     assert_eq!(mode, "send");
                     assert!(!handled);
                     assert_eq!(
@@ -102,7 +102,7 @@ async fn exercise(command: &[&str], expected: Value) {
                         json!({"threadId":"fixture-thread","clientUserMessageId":"fixture-message","model":null,"effort":null,"serviceTierForTurn":null,"input":[{"type":"text","text":"hello"}]})
                     );
                     handled = true;
-                    json!({"turn":{"id":"fixture-turn"}})
+                    json!({"turnId":"fixture-turn"})
                 }
                 Some(method) => panic!("unexpected command RPC: {method}"),
                 None => panic!("unframed approval response is retired"),
