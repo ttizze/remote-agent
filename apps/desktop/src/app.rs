@@ -199,8 +199,9 @@ pub(crate) struct Desktop {
     editor_pending: Option<u64>,
     search: Entity<InputState>,
     path: Entity<InputState>,
-    effort_slider: Entity<slider::SliderState>,
-    effort_position: (usize, usize),
+    model_provider: Option<agent_protocol::session::ProviderKind>,
+    account_sign_out: Option<String>,
+    account_login_draft: Option<String>,
     worktree_copy_paths: Entity<TextareaState>,
     worktree_directory: Entity<InputState>,
     worktree_dirty: bool,
@@ -282,7 +283,7 @@ impl Desktop {
                             view.perform(
                                 Intent::ReadAccountLogin(op::ReadAccountLogin {
                                     id,
-                                    thread_id: None,
+                                    thread_id: view.account_login_draft.clone(),
                                 }),
                                 OperationCompletion::Account,
                             );
@@ -315,7 +316,6 @@ impl Desktop {
         let worktree_directory = cx.new(|cx| {
             InputState::new(window, cx).placeholder("接続先 Host 上の絶対パス（空欄で既定）")
         });
-        let effort_slider = cx.new(|_| slider::SliderState::new().max(1.).step(1.));
         let hosts = (!side_chat_mode).then(|| cx.new(|cx| Hosts::new(window, cx)));
         let selection = cx.new(|_| selection::ConversationSelection::new(!side_chat_mode));
         let mut subscriptions = vec![
@@ -395,18 +395,6 @@ impl Desktop {
                         query.search_term = value.to_string();
                         view.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
                     }
-                }
-            }),
-            cx.subscribe(&effort_slider, |view, _, event, _| {
-                if let slider::SliderEvent::Change(slider::SliderValue::Single(index)) = event
-                    && let Some(model) = view.selected_model()
-                    && let Some(effort) = model.supported_reasoning_efforts.get(*index as usize)
-                    && view.draft().effort.as_deref() != Some(&effort.reasoning_effort)
-                {
-                    view.dispatch(Intent::SelectEffort {
-                        thread_id: view.draft_key().into(),
-                        effort: effort.reasoning_effort.clone(),
-                    });
                 }
             }),
             cx.subscribe(&worktree_copy_paths, |view, _, event, cx| {
@@ -492,8 +480,9 @@ impl Desktop {
             editor_pending: None,
             search,
             path,
-            effort_slider,
-            effort_position: (0, 0),
+            model_provider: None,
+            account_sign_out: None,
+            account_login_draft: None,
             worktree_copy_paths,
             worktree_directory,
             worktree_dirty: false,
@@ -553,6 +542,9 @@ impl Desktop {
         self.worktree_busy = false;
         self.account_busy = false;
         self.account_polling = false;
+        self.model_provider = None;
+        self.account_sign_out = None;
+        self.account_login_draft = None;
         self.error = self.runtime.logging_error.clone().unwrap_or_default();
         let epoch = self.epoch;
         let remote = self.remote.clone();
@@ -816,6 +808,9 @@ impl Desktop {
                     self.accept_snapshot(window, cx);
                     self.account_polling = self.snapshot.account.login.is_some();
                 }
+                if self.snapshot.account.login.is_none() {
+                    self.account_login_draft = None;
+                }
                 return;
             }
             OperationCompletion::Refresh => {}
@@ -937,27 +932,6 @@ impl Desktop {
             self.composer_value = value.clone();
             self.composer
                 .update(cx, |input, cx| input.set_value(value, window, cx));
-        }
-        let model = self.selected_model();
-        let efforts = model
-            .map(|model| model.supported_reasoning_efforts.as_slice())
-            .unwrap_or_default();
-        let index = efforts
-            .iter()
-            .position(|effort| {
-                Some(effort.reasoning_effort.as_str()) == self.draft().effort.as_deref()
-            })
-            .unwrap_or_default();
-        let position = (efforts.len(), index);
-        if position != self.effort_position {
-            self.effort_position = position;
-            self.effort_slider.update(cx, |slider, cx| {
-                *slider = slider::SliderState::new()
-                    .max(position.0.saturating_sub(1).max(1) as f32)
-                    .step(1.)
-                    .default_value(position.1 as f32);
-                cx.notify();
-            });
         }
         let file = self.snapshot.workspace.file.as_ref();
         let path = file.map(|file| file.path.as_str());

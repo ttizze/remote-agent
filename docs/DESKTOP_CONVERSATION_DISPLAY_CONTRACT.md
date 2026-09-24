@@ -87,6 +87,24 @@ retrieval and reopening.
   `testSimulatorKeepsSmallOlderScrollDuringLiveUpdate`, Android
   `ConversationNavigationTest` exercise the production native conversation views.
 
+## Model and account settings
+
+Desktop's composer opens the same model/account controls used in Settings.
+Like iPhone, show the Codex/Claude service selector first, then model settings,
+then accounts for that service. Model settings contain a model menu, discrete
+reasoning-effort buttons and a separate speed menu when supported by the model.
+Use the core account catalog and active-draft projection; switching the viewed
+service must not display the other service's reasoning or speed controls.
+Account selection, sign-in, usage refresh and confirmed sign-out are available
+in the same view. Disable changes while disconnected, during account operations
+or while signing in. Account/model changes continue through the shared Store.
+
+Acceptance: desktop
+`model_settings_filter_services_keep_controls_first_and_confirm_sign_out`
+checks native controls, service filtering, layout order, busy-state locking and
+sign-out cancellation. Core `account_selection_owns_catalog_model_effort_and_speed`
+checks account selection and draft normalization.
+
 ## Project registration
 
 Desktop's project heading has a “＋” action. Both this action and the new-chat

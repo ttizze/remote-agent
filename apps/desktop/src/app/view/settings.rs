@@ -4,6 +4,9 @@ impl Desktop {
     pub(super) fn open_settings(&mut self) {
         self.tab = Tab::Settings;
         self.settings_page = SettingsPage::Accounts;
+        self.model_provider = None;
+        self.account_sign_out = None;
+        self.dispatch(Intent::LoadModels(op::LoadModels {}));
         self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
         self.worktree_removal = None;
         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
@@ -15,7 +18,7 @@ impl Desktop {
         for (id, label, icon, page) in [
             (
                 "settings-accounts",
-                "アカウント",
+                "モデルとアカウント",
                 IconName::User,
                 SettingsPage::Accounts,
             ),
@@ -70,7 +73,7 @@ impl Desktop {
     pub(super) fn settings(&self, cx: &Context<Self>) -> AnyElement {
         let (title, subtitle) = match self.settings_page {
             SettingsPage::Accounts => (
-                "アカウント",
+                "モデルとアカウント",
                 if self.remote.is_some() {
                     "接続先に保存した Codex・Claude アカウントを管理します。"
                 } else {
@@ -116,7 +119,7 @@ impl Desktop {
             );
         }
         body = match self.settings_page {
-            SettingsPage::Accounts => body.child(self.account_settings(cx)),
+            SettingsPage::Accounts => body.child(self.model_controls(cx)),
             SettingsPage::Connections => body.children(self.hosts.clone()),
             SettingsPage::Worktrees => body.child(self.worktree_settings(cx)),
         };
@@ -445,190 +448,5 @@ impl Desktop {
             Intent::RemoveWorktree(op::RemoveWorktree { path }),
             OperationCompletion::RemoveWorktree,
         );
-    }
-}
-
-impl Desktop {
-    pub(in crate::app) fn account_operation(&mut self, intent: Intent) {
-        if self.account_busy || self.session.is_none() || !self.snapshot.connected {
-            return;
-        }
-        self.account_busy = true;
-        self.perform(intent, OperationCompletion::Account);
-    }
-
-    fn account_settings(&self, cx: &Context<Self>) -> AnyElement {
-        let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
-        let mut body = v_flex().gap_4().child(
-            self.button("accounts-refresh", "再読み込み", cx, |s, _, _| {
-                s.dispatch(Intent::ListAccounts(op::ListAccounts {}));
-            })
-            .disabled(disabled || self.snapshot.account.login.is_some()),
-        );
-        if let Some(accounts) = &self.snapshot.account.accounts {
-            let mut rows = v_flex()
-                .border_1()
-                .border_color(rgb(0x383838))
-                .rounded(px(8.))
-                .overflow_hidden();
-            if accounts.accounts.is_empty() {
-                rows =
-                    rows.child(div().p_6().text_color(rgb(0xa3a3a3)).child(
-                        "アカウントがありません。アカウントを追加してログインしてください。",
-                    ));
-            }
-            for (index, account) in accounts.accounts.iter().enumerate() {
-                let logout_id = account.id.clone();
-                let email = account.email.clone().unwrap_or_else(|| account.id.clone());
-                rows = rows.child(
-                    h_flex()
-                        .gap_4()
-                        .p_5()
-                        .when(index > 0, |row| {
-                            row.border_t_1().border_color(rgb(0x383838))
-                        })
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_3()
-                                .child(div().child(format!(
-                                    "{} · {email}",
-                                    match account.provider {
-                                        agent_protocol::session::ProviderKind::Codex => "Codex",
-                                        agent_protocol::session::ProviderKind::Claude => "Claude",
-                                    }
-                                )))
-                                .when(accounts.is_selected(account), |row| {
-                                    row.child(
-                                        div().text_xs().text_color(rgb(0x8acfac)).child("選択中"),
-                                    )
-                                })
-                                .child(account_usage_view(account.usage.as_ref(), true)),
-                        )
-                        .child(
-                            Button::new(format!("settings-account-logout-{index}"))
-                                .label("ログアウト")
-                                .disabled(disabled || self.snapshot.account.login.is_some())
-                                .on_click(cx.listener(move |s, _, _, cx| {
-                                    s.account_operation(Intent::LogoutAccount(op::LogoutAccount {
-                                        id: logout_id.clone(),
-                                    }));
-                                    cx.notify();
-                                })),
-                        ),
-                );
-            }
-            body = body.child(rows).child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa3a3a3))
-                    .child("使用するアカウントは、チャットの入力欄で切り替えます。"),
-            );
-        } else {
-            body = body.child(
-                div()
-                    .text_color(rgb(0xa3a3a3))
-                    .child(if self.snapshot.connected {
-                        "アカウントを読み込み中…"
-                    } else {
-                        "接続されていません。接続後にアカウントを管理できます。"
-                    }),
-            );
-        }
-        let mut add = h_flex().gap_3().flex_wrap();
-        for (id, label, provider) in [
-            (
-                "account-start-login",
-                "Codex アカウントを追加",
-                agent_protocol::session::ProviderKind::Codex,
-            ),
-            (
-                "account-start-claude-login",
-                "Claude アカウントを追加",
-                agent_protocol::session::ProviderKind::Claude,
-            ),
-        ] {
-            add = add.child(
-                self.button(id, label, cx, move |s, window, cx| {
-                    s.account_code
-                        .update(cx, |input, cx| input.set_value("", window, cx));
-                    s.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
-                        provider,
-                    }));
-                })
-                .icon(IconName::Plus)
-                .disabled(disabled || self.snapshot.account.login.is_some()),
-            );
-        }
-        body = body.child(add);
-        if let Some(login) = &self.snapshot.account.login {
-            let code = login.user_code.clone();
-            let url = login.verification_url.clone();
-            let cancel_id = login.login_id.clone();
-            if login.requires_code_submission {
-                let submit_id = login.login_id.clone();
-                body = body.child("ブラウザで Claude にログインし、表示された認証コードを貼り付けてください。")
-                    .child(Input::new(&self.account_code))
-                    .child(self.button("account-submit-code", "認証コードを送信", cx, move |s, window, cx| {
-                        let code = s.account_code.read(cx).value().to_string();
-                        if code.trim().is_empty() { return; }
-                        s.account_operation(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: submit_id.clone(), code }));
-                        s.account_code.update(cx, |input, cx| input.set_value("", window, cx));
-                    }).disabled(disabled));
-            }
-            body = body
-                .when(!login.requires_code_submission, |body| {
-                    body.child("ブラウザでログインし、次のコードを入力してください。")
-                })
-                .child(div().text_xl().child(login.user_code.clone()))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .when(!login.requires_code_submission, |row| {
-                            row.child(self.button(
-                                "account-copy-code",
-                                "コードをコピー",
-                                cx,
-                                move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                                },
-                            ))
-                        })
-                        .child(self.button(
-                            "account-open-login",
-                            "ブラウザでログイン",
-                            cx,
-                            move |_, _, cx| cx.open_url(&url),
-                        ))
-                        .child(
-                            self.button(
-                                "account-cancel-login",
-                                "キャンセル",
-                                cx,
-                                move |s, _, _| {
-                                    s.account_operation(Intent::CancelAccountLogin(
-                                        op::CancelAccountLogin {
-                                            id: cancel_id.clone(),
-                                        },
-                                    ));
-                                },
-                            )
-                            .disabled(disabled),
-                        ),
-                )
-                .child(
-                    self.button(
-                        "account-check-login",
-                        "ログイン状態を確認",
-                        cx,
-                        |s, _, _| {
-                            s.account_polling = true;
-                        },
-                    )
-                    .disabled(disabled),
-                );
-        }
-        body.into_any_element()
     }
 }
