@@ -61,6 +61,14 @@ impl From<AppServerError> for Failure {
 }
 
 impl Failure {
+    fn before_submission(mut self) -> Self {
+        match &mut self {
+            Self::Host { delivery, .. } | Self::Upstream { delivery, .. } => {
+                *delivery = agent_transport::peer::Delivery::NotSent
+            }
+        }
+        self
+    }
     fn delivery(&self) -> agent_transport::peer::Delivery {
         match self {
             Self::Host { delivery, .. } | Self::Upstream { delivery, .. } => *delivery,
@@ -334,16 +342,53 @@ impl HostRpcService {
                 .transpose()
                 .map_err(|error| Failure::new("invalid_params", error))?;
             let submission = target.as_ref().zip(input_id);
+            // Keep the execution alive and serialize decisions through the
+            // provider acknowledgement, including concurrent client inputs.
+            let _read = submission
+                .map(|(target, _)| self.inner.router.retain_execution(target.clone()))
+                .transpose()
+                .map_err(|error| Failure::new("invalid_params", error))?;
+            let _serial = if let Some((target, _)) = submission {
+                Some(self.inner.router.submission_lock(target).lock_owned().await)
+            } else {
+                None
+            };
             if let Some((target, id)) = submission {
+                if matches!(message, Call::Submit(_))
+                    && let Some(receipt) = self.inner.router.submission_receipt(target, id)
+                {
+                    return Ok(receipt.into());
+                }
                 self.inner.router.begin_submission(target, id)?;
             }
-            let result = self.request(session, message, target.as_ref()).await;
-            if let Some((target, id)) = submission
-                && result.as_ref().is_err_and(|error| {
-                    error.delivery() == agent_transport::peer::Delivery::NotSent
-                })
-            {
-                self.inner.router.reject_submission(target, id);
+            let result = if let Call::Submit(input) = message {
+                self.submit_input(session, target.as_ref().expect("submission target"), input)
+                    .await
+                    .map(Into::into)
+            } else {
+                self.request(session, message, target.as_ref()).await
+            };
+            if let Some((target, id)) = submission {
+                use agent_protocol::session::SubmissionDelivery;
+                let delivery = match &result {
+                    Ok(Body::Submission(receipt)) => SubmissionDelivery::Accepted {
+                        turn_id: receipt.turn_id.clone(),
+                    },
+                    Ok(Body::Started(receipt)) => SubmissionDelivery::Accepted {
+                        turn_id: Some(receipt.turn.id.clone()),
+                    },
+                    Ok(_) => SubmissionDelivery::Accepted {
+                        turn_id: match message {
+                            Call::SteerTurn(input) => Some(input.expected_turn_id.clone()),
+                            _ => None,
+                        },
+                    },
+                    Err(error) if error.delivery() == agent_transport::peer::Delivery::NotSent => {
+                        SubmissionDelivery::Rejected
+                    }
+                    Err(_) => SubmissionDelivery::Unknown,
+                };
+                self.inner.router.finish_submission(target, id, delivery);
             }
             result
         }
@@ -358,6 +403,111 @@ impl HostRpcService {
         Ok(Response::from_result(result)
             .map_err(invalid_message)?
             .into())
+    }
+
+    async fn submit_input(
+        &self,
+        session: SessionId,
+        target: &agent_protocol::session::SessionRef,
+        input: &agent_protocol::operations::Submission,
+    ) -> Result<agent_protocol::operations::SubmissionReceipt, Failure> {
+        use agent_protocol::operations::{
+            QueueTurn, ResumeThread, StartTurn, SteerTurn, SubmissionReceipt,
+        };
+        let mut response = match target.provider {
+            agent_protocol::session::ProviderKind::Codex => self
+                .inner
+                .codex
+                .request(
+                    "thread/read",
+                    &serde_json::json!({"threadId":target.id,"includeTurns":false}),
+                )
+                .await
+                .map_err(Failure::before_submission)?,
+            agent_protocol::session::ProviderKind::Claude => self
+                .inner
+                .claude
+                .get()
+                .ok_or_else(|| Failure::new("claude_unavailable", "Claude is unavailable"))?
+                .read(&target.id, 1)
+                .await
+                .map_err(|e| Failure::new("session_read_failed", e))?,
+        };
+        let expected = match target.provider {
+            agent_protocol::session::ProviderKind::Codex => target.id.as_str(),
+            agent_protocol::session::ProviderKind::Claude => input.thread_id.as_str(),
+        };
+        if response.thread.id.as_deref() != Some(expected) {
+            return Err(Failure::new(
+                "invalid_thread",
+                "native session identity changed",
+            ));
+        }
+        self.inner.router.overlay_execution(target, &mut response);
+        let thread = &response.thread;
+        use agent_protocol::session::{SubmissionTarget, submission_target};
+        let route = submission_target(
+            thread.status.as_ref(),
+            thread.turns.as_deref().unwrap_or_default(),
+            thread.cwd.as_deref(),
+        )
+        .map_err(|error| Failure::new("submission_unavailable", error))?;
+        let call = match route {
+            SubmissionTarget::Steer(turn_id) => Call::SteerTurn(SteerTurn {
+                thread_id: input.thread_id.clone(),
+                client_user_message_id: input.client_user_message_id.clone(),
+                input: input.input.clone(),
+                expected_turn_id: turn_id.into(),
+            }),
+            SubmissionTarget::Queue => Call::QueueTurn(QueueTurn {
+                thread_id: input.thread_id.clone(),
+                client_user_message_id: input.client_user_message_id.clone(),
+                input: input.input.clone(),
+            }),
+            SubmissionTarget::Start { cwd, resume } => {
+                if resume {
+                    self.request(
+                        session,
+                        &Call::ResumeThread(ResumeThread {
+                            thread_id: input.thread_id.clone(),
+                            cwd: Some(cwd.into()),
+                        }),
+                        Some(target),
+                    )
+                    .await
+                    .map_err(Failure::before_submission)?;
+                }
+                Call::StartTurn(StartTurn {
+                    thread_id: input.thread_id.clone(),
+                    client_user_message_id: input.client_user_message_id.clone(),
+                    input: input.input.clone(),
+                    model: input.model.clone(),
+                    effort: input.effort.clone(),
+                    service_tier: input.service_tier.clone(),
+                })
+            }
+        };
+        let reply = self.request(session, &call, Some(target)).await?;
+        let turn_id = match (&call, reply) {
+            (Call::StartTurn(params), Body::Started(reply)) => {
+                agent_protocol::operations::RpcMethod::validate(params, &reply)
+                    .map_err(|error| Failure::unknown("invalid_submission_reply", error))?;
+                Some(reply.turn.id)
+            }
+            (Call::SteerTurn(params), Body::Empty(_)) => Some(params.expected_turn_id.clone()),
+            (Call::QueueTurn(params), Body::Queued(reply)) => {
+                agent_protocol::operations::RpcMethod::validate(params, &reply)
+                    .map_err(|error| Failure::unknown("invalid_submission_reply", error))?;
+                None
+            }
+            _ => {
+                return Err(Failure::unknown(
+                    "invalid_submission_reply",
+                    "provider returned an invalid submission result",
+                ));
+            }
+        };
+        Ok(SubmissionReceipt { turn_id })
     }
 
     async fn answer_request(
@@ -408,7 +558,9 @@ impl HostRpcService {
         params: &agent_protocol::session::OpenSession,
     ) -> Result<HostReply, String> {
         let result: anyhow::Result<HostReply> = async {
-            let params = params.clone();
+            if params.limit == 0 {
+                anyhow::bail!("invalid session reference or zero history limit");
+            }
             let target = params.session.clone();
             if target.provider == agent_protocol::session::ProviderKind::Codex {
                 self.inner.codex.server()?;
@@ -417,7 +569,7 @@ impl HostRpcService {
             let read = self
                 .inner
                 .router
-                .begin_session_read(params)
+                .retain_execution(target.clone())
                 .map_err(anyhow::Error::msg)?;
             let started = std::time::Instant::now();
             let mut response = match target.provider {
@@ -1433,6 +1585,10 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 // additionally identify the operations whose delivery must be tracked.
 fn session_target(request: &Call) -> (Option<&str>, Option<&str>) {
     match request {
+        Call::Submit(p) => (
+            Some(p.thread_id.as_str()),
+            Some(p.client_user_message_id.as_str()),
+        ),
         Call::StartTurn(p) => (
             Some(p.thread_id.as_str()),
             Some(p.client_user_message_id.as_str()),

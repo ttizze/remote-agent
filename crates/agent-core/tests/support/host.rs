@@ -255,7 +255,31 @@ impl Writer {
         Ok(())
     }
     pub async fn notify(&self, value: Value) -> std::io::Result<()> {
-        let Some(value) = self.prepare(None, value)? else {
+        let activity = matches!(
+            value["method"].as_str(),
+            Some("turn/started" | "turn/completed" | "thread/status/changed")
+        )
+        .then(|| {
+            (
+                value["params"]["threadId"].as_str().unwrap().to_owned(),
+                value["method"] == "turn/completed"
+                    && value["params"]["turn"]["status"] == "completed",
+            )
+        });
+        let prepared = self.prepare(None, value)?;
+        if let Some((id, finished)) = activity {
+            let active = self.current(&id)["thread"]["status"]["type"] == "active";
+            agent_transport::framing::write(
+                &mut *self.events.lock().await,
+                protocol::Notification::Activity {
+                    session: SessionRef::from_thread_id(&id).unwrap(),
+                    active,
+                    finished: finished && !active,
+                },
+            )
+            .await?;
+        }
+        let Some(value) = prepared else {
             return Ok(());
         };
         if value["method"] == "host/session/update" {

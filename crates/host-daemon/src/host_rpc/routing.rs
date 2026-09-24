@@ -10,22 +10,22 @@ use agent_protocol::{
     models::ThreadResponse,
     operations::ServerRequest,
     protocol::Notification,
-    session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef},
+    session::{OpenedSession, ProviderKind, SessionChange, SessionRef},
 };
 #[cfg(test)]
 use agent_transport::peer::RpcMessage;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-pub(super) struct SessionRead {
+pub(super) struct SessionLease {
     router: SessionRouter,
     target: SessionRef,
 }
-impl Drop for SessionRead {
+impl Drop for SessionLease {
     fn drop(&mut self) {
         let mut state = lock_state(&self.router.state);
         if let Some(actor) = state.executions.get_mut(&self.target) {
-            actor.readers -= 1;
+            actor.leases -= 1;
         }
         state.executions.retain(|_, actor| actor.release());
     }
@@ -240,6 +240,37 @@ impl SessionRouter {
         }
     }
 
+    pub(super) fn submission_lock(&self, target: &SessionRef) -> Arc<tokio::sync::Mutex<()>> {
+        lock_state(&self.state)
+            .executions
+            .entry(target.clone())
+            .or_default()
+            .submission_lock
+            .clone()
+    }
+
+    pub(super) fn overlay_execution(&self, target: &SessionRef, response: &mut ThreadResponse) {
+        if let Some(actor) = lock_state(&self.state).executions.get(target) {
+            actor.overlay(response);
+        }
+    }
+
+    pub(super) fn submission_receipt(
+        &self,
+        target: &SessionRef,
+        id: &str,
+    ) -> Option<agent_protocol::operations::SubmissionReceipt> {
+        let state = lock_state(&self.state);
+        match state.executions.get(target)?.live.submissions.get(id)? {
+            agent_protocol::session::SubmissionDelivery::Accepted { turn_id } => {
+                Some(agent_protocol::operations::SubmissionReceipt {
+                    turn_id: turn_id.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn begin_submission(
         &self,
         target: &SessionRef,
@@ -254,28 +285,61 @@ impl SessionRouter {
         }
         let mut state = lock_state(&self.state);
         let actor = state.executions.entry(target.clone()).or_default();
-        if actor.inputs.contains(id) {
+        if actor.live.submissions.get(id).is_some_and(|delivery| {
+            *delivery != agent_protocol::session::SubmissionDelivery::Rejected
+        }) {
             return Err(Failure::unknown(
                 "submission_outcome_unknown",
                 "submission is already in flight; read the session before sending again",
             ));
         }
-        if actor.inputs.len() >= 128 {
+        // Rejections have no provider side effect. Keep them available for a
+        // reconnect until another input needs the bounded execution capacity.
+        if actor.live.submissions.len() >= 128 {
+            actor.live.submissions.retain(|_, delivery| {
+                *delivery != agent_protocol::session::SubmissionDelivery::Rejected
+            });
+        }
+        if actor.live.submissions.len() >= 128 {
             return Err(Failure::new(
                 "input_capacity_reached",
                 "active input capacity reached",
             ));
         }
-        actor.inputs.insert(id.into());
+        change_locked(
+            &mut state,
+            target,
+            &SessionChange::Submission {
+                id: id.into(),
+                delivery: agent_protocol::session::SubmissionDelivery::Sending,
+            },
+        );
         Ok(())
     }
 
-    pub(super) fn reject_submission(&self, target: &SessionRef, id: &str) {
+    pub(super) fn finish_submission(
+        &self,
+        target: &SessionRef,
+        id: &str,
+        delivery: agent_protocol::session::SubmissionDelivery,
+    ) {
         let mut state = lock_state(&self.state);
-        if let Some(actor) = state.executions.get_mut(target) {
-            actor.inputs.remove(id);
+        // A completed execution may already have retired its inputs. Do not
+        // recreate execution state from a late RPC completion.
+        if state
+            .executions
+            .get(target)
+            .is_some_and(|actor| actor.live.submissions.contains_key(id))
+        {
+            change_locked(
+                &mut state,
+                target,
+                &SessionChange::Submission {
+                    id: id.into(),
+                    delivery,
+                },
+            );
         }
-        state.executions.retain(|_, actor| actor.release());
     }
 
     pub(crate) fn current_turn(
@@ -297,26 +361,19 @@ impl SessionRouter {
             .map(|turn| (**turn).clone())
     }
 
-    pub(super) fn begin_session_read(&self, params: OpenSession) -> Result<SessionRead, String> {
-        params.session.validate()?;
-        if params.limit == 0 {
-            return Err("invalid session reference or zero history limit".into());
-        }
+    pub(super) fn retain_execution(&self, target: SessionRef) -> Result<SessionLease, String> {
+        target.validate()?;
         let mut state = lock_state(&self.state);
-        state
-            .executions
-            .entry(params.session.clone())
-            .or_default()
-            .readers += 1;
-        Ok(SessionRead {
+        state.executions.entry(target.clone()).or_default().leases += 1;
+        Ok(SessionLease {
             router: self.clone(),
-            target: params.session,
+            target,
         })
     }
 
     pub(super) fn finish_session_read(
         &self,
-        read: SessionRead,
+        read: SessionLease,
         session: SessionId,
         mut response: ThreadResponse,
     ) -> Result<HostReply, String> {
@@ -422,9 +479,30 @@ impl SessionRouter {
                     },
                 );
             }
-            if let Some(actor) = state.executions.get_mut(&target) {
-                actor.inputs.clear();
+            for (id, delivery) in &thread.submissions {
+                if matches!(
+                    delivery,
+                    agent_protocol::session::SubmissionDelivery::Sending
+                ) {
+                    change_locked(
+                        &mut state,
+                        &target,
+                        &SessionChange::Submission {
+                            id: id.clone(),
+                            delivery: agent_protocol::session::SubmissionDelivery::Unknown,
+                        },
+                    );
+                }
             }
+            change_locked(
+                &mut state,
+                &target,
+                &SessionChange::Status {
+                    status: agent_protocol::models::ThreadStatus {
+                        kind: agent_protocol::models::ThreadStatusKind::SystemError,
+                    },
+                },
+            );
         }
         state.executions.retain(|_, actor| actor.release());
     }
@@ -615,7 +693,7 @@ fn change_locked(
     change: &agent_protocol::session::SessionChange,
 ) {
     let actor = state.executions.entry(target.clone()).or_default();
-    if actor.update(change).is_err() {
+    let Ok(next) = change.apply(&actor.live) else {
         let connections: Vec<_> = state
             .subscriptions
             .values()
@@ -627,7 +705,8 @@ fn change_locked(
         }
         state.executions.retain(|_, actor| actor.release());
         return;
-    }
+    };
+    actor.live = next;
     let mut failed = Vec::new();
     let line = protocol::encode(change).expect("change encodes");
     for (id, connection, output) in state.subscriptions.values() {
@@ -726,12 +805,9 @@ mod tests {
     use agent_protocol::session::TextField;
     use serde_json::json;
 
-    fn open(router: &SessionRouter, id: &str, limit: usize) -> SessionRead {
+    fn open(router: &SessionRouter, id: &str) -> SessionLease {
         router
-            .begin_session_read(OpenSession {
-                session: SessionRef::from_thread_id(id).unwrap(),
-                limit,
-            })
+            .retain_execution(SessionRef::from_thread_id(id).unwrap())
             .unwrap()
     }
 
@@ -778,7 +854,7 @@ mod tests {
             model: None,
         };
         let response = router
-            .finish_session_read(open(&router, "native", 1001), connection.id(), response)
+            .finish_session_read(open(&router, "native"), connection.id(), response)
             .unwrap();
         let reply = agent_protocol::protocol::decode::<
             agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
@@ -825,7 +901,7 @@ mod tests {
         )
         .unwrap();
         let response = router
-            .finish_session_read(open(&router, "native", 5), connection.id(), response)
+            .finish_session_read(open(&router, "native"), connection.id(), response)
             .unwrap();
         let line = response.initial;
         assert!(line.len() < 64 * 1024);
@@ -850,7 +926,7 @@ mod tests {
             )
             .unwrap();
             let response = router
-                .finish_session_read(open(&router, "native", 5), connection.id(), response)
+                .finish_session_read(open(&router, "native"), connection.id(), response)
                 .unwrap();
             let reply = agent_protocol::protocol::decode::<
                 agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
@@ -868,7 +944,7 @@ mod tests {
     async fn completion_during_native_read_is_overlaid_before_live_updates() {
         let router = SessionRouter::new();
         let connection = router.open_session(16);
-        let read = open(&router, "native", 5);
+        let read = open(&router, "native");
         turn(&router, false);
         router.session_change(
             &SessionRef {
@@ -921,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_input_is_blocked_only_while_execution_is_in_flight() {
+    fn completion_does_not_discard_unconfirmed_input_and_accepted_receipts_replay() {
         let router = SessionRouter::new();
         let target = SessionRef {
             provider: ProviderKind::Codex,
@@ -932,11 +1008,64 @@ mod tests {
         turn(&router, false);
         assert!(router.begin_submission(&target, "send").is_err());
         turn(&router, true);
-        assert!(lock_state(&router.state).executions.is_empty());
-        // There is deliberately no completed receipt or time-based cache.
-        router.begin_submission(&target, "send").unwrap();
-        router.reject_submission(&target, "send");
-        assert!(lock_state(&router.state).executions.is_empty());
+        assert!(router.begin_submission(&target, "send").is_err());
+        router.finish_submission(
+            &target,
+            "send",
+            agent_protocol::session::SubmissionDelivery::Accepted {
+                turn_id: Some("run".into()),
+            },
+        );
+        assert_eq!(
+            router
+                .submission_receipt(&target, "send")
+                .unwrap()
+                .turn_id
+                .as_deref(),
+            Some("run")
+        );
+        let mut response: ThreadResponse =
+            serde_json::from_value(json!({"thread":{"id":"native","turns":[]}})).unwrap();
+        router.overlay_execution(&target, &mut response);
+        assert_eq!(
+            response.thread.submissions["send"],
+            agent_protocol::session::SubmissionDelivery::Accepted {
+                turn_id: Some("run".into())
+            }
+        );
+    }
+
+    #[test]
+    fn provider_exit_clears_activity_but_preserves_uncertain_delivery() {
+        use agent_protocol::{
+            models::{ThreadStatus, ThreadStatusKind},
+            session::SubmissionDelivery,
+        };
+        let router = SessionRouter::new();
+        let target = SessionRef::from_thread_id("native").unwrap();
+        router.begin_submission(&target, "input").unwrap();
+        router.session_change(
+            &target,
+            SessionChange::Status {
+                status: ThreadStatus {
+                    kind: ThreadStatusKind::Active,
+                },
+            },
+        );
+        assert_eq!(
+            lock_state(&router.state).executions[&target]
+                .live
+                .status
+                .as_ref()
+                .unwrap()
+                .kind,
+            ThreadStatusKind::Active
+        );
+        router.fail_provider(ProviderKind::Codex, "provider stopped");
+        let state = lock_state(&router.state);
+        let live = &state.executions[&target].live;
+        assert!(live.status.is_none());
+        assert_eq!(live.submissions["input"], SubmissionDelivery::Unknown);
     }
 
     #[tokio::test]
@@ -965,10 +1094,7 @@ mod tests {
         let mut streams = Vec::new();
         for connection in [slow.id(), healthy.id()] {
             let read = router
-                .begin_session_read(OpenSession {
-                    session: SessionRef::from_thread_id("native").unwrap(),
-                    limit: 5,
-                })
+                .retain_execution(SessionRef::from_thread_id("native").unwrap())
                 .unwrap();
             let response = router
                 .finish_session_read(read, connection, response.clone())
@@ -1022,16 +1148,12 @@ mod tests {
         let response: ThreadResponse =
             serde_json::from_value(json!({"thread":{"id":"native","turns":[]}})).unwrap();
         let first = router
-            .finish_session_read(
-                open(&router, "native", 5),
-                connection.id(),
-                response.clone(),
-            )
+            .finish_session_read(open(&router, "native"), connection.id(), response.clone())
             .unwrap()
             .updates
             .unwrap();
         let second = router
-            .finish_session_read(open(&router, "native", 5), connection.id(), response)
+            .finish_session_read(open(&router, "native"), connection.id(), response)
             .unwrap()
             .updates
             .unwrap();
@@ -1057,20 +1179,14 @@ mod tests {
         let router = SessionRouter::new();
         let connection = router.open_session(4);
         let read = router
-            .begin_session_read(OpenSession {
-                session: SessionRef::from_thread_id("native").unwrap(),
-                limit: 5,
-            })
+            .retain_execution(SessionRef::from_thread_id("native").unwrap())
             .unwrap();
         drop(connection);
         drop(read);
-        // Fill and evict idle entries: leaked readers would eventually prevent admission.
+        // Fill and evict idle entries: leaked leases would eventually prevent admission.
         for id in 0..200 {
             let read = router
-                .begin_session_read(OpenSession {
-                    session: SessionRef::from_thread_id(&id.to_string()).unwrap(),
-                    limit: 5,
-                })
+                .retain_execution(SessionRef::from_thread_id(&id.to_string()).unwrap())
                 .unwrap();
             drop(read);
         }
@@ -1084,12 +1200,7 @@ fn identical_native_request_ids_keep_their_provider_owner() {
     let mut ids = Vec::new();
     for thread in ["codex-native", "claude:claude-native"] {
         let target = SessionRef::from_thread_id(thread).unwrap();
-        let read = router
-            .begin_session_read(OpenSession {
-                session: target.clone(),
-                limit: 5,
-            })
-            .unwrap();
+        let read = router.retain_execution(target.clone()).unwrap();
         let response = serde_json::from_value(serde_json::json!({"thread":{"id":thread,
                 "turns":[{"id":"turn","status":"inProgress","items":[]}]}}))
         .unwrap();

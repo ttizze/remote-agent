@@ -134,29 +134,10 @@ pub(super) fn session_update(
             ..
         }
     );
-    let active = match &update.change {
-        SessionChange::Status { status } => {
-            Some(status.kind == crate::models::ThreadStatusKind::Active)
-        }
-        SessionChange::Turn { .. } => Some(
-            thread
-                .status
-                .as_ref()
-                .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active),
-        ),
-        _ => None,
-    };
-    if let Some(active) = active {
-        let activity = Arc::make_mut(&mut next.activity);
-        activity.active.insert(id.clone(), active);
-        if active {
-            activity.unread.remove(id);
-        } else if matches!(&update.change, SessionChange::Turn { completed:true, turn } if turn.status.as_deref() == Some("completed"))
-            && previous.navigation.thread_id.as_ref() != Some(id)
-        {
-            activity.unread.insert(id.clone());
-        }
-    }
+    let active = thread
+        .status
+        .as_ref()
+        .map(|status| status.kind == crate::models::ThreadStatusKind::Active);
     let refresh_workspace = (completed || matches!(update.change, SessionChange::Item { .. }))
         && current.cwd.as_deref() == Some(&next.navigation.cwd);
     Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));

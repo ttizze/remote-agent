@@ -80,6 +80,7 @@ contracts! {
     StartThread, "host/thread/start" => (op::StartThread, m::ThreadResponse) [clone, op::StartThread::validate],
     ForkThread, "thread/fork" => (op::ForkThread, m::ThreadResponse) [clone, op::ForkThread::validate],
     ResumeThread, "thread/resume" => (op::ResumeThread, m::Empty) [clone],
+    Submit, "host/session/submit" => (op::Submission, op::SubmissionReceipt) [clone],
     StartTurn, "turn/start" => (op::StartTurn, op::StartedTurn) [clone, op::StartTurn::validate],
     SteerTurn, "turn/steer" => (op::SteerTurn, m::Empty) [clone],
     QueueTurn, "thread/queue/add" => (op::QueueTurn, op::QueuedTurn) [clone, op::QueueTurn::validate],

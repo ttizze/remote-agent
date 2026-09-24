@@ -88,11 +88,6 @@ impl Operation for Respond {
             })?;
         context.client.respond(request, &self.answer).await
     }
-    fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
-        // The Host owns delivery and resolution; transport enqueue is not an approval acknowledgement.
-        let _ = snapshot;
-        Vec::new()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,24 +215,6 @@ impl Operation for SendSubmission {
                 .await
                 .map(|opened| SubmissionProgress::Opened(Box::new(opened)));
         }
-        let target = submission_target(
-            context
-                .snapshot
-                .conversations
-                .get(&self.thread_id)
-                .map(Arc::as_ref),
-            context.snapshot.threads.as_ref().and_then(|list| {
-                list.data
-                    .iter()
-                    .find(|thread| thread.id.as_ref() == Some(&self.thread_id))
-            }),
-            context
-                .snapshot
-                .activity
-                .active
-                .get(&self.thread_id)
-                .copied(),
-        )?;
         let mut input = Vec::with_capacity(
             self.draft.attachments.len() + usize::from(!self.draft.text.is_empty()),
         );
@@ -267,19 +244,16 @@ impl Operation for SendSubmission {
         }
         let reply = context
             .client
-            .submit(
-                &Submission {
-                    thread_id: &self.thread_id,
-                    client_user_message_id: &self.client_user_message_id,
-                    input: &input,
-                    model: self.draft.model.as_deref(),
-                    effort: self.draft.effort.as_deref(),
-                    service_tier: self.draft.service_tier.as_deref(),
-                },
-                target,
-            )
+            .call(&Submission {
+                thread_id: self.thread_id.clone(),
+                client_user_message_id: self.client_user_message_id.clone(),
+                input,
+                model: self.draft.model.clone(),
+                effort: self.draft.effort.clone(),
+                service_tier: self.draft.service_tier.clone(),
+            })
             .await?;
-        Ok(SubmissionProgress::Sent(reply))
+        Ok(SubmissionProgress::Sent(reply.turn_id))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let turn_id = match output {
@@ -296,15 +270,11 @@ impl Operation for SendSubmission {
             ..
         } = self;
 
-        if let Some(pending) =
-            Arc::make_mut(&mut snapshot.pending_submissions).get_mut(&client_user_message_id)
-        {
-            let pending = Arc::make_mut(pending);
-            pending.accepted = true;
-            if turn_id.is_some() && pending.turn_id != turn_id {
-                pending.turn_id = turn_id;
-                pending.after_item_id = None;
-            }
+        if let Some(thread) = shared_mut(&mut snapshot.conversations, &thread_id) {
+            thread.submissions.insert(
+                client_user_message_id,
+                crate::session::SubmissionDelivery::Accepted { turn_id },
+            );
         }
         reconcile_pending(snapshot, &thread_id);
 

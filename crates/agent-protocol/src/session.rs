@@ -57,6 +57,40 @@ impl SessionRef {
     }
 }
 
+/// Pure execution decision used by the Host after reading native state and
+/// overlaying its live execution. Client caches never choose an input route.
+#[derive(Debug, PartialEq)]
+pub enum SubmissionTarget<'a> {
+    Steer(&'a str),
+    Queue,
+    Start { cwd: &'a str, resume: bool },
+}
+pub fn submission_target<'a>(
+    status: Option<&ThreadStatus>,
+    turns: &'a [Arc<Turn>],
+    cwd: Option<&'a str>,
+) -> Result<SubmissionTarget<'a>, &'static str> {
+    let active = status.map(|status| status.kind == crate::models::ThreadStatusKind::Active);
+    if active != Some(false)
+        && let Some(turn) = turns
+            .iter()
+            .rev()
+            .find(|turn| turn.status.as_deref() == Some("inProgress") && !turn.id.trim().is_empty())
+    {
+        return Ok(SubmissionTarget::Steer(&turn.id));
+    }
+    if active == Some(true) {
+        return Ok(SubmissionTarget::Queue);
+    }
+    Ok(SubmissionTarget::Start {
+        cwd: cwd
+            .filter(|cwd| !cwd.trim().is_empty())
+            .ok_or("thread working directory is unknown")?,
+        resume: status
+            .is_none_or(|status| status.kind == crate::models::ThreadStatusKind::NotLoaded),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextField {
@@ -70,6 +104,10 @@ pub enum TextField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SessionChange {
+    Submission {
+        id: String,
+        delivery: SubmissionDelivery,
+    },
     Request {
         request: crate::operations::ServerRequest,
     },
@@ -109,6 +147,16 @@ pub enum SessionChange {
     },
 }
 
+/// Host delivery evidence for an input whose execution is still owned by the Host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SubmissionDelivery {
+    Sending,
+    Accepted { turn_id: Option<String> },
+    Unknown,
+    Rejected,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RequestDelivery {
@@ -123,6 +171,10 @@ impl SessionChange {
     pub fn apply(&self, previous: &Thread) -> Result<Thread, &'static str> {
         let mut next = previous.clone();
         match self {
+            Self::Submission { id, delivery } => {
+                next.submissions.insert(id.clone(), delivery.clone());
+                return Ok(next);
+            }
             Self::Request { request } => {
                 next.requests
                     .insert(request.id.to_string(), Arc::new(request.clone()));
@@ -153,6 +205,7 @@ impl SessionChange {
             | Self::Text { turn_id, .. }
             | Self::Error { turn_id, .. } => turn_id,
             Self::Status { .. }
+            | Self::Submission { .. }
             | Self::Request { .. }
             | Self::RequestDelivery { .. }
             | Self::ResolveRequest { .. } => unreachable!(),
@@ -310,7 +363,8 @@ impl SessionChange {
                 error.insert("willRetry".into(), Value::Bool(*will_retry));
                 turn.error = Some(Value::Object(error));
             }
-            Self::Status { .. }
+            Self::Submission { .. }
+            | Self::Status { .. }
             | Self::Turn { .. }
             | Self::Request { .. }
             | Self::RequestDelivery { .. }

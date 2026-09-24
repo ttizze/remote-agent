@@ -5,65 +5,6 @@ use agent_transport::client::{Client, Updates};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-#[derive(Debug, PartialEq)]
-pub enum SubmissionTarget<'a> {
-    Steer(&'a str),
-    Queue,
-    Start { cwd: &'a str, resume: bool },
-}
-pub fn submission_target<'a>(
-    snapshot: Option<&'a crate::models::Thread>,
-    listed: Option<&'a crate::models::Thread>,
-    active: Option<bool>,
-) -> Result<SubmissionTarget<'a>, PeerError> {
-    // Current execution state takes precedence over unfinished historical turns.
-    let active = active.or_else(|| {
-        snapshot
-            .and_then(|thread| thread.status.as_ref())
-            .map(|status| status.kind == crate::models::ThreadStatusKind::Active)
-    });
-    if active != Some(false)
-        && let Some(turn) = snapshot
-            .and_then(|thread| thread.turns.as_ref())
-            .and_then(|turns| {
-                turns.iter().rev().find(|turn| {
-                    turn.status.as_deref() == Some("inProgress") && !turn.id.trim().is_empty()
-                })
-            })
-    {
-        return Ok(SubmissionTarget::Steer(&turn.id));
-    }
-    if active.unwrap_or_else(|| {
-        listed
-            .and_then(|thread| thread.status.as_ref())
-            .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
-    }) {
-        return Ok(SubmissionTarget::Queue);
-    }
-    let cwd = [snapshot, listed]
-        .into_iter()
-        .flatten()
-        .filter_map(|thread| thread.cwd.as_deref())
-        .find(|cwd| !cwd.trim().is_empty())
-        .ok_or_else(|| PeerError::InvalidMessage("thread working directory is unknown".into()))?;
-    let resume = snapshot.is_none_or(|thread| {
-        thread
-            .status
-            .as_ref()
-            .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::NotLoaded)
-    });
-    Ok(SubmissionTarget::Start { cwd, resume })
-}
-
-pub struct Submission<'a> {
-    pub thread_id: &'a str,
-    pub client_user_message_id: &'a str,
-    pub input: &'a [Input],
-    pub model: Option<&'a str>,
-    pub effort: Option<&'a str>,
-    pub service_tier: Option<&'a str>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SessionImage {
@@ -87,11 +28,6 @@ pub trait ClientExt {
         &self,
         operation: &O,
     ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError>;
-    async fn submit(
-        &self,
-        submission: &Submission<'_>,
-        target: SubmissionTarget<'_>,
-    ) -> Result<Option<String>, PeerError>;
     async fn models(&self) -> Result<ModelPage, PeerError>;
     async fn respond(&self, request: &ServerRequest, answer: &Answer) -> Result<(), PeerError>;
     async fn session_images(
@@ -115,63 +51,6 @@ impl ClientExt for Client {
         let id = uuid::Uuid::new_v4();
         O::subscription(&mut output, id);
         Ok(Some((output, updates, id)))
-    }
-
-    async fn submit(
-        &self,
-        submission: &Submission<'_>,
-        target: SubmissionTarget<'_>,
-    ) -> Result<Option<String>, PeerError> {
-        let Submission {
-            thread_id,
-            client_user_message_id,
-            input,
-            model,
-            effort,
-            service_tier,
-        } = *submission;
-        match target {
-            SubmissionTarget::Steer(turn_id) => {
-                self.call(&SteerTurn {
-                    thread_id: thread_id.to_owned(),
-                    client_user_message_id: client_user_message_id.to_owned(),
-                    input: input.to_vec(),
-                    expected_turn_id: turn_id.to_owned(),
-                })
-                .await?;
-                Ok(Some(turn_id.into()))
-            }
-            SubmissionTarget::Queue => {
-                self.call(&QueueTurn {
-                    thread_id: thread_id.to_owned(),
-                    client_user_message_id: client_user_message_id.to_owned(),
-                    input: input.to_vec(),
-                })
-                .await?;
-                Ok(None)
-            }
-            SubmissionTarget::Start { cwd, resume } => {
-                if resume {
-                    self.call(&ResumeThread {
-                        thread_id: thread_id.to_owned(),
-                        cwd: Some(cwd.to_owned()),
-                    })
-                    .await?;
-                }
-                let reply = self
-                    .call(&StartTurn {
-                        thread_id: thread_id.to_owned(),
-                        client_user_message_id: client_user_message_id.to_owned(),
-                        input: input.to_vec(),
-                        model: model.map(str::to_owned),
-                        effort: effort.map(str::to_owned),
-                        service_tier: service_tier.map(str::to_owned),
-                    })
-                    .await?;
-                let id = reply.turn.id;
-                Ok(Some(id))
-            }
-        }
     }
 
     async fn models(&self) -> Result<ModelPage, PeerError> {

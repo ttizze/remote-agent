@@ -2905,3 +2905,118 @@ async fn composer_catalog_uses_host_provider_and_excludes_disabled_entries() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = start_host(directory.path()).await;
+        let first = fixture.local().await.unwrap();
+        let thread = first
+            .peer
+            .call(&op::StartThread {
+                cwd: None,
+                model: None,
+            })
+            .await
+            .unwrap()
+            .thread
+            .id
+            .unwrap();
+        let input = rpc::Submission {
+            thread_id: thread.clone(),
+            client_user_message_id: "first-input".into(),
+            input: vec![rpc::Input::Text {
+                text: "[delayed-input] wait for another client".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        let (started, duplicate) = tokio::join!(first.peer.call(&input), first.peer.call(&input));
+        let started = started.unwrap();
+        assert_eq!(
+            duplicate.unwrap(),
+            started,
+            "concurrent identical input intents must share one provider submission"
+        );
+        assert!(started.turn_id.is_some());
+        first.peer.close().await;
+        let second = fixture.local().await.unwrap();
+        assert_eq!(
+            second.peer.call(&input).await.unwrap(),
+            started,
+            "a repeated ID must replay its receipt without another provider input"
+        );
+        let steered = second
+            .peer
+            .call(&rpc::Submission {
+                client_user_message_id: "second-input".into(),
+                input: vec![rpc::Input::Text {
+                    text: "additional input".into(),
+                }],
+                ..input
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            steered.turn_id, started.turn_id,
+            "the Host must steer its live turn without client execution state"
+        );
+        let (opened, mut events) = open_session(&second.peer, &json!(thread), 5).await;
+        let deliveries = &opened["response"]["thread"]["submissions"];
+        assert_eq!(
+            deliveries["first-input"]["accepted"]["turnId"],
+            json!(started.turn_id)
+        );
+        assert_eq!(
+            deliveries["second-input"]["accepted"]["turnId"],
+            json!(started.turn_id)
+        );
+        std::fs::write(directory.path().join("release-inputs"), "").unwrap();
+        // The fixture releases the first turn and its steered input in
+        // independent tasks. Observe both echoes before checking native history;
+        // the final-turn event is not a barrier for the other task's echo.
+        let mut echoed = std::collections::HashSet::new();
+        let mut finished = false;
+        while !finished
+            || !["first-input", "second-input"]
+                .iter()
+                .all(|id| echoed.contains(*id))
+        {
+            use agent_protocol::session::SessionChange;
+            let change: SessionChange = events.read().await.unwrap().expect("subscription closed");
+            let items = match change {
+                SessionChange::Turn { turn, completed } => {
+                    finished |= completed;
+                    turn.items.unwrap_or_default()
+                }
+                SessionChange::Item { item, .. } => vec![item],
+                _ => Vec::new(),
+            };
+            for item in items {
+                if item.kind.as_deref() == Some("userMessage")
+                    && let Some(id) = &item.client_id
+                {
+                    echoed.insert(id.clone());
+                }
+            }
+        }
+        let reopened = open_session(&second.peer, &json!(thread), 5).await.0;
+        let turns = reopened["response"]["thread"]["turns"].as_array().unwrap();
+        for id in ["first-input", "second-input"] {
+            assert_eq!(
+                turns
+                    .iter()
+                    .flat_map(|turn| turn["items"].as_array().unwrap())
+                    .filter(|item| item["clientId"] == id)
+                    .count(),
+                1
+            );
+        }
+        second.peer.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("Host submission routing stalled");
+}

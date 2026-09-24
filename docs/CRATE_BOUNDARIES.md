@@ -18,7 +18,10 @@ not depend on these bindings.
 owns workspace execution and sandboxed visualization-document generation;
 clients receive the resulting document. Host's dev-dependency on `agent-core`
 is solely for integration tests that exercise real client state and rendering
-against Host behavior.
+against Host behavior. Host also owns submission routing and delivery evidence;
+clients send `host/session/submit` intents and reconcile subscribed evidence with
+local drafts. The deterministic routing decision and delivery records live in
+`agent-protocol`; client caches never choose start, steer, queue, or resume.
 
 `python3 -B -m unittest discover -s scripts/tests` checks these production
 crate boundaries, including indirect local dependencies. Rust CI and quality

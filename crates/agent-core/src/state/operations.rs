@@ -1,11 +1,10 @@
 use super::*;
 use crate::{
-    client::{Submission, submission_target},
     peer::PeerError,
     store::{Execution, Outcome},
 };
 use agent_protocol::operations as rpc;
-use rpc::Input;
+use rpc::{Input, Submission};
 
 macro_rules! rpc_operation {
     ($parent:ident.$field:ident) => {

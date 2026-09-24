@@ -770,3 +770,23 @@ impl ReadItem {
         }
     }
 }
+
+/// Input intent. The Host chooses start, steer or queue from its current execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Submission {
+    pub thread_id: String,
+    pub client_user_message_id: String,
+    #[serde(with = "input_json")]
+    pub input: Vec<Input>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    #[serde(rename = "serviceTierForTurn")]
+    pub service_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmissionReceipt {
+    pub turn_id: Option<String>,
+}

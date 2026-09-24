@@ -85,6 +85,8 @@ pub struct Thread {
     pub capabilities: Option<crate::session::Capabilities>,
     #[serde(default)]
     pub requests: BTreeMap<String, Arc<crate::operations::ServerRequest>>,
+    #[serde(default)]
+    pub submissions: BTreeMap<String, crate::session::SubmissionDelivery>,
     pub id: Option<String>,
     pub name: Option<String>,
     pub cwd: Option<String>,

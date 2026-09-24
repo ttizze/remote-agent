@@ -2,16 +2,13 @@ use agent_core::client::ClientExt;
 #[allow(dead_code)]
 #[path = "support/host.rs"]
 mod host_fixture;
-use agent_core::{
-    client::{Submission, SubmissionTarget, submission_target},
-    state::operations::{
-        CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
-        ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings, ReviewWorkspace,
-        SelectAccount, StartAccountLogin, StartThread, UpdateWorktreeSettings,
-    },
+use agent_core::state::operations::{
+    CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
+    ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings, ReviewWorkspace,
+    SelectAccount, StartAccountLogin, StartThread, UpdateWorktreeSettings,
 };
 use agent_protocol::{
-    models::{ListQuery, Thread, WorktreeSettings},
+    models::{ListQuery, WorktreeSettings},
     operations::*,
 };
 use agent_transport::{client::Client, peer::PeerError};
@@ -59,9 +56,6 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             item_id: text(command, "itemId").to_owned()
         }),
         "sendTurn" => {
-            let snapshot: Option<Thread> =
-                serde_json::from_value(command["snapshot"].clone()).unwrap();
-            let listed: Option<Thread> = serde_json::from_value(command["listed"].clone()).unwrap();
             let input = &command["input"];
             let mut items = Vec::new();
             if !text(input, "text").is_empty() {
@@ -81,20 +75,17 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     }
                 });
             }
-            let target = submission_target(snapshot.as_ref(), listed.as_ref(), None)?;
             let reply = client
-                .submit(
-                    &Submission {
-                        thread_id: text(command, "threadId"),
-                        client_user_message_id: text(input, "clientUserMessageId"),
-                        input: &items,
-                        model: optional(command, "model"),
-                        effort: optional(command, "effort"),
-                        service_tier: optional(command, "serviceTierForTurn"),
-                    },
-                    target,
-                )
-                .await?;
+                .call(&Submission {
+                    thread_id: text(command, "threadId").into(),
+                    client_user_message_id: text(input, "clientUserMessageId").into(),
+                    input: items,
+                    model: optional(command, "model").map(str::to_owned),
+                    effort: optional(command, "effort").map(str::to_owned),
+                    service_tier: optional(command, "serviceTierForTurn").map(str::to_owned),
+                })
+                .await?
+                .turn_id;
             json!(reply)
         }
         "interruptTurn" => {
@@ -309,60 +300,6 @@ async fn operation_corpus() {
     }
 }
 
-#[test]
-fn submission_corpus() {
-    let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/submission.json")).unwrap();
-    assert_eq!(cases.len(), 9);
-    for case in cases {
-        let snapshot: Option<Thread> = serde_json::from_value(case["snapshot"].clone()).unwrap();
-        let listed: Option<Thread> = serde_json::from_value(case["listed"].clone()).unwrap();
-        let result = submission_target(snapshot.as_ref(), listed.as_ref(), None);
-        let expected = &case["expected"];
-        if expected["action"] == "reject" {
-            assert!(result.is_err());
-            continue;
-        }
-        let actual = match result.unwrap() {
-            SubmissionTarget::Steer(turn_id) => json!({"action":"steer","turnId":turn_id}),
-            SubmissionTarget::Queue => json!({"action":"queue"}),
-            SubmissionTarget::Start { cwd, resume } => {
-                json!({"action":"start","cwd":cwd,"resume":resume})
-            }
-        };
-        assert_eq!(actual, *expected, "{}", case["name"]);
-    }
-}
-
 fn normalize<T: serde::de::DeserializeOwned + serde::Serialize>(value: &Value) -> Value {
     serde_json::to_value(serde_json::from_value::<T>(value.clone()).unwrap()).unwrap()
-}
-
-#[test]
-fn current_idle_state_overrides_unfinished_history_for_submission() {
-    let mut thread: Thread = serde_json::from_value(json!({
-        "cwd":"/project", "status":{"type":"idle"},
-        "turns":[{"id":"old", "status":"inProgress"}]
-    }))
-    .unwrap();
-    for active in [None, Some(false)] {
-        assert_eq!(
-            submission_target(Some(&thread), None, active).unwrap(),
-            SubmissionTarget::Start {
-                cwd: "/project",
-                resume: false
-            }
-        );
-    }
-    thread.status = Some(serde_json::from_value(json!({"type":"active"})).unwrap());
-    assert_eq!(
-        submission_target(Some(&thread), None, Some(false)).unwrap(),
-        SubmissionTarget::Start {
-            cwd: "/project",
-            resume: false
-        }
-    );
-    assert_eq!(
-        submission_target(Some(&thread), None, Some(true)).unwrap(),
-        SubmissionTarget::Steer("old")
-    );
 }

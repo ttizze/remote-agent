@@ -105,6 +105,7 @@ results! {
     Transcription(crate::operations::Transcription),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
+    Submission(crate::operations::SubmissionReceipt),
     Started(crate::operations::StartedTurn), Queued(crate::operations::QueuedTurn),
     Unit(()), Text(String), Provider(#[serde(with = "json")] Value)
 }

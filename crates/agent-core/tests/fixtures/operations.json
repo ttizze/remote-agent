@@ -657,7 +657,7 @@
     },
     "exchanges": [
       {
-        "method": "turn/start",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "clientUserMessageId": "client-1",
@@ -671,9 +671,7 @@
         },
         "response": {
           "result": {
-            "turn": {
-              "id": "turn-1"
-            }
+            "turnId": "turn-1"
           }
         }
       }
@@ -703,7 +701,7 @@
     },
     "exchanges": [
       {
-        "method": "turn/start",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "clientUserMessageId": "client-1",
@@ -719,9 +717,7 @@
         },
         "response": {
           "result": {
-            "turn": {
-              "id": "turn-1"
-            }
+            "turnId": "turn-1"
           }
         }
       }
@@ -751,17 +747,7 @@
     },
     "exchanges": [
       {
-        "method": "thread/resume",
-        "params": {
-          "threadId": "thread-1",
-          "cwd": "/first"
-        },
-        "response": {
-          "result": {}
-        }
-      },
-      {
-        "method": "turn/start",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "clientUserMessageId": "client-1",
@@ -775,9 +761,7 @@
         },
         "response": {
           "result": {
-            "turn": {
-              "id": "turn-1"
-            }
+            "turnId": "turn-1"
           }
         }
       }
@@ -807,10 +791,16 @@
     },
     "exchanges": [
       {
-        "method": "thread/resume",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
-          "cwd": "/workspace"
+          "input": [
+            {
+              "type": "text",
+              "text": "hello"
+            }
+          ],
+          "clientUserMessageId": "client-1"
         },
         "response": {
           "error": {
@@ -858,7 +848,7 @@
     },
     "exchanges": [
       {
-        "method": "turn/steer",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "clientUserMessageId": "client-1",
@@ -868,11 +858,12 @@
               "text": "hello",
               "text_elements": []
             }
-          ],
-          "expectedTurnId": "turn-1"
+          ]
         },
         "response": {
-          "result": {}
+          "result": {
+            "turnId": "turn-1"
+          }
         }
       }
     ],
@@ -899,7 +890,7 @@
     },
     "exchanges": [
       {
-        "method": "thread/queue/add",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "clientUserMessageId": "client-1",
@@ -913,9 +904,7 @@
         },
         "response": {
           "result": {
-            "queuedSubmission": {
-              "id": "queued-1"
-            }
+            "turnId": null
           }
         }
       }
@@ -956,7 +945,7 @@
     },
     "exchanges": [
       {
-        "method": "turn/start",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "input": [
@@ -974,9 +963,7 @@
         },
         "response": {
           "result": {
-            "turn": {
-              "id": "turn-1"
-            }
+            "turnId": "turn-1"
           }
         }
       }
@@ -1018,7 +1005,7 @@
     },
     "exchanges": [
       {
-        "method": "turn/steer",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "input": [
@@ -1032,11 +1019,12 @@
               "name": "notes.txt"
             }
           ],
-          "clientUserMessageId": "client-1",
-          "expectedTurnId": "turn-1"
+          "clientUserMessageId": "client-1"
         },
         "response": {
-          "result": {}
+          "result": {
+            "turnId": "turn-1"
+          }
         }
       }
     ],
@@ -1074,7 +1062,7 @@
     },
     "exchanges": [
       {
-        "method": "thread/queue/add",
+        "method": "host/session/submit",
         "params": {
           "threadId": "thread-1",
           "input": [
@@ -1092,9 +1080,7 @@
         },
         "response": {
           "result": {
-            "queuedSubmission": {
-              "id": "queued-1"
-            }
+            "turnId": null
           }
         }
       }

@@ -329,7 +329,7 @@ async fn read_response_precedes_following_delta_until_subscription_ends() {
             .unwrap();
         writer.notify(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","turnId":"turn","itemId":"item","delta":" tail"}})).await.unwrap();
         writer.finish_updates().await;
-        writer
+        (writer, reader)
     });
     let result = tokio::time::timeout(
         Duration::from_secs(2),
@@ -338,7 +338,7 @@ async fn read_response_precedes_following_delta_until_subscription_ends() {
     .await
     .unwrap();
     assert_eq!(result.unwrap(), Outcome::Applied);
-    let _writer = server.await.unwrap();
+    let _connection = server.await.unwrap();
     wait_for(&store, |snapshot| {
         loaded_text(snapshot) == Some("base tail")
     })
@@ -499,7 +499,7 @@ async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
     assert_eq!(rendered.queued[0].data.title, "送信中…");
     writer.reply(&request, json!({ "result": {"thread": {"id":"created", "cwd":"/fixture", "status":{"type":"idle"}, "turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(request["method"], "turn/start");
+    assert_eq!(request["method"], "host/session/submit");
     assert_eq!(request["params"]["input"][0]["text"], "first message");
     writer.notify(json!({"method":"item/completed", "params":{"threadId":"created", "turnId":"turn", "item":{"id":"native", "type":"userMessage", "clientId":"client", "content":[{"type":"text", "text":"first message"}]}}})).await.unwrap();
     writer
@@ -546,7 +546,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
             client_user_message_id: "fixture-message".into(),
         });
         let request = read_after_reviews(&mut reader, &mut writer).await;
-        assert_eq!(request["method"], "turn/start");
+        assert_eq!(request["method"], "host/session/submit");
         assert_eq!(request["params"]["input"][0]["text"], "sent");
         assert_eq!(request["params"]["serviceTierForTurn"], "priority");
         assert!(store.snapshot().drafts["thread"].text.is_empty());
@@ -559,7 +559,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
             .await
             .unwrap();
         writer
-            .reply(&request, json!({"result":{"turn":{"id":"turn-new"}}}))
+            .reply(&request, json!({"result":{"turnId":"turn-new"}}))
             .await
             .unwrap();
         assert_eq!(
@@ -624,7 +624,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
         }
         writer.reply(&create, json!({"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}})).await.unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
-        assert_eq!(submit["method"], "turn/start");
+        assert_eq!(submit["method"], "host/session/submit");
         assert_eq!(submit["params"]["threadId"], "created");
         assert_eq!(submit["params"]["input"][0]["text"], "sent");
         assert!(
@@ -632,7 +632,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
             "dispatch must wait for submission, not just thread creation"
         );
         writer
-            .reply(&submit, json!({"result":{"turn":{"id":"turn"}}}))
+            .reply(&submit, json!({"result":{"turnId":"turn"}}))
             .await
             .unwrap();
         assert_eq!(
@@ -689,7 +689,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
         } else {
             writer.reply(&create, json!({"result":{"thread":{"id":"created","cwd":"/fixture","turns":[],"status":{"type":"idle"}}}})).await.unwrap();
             let submit = read_after_reviews(&mut reader, &mut writer).await;
-            assert_eq!(submit["method"], "turn/start");
+            assert_eq!(submit["method"], "host/session/submit");
             submit
         };
         writer
@@ -727,7 +727,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
             if fail_creation {
                 "host/thread/start"
             } else {
-                "turn/start"
+                "host/session/submit"
             }
         );
         if !fail_creation {
@@ -807,13 +807,13 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
             .await
             .unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
-        assert_eq!(submit["method"], "turn/start");
+        assert_eq!(submit["method"], "host/session/submit");
         assert_eq!(submit["params"]["input"][0]["text"], "original\nspoken");
         assert!(!transcribing.is_finished());
         let reply = if fail_send {
             json!({"error":{"code":-32000,"message":"send failed","delivery":"notSent"}})
         } else {
-            json!({"result":{"turn":{"id":"next"}}})
+            json!({"result":{"turnId":"next"}})
         };
         writer.reply(&submit, reply).await.unwrap();
         assert_eq!(transcribing.await.unwrap().is_err(), fail_send);
@@ -884,11 +884,11 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
         assert!(start["params"]["cwd"].is_null());
         writer.reply(&start, json!({"result":{"thread":{"id":"created","cwd":"/fixture","projectId":null,"status":{"type":"idle"},"turns":[]}}})).await.unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
-        assert_eq!(submit["method"], "turn/start");
+        assert_eq!(submit["method"], "host/session/submit");
         let input = json!([{"type":"text","text":"typed\nspoken"},{"type":"localImage","path":"/fixture/photo.png"}]);
         assert_eq!(submit["params"]["input"], input);
         writer
-            .reply(&submit, json!({"result":{"turn":{"id":"turn"}}}))
+            .reply(&submit, json!({"result":{"turnId":"turn"}}))
             .await
             .unwrap();
         writer.notify(json!({"method":"turn/completed","params":{"threadId":"created","turn":{"id":"turn","status":"completed","items":[
@@ -1326,9 +1326,9 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
         }
     });
     let request = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(request["method"], "turn/start");
+    assert_eq!(request["method"], "host/session/submit");
     writer
-        .reply(&request, json!({"result":{"turn":{"id":"new-turn"}}}))
+        .reply(&request, json!({"result":{"turnId":"new-turn"}}))
         .await
         .unwrap();
     assert_eq!(
@@ -1550,7 +1550,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
                 "host/session/open" => {
                     writer.current(request["params"]["session"]["id"].as_str().unwrap())
                 }
-                "turn/start" => json!({"turn":{"id":"turn"}}),
+                "host/session/submit" => json!({"turnId":"turn"}),
                 "host/thread/list" => {
                     let data = if request["params"]["searchTerm"] == "created" {
                         json!([{"id":"created","name":"created chat"}])
@@ -2245,8 +2245,6 @@ async fn close_ends_subscriptions_while_store_is_retained() {
 
 #[tokio::test]
 async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dictation() {
-    use agent_core::client::SubmissionTarget;
-    use agent_core::client::submission_target;
     use agent_core::state::{Activity, Navigation, PendingSubmission};
     let draft = Arc::new(Draft {
         text: "typed\nspoken".into(),
@@ -2292,10 +2290,12 @@ async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dict
         "typed\nspoken"
     );
     assert!(current.drafts["thread"].text.is_empty());
-    assert!(matches!(
-        submission_target(Some(&current.conversations["thread"]), None, None).unwrap(),
-        SubmissionTarget::Start { .. }
-    ));
+    assert!(
+        current.conversations["thread"]
+            .status
+            .as_ref()
+            .is_none_or(|status| status.kind != agent_protocol::models::ThreadStatusKind::Active)
+    );
     store.close().await.unwrap();
 }
 
@@ -2809,7 +2809,7 @@ async fn selected_invocations_reach_submission_and_return_after_failure() {
     );
     writer.reply(&request, json!({"result":{"thread":{"id":"created","cwd":"/fixture","status":{"type":"idle"},"turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
-    assert_eq!(request["method"], "turn/start");
+    assert_eq!(request["method"], "host/session/submit");
     assert_eq!(
         request["params"]["input"][1],
         json!({"type":"skill","name":"review","path":"/fixture/review/SKILL.md"})

@@ -659,7 +659,9 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.storage_scope = scope;
         }
         Event::SubmissionUnknown(id) => {
-            if let Some(pending) = shared_mut(&mut next.pending_submissions, &id) {
+            if let Some(pending) = shared_mut(&mut next.pending_submissions, &id)
+                && !pending.accepted
+            {
                 pending.delivery_unknown = true;
             }
         }
@@ -743,8 +745,10 @@ fn reset_session(snapshot: &mut Snapshot) {
     snapshot.composer_catalog = None;
     snapshot.subscriptions = Arc::default();
     for thread in Arc::make_mut(&mut snapshot.conversations).values_mut() {
-        if !thread.requests.is_empty() {
-            Arc::make_mut(thread).requests.clear();
+        if !thread.requests.is_empty() || !thread.submissions.is_empty() {
+            let thread = Arc::make_mut(thread);
+            thread.requests.clear();
+            thread.submissions.clear();
         }
     }
     if !snapshot.requests.is_empty() {
@@ -935,14 +939,6 @@ fn submission(
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     next.error = None;
-    if let Some(reason) = thread_id
-        .as_ref()
-        .and_then(|id| previous.conversations.get(id))
-        .and_then(|thread| crate::session::input_unavailable_reason(thread))
-    {
-        next.error = Some(reason);
-        return (next, Vec::new());
-    }
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
     if let Some(current) = shared_mut(&mut next.drafts, &draft_key) {
         if current.text == cleared.text {
@@ -1011,12 +1007,50 @@ fn append_transcript(text: &mut String, transcript: &str) {
 }
 
 fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &str) {
+    if snapshot.pending_submissions.is_empty() {
+        return;
+    }
     let Some(thread) = snapshot.conversations.get(thread_id) else {
         return;
     };
+    let deliveries: Vec<_> = snapshot
+        .pending_submissions
+        .iter()
+        .filter(|(_, pending)| pending.draft_key == thread_id)
+        .filter_map(|(id, _)| {
+            thread
+                .submissions
+                .get(id)
+                .map(|delivery| (id.clone(), delivery.clone()))
+        })
+        .collect();
+    for (id, delivery) in deliveries {
+        use crate::session::SubmissionDelivery;
+        if delivery == SubmissionDelivery::Rejected {
+            *snapshot = reduce_event(snapshot, Event::SubmissionFailed(id)).0;
+            continue;
+        }
+        let mut pending = (*snapshot.pending_submissions[&id]).clone();
+        match delivery {
+            SubmissionDelivery::Sending => pending.delivery_unknown = false,
+            SubmissionDelivery::Accepted { turn_id } => {
+                pending.accepted = true;
+                pending.delivery_unknown = false;
+                if turn_id.is_some() && pending.turn_id != turn_id {
+                    pending.turn_id = turn_id;
+                    pending.after_item_id = None;
+                }
+            }
+            SubmissionDelivery::Unknown => pending.delivery_unknown = true,
+            SubmissionDelivery::Rejected => unreachable!(),
+        }
+        if pending != *snapshot.pending_submissions[&id] {
+            Arc::make_mut(&mut snapshot.pending_submissions).insert(id, Arc::new(pending));
+        }
+    }
+    let thread = &snapshot.conversations[thread_id];
     let echoed = |id: &String, pending: &Arc<PendingSubmission>| {
-        (pending.accepted || pending.delivery_unknown)
-            && pending.draft_key == thread_id
+        pending.draft_key == thread_id
             && thread
                 .turns
                 .iter()

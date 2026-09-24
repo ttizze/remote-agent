@@ -194,7 +194,11 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
                 );
             }
             if index == 0 {
-                assert_eq!(finished.pending_submissions.len(), 1);
+                assert_eq!(
+                    finished.pending_submissions.len(),
+                    usize::from(!echo),
+                    "a Host-delivered native echo proves acceptance even when the RPC reply is lost"
+                );
             }
         }
         assert!(finished.pending_submissions.is_empty());
@@ -1081,4 +1085,63 @@ fn editing_a_file_shares_other_drafts_and_preserves_previous_snapshots() {
         &original.file_drafts["/edited"],
         &edited.file_drafts["/edited"]
     ));
+}
+
+#[test]
+fn host_delivery_replay_resolves_unknown_input_without_overwriting_new_draft() {
+    use agent_protocol::session::SubmissionDelivery;
+    for delivery in [
+        SubmissionDelivery::Sending,
+        SubmissionDelivery::Accepted {
+            turn_id: Some("live".into()),
+        },
+        SubmissionDelivery::Rejected,
+    ] {
+        let mut original =
+            initial(serde_json::from_value(json!({"id":"thread","turns":[]})).unwrap());
+        Arc::make_mut(&mut original.drafts).insert(
+            "thread".into(),
+            Arc::new(Draft {
+                text: "sent text".into(),
+                ..Default::default()
+            }),
+        );
+        let (pending, _) = reduce(
+            &original,
+            Event::Intent(Intent::Submit {
+                thread_id: Some("thread".into()),
+                client_user_message_id: "input".into(),
+            }),
+        );
+        let (pending, _) = reduce(&pending, Event::SubmissionUnknown("input".into()));
+        let (mut pending, _) = reduce(
+            &pending,
+            Event::Intent(Intent::SetDraftText {
+                thread_id: "thread".into(),
+                text: "new text".into(),
+            }),
+        );
+        let mut thread = (*pending.conversations["thread"]).clone();
+        thread.submissions.insert("input".into(), delivery.clone());
+        op::ReadThread::new("thread".into()).apply(&mut pending, reply(thread));
+        if delivery == SubmissionDelivery::Rejected {
+            assert!(pending.pending_submissions.is_empty());
+            assert_eq!(pending.drafts["thread"].text, "sent text\nnew text");
+        } else {
+            let input = &pending.pending_submissions["input"];
+            assert!(!input.delivery_unknown);
+            assert_eq!(
+                input.accepted,
+                matches!(delivery, SubmissionDelivery::Accepted { .. })
+            );
+            assert_eq!(pending.drafts["thread"].text, "new text");
+            if matches!(delivery, SubmissionDelivery::Accepted { .. }) {
+                let (lost_reply, _) = reduce(&pending, Event::SubmissionUnknown("input".into()));
+                assert!(
+                    !lost_reply.pending_submissions["input"].delivery_unknown,
+                    "a lost RPC reply cannot override Host acceptance already received through the subscription"
+                );
+            }
+        }
+    }
 }
