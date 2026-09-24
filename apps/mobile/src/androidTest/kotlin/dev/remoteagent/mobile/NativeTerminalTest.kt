@@ -15,6 +15,7 @@ import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
+import dev.remoteagent.core.terminalHandle
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
@@ -58,7 +59,9 @@ class NativeTerminalTest {
                     model.busy || !model.snapshot.connected() || model.snapshot.models().isEmpty()
                 }) delay(20)
             }
-            perform(Intent.NewChat(requireNotNull(InstrumentationRegistry.getArguments().getString("cwd"))))
+            val cwd = requireNotNull(InstrumentationRegistry.getArguments().getString("cwd"))
+            val handle = terminalHandle(cwd)
+            perform(Intent.NewChat(cwd))
             val visible = mutableStateOf(true)
             compose.setContent {
                 MaterialTheme {
@@ -66,6 +69,13 @@ class NativeTerminalTest {
                 }
             }
             val device = UiDevice.getInstance(instrumentation)
+            fun awaitTerminalReady() {
+                compose.waitUntil(10_000) {
+                    model.snapshot.terminalView(handle)?.let { it.acceptsInput && !it.loading } == true
+                }
+                assertFalse(device.hasObject(By.text("実行中")))
+                assertFalse(device.hasObject(By.text("起動中")))
+            }
             fun type(command: String) {
                 compose.waitUntil(10_000) { device.hasObject(By.res("dev.remoteagent.mobile", "native_terminal")) }
                 device.findObject(By.res("dev.remoteagent.mobile", "native_terminal")).click()
@@ -73,13 +83,13 @@ class NativeTerminalTest {
                 instrumentation.sendStringSync(command)
                 device.pressKeyCode(android.view.KeyEvent.KEYCODE_ENTER)
             }
-            compose.waitUntil(10_000) { device.hasObject(By.text("実行中")) }
+            awaitTerminalReady()
             type("BEX_NATIVE=17")
             assertTrue(device.takeScreenshot(File(base.getExternalFilesDir(null), "terminal-input.png")))
             device.findObject(By.text("閉じる")).click()
             compose.waitUntil(10_000) { !visible.value }
             compose.runOnIdle { visible.value = true }
-            compose.waitUntil(10_000) { device.hasObject(By.text("実行中")) }
+            awaitTerminalReady()
             type("exit \$BEX_NATIVE")
             compose.waitUntil(10_000) { device.hasObject(By.text("終了 · 17")) }
             assertTrue(device.takeScreenshot(File(base.getExternalFilesDir(null), "terminal-retained.png")))
