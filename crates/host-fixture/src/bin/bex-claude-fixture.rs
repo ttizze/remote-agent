@@ -1,5 +1,5 @@
-//! Deterministic external Claude Code boundary. All conversation state and
-//! tool side effects live in the explicitly supplied working directory.
+//! Deterministic external Claude Code boundary. Conversation history lives in
+//! native storage; tool side effects and input traces use the working directory.
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -134,14 +134,18 @@ fn main() {
         writeln!(trace, "{}", std::env::var("CLAUDE_CONFIG_DIR").unwrap()).unwrap();
     }
     let path = format!("claude-session-{session}.json");
+    let history = Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap())
+        .join("projects")
+        .join("fixture-native-project")
+        .join(format!("{session}.inputs.json"));
     let mut inputs: Vec<Value> = if option("--resume").is_some() {
         serde_json::from_slice(
-            &fs::read(&path).expect("resume must find the original session in its original cwd"),
+            &fs::read(&history).expect("resume must find the original session in native storage"),
         )
         .unwrap()
     } else {
         assert!(
-            !Path::new(&path).exists(),
+            !history.exists(),
             "a new session cannot overwrite a previous session"
         );
         Vec::new()
@@ -211,7 +215,10 @@ fn main() {
                 inputs.push(
                     json!({"content":content,"model":option("--model"),"effort":option("--effort"),"pid":std::process::id()}),
                 );
-                fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
+                let bytes = serde_json::to_vec(&inputs).unwrap();
+                fs::create_dir_all(history.parent().unwrap()).unwrap();
+                fs::write(&history, &bytes).unwrap();
+                fs::write(&path, bytes).unwrap();
                 emit(json!({"type":"system","subtype":"init","session_id":session}));
                 let text = content
                     .as_array()

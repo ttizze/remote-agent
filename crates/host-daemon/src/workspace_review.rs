@@ -1,5 +1,9 @@
 use anyhow::{Context as _, Result, anyhow};
-use std::{collections::HashMap, path::PathBuf, process::Command};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use agent_protocol::models::ChangedFile as WorkspaceFileChange;
 pub use agent_protocol::models::WorkspaceReview;
@@ -11,6 +15,17 @@ pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview> {
 }
 
 fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
+    let review = review_existing_workspace(&cwd);
+    // Deletion can race any Git command, not just the initial path lookup.
+    if review.is_err()
+        && matches!(std::fs::metadata(&cwd), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(empty_review());
+    }
+    review
+}
+
+fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
     let cwd = cwd
         .canonicalize()
         .context("working directory is unavailable")?;
@@ -34,13 +49,7 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
         return Err(anyhow!(crate::git::failure(&membership)));
     }
     if no_repository || membership.stdout.trim_ascii() == b"false" {
-        return Ok(WorkspaceReview {
-            branch: String::new(),
-            additions: 0,
-            deletions: 0,
-            files: Vec::new(),
-            diff: String::new(),
-        });
+        return Ok(empty_review());
     }
     let branch = crate::git::text(&cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .or_else(|_| crate::git::text(&cwd, &["rev-parse", "--short", "HEAD"]))?
@@ -112,6 +121,16 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
         files,
         diff,
     })
+}
+
+fn empty_review() -> WorkspaceReview {
+    WorkspaceReview {
+        branch: String::new(),
+        additions: 0,
+        deletions: 0,
+        files: Vec::new(),
+        diff: String::new(),
+    }
 }
 
 fn parse_git_status(output: &[u8]) -> Vec<WorkspaceFileChange> {
@@ -205,9 +224,14 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_paths_and_broken_git_metadata_remain_errors() {
+    fn deleted_workspaces_have_no_changes_but_invalid_workspaces_remain_errors() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(collect_workspace_review(directory.path().join("missing")).is_err());
+        assert!(
+            collect_workspace_review(directory.path().join("missing"))
+                .unwrap()
+                .files
+                .is_empty()
+        );
         let file = directory.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
         assert!(collect_workspace_review(file).is_err());

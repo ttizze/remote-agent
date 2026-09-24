@@ -785,6 +785,7 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         );
         until(&store, |snapshot| {
             snapshot.requests.len() == 1
+                && !snapshot.activity.active[&codex_id]
                 && snapshot.conversations[&codex_id].turns.as_ref().unwrap()[0]
                     .status
                     .as_deref()
@@ -1035,6 +1036,75 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
     store.close().await.unwrap();
     endpoint.close().await;
     fixture.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the_conversation() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "--quiet", "--initial-branch=main"]);
+        git(
+            &project,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        );
+        std::fs::write(
+            root.join("bex-worktrees.json"),
+            json!({"settings":{"createOnNewSession":true}}).to_string(),
+        )
+        .unwrap();
+        let fixture = host(&root, Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store
+            .dispatch(Intent::NewChat {
+                cwd: project.to_string_lossy().into_owned(),
+            })
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::SelectModel {
+                thread_id: store.snapshot().navigation.draft_key.clone(),
+                model: "claude:default".into(),
+            })
+            .await
+            .unwrap();
+        let id = send(&store, "first", "before-removal").await;
+        let snapshot = completed(&store, &id, 1, "completed").await;
+        let cwd = snapshot.navigation.cwd.clone();
+        let inputs_path = Path::new(&cwd).join(format!(
+            "claude-session-{}.json",
+            id.strip_prefix("claude:").unwrap()
+        ));
+        let before: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+        std::fs::remove_dir_all(&cwd).unwrap();
+        assert_eq!(send(&store, "second", "after-removal").await, id);
+        let snapshot = completed(&store, &id, 2, "completed").await;
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert_eq!(snapshot.navigation.cwd, cwd);
+        let after: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+        assert_ne!(
+            before[0]["pid"], after[1]["pid"],
+            "deleted cwd must not reuse the retained process"
+        );
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("Claude worktree recovery deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

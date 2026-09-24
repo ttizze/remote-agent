@@ -12,7 +12,15 @@ use std::{
 #[serde(default, rename_all = "camelCase")]
 struct State {
     settings: WorktreeSettings,
-    workspace_roots: HashMap<String, String>,
+    workspace_roots: HashMap<String, Workspace>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Workspace {
+    project_path: String,
+    branch: String,
+    removed: bool,
 }
 
 pub(crate) struct Worktrees {
@@ -36,7 +44,9 @@ impl Worktrees {
             let mut entries = state
                 .workspace_roots
                 .into_iter()
-                .map(|(path, project_path)| {
+                .filter(|(_, workspace)| !workspace.removed)
+                .map(|(path, workspace)| {
+                    let project_path = workspace.project_path;
                     let (branch, blocked_reason) = inspect(&path, &project_path)
                         .unwrap_or_else(|error| (String::new(), Some(format!("{error:#}"))));
                     Worktree {
@@ -59,15 +69,17 @@ impl Worktrees {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
-            let root = state
+            let workspace = state
                 .workspace_roots
-                .get(&target)
+                .get_mut(&target)
                 .context("Bexが作成したワークツリーではありません。")?;
+            let root = &workspace.project_path;
             if !already_removed(&target, root)? {
-                let (_, blocked) = inspect(&target, root)?;
+                let (branch, blocked) = inspect(&target, root)?;
                 if let Some(reason) = blocked {
                     return Err(anyhow!(reason));
                 }
+                workspace.branch = branch;
                 // Git rechecks tracked/untracked changes and locks at removal time.
                 // Keep the branch so commits remain reachable even if not merged.
                 crate::git::text(Path::new(root), &["worktree", "remove", "--", &target])?;
@@ -83,8 +95,89 @@ impl Worktrees {
             {
                 let _ = fs::remove_dir(parent);
             }
-            state.workspace_roots.remove(&target);
+            workspace.removed = true;
             save(&path, &state)
+        })
+        .await?
+    }
+
+    /// Recreate a deleted checkout at its persisted path so provider sessions
+    /// and every client keep using the same working directory.
+    pub(crate) async fn ensure_available(&self, cwd: &str) -> Result<Option<PathBuf>> {
+        let _guard = self.lock.lock().await;
+        let path = self.path.clone();
+        let cwd = PathBuf::from(cwd);
+        tokio::task::spawn_blocking(move || {
+            match fs::metadata(&cwd) {
+                Ok(metadata) if metadata.is_dir() => return Ok(None),
+                Ok(_) => return Err(anyhow!("working directory is not a directory")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let mut state = read(&path)?;
+            let (target, workspace) = state
+                .workspace_roots
+                .iter_mut()
+                .filter(|(target, _)| cwd.starts_with(target))
+                .max_by_key(|(target, _)| target.len())
+                .context("working directory is unavailable")?;
+            let destination = Path::new(target);
+            // A missing subdirectory in an existing checkout is not a deleted worktree.
+            match fs::symlink_metadata(destination) {
+                Ok(_) => return Err(anyhow!("working directory is unavailable")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let root = Path::new(&workspace.project_path);
+            let listing = crate::git::text(root, &["worktree", "list", "--porcelain", "-z"])?;
+            let entry = format!("worktree {target}");
+            let registered = listing
+                .split("\0\0")
+                .find(|record| record.split('\0').next() == Some(entry.as_str()));
+            if let Some(branch) = registered.and_then(|record| {
+                record
+                    .split('\0')
+                    .find_map(|field| field.strip_prefix("branch refs/heads/"))
+            }) {
+                workspace.branch = branch.to_owned();
+            }
+            let branch_ref = format!("refs/heads/{}", workspace.branch);
+            let has_branch =
+                crate::git::output(root, &["show-ref", "--verify", "--quiet", &branch_ref]).is_ok();
+            let branch_entry = format!("branch {branch_ref}");
+            if listing.split("\0\0").any(|record| {
+                record.split('\0').next() != Some(entry.as_str())
+                    && record.split('\0').any(|field| field == branch_entry)
+            }) {
+                return Err(anyhow!("worktree branch is already checked out elsewhere"));
+            }
+            let base = if has_branch {
+                None
+            } else {
+                Some(default_base(root)?)
+            };
+            let relative_cwd = cwd.strip_prefix(destination)?;
+            create_checkout(
+                root,
+                destination,
+                &workspace.branch,
+                base.as_deref(),
+                registered.is_some(),
+                if state.settings.copy_on_create {
+                    &state.settings.copy_paths
+                } else {
+                    &[]
+                },
+                relative_cwd,
+            )?;
+            workspace.removed = false;
+            let recreated = destination.to_path_buf();
+            let project = workspace.project_path.clone();
+            let branch = base.as_ref().map(|_| workspace.branch.clone());
+            save(&path, &state).map_err(|error| {
+                discard_checkout(Path::new(&project), &recreated, branch.as_deref(), error)
+            })?;
+            Ok(Some(recreated))
         })
         .await?
     }
@@ -135,7 +228,7 @@ impl Worktrees {
                 .workspace_roots
                 .get(root.to_str().context("project path is not UTF-8")?)
             {
-                Some(original) => PathBuf::from(original),
+                Some(workspace) => PathBuf::from(&workspace.project_path),
                 None => PathBuf::from(
                     crate::git::text(&root, &["worktree", "list", "--porcelain", "-z"])?
                         .split('\0')
@@ -184,62 +277,34 @@ impl Worktrees {
                     .file_name()
                     .context("repository has no folder name")?,
             );
-            crate::platform::create_state_directory(&destination)?;
             let branch = format!("bex/{}", session.file_name().unwrap().to_string_lossy());
-            let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
-            if let Err(error) = crate::git::text(
+            let target = create_checkout(
                 &root,
-                &["worktree", "add", "-b", &branch, destination_text, "HEAD"],
-            ) {
-                let _ = fs::remove_dir(&destination);
-                return Err(error);
-            }
-            let prepared = (|| {
+                &destination,
+                &branch,
+                Some("HEAD"),
+                false,
                 if state.settings.copy_on_create {
-                    for entry in &state.settings.copy_paths {
-                        let relative = relative_path(entry)?;
-                        let source = root.join(relative);
-                        match fs::symlink_metadata(&source) {
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                            Err(e) => return Err(e.into()),
-                            Ok(_) => {}
-                        }
-                        // Check every ancestor as well as the leaf before following it.
-                        no_symlinks(&root, relative)?;
-                        copy(&source, &destination.join(relative))?;
-                    }
-                }
-                let target = if relative_cwd.as_os_str().is_empty() {
-                    destination.clone()
+                    &state.settings.copy_paths
                 } else {
-                    destination.join(relative_cwd)
-                };
-                if !target.is_dir() {
-                    return Err(anyhow!("working directory does not exist in HEAD"));
-                }
-                state.workspace_roots.insert(
-                    destination_text.to_owned(),
-                    original.to_string_lossy().into_owned(),
-                );
-                save(&path, &state)?;
-                Ok(target)
-            })();
-            match prepared {
-                Ok(target) => Ok(Some(target)),
-                Err(error) => {
-                    let cleanup = crate::git::text(
-                        &root,
-                        &["worktree", "remove", "--force", destination_text],
-                    )
-                    .and_then(|_| crate::git::text(&root, &["branch", "-D", &branch]));
-                    match cleanup {
-                        Ok(_) => Err(error),
-                        Err(cleanup) => {
-                            Err(error.context(format!("worktree cleanup failed: {cleanup:#}")))
-                        }
-                    }
-                }
-            }
+                    &[]
+                },
+                relative_cwd,
+            )?;
+            state.workspace_roots.insert(
+                destination
+                    .to_str()
+                    .context("worktree path is not UTF-8")?
+                    .to_owned(),
+                Workspace {
+                    project_path: original.to_string_lossy().into_owned(),
+                    branch: branch.clone(),
+                    removed: false,
+                },
+            );
+            save(&path, &state)
+                .map_err(|error| discard_checkout(&root, &destination, Some(&branch), error))?;
+            Ok(Some(target))
         })
         .await?
     }
@@ -375,7 +440,16 @@ fn already_removed(path: &str, project: &str) -> Result<bool> {
 
 pub(crate) async fn workspace_roots(project_state: &Path) -> Result<HashMap<String, String>> {
     let path = project_state.with_file_name("bex-worktrees.json");
-    tokio::task::spawn_blocking(move || read(&path).map(|state| state.workspace_roots)).await?
+    tokio::task::spawn_blocking(move || {
+        read(&path).map(|state| {
+            state
+                .workspace_roots
+                .into_iter()
+                .map(|(path, workspace)| (path, workspace.project_path))
+                .collect()
+        })
+    })
+    .await?
 }
 
 fn read(path: &Path) -> Result<State> {
@@ -398,6 +472,114 @@ fn save(path: &Path, state: &State) -> Result<()> {
             crate::platform::private_file_options(),
         )
         .map_err(Into::into)
+}
+
+fn default_base(root: &Path) -> Result<String> {
+    let remote = crate::git::text(
+        root,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .map(|branch| branch.trim().to_owned());
+    let local = remote
+        .as_deref()
+        .and_then(|branch| branch.strip_prefix("refs/remotes/origin/"))
+        .map(|branch| format!("refs/heads/{branch}"));
+    [
+        local.as_deref(),
+        remote.as_deref(),
+        Some("refs/heads/main"),
+        Some("refs/heads/master"),
+        Some("HEAD"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|branch| crate::git::text(root, &["rev-parse", "--verify", branch]).ok())
+    .map(|head| head.trim().to_owned())
+    .context("repository default branch is unavailable")
+}
+
+/// Both fresh and recreated worktrees use the same checkout, copy and rollback rules.
+/// The caller owns persisting the registry after successful creation.
+fn create_checkout(
+    source: &Path,
+    destination: &Path,
+    branch: &str,
+    new_branch_base: Option<&str>,
+    replace_missing: bool,
+    copy_paths: &[String],
+    relative_cwd: &Path,
+) -> Result<PathBuf> {
+    let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
+    let mut args = vec!["worktree", "add"];
+    // One --force replaces a missing registration but continues to respect locks.
+    if replace_missing {
+        args.push("--force");
+    }
+    if new_branch_base.is_some() {
+        args.extend(["-b", branch]);
+    }
+    args.extend([destination_text, new_branch_base.unwrap_or(branch)]);
+    if let Some(parent) = destination.parent() {
+        crate::platform::create_state_directory(parent)?;
+    }
+    crate::platform::create_state_directory(destination)?;
+    if let Err(error) = crate::git::text(source, &args) {
+        let _ = fs::remove_dir(destination);
+        return Err(error);
+    }
+    let prepared = (|| {
+        for entry in copy_paths {
+            let relative = relative_path(entry)?;
+            let path = source.join(relative);
+            match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
+            }
+            no_symlinks(source, relative)?;
+            copy(&path, &destination.join(relative))?;
+        }
+        let target = if relative_cwd.as_os_str().is_empty() {
+            destination.to_path_buf()
+        } else {
+            destination.join(relative_cwd)
+        };
+        if !target.is_dir() {
+            return Err(anyhow!("working directory does not exist in the checkout"));
+        }
+        Ok(target)
+    })();
+    prepared.map_err(|error| {
+        discard_checkout(source, destination, new_branch_base.map(|_| branch), error)
+    })
+}
+
+fn discard_checkout(
+    source: &Path,
+    destination: &Path,
+    new_branch: Option<&str>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let cleanup = (|| -> Result<()> {
+        crate::git::text(
+            source,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                destination.to_str().context("worktree path is not UTF-8")?,
+            ],
+        )?;
+        if let Some(branch) = new_branch {
+            crate::git::text(source, &["branch", "-D", branch])?;
+        }
+        Ok(())
+    })();
+    match cleanup {
+        Ok(_) => error,
+        Err(cleanup) => error.context(format!("worktree cleanup failed: {cleanup:#}")),
+    }
 }
 
 fn relative_path(value: &str) -> Result<&Path> {
@@ -505,7 +687,7 @@ mod tests {
     fn repository() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
-        crate::git::text(root, &["init", "--quiet"]).unwrap();
+        crate::git::text(root, &["init", "--quiet", "--initial-branch=main"]).unwrap();
         fs::write(root.join("tracked.txt"), "committed\n").unwrap();
         fs::write(root.join("config.txt"), "default\n").unwrap();
         fs::write(root.join(".gitignore"), ".env\nlocal/\n").unwrap();
@@ -527,6 +709,161 @@ mod tests {
         )
         .unwrap();
         directory
+    }
+
+    #[tokio::test]
+    async fn deleted_worktrees_are_recreated_on_send_even_when_creation_is_disabled() {
+        for removal in ["managed", "git", "filesystem"] {
+            let repository = repository();
+            let root = repository.path().canonicalize().unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let projects = directory.path().join("projects.json");
+            let store = Worktrees::new(&projects);
+            store
+                .configure(Some(json!({"createOnNewSession":true})))
+                .await
+                .unwrap();
+            let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
+            fs::write(cwd.join("tracked.txt"), "worktree commit").unwrap();
+            crate::git::text(&cwd, &["add", "tracked.txt"]).unwrap();
+            crate::git::text(
+                &cwd,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-m",
+                    "worktree change",
+                ],
+            )
+            .unwrap();
+            let branch = crate::git::text(&cwd, &["branch", "--show-current"]).unwrap();
+            let head = crate::git::text(&cwd, &["rev-parse", "HEAD"]).unwrap();
+            match removal {
+                "managed" => store.remove(cwd.to_str().unwrap().into()).await.unwrap(),
+                "git" => {
+                    crate::git::text(&root, &["worktree", "remove", cwd.to_str().unwrap()])
+                        .unwrap();
+                }
+                _ => fs::remove_dir_all(&cwd).unwrap(),
+            }
+            fs::write(root.join(".env"), "local configuration").unwrap();
+            store
+                .configure(Some(
+                    json!({"createOnNewSession":false,"copyOnCreate":true,"copyPaths":[".env"]}),
+                ))
+                .await
+                .unwrap();
+            let restarted = Worktrees::new(&projects);
+            let (first, second) = tokio::join!(
+                restarted.ensure_available(cwd.to_str().unwrap()),
+                restarted.ensure_available(cwd.to_str().unwrap()),
+            );
+            let recreated: Vec<_> = [first.unwrap(), second.unwrap()]
+                .into_iter()
+                .flatten()
+                .collect();
+            assert_eq!(recreated, std::slice::from_ref(&cwd));
+            assert_eq!(
+                crate::git::text(&cwd, &["branch", "--show-current"]).unwrap(),
+                branch
+            );
+            assert_eq!(
+                crate::git::text(&cwd, &["rev-parse", "HEAD"]).unwrap(),
+                head
+            );
+            assert_eq!(
+                fs::read_to_string(cwd.join(".env")).unwrap(),
+                "local configuration"
+            );
+            assert_eq!(restarted.list().await.unwrap().len(), 1);
+            fs::write(cwd.join("keep.txt"), "uncommitted").unwrap();
+            restarted
+                .ensure_available(cwd.to_str().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(cwd.join("keep.txt")).unwrap(),
+                "uncommitted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deleted_branch_uses_default_branch_and_failed_copy_can_be_retried() {
+        let repository = repository();
+        let root = repository.path().canonicalize().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = Worktrees::new(&directory.path().join("projects.json"));
+        store
+            .configure(Some(json!({"createOnNewSession":true})))
+            .await
+            .unwrap();
+        let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
+        let branch = crate::git::text(&cwd, &["branch", "--show-current"]).unwrap();
+        store.remove(cwd.to_str().unwrap().into()).await.unwrap();
+        crate::git::text(&root, &["branch", "-D", branch.trim()]).unwrap();
+        crate::git::text(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        crate::git::text(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .unwrap();
+        crate::git::text(
+            &root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "advance local default",
+            ],
+        )
+        .unwrap();
+        // A symlink in a configured copy path must fail without leaving a checkout.
+        #[cfg(unix)]
+        {
+            symlink(root.join("tracked.txt"), root.join("unsafe-copy")).unwrap();
+            store
+                .configure(Some(
+                    json!({"copyOnCreate":true,"copyPaths":["unsafe-copy"]}),
+                ))
+                .await
+                .unwrap();
+            assert!(store.ensure_available(cwd.to_str().unwrap()).await.is_err());
+            assert!(!cwd.exists());
+        }
+        store.configure(Some(json!({}))).await.unwrap();
+        store.ensure_available(cwd.to_str().unwrap()).await.unwrap();
+        assert_eq!(
+            crate::git::text(&cwd, &["rev-parse", "HEAD"]).unwrap(),
+            crate::git::text(&root, &["rev-parse", "main"]).unwrap()
+        );
+        assert!(
+            store
+                .ensure_available(cwd.join("missing").to_str().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .ensure_available(root.join("unknown").to_str().unwrap())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -610,7 +947,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, other.to_str().unwrap());
         assert!(
-            !workspace_roots(&state)
+            workspace_roots(&state)
                 .await
                 .unwrap()
                 .contains_key(&first_path)
@@ -878,7 +1215,11 @@ mod tests {
             if registered {
                 state.workspace_roots.insert(
                     legacy.to_str().unwrap().into(),
-                    root.to_str().unwrap().into(),
+                    Workspace {
+                        project_path: root.to_str().unwrap().into(),
+                        branch: "legacy".into(),
+                        removed: false,
+                    },
                 );
             }
             save(&projects.with_file_name("bex-worktrees.json"), &state).unwrap();

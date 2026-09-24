@@ -353,6 +353,23 @@ impl HostRpcService {
             } else {
                 None
             };
+            let _workspace_read = if matches!(
+                message,
+                Call::Submit(_)
+                    | Call::QueueTurn(_)
+                    | Call::StartThread(_)
+                    | Call::ResumeThread(_)
+                    | Call::StartTurn(_)
+                    | Call::SteerTurn(_)
+                    | Call::StartTerminal(_)
+                    | Call::WriteFile(_)
+                    | Call::Upload(_)
+                    | Call::ReviewWorkspace(_)
+            ) {
+                Some(self.inner.worktree_access.read().await)
+            } else {
+                None
+            };
             if let Some((target, id)) = submission {
                 if matches!(message, Call::Submit(_))
                     && let Some(receipt) = self.inner.router.submission_receipt(target, id)
@@ -465,7 +482,21 @@ impl HostRpcService {
                 input: input.input.clone(),
             }),
             SubmissionTarget::Start { cwd, resume } => {
-                if resume {
+                let recreated = self
+                    .inner
+                    .worktrees
+                    .ensure_available(cwd)
+                    .await
+                    .map_err(|error| Failure::new("worktree_creation_failed", error))?;
+                if let Some(directory) = &recreated
+                    && let Some(claude) = self.inner.claude.get()
+                {
+                    claude
+                        .discard_workspace_processes(directory)
+                        .await
+                        .map_err(|error| Failure::new("workspace_resume_failed", error))?;
+                }
+                if resume || recreated.is_some() {
                     self.request(
                         session,
                         &Call::ResumeThread(ResumeThread {
@@ -742,20 +773,6 @@ impl HostRpcService {
                 .await
                 .map(Into::into);
         }
-        let _workspace_read = if matches!(
-            request,
-            Call::StartThread(_)
-                | Call::ResumeThread(_)
-                | Call::StartTurn(_)
-                | Call::SteerTurn(_)
-                | Call::StartTerminal(_)
-                | Call::WriteFile(_)
-                | Call::Upload(_)
-        ) {
-            Some(self.inner.worktree_access.read().await)
-        } else {
-            None
-        };
         let claude_target = target_session
             .filter(|target| target.provider == agent_protocol::session::ProviderKind::Claude);
         if claude_target.is_none()

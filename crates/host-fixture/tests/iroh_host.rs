@@ -2292,6 +2292,22 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
         assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
         let listed = local.peer.request::<agent_protocol::protocol::json_boundary::Opaque>(&agent_protocol::protocol::Call::Provider(agent_protocol::protocol::ProviderCall { method: "thread/list".into(), params: json!({}) })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert!(listed["data"].as_array().unwrap().iter().any(|thread| thread["id"] == id), "removal must preserve conversation history");
+        let review = local.peer.call(&rpc::ReviewWorkspace { cwd: path.clone() }).await.unwrap();
+        assert!(review.files.is_empty());
+        assert!(!Path::new(&path).exists(), "reading history must not recreate the worktree");
+        let receipt = local.peer.call(&rpc::Submission {
+            thread_id: id.clone(),
+            client_user_message_id: "after-removal".into(),
+            input: vec![rpc::Input::Text { text: "[success] continue after removal".into() }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        }).await.unwrap();
+        assert!(receipt.turn_id.is_some());
+        assert!(Path::new(&path).is_dir(), "sending must recreate the checkout");
+        let (opened, _) = open_session(&local.peer, &json!(id), 5).await;
+        assert_eq!(opened["response"]["thread"]["cwd"], path);
+        assert!(opened.to_string().contains("[success] continue after removal"));
         local.close().await;
         store.close().await.unwrap();
         drop(store);

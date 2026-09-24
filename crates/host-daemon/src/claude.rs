@@ -575,6 +575,26 @@ impl Claude {
         })
     }
 
+    pub(crate) async fn discard_workspace_processes(&self, directory: &Path) -> anyhow::Result<()> {
+        let records: Vec<_> = self.records.lock().await.values().cloned().collect();
+        for record in records {
+            let idle = {
+                let mut record = record.lock().await;
+                if Path::new(&record.cwd).starts_with(directory) {
+                    record.idle.take()
+                } else {
+                    None
+                }
+            };
+            // Retained processes still hold the deleted directory's inode.
+            if let Some(idle) = idle {
+                idle.released.cancel();
+                idle.process.finish().await.map_err(anyhow::Error::msg)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn request(&self, id: &str, request: &Call) -> Result<Body, OperationError> {
         let method = request.method();
         if matches!(request, Call::ResumeThread(_)) {
