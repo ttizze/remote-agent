@@ -105,7 +105,7 @@ mod tests {
         std::fs::write(
             store.path(),
             serde_json::to_vec(
-                &serde_json::json!({"workspaceRoots":{checkout.to_str().unwrap():{"projectPath":project,"branch":"bex/session-test","removed":false}}}),
+                &serde_json::json!({"workspaceRoots":{checkout.to_str().unwrap():project}}),
             )
             .unwrap(),
         )

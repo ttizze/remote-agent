@@ -2211,7 +2211,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn worktree_management_lists_conversations_refuses_active_work_and_persists_removal() {
+async fn worktree_management_preserves_conversations_and_recreates_deleted_checkouts() {
     use agent_core::state::Intent;
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -2224,7 +2224,7 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             output.stdout
         };
-        git(&["init", "--quiet"]);
+        git(&["init", "--quiet", "--initial-branch=main"]);
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "fixture"]);
         let fixture = start_host(&root).await;
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
@@ -2283,11 +2283,11 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
         store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
         store.dispatch(Intent::RemoveWorktree(op::RemoveWorktree { path: path.clone() })).await.unwrap();
         assert!(!Path::new(&path).exists());
-        assert!(store.snapshot().workspace.worktrees.as_ref().unwrap().is_empty());
+        assert_eq!(store.snapshot().workspace.worktrees.as_ref().unwrap().len(), 1);
         store.disconnect().await.unwrap();
         store.reconnect(&endpoint, &fixture.ticket, None).await.unwrap();
         store.dispatch(Intent::ListWorktrees(op::ListWorktrees {})).await.unwrap();
-        assert!(store.snapshot().workspace.worktrees.as_ref().unwrap().is_empty());
+        assert_eq!(store.snapshot().workspace.worktrees.as_ref().unwrap().len(), 1);
         assert!(store.snapshot().error.is_none());
         assert!(String::from_utf8(git(&["branch", "--list", "bex/*"])).unwrap().contains("bex/session-"));
         let listed = local.peer.request::<agent_protocol::protocol::json_boundary::Opaque>(&agent_protocol::protocol::Call::Provider(agent_protocol::protocol::ProviderCall { method: "thread/list".into(), params: json!({}) })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
@@ -2295,6 +2295,7 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
         let review = local.peer.call(&rpc::ReviewWorkspace { cwd: path.clone() }).await.unwrap();
         assert!(review.files.is_empty());
         assert!(!Path::new(&path).exists(), "reading history must not recreate the worktree");
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "advance main"]);
         let receipt = local.peer.call(&rpc::Submission {
             thread_id: id.clone(),
             client_user_message_id: "after-removal".into(),
@@ -2305,6 +2306,7 @@ async fn worktree_management_lists_conversations_refuses_active_work_and_persist
         }).await.unwrap();
         assert!(receipt.turn_id.is_some());
         assert!(Path::new(&path).is_dir(), "sending must recreate the checkout");
+        assert_eq!(git(&["-C", &path, "rev-parse", "HEAD"]), git(&["rev-parse", "main"]));
         let (opened, _) = open_session(&local.peer, &json!(id), 5).await;
         assert_eq!(opened["response"]["thread"]["cwd"], path);
         assert!(opened.to_string().contains("[success] continue after removal"));

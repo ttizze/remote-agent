@@ -12,15 +12,7 @@ use std::{
 #[serde(default, rename_all = "camelCase")]
 struct State {
     settings: WorktreeSettings,
-    workspace_roots: HashMap<String, Workspace>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Workspace {
-    project_path: String,
-    branch: String,
-    removed: bool,
+    workspace_roots: HashMap<String, String>,
 }
 
 pub(crate) struct Worktrees {
@@ -44,9 +36,7 @@ impl Worktrees {
             let mut entries = state
                 .workspace_roots
                 .into_iter()
-                .filter(|(_, workspace)| !workspace.removed)
-                .map(|(path, workspace)| {
-                    let project_path = workspace.project_path;
+                .map(|(path, project_path)| {
                     let (branch, blocked_reason) = inspect(&path, &project_path)
                         .unwrap_or_else(|error| (String::new(), Some(format!("{error:#}"))));
                     Worktree {
@@ -68,18 +58,16 @@ impl Worktrees {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let mut state = read(&path)?;
-            let workspace = state
+            let state = read(&path)?;
+            let root = state
                 .workspace_roots
-                .get_mut(&target)
+                .get(&target)
                 .context("Bexが作成したワークツリーではありません。")?;
-            let root = &workspace.project_path;
             if !already_removed(&target, root)? {
-                let (branch, blocked) = inspect(&target, root)?;
+                let (_, blocked) = inspect(&target, root)?;
                 if let Some(reason) = blocked {
                     return Err(anyhow!(reason));
                 }
-                workspace.branch = branch;
                 // Git rechecks tracked/untracked changes and locks at removal time.
                 // Keep the branch so commits remain reachable even if not merged.
                 crate::git::text(Path::new(root), &["worktree", "remove", "--", &target])?;
@@ -95,8 +83,7 @@ impl Worktrees {
             {
                 let _ = fs::remove_dir(parent);
             }
-            workspace.removed = true;
-            save(&path, &state)
+            Ok(())
         })
         .await?
     }
@@ -114,10 +101,10 @@ impl Worktrees {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            let mut state = read(&path)?;
-            let (target, workspace) = state
+            let state = read(&path)?;
+            let (target, project) = state
                 .workspace_roots
-                .iter_mut()
+                .iter()
                 .filter(|(target, _)| cwd.starts_with(target))
                 .max_by_key(|(target, _)| target.len())
                 .context("working directory is unavailable")?;
@@ -128,41 +115,14 @@ impl Worktrees {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            let root = Path::new(&workspace.project_path);
-            let listing = crate::git::text(root, &["worktree", "list", "--porcelain", "-z"])?;
-            let entry = format!("worktree {target}");
-            let registered = listing
-                .split("\0\0")
-                .find(|record| record.split('\0').next() == Some(entry.as_str()));
-            if let Some(branch) = registered.and_then(|record| {
-                record
-                    .split('\0')
-                    .find_map(|field| field.strip_prefix("branch refs/heads/"))
-            }) {
-                workspace.branch = branch.to_owned();
-            }
-            let branch_ref = format!("refs/heads/{}", workspace.branch);
-            let has_branch =
-                crate::git::output(root, &["show-ref", "--verify", "--quiet", &branch_ref]).is_ok();
-            let branch_entry = format!("branch {branch_ref}");
-            if listing.split("\0\0").any(|record| {
-                record.split('\0').next() != Some(entry.as_str())
-                    && record.split('\0').any(|field| field == branch_entry)
-            }) {
-                return Err(anyhow!("worktree branch is already checked out elsewhere"));
-            }
-            let base = if has_branch {
-                None
-            } else {
-                Some(default_base(root)?)
-            };
+            let root = Path::new(project);
+            let branch = format!("bex/session-{}", uuid::Uuid::new_v4());
             let relative_cwd = cwd.strip_prefix(destination)?;
             create_checkout(
                 root,
                 destination,
-                &workspace.branch,
-                base.as_deref(),
-                registered.is_some(),
+                &branch,
+                "refs/heads/main",
                 if state.settings.copy_on_create {
                     &state.settings.copy_paths
                 } else {
@@ -170,14 +130,7 @@ impl Worktrees {
                 },
                 relative_cwd,
             )?;
-            workspace.removed = false;
-            let recreated = destination.to_path_buf();
-            let project = workspace.project_path.clone();
-            let branch = base.as_ref().map(|_| workspace.branch.clone());
-            save(&path, &state).map_err(|error| {
-                discard_checkout(Path::new(&project), &recreated, branch.as_deref(), error)
-            })?;
-            Ok(Some(recreated))
+            Ok(Some(destination.to_path_buf()))
         })
         .await?
     }
@@ -228,7 +181,7 @@ impl Worktrees {
                 .workspace_roots
                 .get(root.to_str().context("project path is not UTF-8")?)
             {
-                Some(workspace) => PathBuf::from(&workspace.project_path),
+                Some(project) => PathBuf::from(project),
                 None => PathBuf::from(
                     crate::git::text(&root, &["worktree", "list", "--porcelain", "-z"])?
                         .split('\0')
@@ -282,8 +235,7 @@ impl Worktrees {
                 &root,
                 &destination,
                 &branch,
-                Some("HEAD"),
-                false,
+                "HEAD",
                 if state.settings.copy_on_create {
                     &state.settings.copy_paths
                 } else {
@@ -296,14 +248,10 @@ impl Worktrees {
                     .to_str()
                     .context("worktree path is not UTF-8")?
                     .to_owned(),
-                Workspace {
-                    project_path: original.to_string_lossy().into_owned(),
-                    branch: branch.clone(),
-                    removed: false,
-                },
+                original.to_string_lossy().into_owned(),
             );
             save(&path, &state)
-                .map_err(|error| discard_checkout(&root, &destination, Some(&branch), error))?;
+                .map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
             Ok(Some(target))
         })
         .await?
@@ -373,7 +321,7 @@ fn merged_into_main(cwd: &Path) -> Result<bool> {
 
 fn inspect(path: &str, project: &str) -> Result<(String, Option<String>)> {
     if already_removed(path, project)? {
-        return Ok(("削除済み（登録を解除できます）".into(), None));
+        return Ok(("削除済み".into(), None));
     }
     let target = Path::new(path)
         .canonicalize()
@@ -422,8 +370,7 @@ fn inspect(path: &str, project: &str) -> Result<(String, Option<String>)> {
     Ok((branch.unwrap_or("detached HEAD").into(), reason))
 }
 
-// A registry write can fail after Git has removed the directory. Allow retrying
-// that write only when both the filesystem and Git agree removal is complete.
+// Treat removal as complete only when both the filesystem and Git agree.
 fn already_removed(path: &str, project: &str) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => return Ok(false),
@@ -440,16 +387,7 @@ fn already_removed(path: &str, project: &str) -> Result<bool> {
 
 pub(crate) async fn workspace_roots(project_state: &Path) -> Result<HashMap<String, String>> {
     let path = project_state.with_file_name("bex-worktrees.json");
-    tokio::task::spawn_blocking(move || {
-        read(&path).map(|state| {
-            state
-                .workspace_roots
-                .into_iter()
-                .map(|(path, workspace)| (path, workspace.project_path))
-                .collect()
-        })
-    })
-    .await?
+    tokio::task::spawn_blocking(move || read(&path).map(|state| state.workspace_roots)).await?
 }
 
 fn read(path: &Path) -> Result<State> {
@@ -474,59 +412,35 @@ fn save(path: &Path, state: &State) -> Result<()> {
         .map_err(Into::into)
 }
 
-fn default_base(root: &Path) -> Result<String> {
-    let remote = crate::git::text(
-        root,
-        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    )
-    .ok()
-    .map(|branch| branch.trim().to_owned());
-    let local = remote
-        .as_deref()
-        .and_then(|branch| branch.strip_prefix("refs/remotes/origin/"))
-        .map(|branch| format!("refs/heads/{branch}"));
-    [
-        local.as_deref(),
-        remote.as_deref(),
-        Some("refs/heads/main"),
-        Some("refs/heads/master"),
-        Some("HEAD"),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(|branch| crate::git::text(root, &["rev-parse", "--verify", branch]).ok())
-    .map(|head| head.trim().to_owned())
-    .context("repository default branch is unavailable")
-}
-
-/// Both fresh and recreated worktrees use the same checkout, copy and rollback rules.
-/// The caller owns persisting the registry after successful creation.
+/// Fresh and recreated worktrees share checkout, copy and rollback rules.
 fn create_checkout(
     source: &Path,
     destination: &Path,
     branch: &str,
-    new_branch_base: Option<&str>,
-    replace_missing: bool,
+    base: &str,
     copy_paths: &[String],
     relative_cwd: &Path,
 ) -> Result<PathBuf> {
     let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
-    let mut args = vec!["worktree", "add"];
-    // One --force replaces a missing registration but continues to respect locks.
-    if replace_missing {
-        args.push("--force");
-    }
-    if new_branch_base.is_some() {
-        args.extend(["-b", branch]);
-    }
-    args.extend([destination_text, new_branch_base.unwrap_or(branch)]);
     if let Some(parent) = destination.parent() {
         crate::platform::create_state_directory(parent)?;
     }
     crate::platform::create_state_directory(destination)?;
-    if let Err(error) = crate::git::text(source, &args) {
+    if let Err(error) = crate::git::text(source, &["branch", branch, base]) {
         let _ = fs::remove_dir(destination);
         return Err(error);
+    }
+    // Create the branch separately so a locked/missing checkout cannot leak it.
+    // One --force replaces a missing registration but continues to respect locks.
+    if let Err(error) = crate::git::text(
+        source,
+        &["worktree", "add", "--force", destination_text, branch],
+    ) {
+        let _ = fs::remove_dir(destination);
+        return Err(match crate::git::text(source, &["branch", "-D", branch]) {
+            Ok(_) => error,
+            Err(cleanup) => error.context(format!("branch cleanup failed: {cleanup:#}")),
+        });
     }
     let prepared = (|| {
         for entry in copy_paths {
@@ -550,15 +464,13 @@ fn create_checkout(
         }
         Ok(target)
     })();
-    prepared.map_err(|error| {
-        discard_checkout(source, destination, new_branch_base.map(|_| branch), error)
-    })
+    prepared.map_err(|error| discard_checkout(source, destination, branch, error))
 }
 
 fn discard_checkout(
     source: &Path,
     destination: &Path,
-    new_branch: Option<&str>,
+    branch: &str,
     error: anyhow::Error,
 ) -> anyhow::Error {
     let cleanup = (|| -> Result<()> {
@@ -571,9 +483,7 @@ fn discard_checkout(
                 destination.to_str().context("worktree path is not UTF-8")?,
             ],
         )?;
-        if let Some(branch) = new_branch {
-            crate::git::text(source, &["branch", "-D", branch])?;
-        }
+        crate::git::text(source, &["branch", "-D", branch])?;
         Ok(())
     })();
     match cleanup {
@@ -751,6 +661,59 @@ mod tests {
                 }
                 _ => fs::remove_dir_all(&cwd).unwrap(),
             }
+            crate::git::text(
+                &root,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "advance main",
+                ],
+            )
+            .unwrap();
+            let branches = crate::git::text(
+                &root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                    "refs/heads/",
+                ],
+            )
+            .unwrap();
+            if removal == "filesystem" {
+                crate::git::text(&root, &["worktree", "lock", cwd.to_str().unwrap()]).unwrap();
+                assert!(store.ensure_available(cwd.to_str().unwrap()).await.is_err());
+                assert!(!cwd.exists());
+                crate::git::text(&root, &["worktree", "unlock", cwd.to_str().unwrap()]).unwrap();
+            }
+            // Failed copying must roll back the new checkout and branch before retrying.
+            symlink(root.join("tracked.txt"), root.join("unsafe-copy")).unwrap();
+            store
+                .configure(Some(
+                    json!({"copyOnCreate":true,"copyPaths":["unsafe-copy"]}),
+                ))
+                .await
+                .unwrap();
+            assert!(store.ensure_available(cwd.to_str().unwrap()).await.is_err());
+            assert!(!cwd.exists());
+            assert_eq!(
+                crate::git::text(
+                    &root,
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname) %(objectname)",
+                        "refs/heads/"
+                    ]
+                )
+                .unwrap(),
+                branches
+            );
             fs::write(root.join(".env"), "local configuration").unwrap();
             store
                 .configure(Some(
@@ -768,12 +731,16 @@ mod tests {
                 .flatten()
                 .collect();
             assert_eq!(recreated, std::slice::from_ref(&cwd));
-            assert_eq!(
+            assert_ne!(
                 crate::git::text(&cwd, &["branch", "--show-current"]).unwrap(),
                 branch
             );
             assert_eq!(
                 crate::git::text(&cwd, &["rev-parse", "HEAD"]).unwrap(),
+                crate::git::text(&root, &["rev-parse", "main"]).unwrap()
+            );
+            assert_eq!(
+                crate::git::text(&root, &["rev-parse", branch.trim()]).unwrap(),
                 head
             );
             assert_eq!(
@@ -781,6 +748,14 @@ mod tests {
                 "local configuration"
             );
             assert_eq!(restarted.list().await.unwrap().len(), 1);
+            for missing in [cwd.join("missing"), root.join("unknown")] {
+                assert!(
+                    restarted
+                        .ensure_available(missing.to_str().unwrap())
+                        .await
+                        .is_err()
+                );
+            }
             fs::write(cwd.join("keep.txt"), "uncommitted").unwrap();
             restarted
                 .ensure_available(cwd.to_str().unwrap())
@@ -791,79 +766,6 @@ mod tests {
                 "uncommitted"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn deleted_branch_uses_default_branch_and_failed_copy_can_be_retried() {
-        let repository = repository();
-        let root = repository.path().canonicalize().unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let store = Worktrees::new(&directory.path().join("projects.json"));
-        store
-            .configure(Some(json!({"createOnNewSession":true})))
-            .await
-            .unwrap();
-        let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
-        let branch = crate::git::text(&cwd, &["branch", "--show-current"]).unwrap();
-        store.remove(cwd.to_str().unwrap().into()).await.unwrap();
-        crate::git::text(&root, &["branch", "-D", branch.trim()]).unwrap();
-        crate::git::text(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
-        crate::git::text(
-            &root,
-            &[
-                "symbolic-ref",
-                "refs/remotes/origin/HEAD",
-                "refs/remotes/origin/main",
-            ],
-        )
-        .unwrap();
-        crate::git::text(
-            &root,
-            &[
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "advance local default",
-            ],
-        )
-        .unwrap();
-        // A symlink in a configured copy path must fail without leaving a checkout.
-        #[cfg(unix)]
-        {
-            symlink(root.join("tracked.txt"), root.join("unsafe-copy")).unwrap();
-            store
-                .configure(Some(
-                    json!({"copyOnCreate":true,"copyPaths":["unsafe-copy"]}),
-                ))
-                .await
-                .unwrap();
-            assert!(store.ensure_available(cwd.to_str().unwrap()).await.is_err());
-            assert!(!cwd.exists());
-        }
-        store.configure(Some(json!({}))).await.unwrap();
-        store.ensure_available(cwd.to_str().unwrap()).await.unwrap();
-        assert_eq!(
-            crate::git::text(&cwd, &["rev-parse", "HEAD"]).unwrap(),
-            crate::git::text(&root, &["rev-parse", "main"]).unwrap()
-        );
-        assert!(
-            store
-                .ensure_available(cwd.join("missing").to_str().unwrap())
-                .await
-                .is_err()
-        );
-        assert!(
-            store
-                .ensure_available(root.join("unknown").to_str().unwrap())
-                .await
-                .is_err()
-        );
     }
 
     #[tokio::test]
@@ -944,22 +846,29 @@ mod tests {
         );
         let restarted = Worktrees::new(&state);
         let entries = restarted.list().await.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path, other.to_str().unwrap());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.path == first_path)
+                .unwrap()
+                .branch,
+            "削除済み"
+        );
         assert!(
             workspace_roots(&state)
                 .await
                 .unwrap()
                 .contains_key(&first_path)
         );
-        // Simulate a registry write failure after successful Git removal.
+        // External removal also keeps the conversation-to-project mapping.
         let other_path = other.to_str().unwrap();
         crate::git::text(&root, &["worktree", "remove", "--", other_path]).unwrap();
         assert!(restarted.list().await.unwrap()[0].blocked_reason.is_none());
         let unrelated = other.parent().unwrap().join("keep.txt");
         fs::write(&unrelated, "preserve").unwrap();
         restarted.remove(other_path.into()).await.unwrap();
-        assert!(Worktrees::new(&state).list().await.unwrap().is_empty());
+        assert_eq!(Worktrees::new(&state).list().await.unwrap().len(), 2);
         assert_eq!(fs::read_to_string(unrelated).unwrap(), "preserve");
     }
 
@@ -1215,11 +1124,7 @@ mod tests {
             if registered {
                 state.workspace_roots.insert(
                     legacy.to_str().unwrap().into(),
-                    Workspace {
-                        project_path: root.to_str().unwrap().into(),
-                        branch: "legacy".into(),
-                        removed: false,
-                    },
+                    root.to_str().unwrap().into(),
                 );
             }
             save(&projects.with_file_name("bex-worktrees.json"), &state).unwrap();

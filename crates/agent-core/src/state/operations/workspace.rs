@@ -224,10 +224,7 @@ pub use agent_protocol::operations::RemoveWorktree;
 
 impl Operation for RemoveWorktree {
     rpc_operation!();
-    fn apply(self, snapshot: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
-        if let Some(worktrees) = Arc::make_mut(&mut snapshot.workspace).worktrees.as_mut() {
-            Arc::make_mut(worktrees).retain(|worktree| worktree.path != self.path);
-        }
+    fn apply(self, _: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
         vec![Effect::execute(ListWorktrees {})]
     }
 }

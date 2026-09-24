@@ -425,7 +425,7 @@ impl Desktop {
             }
             if confirming {
                 let path = worktree.path.clone();
-                entry = entry.child(div().text_sm().child("この作業ディレクトリを削除します。ブランチと会話履歴は残りますが、この場所での作業再開はできなくなります。"))
+                entry = entry.child(div().text_sm().child("この作業ディレクトリを削除します。ブランチと会話履歴は残ります。次のメッセージ送信時に、元プロジェクトの main から同じ場所に作り直します。"))
                     .child(h_flex().gap_2()
                         .child(self.button(format!("cancel-remove-worktree-{index}"), "取消", cx, |s, _, _| s.worktree_removal = None).disabled(self.worktree_busy))
                         .child(self.button(format!("confirm-remove-worktree-{index}"), "ワークツリーを削除", cx, move |s, _, _| s.remove_worktree(path.clone()))
