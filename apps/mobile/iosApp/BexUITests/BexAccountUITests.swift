@@ -139,6 +139,11 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.project.simulator-project"].tap()
         app.buttons["model.settings"].tap()
         _ = addFixtureClaudeAccount(app)
+        XCTAssertLessThan(
+            app.buttons["model.choice.menu"].frame.maxY,
+            app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'model.account.claude:'"))
+                .firstMatch.frame.minY
+        )
         openModelChoices(app)
         XCTAssertFalse(app.buttons["model.choice.fixture-model"].exists)
         XCTAssertTrue(app.buttons["model.choice.claude:default"].exists)
@@ -147,7 +152,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(effort.buttons["high"].isSelected)
         XCTAssertTrue(effort.buttons["low"].exists)
         XCTAssertFalse(effort.buttons["medium"].exists)
-        XCTAssertFalse(app.pickers["model.service-tier"].exists)
+        XCTAssertFalse(app.buttons["model.service-tier"].exists)
         captureScreen(app, named: "Claude owns its model and effort in unified settings")
         openModelChoices(app)
         app.buttons["model.choice.claude:haiku"].tap()
@@ -158,6 +163,16 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.buttons["model.choice.claude:default"].exists)
         app.buttons["model.choice.fixture-model"].tap()
         XCTAssertTrue(fixtureEffortControl(app).buttons["medium"].isSelected)
+        let speed = app.buttons["model.service-tier"]
+        XCTAssertTrue(speed.isHittable)
+        XCTAssertTrue(speed.staticTexts["標準"].isHittable)
+        XCTAssertLessThan(speed.frame.maxY, app.buttons["model.account.desktop"].frame.minY)
+        speed.tap()
+        app.buttons["高速"].tap()
+        XCTAssertTrue(speed.staticTexts["高速"].isHittable)
+        speed.tap()
+        app.buttons["標準"].tap()
+        XCTAssertTrue(speed.staticTexts["標準"].isHittable)
         captureScreen(app, named: "Codex owns its model and effort in unified settings")
     }
 
@@ -172,13 +187,18 @@ extension BexLaunchUITests {
             .firstMatch
         XCTAssertTrue(second.waitForExistence(timeout: 20))
         let id = String(second.identifier.dropFirst("account.logout.".count))
-        app.buttons["model.account.picker"].tap()
         XCTAssertTrue(app.buttons["model.account.desktop"].waitForExistence(timeout: 5))
-        app.buttons["model.account." + id].tap()
+        app.buttons["model.account.desktop"].tap()
+        let choice = app.buttons["model.account." + id]
+        for _ in 0 ..< 6 where !choice.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(choice.isHittable)
+        choice.tap()
         openModelChoices(app)
         app.buttons["model.choice.fixture-model"].tap()
         fixtureEffortControl(app).buttons["high"].tap()
-        captureScreen(app, named: "Account dropdown switches accounts without leaving settings")
+        captureScreen(app, named: "Account list switches accounts without leaving settings")
         app.buttons["model.close"].tap()
     }
 }

@@ -32,7 +32,7 @@ struct ModelSettingsSheet: View {
         model.accounts.filter { $0.provider == provider }
     }
 
-    private var account: Account? {
+    private var selectedAccount: Account? {
         accounts.first { model.snapshot.accountIsSelected(id: $0.id) }
     }
 
@@ -60,8 +60,8 @@ struct ModelSettingsSheet: View {
                 if let login {
                     loginSection(login)
                 } else {
-                    accountSection
                     modelSection
+                    accountSection
                 }
             }
             .contentMargins(.top, 12, for: .scrollContent)
@@ -100,66 +100,41 @@ struct ModelSettingsSheet: View {
     }
 
     private var accountSection: some View {
-        Section("アカウント") {
-            if !accounts.isEmpty {
-                Menu {
-                    ForEach(accounts, id: \.id) { choice in
-                        Button { chooseAccount(choice.id) } label: {
-                            if choice.id == account?.id {
-                                Label(choice.email ?? choice.id, systemImage: "checkmark")
-                            } else {
+        Section {
+            ForEach(accounts, id: \.id) { choice in
+                let selected = choice.id == selectedAccount?.id
+                VStack(alignment: .leading, spacing: 12) {
+                    Button { chooseAccount(choice.id) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(Color.accentColor)
+                            VStack(alignment: .leading, spacing: 4) {
                                 Text(choice.email ?? choice.id)
-                            }
-                        }
-                        .accessibilityIdentifier("model.account." + choice.id)
-                        .accessibilityValue(choice.id == account?.id ? "選択中" : "")
-                    }
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: account == nil ? "person.crop.circle" : "checkmark.circle.fill")
-                            .foregroundStyle(Color.accentColor)
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text(account?.email ?? "アカウントを選択")
-                                    .font(.headline).lineLimit(2)
-                                    .accessibilityIdentifier("account.identity." + (account?.id ?? "none"))
-                                if let plan = account?.planType, !plan.isEmpty {
-                                    Text(plan.uppercased()).font(.caption)
-                                        .padding(.horizontal, 8).padding(.vertical, 3)
-                                        .background(.quaternary, in: Capsule())
+                                    .font(.headline)
+                                    .accessibilityIdentifier("account.identity." + choice.id)
+                                if let plan = choice.planType, !plan.isEmpty {
+                                    Text(plan.uppercased()).font(.caption).foregroundStyle(.secondary)
                                 }
                             }
-                            Text("アカウントを切り替え").font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
                         }
-                        Spacer(minLength: 0)
-                        Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
+                        .padding(.vertical, 4)
                     }
-                    .foregroundStyle(.primary)
-                    .padding(.vertical, 4)
+                    .accessibilityIdentifier("model.account." + choice.id)
+                    .accessibilityValue(selected ? "選択中" : "")
+                    .disabled(busy)
+                    AccountUsageView(usage: choice.usage)
+                    Button("サインアウト", role: .destructive) { signOutId = choice.id }
+                        .frame(minHeight: 44)
+                        .font(.subheadline)
+                        .accessibilityIdentifier("account.logout." + choice.id)
+                        .disabled(busy)
                 }
-                .tint(.primary)
-                .accessibilityIdentifier("model.account.picker")
-                .disabled(busy)
-            } else if !loadingAccounts {
+            }
+            if accounts.isEmpty, !loadingAccounts {
                 Text("\(providerName) にサインインして利用を開始できます。")
                     .foregroundStyle(.secondary)
-            }
-
-            if let account {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("使用量").font(.subheadline)
-                        Spacer()
-                        Button(action: refresh) {
-                            Image(systemName: "arrow.clockwise").frame(minWidth: 44, minHeight: 44)
-                        }
-                        .buttonStyle(.borderless)
-                        .accessibilityLabel("使用量を更新")
-                        .accessibilityIdentifier("account.refresh")
-                        .disabled(busy || loadingAccounts)
-                    }
-                    AccountUsageView(usage: account.usage)
-                }
             }
             if loadingAccounts {
                 ProgressView("アカウントを更新中…")
@@ -177,21 +152,26 @@ struct ModelSettingsSheet: View {
                 }
                 .accessibilityIdentifier("model.account.add")
                 Spacer(minLength: 8)
-                if let account {
-                    Button("サインアウト", role: .destructive) { signOutId = account.id }
-                        .frame(minHeight: 44)
-                        .accessibilityIdentifier("account.logout." + account.id)
+                Button(action: refresh) {
+                    Image(systemName: "arrow.clockwise").frame(minWidth: 44, minHeight: 44)
                 }
+                .accessibilityLabel("使用量を更新")
+                .accessibilityIdentifier("account.refresh")
+                .disabled(loadingAccounts)
             }
             .font(.subheadline)
-            .buttonStyle(.borderless)
             .disabled(busy)
+        } header: {
+            Text("アカウント")
+        } footer: {
+            Text("アカウントの切替は、同じ接続先を使う端末にも反映されます。")
         }
+        .buttonStyle(.borderless)
     }
 
     private var modelSection: some View {
         Section {
-            if let account {
+            if let account = selectedAccount {
                 AccountModelControls(
                     choices: model.snapshot.accountModels(id: account.id),
                     currentModel: model.snapshot.accountIsActiveForDraft(id: account.id, threadId: model.coreDraftKey)
@@ -212,8 +192,6 @@ struct ModelSettingsSheet: View {
             }
         } header: {
             Text("モデル設定")
-        } footer: {
-            Text("アカウントの切替は、同じ接続先を使う端末にも反映されます。")
         }
         .disabled(busy)
     }
@@ -266,7 +244,7 @@ extension ModelSettingsSheet {
     private func selectProvider(_ provider: ProviderKind) {
         providerOverride = provider
         loginError = nil
-        if let account {
+        if let account = selectedAccount {
             chooseAccount(account.id)
         }
     }
