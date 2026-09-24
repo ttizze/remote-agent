@@ -54,9 +54,13 @@ struct AccountModelControls: View {
                 "速度",
                 selection: $selectedServiceTier
             ) {
-                Text("標準").tag("")
-                ForEach(tiers, id: \.id) { Text($0.id).tag($0.id) }
-            }.accessibilityIdentifier("model.service-tier")
+                Text("標準").tag("default")
+                ForEach(tiers.filter { $0.id != "default" }, id: \.id) {
+                    Text($0.name ?? $0.id).tag($0.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("model.service-tier")
         }
     }
 }

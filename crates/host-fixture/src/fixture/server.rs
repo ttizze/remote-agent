@@ -339,6 +339,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                 }
                 "model/list" => {
                     let models = json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
+                            "defaultServiceTier":"default","serviceTiers":[{"id":"priority","name":"高速"}],
                             "defaultReasoningEffort":"medium","supportedReasoningEfforts":[
                                 {"reasoningEffort":"medium","description":"Balanced"},
                                 {"reasoningEffort":"high","description":"Detailed"}],

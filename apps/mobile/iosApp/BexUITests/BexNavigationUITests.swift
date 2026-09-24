@@ -207,7 +207,7 @@ extension BexLaunchUITests {
     func openModelChoices(_ app: XCUIApplication) {
         let menu = app.buttons["model.choice.menu"]
         for _ in 0 ..< 6 where !menu.isHittable {
-            app.swipeUp()
+            app.swipeDown()
         }
         XCTAssertTrue(menu.waitForExistence(timeout: 15))
         let enabled = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: menu)
