@@ -14,8 +14,8 @@ agent-peer-install-skills
 ```
 
 Install and authenticate Claude Code and/or Codex separately on that machine.
-The package supplies Python; it does not bundle provider CLIs, credentials,
-or conversation history. For reproducible deployments, use
+The package supplies native Rust binaries; it does not bundle provider CLIs,
+credentials, or conversation history. For reproducible deployments, use
 `github:ttizze/agent-peer/<commit>` instead of the unpinned URL.
 
 `agent-peer-install-skills` links the packaged skill into
@@ -26,16 +26,22 @@ the package. For a separate service account, run the installation as that
 account or supply `--codex-home` and `--claude-home`. Ensure the account running
 the agents has `agent-peer` on PATH. Reload the agent's skills after installation.
 
-Without Nix, Python 3.9+ on macOS or Linux is sufficient:
+Without Nix, build with Rust 1.88+ on macOS or Linux:
 
 ```sh
 git clone https://github.com/ttizze/agent-peer.git
 cd agent-peer
-./scripts/agent-peer-install-skills
-export PATH="$PWD/scripts:$PATH"
+cargo build --release --locked
+prefix="$HOME/.local"
+mkdir -p "$prefix/bin" "$prefix/share/agent-peer/scripts"
+cp target/release/agent-peer target/release/agent-peer-install-skills "$prefix/bin/"
+cp SKILL.md "$prefix/share/agent-peer/"
+ln -sf ../../../bin/agent-peer "$prefix/share/agent-peer/scripts/agent-peer"
+export PATH="$prefix/bin:$PATH"
+agent-peer-install-skills
 ```
 
-Keep that checkout while its skill links are in use.
+The installed binaries and skill are independent of the source checkout.
 
 ## Use
 
@@ -72,7 +78,9 @@ then PATH and `~/.local/bin`. Claude uses PATH and `~/.local/bin`.
 
 ```sh
 nix flake check --print-build-logs
-nix develop --command python3 -B -m unittest discover -s tests -v
+nix develop --command cargo test --locked
+nix develop --command cargo fmt -- --check
+nix develop --command cargo clippy --locked --all-targets -- -D warnings
 ```
 
 Checks run deterministic provider fixtures and test the installed package and

@@ -17,7 +17,7 @@
         agent-peer = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-peer;
       });
       devShells = forEachSystem (pkgs: {
-        default = pkgs.mkShell { packages = [ pkgs.python3 ]; };
+        default = pkgs.mkShell { packages = [ pkgs.cargo pkgs.rustc pkgs.rustfmt pkgs.clippy ]; };
       });
     };
 }

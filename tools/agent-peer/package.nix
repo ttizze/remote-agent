@@ -1,27 +1,17 @@
-{ lib, stdenvNoCC, python3 }:
+{ lib, rustPlatform }:
 
-stdenvNoCC.mkDerivation {
+rustPlatform.buildRustPackage {
   pname = "agent-peer";
   version = "0.1.0";
-  src = ./.;
-  nativeBuildInputs = [ python3 ];
-  dontBuild = true;
-  doCheck = true;
-  checkPhase = ''
-    runHook preCheck
-    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
-    runHook postCheck
-  '';
-  installPhase = ''
-    runHook preInstall
-    mkdir -p "$out/bin" "$out/share/agent-peer"
+  src = lib.fileset.toSource {
+    root = ./.;
+    fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ./tests ./SKILL.md ./LICENSE ];
+  };
+  cargoLock.lockFile = ./Cargo.lock;
+  postInstall = ''
+    mkdir -p "$out/share/agent-peer/scripts"
     cp SKILL.md "$out/share/agent-peer/"
-    cp -R scripts "$out/share/agent-peer/"
-    patchShebangs "$out/share/agent-peer/scripts"
-    for command in agent-peer agent-peer-install-skills; do
-      ln -s "../share/agent-peer/scripts/$command" "$out/bin/$command"
-    done
-    runHook postInstall
+    ln -s ../../../bin/agent-peer "$out/share/agent-peer/scripts/agent-peer"
   '';
   doInstallCheck = true;
   installCheckPhase = ''
