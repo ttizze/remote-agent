@@ -139,6 +139,118 @@ fn git(cwd: &Path, args: &[&str]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_refresh_observes_catalog_changes_without_restarting_host() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("claude-native")).unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        assert!(
+            store
+                .snapshot()
+                .models
+                .iter()
+                .any(|model| model.model == "claude:default")
+        );
+        let catalog = root.path().join("claude-native/fixture-models.json");
+        std::fs::write(
+            &catalog,
+            serde_json::to_vec(&json!([
+                {"value":"default","displayName":"Updated default"},
+                {"value":"new-model","displayName":"New model","supportedEffortLevels":["high"]}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        store
+            .dispatch(Intent::LoadModels(op::LoadModels {}))
+            .await
+            .unwrap();
+        let snapshot = store.snapshot();
+        let claude = snapshot
+            .models
+            .iter()
+            .filter(|model| model.model.starts_with("claude:"))
+            .collect::<Vec<_>>();
+        assert_eq!(claude.len(), 2, "removed models must disappear");
+        assert_eq!(claude[0].display_name, "Claude · Updated default");
+        assert_eq!(claude[1].model, "claude:new-model");
+        assert_eq!(claude[1].default_reasoning_effort, "high");
+        assert!(snapshot.model_errors.is_empty());
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("model refresh deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_reads() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("claude-native")).unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        // Any additional catalog read would now fail to parse.
+        std::fs::write(
+            root.path().join("claude-native/fixture-models.json"),
+            "null",
+        )
+        .unwrap();
+        let local = fixture.local().await.unwrap();
+        for (model, effort) in [("unlisted-model", "low"), ("default", "xhigh")] {
+            std::fs::write(
+                root.path().join("claude-fixture.json"),
+                json!({"expectedModel":model}).to_string(),
+            )
+            .unwrap();
+            let response = local
+                .peer
+                .call(&op::StartThread {
+                    cwd: Some(root.path().to_string_lossy().into()),
+                    model: Some(format!("claude:{model}")),
+                })
+                .await
+                .unwrap();
+            let id = response.thread.id.unwrap();
+            store
+                .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+                .await
+                .unwrap();
+            local
+                .peer
+                .call(&rpc::StartTurn {
+                    thread_id: id.clone(),
+                    client_user_message_id: format!("delegate-{model}"),
+                    input: vec![rpc::Input::Text {
+                        text: "delegate settings".into(),
+                    }],
+                    model: Some(format!("claude:{model}")),
+                    effort: Some(effort.into()),
+                    service_tier: None,
+                })
+                .await
+                .unwrap();
+            completed(&store, &id, 1, "completed").await;
+            let session = id.strip_prefix("claude:").unwrap();
+            let inputs: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join(format!("claude-session-{session}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(inputs[0]["model"], model);
+            assert_eq!(inputs[0]["effort"], effort);
+        }
+        local.close().await;
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("CLI settings delegation deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claude_submission_preserves_inputs_settings_workspaces_and_history_across_host_restart() {
     tokio::time::timeout(Duration::from_secs(120), async {
         for automatic in [false, true] {
@@ -1022,9 +1134,9 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         std::fs::write(native.join("fixture-auth.json"), json!({"loggedIn":true,"authMethod":"claude.ai","email":"native@example.invalid","subscriptionType":"pro"}).to_string()).unwrap();
         let memory = Arc::new(Memory::default());
         let start = || HostFixture::start(&root, AppServerConfig { program: root.join("missing-codex"), ..Default::default() }, memory.clone(), "Claude accounts", false, Some(fixture_program()));
+        std::fs::write(native.join("usage-paused"), "").unwrap();
         let fixture = start().await.unwrap();
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        std::fs::write(native.join("usage-paused"), "").unwrap();
         tokio::time::timeout(Duration::from_secs(2), store.dispatch(Intent::ListAccounts(op::ListAccounts {})))
             .await.expect("listing must not wait for usage").unwrap();
         while !native.join("usage-requested").exists() {

@@ -56,12 +56,6 @@ impl From<&str> for OperationError {
 
 pub(crate) const MODEL_PREFIX: &str = "claude:";
 
-struct AccountModels {
-    home: PathBuf,
-    revision: u64,
-    models: Vec<Model>,
-}
-
 pub(crate) struct Claude {
     browser: Option<Arc<crate::browser::Browser>>,
     program: PathBuf,
@@ -69,7 +63,6 @@ pub(crate) struct Claude {
     native_home: PathBuf,
     pub(crate) accounts: AsyncMutex<accounts::Accounts>,
     records: AsyncMutex<HashMap<String, Arc<AsyncMutex<Record>>>>,
-    models: AsyncMutex<Option<AccountModels>>,
     processes: Arc<Semaphore>,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
     router: SessionRouter,
@@ -151,7 +144,6 @@ impl Claude {
             directory,
             native_home,
             records: AsyncMutex::new(HashMap::new()),
-            models: AsyncMutex::new(None),
             processes: Arc::new(Semaphore::new(8)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             router,
@@ -183,114 +175,85 @@ impl Claude {
         if !available {
             return Ok(Vec::new());
         }
-        let (auth_home, revision) = {
-            let accounts = self.accounts.lock().await;
-            (accounts.home()?, accounts.revision())
-        };
-        let mut cached = self.models.lock().await;
-        if let Some(catalog) = cached.as_ref()
-            && catalog.home == auth_home
-            && catalog.revision == revision
-        {
-            return Ok(catalog.models.clone());
-        }
-        let models = {
-            let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-            let (process, initialized) = Process::start(
-                &self.program,
-                &auth_home,
-                cwd.path(),
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
-            process.finish().await?;
-            let entries = initialized["models"]
-                .as_array()
-                .ok_or("Claude Code did not return a model catalog")?;
-            entries
-                .iter()
-                .map(|entry| {
-                    let name = entry["value"]
-                        .as_str()
-                        .filter(|name| !name.is_empty())
-                        .ok_or("Claude model has no value")?;
-                    let display = entry["displayName"]
-                        .as_str()
-                        .ok_or("Claude model has no display name")?;
-                    // The CLI's short display name omits the model generation.
-                    // Its description starts with the versioned name and context size.
-                    let title = entry["description"]
-                        .as_str()
-                        .and_then(|description| description.split('·').next())
-                        .map(str::trim)
-                        .filter(|title| !title.is_empty())
-                        .unwrap_or(display);
-                    let display = if name == "default" && title != display {
-                        format!("{display} · {title}")
-                    } else {
-                        title.to_owned()
-                    };
-                    let values = match entry.get("supportedEffortLevels") {
-                        Some(value) => value
-                            .as_array()
-                            .ok_or("invalid Claude effort levels")?
-                            .as_slice(),
-                        None => &[],
-                    };
-                    let efforts = values
-                        .iter()
-                        .map(|value| {
-                            Ok(ReasoningEffort {
-                                reasoning_effort: value
-                                    .as_str()
-                                    .ok_or("invalid Claude effort level")?
-                                    .into(),
-                            })
+        let auth_home = self.accounts.lock().await.home()?;
+        let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
+        let (process, initialized) = Process::start(
+            &self.program,
+            &auth_home,
+            cwd.path(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+        process.finish().await?;
+        let entries = initialized["models"]
+            .as_array()
+            .ok_or("Claude Code did not return a model catalog")?;
+        entries
+            .iter()
+            .map(|entry| {
+                let name = entry["value"]
+                    .as_str()
+                    .filter(|name| !name.is_empty())
+                    .ok_or("Claude model has no value")?;
+                let display = entry["displayName"]
+                    .as_str()
+                    .ok_or("Claude model has no display name")?;
+                // The CLI's short display name omits the model generation.
+                // Its description starts with the versioned name and context size.
+                let title = entry["description"]
+                    .as_str()
+                    .and_then(|description| description.split('·').next())
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or(display);
+                let display = if name == "default" && title != display {
+                    format!("{display} · {title}")
+                } else {
+                    title.to_owned()
+                };
+                let values = match entry.get("supportedEffortLevels") {
+                    Some(value) => value
+                        .as_array()
+                        .ok_or("invalid Claude effort levels")?
+                        .as_slice(),
+                    None => &[],
+                };
+                let efforts = values
+                    .iter()
+                    .map(|value| {
+                        Ok(ReasoningEffort {
+                            reasoning_effort: value
+                                .as_str()
+                                .ok_or("invalid Claude effort level")?
+                                .into(),
                         })
-                        .collect::<Result<Vec<_>, String>>()?;
-                    let default = efforts
-                        .iter()
-                        .find(|effort| effort.reasoning_effort == "high")
-                        .or(efforts.first())
-                        .map(|effort| effort.reasoning_effort.clone())
-                        .unwrap_or_default();
-                    let model = format!("{MODEL_PREFIX}{name}");
-                    Ok(Model {
-                        id: model.clone(),
-                        model,
-                        display_name: format!("Claude · {display}"),
-                        default_reasoning_effort: default,
-                        supported_reasoning_efforts: efforts,
-                        service_tiers: Some(Vec::new()),
-                        default_service_tier: None,
-                        is_default: Some(false),
                     })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let default = efforts
+                    .iter()
+                    .find(|effort| effort.reasoning_effort == "high")
+                    .or(efforts.first())
+                    .map(|effort| effort.reasoning_effort.clone())
+                    .unwrap_or_default();
+                let model = format!("{MODEL_PREFIX}{name}");
+                Ok(Model {
+                    id: model.clone(),
+                    model,
+                    display_name: format!("Claude · {display}"),
+                    default_reasoning_effort: default,
+                    supported_reasoning_efforts: efforts,
+                    service_tiers: Some(Vec::new()),
+                    default_service_tier: None,
+                    is_default: Some(false),
                 })
-                .collect::<Result<Vec<Model>, String>>()?
-        };
-        *cached = Some(AccountModels {
-            home: auth_home,
-            revision,
-            models: models.clone(),
-        });
-        Ok(models)
+            })
+            .collect::<Result<Vec<Model>, String>>()
     }
 
     pub(crate) async fn create(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {
-        if !self
-            .models()
-            .await
-            .map_err(anyhow::Error::msg)?
-            .iter()
-            .any(|entry| entry.model == model)
-        {
-            return Err(anyhow::anyhow!(
-                "このClaudeモデルは利用できません。モデル一覧を更新してください。"
-            ));
-        }
         let cwd = tokio::fs::canonicalize(cwd).await?;
         if !cwd.is_dir() {
             return Err(anyhow::anyhow!("Claudeの作業フォルダがありません。"));
@@ -725,20 +688,7 @@ impl Claude {
             .ok_or("Codexへ切り替える場合は新しい会話を作成してください。")?;
         let model_name = model_name.to_owned();
         let model = model.to_owned();
-        let models = self.models().await?;
-        let selected = models
-            .iter()
-            .find(|entry| entry.model == model)
-            .ok_or("Claude model is no longer available")?;
         let effort = params.effort.as_deref();
-        if effort.is_some_and(|effort| {
-            !selected
-                .supported_reasoning_efforts
-                .iter()
-                .any(|entry| entry.reasoning_effort == effort)
-        }) {
-            return Err("このClaudeモデルは選択した思考強度に対応していません。".into());
-        }
         // Core's "default" means the backend's normal service. Claude has no
         // equivalent of Codex's explicit priority/flex tiers.
         if params

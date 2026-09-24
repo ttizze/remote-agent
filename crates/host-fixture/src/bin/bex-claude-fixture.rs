@@ -159,14 +159,17 @@ fn main() {
                 } else {
                     emit(
                         json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{
-                            "models":[
+                            "models":fs::read(Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap()).join("fixture-models.json"))
+                                .ok()
+                                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())
+                                .unwrap_or_else(|| json!([
                                 {"value":"default","displayName":"Default (recommended)","description":"Opus 5 with 1M context · Best for everyday, complex tasks","supportedEffortLevels":["low","high"]},
                                 {"value":"opus[1m]","displayName":"Opus (1M context)","description":"Opus 5 with 1M context · Best for everyday, complex tasks"},
                                 {"value":"claude-fable-5-1[1m]","displayName":"Fable","description":"Fable 5.1 · Most capable for your hardest and longest-running tasks"},
                                 {"value":"sonnet","displayName":"Sonnet","description":"Sonnet 5 · Efficient for routine tasks"},
                                 {"value":"haiku","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers"},
                                 {"value":"custom","displayName":"Custom model"}
-                            ],
+                            ])),
                             "account":if config["unauthenticated"] == true {json!({})} else {json!({"subscriptionType":"Claude Max"})}
                         }}}),
                     );
@@ -193,7 +196,10 @@ fn main() {
                     config["unauthenticated"] != true,
                     "unauthenticated input must never reach Claude"
                 );
-                assert_eq!(option("--model").as_deref(), Some("default"));
+                assert_eq!(
+                    option("--model").as_deref(),
+                    Some(config["expectedModel"].as_str().unwrap_or("default"))
+                );
                 if waiting.take() == Some("wait") {
                     // The previous input can finish before the queued input is consumed.
                     emit(
@@ -203,7 +209,7 @@ fn main() {
                 emit(value.clone());
                 let content = value["message"]["content"].clone();
                 inputs.push(
-                    json!({"content":content,"effort":option("--effort"),"pid":std::process::id()}),
+                    json!({"content":content,"model":option("--model"),"effort":option("--effort"),"pid":std::process::id()}),
                 );
                 fs::write(&path, serde_json::to_vec(&inputs).unwrap()).unwrap();
                 emit(json!({"type":"system","subtype":"init","session_id":session}));
