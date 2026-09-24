@@ -1,10 +1,12 @@
 //! The single state owner. Independent RPC work publishes completed results.
 use crate::{
-    client::*,
+    client::{ClientExt, SessionImage},
     diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
     peer::PeerError,
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
+use agent_protocol::operations::{Pair, RpcMethod};
+use agent_transport::client::{Client, Updates};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -148,7 +150,7 @@ impl Receipt {
     }
 }
 struct Completed {
-    subscriptions: Vec<(uuid::Uuid, crate::client::Updates)>,
+    subscriptions: Vec<(uuid::Uuid, agent_transport::client::Updates)>,
     item_read: Option<op::ReadItem>,
     delivery_attempted: bool,
     epoch: u64,
@@ -228,6 +230,28 @@ impl Store {
             finished,
         }
     }
+    #[cfg(all(test, feature = "bindings"))]
+    pub(crate) fn mock_connection() -> (Self, impl Future<Output = ConnectionPerformance>) {
+        let mut store = Self::start(
+            None,
+            Snapshot {
+                connected: true,
+                ..Default::default()
+            },
+        );
+        let (commands, mut reports) = mpsc::unbounded_channel();
+        let worker = std::mem::replace(&mut store.commands, commands);
+        (store, async move {
+            // Keep the actual Store worker alive for shutdown, while the mock
+            // connection leaves its diagnostic command queue unread.
+            let _worker = worker;
+            match reports.recv().await.expect("missing diagnostic report") {
+                Command::ConnectionPerformance { performance, .. } => performance,
+                _ => panic!("unexpected connection command"),
+            }
+        })
+    }
+
     pub async fn connect(
         endpoint: &crate::transport::Endpoint,
         ticket: &crate::transport::Ticket,
@@ -1142,7 +1166,7 @@ pub struct Execution<'a> {
     pub(crate) client: &'a Client,
     pub(crate) session: Option<&'a crate::transport::Session>,
     pub(crate) snapshot: &'a Snapshot,
-    subscriptions: &'a mut Vec<(uuid::Uuid, crate::client::Updates)>,
+    subscriptions: &'a mut Vec<(uuid::Uuid, agent_transport::client::Updates)>,
 }
 impl Execution<'_> {
     pub(crate) async fn call<O: RpcMethod + Sync>(

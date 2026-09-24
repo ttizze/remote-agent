@@ -1,5 +1,5 @@
 //! Only live execution state. Native history is read for each open and is never retained here.
-use agent_core::{
+use agent_protocol::{
     models::{Thread, ThreadResponse},
     session::SessionChange,
 };
@@ -24,7 +24,7 @@ impl SessionActor {
             .live
             .status
             .as_ref()
-            .is_none_or(|status| status.kind != agent_core::models::ThreadStatusKind::Active)
+            .is_none_or(|status| status.kind != agent_protocol::models::ThreadStatusKind::Active)
         {
             self.inputs.clear();
         }

@@ -1,7 +1,6 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
-use super::json_boundary::Opaque;
-use super::*;
-use crate::{client as c, models as m, session as s, state::operations as op};
+use super::{json_boundary::Opaque, *};
+use crate::{models as m, operations as op, session as s};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderCall {
     pub method: String,
@@ -47,10 +46,10 @@ macro_rules! contracts {
                 _ => Call::Provider(ProviderCall { method: method.into(), params }),
             })
         }
-        pub fn provider_response(method: &str, line: &str) -> Result<Response, crate::peer::RpcMessageError> {
+        pub fn provider_response(method: &str, line: &str) -> Result<Response, crate::message::RpcMessageError> {
             match method {
-                $($method => Response::from_result(crate::peer::RpcResponse::<$result>::parse(line)?.outcome)),*,
-                _ => Response::from_result(crate::peer::RpcResponse::<Value>::parse(line)?.outcome),
+                $($method => Response::from_result(crate::message::RpcResponse::<$result>::parse(line)?.outcome)),*,
+                _ => Response::from_result(crate::message::RpcResponse::<Value>::parse(line)?.outcome),
             }
         }
         pub fn fixture_reply(method: &str, bytes: &[u8]) -> io::Result<Value> {
@@ -61,9 +60,9 @@ macro_rules! contracts {
         }
     };
     (@clone $params:ty, $variant:ident $(, $validate:path)?) => {
-        impl c::RpcMethod for $params {
-            crate::client::rpc_contract!($variant);
-            fn params(&self) -> Result<Self, crate::peer::PeerError> { Ok(self.clone()) }
+        impl op::RpcMethod for $params {
+            crate::operations::rpc_contract!($variant);
+            fn params(&self) -> Result<Self, crate::error::PeerError> { Ok(self.clone()) }
             $(fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
                 $validate(self, output)
             })?
@@ -72,55 +71,55 @@ macro_rules! contracts {
 }
 contracts! {
     OpenSession, "host/session/open" => (s::OpenSession, s::OpenedSession),
-    AnswerSession, "host/session/answer" => (c::SessionAnswer, m::Empty),
-    RequestSession, "host/session/request" => (c::OpenRequest, s::SessionRef) [clone],
+    AnswerSession, "host/session/answer" => (op::SessionAnswer, m::Empty),
+    RequestSession, "host/session/request" => (op::OpenRequest, s::SessionRef) [clone],
     SessionScope, "host/session/scope" => (m::Empty, String),
-    ReadItem, "host/thread/item/read" => (c::ReadItem, c::ItemResponse) [clone, c::ReadItem::validate],
-    AddProject, "host/project/add" => (c::AddProject, String) [clone],
-    ListThreads, "host/thread/list" => (c::ListThreads, m::ThreadList) [clone],
+    ReadItem, "host/thread/item/read" => (op::ReadItem, op::ItemResponse) [clone, op::ReadItem::validate],
+    AddProject, "host/project/add" => (op::AddProject, String) [clone],
+    ListThreads, "host/thread/list" => (op::ListThreads, m::ThreadList) [clone],
     StartThread, "host/thread/start" => (op::StartThread, m::ThreadResponse) [clone, op::StartThread::validate],
     ForkThread, "thread/fork" => (op::ForkThread, m::ThreadResponse) [clone, op::ForkThread::validate],
-    ResumeThread, "thread/resume" => (c::ResumeThread, m::Empty) [clone],
-    StartTurn, "turn/start" => (c::StartTurn, c::StartedTurn) [clone, c::StartTurn::validate],
-    SteerTurn, "turn/steer" => (c::SteerTurn, m::Empty) [clone],
-    QueueTurn, "thread/queue/add" => (c::QueueTurn, c::QueuedTurn) [clone, c::QueueTurn::validate],
+    ResumeThread, "thread/resume" => (op::ResumeThread, m::Empty) [clone],
+    StartTurn, "turn/start" => (op::StartTurn, op::StartedTurn) [clone, op::StartTurn::validate],
+    SteerTurn, "turn/steer" => (op::SteerTurn, m::Empty) [clone],
+    QueueTurn, "thread/queue/add" => (op::QueueTurn, op::QueuedTurn) [clone, op::QueueTurn::validate],
     Interrupt, "turn/interrupt" => (op::Interrupt, m::Empty) [clone],
     ComposerCatalog, "host/composer/catalog" => (op::LoadComposerCatalog, crate::composer::ComposerCatalog) [clone],
-    ListModels, "model/list" => (c::ListModels, c::ModelPage) [clone],
-    Transcribe, "host/dictation/transcribe" => (c::Transcribe, c::Transcription),
+    ListModels, "model/list" => (op::ListModels, op::ModelPage) [clone],
+    Transcribe, "host/dictation/transcribe" => (op::Transcribe, op::Transcription),
     ListFiles, "host/file/list" => (op::ListFiles, m::FileList) [clone],
     ReadFile, "host/file/read" => (op::ListFiles, m::FileContent),
-    WriteFile, "host/file/write" => (c::WriteFile, m::FileContent) [clone],
-    Upload, "host/blob/upload" => (c::Upload, m::TransferGrant),
+    WriteFile, "host/file/write" => (op::WriteFile, m::FileContent) [clone],
+    Upload, "host/blob/upload" => (op::Upload, m::TransferGrant),
     Download, "host/blob/download" => (op::ListFiles, m::TransferGrant),
-    ReadVisualization, "host/visualize/read" => (c::LoadVisualization, String) [clone],
-    ReviewWorkspace, "host/workspace/review" => (c::ReviewWorkspace, m::WorkspaceReview) [clone],
+    ReadVisualization, "host/visualize/read" => (op::LoadVisualization, String) [clone],
+    ReviewWorkspace, "host/workspace/review" => (op::ReviewWorkspace, m::WorkspaceReview) [clone],
     ReadWorktreeSettings, "host/worktree/settings/read" => (m::Empty, m::WorktreeSettings),
     UpdateWorktreeSettings, "host/worktree/settings/update" => (m::WorktreeSettings, m::WorktreeSettings),
     ListWorktrees, "host/worktree/list" => (m::Empty, Vec<m::Worktree>),
-    RemoveWorktree, "host/worktree/remove" => (c::RemoveWorktree, ()) [clone],
-    ListAccounts, "host/account/list" => (m::Empty, c::Accounts),
-    ReadAccountUsage, "host/account/usage" => (op::ReadAccountUsage, c::AccountUsage) [clone],
-    SelectAccount, "host/account/select" => (c::SelectAccount, c::AccountSelection) [clone],
-    LogoutAccount, "host/account/logout" => (c::LogoutAccount, m::Empty) [clone],
-    StartAccountLogin, "host/account/login/start" => (c::StartAccountLogin, c::AccountLogin) [clone],
-    SubmitAccountLogin, "host/account/login/submit" => (c::SubmitAccountLogin, m::Empty) [clone],
-    ReadAccountLogin, "host/account/login/status" => (c::ReadAccountLogin, c::AccountLoginStatus) [clone],
-    CancelAccountLogin, "host/account/login/cancel" => (c::CancelAccountLogin, m::Empty) [clone],
-    StartTerminal, "host/terminal/start" => (c::StartTerminal, m::Empty) [clone],
+    RemoveWorktree, "host/worktree/remove" => (op::RemoveWorktree, ()) [clone],
+    ListAccounts, "host/account/list" => (m::Empty, op::Accounts),
+    ReadAccountUsage, "host/account/usage" => (op::ReadAccountUsage, op::AccountUsage) [clone],
+    SelectAccount, "host/account/select" => (op::SelectAccount, op::AccountSelection) [clone],
+    LogoutAccount, "host/account/logout" => (op::LogoutAccount, m::Empty) [clone],
+    StartAccountLogin, "host/account/login/start" => (op::StartAccountLogin, op::AccountLogin) [clone],
+    SubmitAccountLogin, "host/account/login/submit" => (op::SubmitAccountLogin, m::Empty) [clone],
+    ReadAccountLogin, "host/account/login/status" => (op::ReadAccountLogin, op::AccountLoginStatus) [clone],
+    CancelAccountLogin, "host/account/login/cancel" => (op::CancelAccountLogin, m::Empty) [clone],
+    StartTerminal, "host/terminal/start" => (op::StartTerminal, m::Empty) [clone],
     ResizeTerminal, "process/resizePty" => (op::ResizeTerminal, m::Empty) [clone],
-    WriteTerminal, "process/writeStdin" => (c::TerminalWrite, m::Empty),
+    WriteTerminal, "process/writeStdin" => (op::TerminalWrite, m::Empty),
     DetachTerminal, "host/terminal/detach" => (op::DetachTerminal, m::Empty) [clone],
-    KillTerminal, "process/kill" => (c::TerminalKill, m::Empty),
-    Pair, "host/pair" => (c::Pair, m::Empty) [clone],
+    KillTerminal, "process/kill" => (op::TerminalKill, m::Empty),
+    Pair, "host/pair" => (op::Pair, m::Empty) [clone],
     HostName, "host/name" => (m::Empty, String),
     HostStatus, "host/status" => (m::Empty, m::HostStatus),
     Invite, "host/invite" => (m::Empty, m::Invitation),
     ListRemotes, "host/listRemotes" => (m::Empty, Vec<m::RemoteHost>),
-    RegisterRemote, "host/registerRemote" => (c::RegisterRemoteHost, m::RemoteHost) [clone],
+    RegisterRemote, "host/registerRemote" => (op::RegisterRemoteHost, m::RemoteHost) [clone],
     RemoveRemote, "host/removeRemote" => (op::RemoveRemoteHost, m::Empty) [clone],
     Revoke, "host/revoke" => (op::RevokeDevice, m::Empty) [clone],
-    RenameThread, "thread/name/set" => (c::RenameThread, m::Empty) [clone],
+    RenameThread, "thread/name/set" => (op::RenameThread, m::Empty) [clone],
     Provider, "provider" => (ProviderCall, Opaque),
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
@@ -129,7 +128,7 @@ contracts! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::RpcMethod;
+    use crate::operations::RpcMethod;
 
     #[test]
     fn shared_input_does_not_merge_file_read_and_download() {
@@ -152,14 +151,14 @@ mod tests {
     fn generated_submission_contracts_keep_response_validation() {
         let params =
             serde_json::json!({"threadId":"thread","clientUserMessageId":"input","input":[]});
-        let start: c::StartTurn = serde_json::from_value(params.clone()).unwrap();
-        let queue: c::QueueTurn = serde_json::from_value(params).unwrap();
+        let start: op::StartTurn = serde_json::from_value(params.clone()).unwrap();
+        let queue: op::QueueTurn = serde_json::from_value(params).unwrap();
         for id in ["", "  ", "turn"] {
-            let started = c::StartedTurn {
-                turn: c::TurnIdentity { id: id.into() },
+            let started = op::StartedTurn {
+                turn: op::TurnIdentity { id: id.into() },
             };
-            let queued = c::QueuedTurn {
-                queued_submission: c::TurnIdentity { id: id.into() },
+            let queued = op::QueuedTurn {
+                queued_submission: op::TurnIdentity { id: id.into() },
             };
             assert_eq!(RpcMethod::validate(&start, &started).is_ok(), id == "turn");
             assert_eq!(RpcMethod::validate(&queue, &queued).is_ok(), id == "turn");

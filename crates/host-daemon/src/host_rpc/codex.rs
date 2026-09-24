@@ -1,13 +1,12 @@
 //! Codex native protocol boundary: one shared process, ordered request
 //! completion, native cursors, deferred item hydration and detail reads.
-use super::routing::SessionRouter;
-use super::service::Failure;
-use agent_core::{
-    client as op,
+use super::{routing::SessionRouter, service::Failure};
+use agent_protocol::{
     models::{Item, Thread, ThreadResponse, Turn},
-    peer::{RpcMessage, RpcMessageKind},
+    operations as op,
     session::{ProviderKind, SessionChange, SessionRef, TextField},
 };
+use agent_transport::peer::{RpcMessage, RpcMessageKind};
 use codex_app_server::CodexAppServer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -93,8 +92,8 @@ pub(super) struct Codex {
     pub(super) processed: tokio::sync::watch::Sender<u64>,
 }
 impl Codex {
-    pub(super) fn capabilities() -> agent_core::session::Capabilities {
-        agent_core::session::Capabilities {
+    pub(super) fn capabilities() -> agent_protocol::session::Capabilities {
+        agent_protocol::session::Capabilities {
             additional_input: true,
             fork: true,
             rename: true,
@@ -156,11 +155,11 @@ impl Codex {
         Ok(())
     }
 
-    pub(super) async fn projects(&self) -> Result<Vec<agent_core::models::Project>, Failure> {
+    pub(super) async fn projects(&self) -> Result<Vec<agent_protocol::models::Project>, Failure> {
         let mut projects = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let page: Page<agent_core::models::Project> = self
+            let page: Page<agent_protocol::models::Project> = self
                 .server()?
                 .request(
                     "project/list",
@@ -280,8 +279,8 @@ impl Codex {
                     Ok(history) => Ok(history),
                     Err(error) => Ok(Thread {
                         id: Some(id.into()),
-                        history_read_state: Some(agent_core::session::HistoryReadState::new(
-                            agent_core::session::HistoryReadKind::Unavailable,
+                        history_read_state: Some(agent_protocol::session::HistoryReadState::new(
+                            agent_protocol::session::HistoryReadKind::Unavailable,
                             vec![error.to_string()],
                         )),
                         ..Default::default()
@@ -451,7 +450,7 @@ impl Codex {
     pub(super) async fn item_read(
         &self,
         params: op::ReadItem,
-    ) -> Result<agent_core::client::ItemResponse, Failure> {
+    ) -> Result<agent_protocol::operations::ItemResponse, Failure> {
         if [&params.thread_id, &params.turn_id, &params.item_id]
             .iter()
             .any(|id| id.is_empty())
@@ -482,7 +481,7 @@ impl Codex {
                 entry.turn_id.as_deref() == Some(params.turn_id.as_str())
                     && entry.item.id == params.item_id
             }) {
-                return Ok(agent_core::client::ItemResponse {
+                return Ok(agent_protocol::operations::ItemResponse {
                     item: Arc::unwrap_or_clone(entry.item),
                     transfer: None,
                 });
@@ -603,7 +602,7 @@ pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<
             change,
         );
     } else {
-        router.broadcast(agent_core::protocol::Notification::Provider {
+        router.broadcast(agent_protocol::protocol::Notification::Provider {
             method: message.method().unwrap_or_default().into(),
             params,
         });
@@ -613,7 +612,7 @@ pub(super) fn event(router: &SessionRouter, message: &RpcMessage<'_>) -> Result<
 
 pub(super) fn request(
     router: &SessionRouter,
-    mut request: agent_core::client::ServerRequest,
+    mut request: agent_protocol::operations::ServerRequest,
 ) -> Result<(), String> {
     let id = request
         .params

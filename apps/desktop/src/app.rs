@@ -8,11 +8,13 @@ mod view;
 
 use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
 use agent_core::{
-    client::{Answer, ServerRequest},
-    models::{Item, Model, RemoteHost, Thread, Turn, WorktreeSettings},
     presentation::conversation::{ActivityExpansion, ConversationRowContent},
     state::{Attachment, Draft, Intent, PendingSubmission, Snapshot},
     store::Outcome,
+};
+use agent_protocol::{
+    models::{Item, Model, RemoteHost, Thread, Turn, WorktreeSettings},
+    operations::{Answer, ServerRequest},
 };
 use dictation::{Dictation, Phase};
 use gpui_kit::{
@@ -564,7 +566,7 @@ impl Desktop {
                 let host = if let Some(remote) = &remote {
                     remote
                         .ticket
-                        .parse::<agent_core::transport::Ticket>()
+                        .parse::<agent_transport::transport::Ticket>()
                         .map_err(|error| error.to_string())?
                         .node_id()
                         .to_string()
@@ -1099,7 +1101,7 @@ impl Desktop {
             .filter(|item| item.kind.as_deref() == Some("userMessage"))
     }
     fn sync_rows(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.rendered = self.snapshot.conversation_source().map(|thread| {
+        self.rendered = self.snapshot.conversation_thread().map(|thread| {
             agent_core::presentation::conversation::project_conversation(
                 &self.snapshot,
                 thread,

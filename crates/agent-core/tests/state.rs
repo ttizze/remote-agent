@@ -1,10 +1,7 @@
-use agent_core::{
-    models::{Item, Thread, ThreadResponse, Turn},
-    state::{
-        Draft, Effect, Event, Intent, Snapshot,
-        operations::{self as op, Operation},
-    },
+use agent_core::state::{
+    Draft, Effect, Event, Intent, Snapshot, operations as op, operations::Operation,
 };
+use agent_protocol::models::{Item, Thread, ThreadResponse, Turn};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -13,25 +10,25 @@ use std::{collections::BTreeMap, sync::Arc};
 #[path = "support/provider_fixture.rs"]
 mod provider_fixture;
 fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
-    if let Event::Notification(agent_core::protocol::Notification::Provider { method, params }) =
+    if let Event::Notification(agent_protocol::protocol::Notification::Provider { method, params }) =
         &event
         && let Ok(Some((id, change))) =
             provider_fixture::notification_change(method, params.clone())
     {
         if !previous.conversations.contains_key(&id) {
             let active = match &change {
-                agent_core::session::SessionChange::Status { status } => {
-                    status.kind == agent_core::models::ThreadStatusKind::Active
+                agent_protocol::session::SessionChange::Status { status } => {
+                    status.kind == agent_protocol::models::ThreadStatusKind::Active
                 }
-                agent_core::session::SessionChange::Turn { completed, .. } => !completed,
+                agent_protocol::session::SessionChange::Turn { completed, .. } => !completed,
                 _ => return (previous.clone(), Vec::new()),
             };
             return agent_core::state::reduce(
                 previous,
-                Event::Notification(agent_core::protocol::Notification::Activity {
-                    session: agent_core::session::SessionRef::from_thread_id(&id).unwrap(),
+                Event::Notification(agent_protocol::protocol::Notification::Activity {
+                    session: agent_protocol::session::SessionRef::from_thread_id(&id).unwrap(),
                     active,
-                    finished: matches!(&change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed")),
+                    finished: matches!(&change, agent_protocol::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed")),
                 }),
             );
         }
@@ -40,7 +37,7 @@ fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Arc::make_mut(&mut source.subscriptions).insert(id.clone(), subscription);
         let (mut next, effects) = agent_core::state::reduce(
             &source,
-            Event::SessionUpdate(Box::new(agent_core::session::SessionUpdate {
+            Event::SessionUpdate(Box::new(agent_protocol::session::SessionUpdate {
                 subscription_id: subscription,
                 change,
             })),
@@ -70,9 +67,9 @@ fn applied<O: Operation>(
     let effects = operation.apply(&mut next, output);
     (next, effects)
 }
-fn reply(thread: Thread) -> agent_core::session::OpenedSession {
-    agent_core::session::OpenedSession {
-        session: agent_core::session::SessionRef::from_thread_id(thread.id.as_deref().unwrap())
+fn reply(thread: Thread) -> agent_protocol::session::OpenedSession {
+    agent_protocol::session::OpenedSession {
+        session: agent_protocol::session::SessionRef::from_thread_id(thread.id.as_deref().unwrap())
             .unwrap(),
         subscription_id: uuid::Uuid::nil(),
         response: ThreadResponse {
@@ -181,7 +178,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
         let mut finished = pending.clone();
         for (index, echo) in [echo_first, !echo_first].into_iter().enumerate() {
             if echo {
-                finished = reduce(&finished, Event::Notification(agent_core::protocol::Notification::Provider {
+                finished = reduce(&finished, Event::Notification(agent_protocol::protocol::Notification::Provider {
                     method: "item/completed".into(),
                     params: json!({"threadId":"thread","turnId":"turn","item":{"id":"native","type":"userMessage","clientId":"client","content":[]}}),
                 })).0;
@@ -276,8 +273,10 @@ fn model_settings_corpus() {
             applied(
                 &previous,
                 op::LoadModels {},
-                serde_json::from_value::<agent_core::client::ModelPage>(json!({"data":models}))
-                    .unwrap(),
+                serde_json::from_value::<agent_protocol::operations::ModelPage>(
+                    json!({"data":models}),
+                )
+                .unwrap(),
             )
         };
         assert!(effects.is_empty());
@@ -296,7 +295,7 @@ fn event_corpus() {
         for event in case["events"].as_array().unwrap() {
             let (next, effects) = reduce(
                 &state,
-                Event::Notification(agent_core::protocol::Notification::Provider {
+                Event::Notification(agent_protocol::protocol::Notification::Provider {
                     method: event["method"].as_str().unwrap().into(),
                     params: event["params"].clone(),
                 }),
@@ -353,7 +352,7 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     );
     let (next, _) = reduce(
         &state,
-        Event::Notification(agent_core::protocol::Notification::Provider {
+        Event::Notification(agent_protocol::protocol::Notification::Provider {
             method: "item/agentMessage/delta".into(),
             params: json!({"threadId":"thread","turnId":"live","itemId":"changed","delta":" after"}),
         }),
@@ -391,7 +390,7 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
         for event in case["events"].as_array().unwrap() {
             snapshot = reduce(
                 &snapshot,
-                Event::Notification(agent_core::protocol::Notification::Provider {
+                Event::Notification(agent_protocol::protocol::Notification::Provider {
                     method: event["method"].as_str().unwrap().into(),
                     params: event["params"].clone(),
                 }),
@@ -417,7 +416,7 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
 #[test]
 fn new_chat_selects_catalog_defaults_in_either_load_order() {
     use agent_core::state::Intent;
-    let models = serde_json::from_value::<Vec<agent_core::models::Model>>(json!([{
+    let models = serde_json::from_value::<Vec<agent_protocol::models::Model>>(json!([{
         "id":"model", "model":"model", "displayName":"Model",
         "defaultReasoningEffort":"high", "supportedReasoningEfforts":[{"reasoningEffort":"high"}],
         "defaultServiceTier":"priority", "serviceTiers":[{"id":"priority"}], "isDefault":true
@@ -466,20 +465,20 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
 #[test]
 fn changing_workspace_clears_content_and_preserves_file_drafts() {
     use agent_core::state::{FileDraft, Intent, Navigation, Workspace};
-    let file: Arc<agent_core::models::FileContent> = Arc::new(
+    let file: Arc<agent_protocol::models::FileContent> = Arc::new(
         serde_json::from_value(json!({
             "path":"/old/file", "revision":"r1", "text":"saved", "bom":false,
             "lineEnding":"lf", "size":5
         }))
         .unwrap(),
     );
-    let directory: Arc<agent_core::models::FileList> = Arc::new(
+    let directory: Arc<agent_protocol::models::FileList> = Arc::new(
         serde_json::from_value(json!({
             "path":"/old", "entries":[], "truncated":false
         }))
         .unwrap(),
     );
-    let review: Arc<agent_core::models::WorkspaceReview> = Arc::new(
+    let review: Arc<agent_protocol::models::WorkspaceReview> = Arc::new(
         serde_json::from_value(json!({
             "branch":"main", "additions":1, "deletions":0, "files":[], "diff":"old"
         }))
@@ -571,7 +570,7 @@ fn file_change_delta_appends_to_known_changes() {
         );
         let (next, _) = reduce(
             &previous,
-            Event::Notification(agent_core::protocol::Notification::Provider {
+            Event::Notification(agent_protocol::protocol::Notification::Provider {
                 method: "item/fileChange/outputDelta".into(),
                 params: json!({"threadId":"thread","turnId":"turn","itemId":"file","delta":"tail"}),
             }),
@@ -617,7 +616,7 @@ fn leaving_conversation_retains_draft_and_marks_later_completion_unread() {
     assert!(effects.is_empty());
     let (completed, _) = reduce(
         &listed,
-        Event::Notification(agent_core::protocol::Notification::Provider {
+        Event::Notification(agent_protocol::protocol::Notification::Provider {
             method: "turn/completed".into(),
             params: json!({"threadId":"thread","turn":{"id":"turn","status":"completed","items":[]}}),
         }),
@@ -643,7 +642,7 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
         })),
         Event::Intent(op::Intent::Respond(op::Respond {
             request_id: json!("request"),
-            answer: agent_core::client::Answer::Raw {
+            answer: agent_protocol::operations::Answer::Raw {
                 value: json!({"decision":"accept","futureField":true}),
             },
         })),
@@ -778,7 +777,7 @@ fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
         snapshot.connected = connected;
         let (next, effects) = reduce(
             &snapshot,
-            Event::Notification(agent_core::protocol::Notification::Provider {
+            Event::Notification(agent_protocol::protocol::Notification::Provider {
                 method: "item/completed".into(),
                 params: json!({"threadId":"task","turnId":"turn","item":{
                     "id":"merge","type":"commandExecution","command":"git merge task","status":"completed","exitCode":0
@@ -809,7 +808,7 @@ fn terminal_disconnect_keeps_resumption_and_host_switch_drops_old_handles() {
         Event::Intent(Intent::StartTerminal(op::StartTerminal {
             handle: "test".into(),
             cwd: "/fixture".into(),
-            size: agent_core::client::TerminalSize { cols: 80, rows: 24 },
+            size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },
         })),
     );
     assert!(starting.terminal_view("test".into()).unwrap().accepts_input);

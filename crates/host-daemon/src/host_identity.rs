@@ -1,10 +1,10 @@
-use agent_core::transport::{Identity, NodeId, Trust};
+use agent_transport::transport::{Identity, NodeId, Trust};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Write, path::PathBuf, sync::Arc};
 use zeroize::Zeroizing;
 
-use agent_core::models::RemoteHost;
+use agent_protocol::models::RemoteHost;
 
 /// Stores only the two identity keys (64 bytes), never growing Host metadata.
 /// Fixtures inject isolated storage at this boundary.

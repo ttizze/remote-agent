@@ -1,6 +1,6 @@
 //! Normalize Codex's catalog at the provider boundary.
 use super::codex::Codex;
-use agent_core::composer::{ComposerCandidate, ComposerCatalog, Invocation, InvocationKind};
+use agent_protocol::composer::{ComposerCandidate, ComposerCatalog, Invocation, InvocationKind};
 use serde::Deserialize;
 use serde_json::json;
 

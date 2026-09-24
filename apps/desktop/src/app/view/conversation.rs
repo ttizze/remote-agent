@@ -1004,7 +1004,7 @@ mod rendering_tests {
     impl ConversationView {
         fn new(
             snapshot: Snapshot,
-            source: agent_core::models::Thread,
+            source: agent_protocol::models::Thread,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> Self {
@@ -1013,7 +1013,7 @@ mod rendering_tests {
                     Desktop::new(
                         Mode::SideChat {
                             // Reject before reading preferences or connecting to a real Host.
-                            remote: Some(agent_core::models::RemoteHost {
+                            remote: Some(agent_protocol::models::RemoteHost {
                                 id: "fixture".into(),
                                 name: "fixture".into(),
                                 ticket: "invalid-fixture-ticket".into(),

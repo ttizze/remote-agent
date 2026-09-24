@@ -1,5 +1,7 @@
-use agent_core::peer::{JsonlReader, JsonlWriter};
-use agent_core::transport::Identity;
+use agent_transport::{
+    peer::{JsonlReader, JsonlWriter},
+    transport::Identity,
+};
 use host_fixture::{
     fixture::Config,
     pairing::PairingServer,

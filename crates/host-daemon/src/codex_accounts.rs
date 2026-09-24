@@ -1,12 +1,15 @@
-use agent_core::protocol::Body;
-use agent_core::protocol::Call;
+use agent_protocol::protocol::{Body, Call};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use agent_core::{
-    client::{self as op, AccountLogin, AccountLoginStatus},
-    models::Empty,
-    peer::PeerEvent,
-};
+use agent_protocol::operations as op;
+
+use agent_protocol::operations::AccountLogin;
+
+use agent_protocol::operations::AccountLoginStatus;
+
+use agent_protocol::models::Empty;
+
+use agent_transport::peer::PeerEvent;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use serde::{Deserialize, Serialize};
@@ -237,7 +240,7 @@ impl Accounts {
                         .iter()
                         .map(|account| op::Account {
                             id: account.id.clone(),
-                            provider: agent_core::session::ProviderKind::Codex,
+                            provider: agent_protocol::session::ProviderKind::Codex,
                             email: account.email.clone(),
                             plan_type: Some(account.plan_type.clone()),
                             usage: None,
@@ -252,7 +255,7 @@ impl Accounts {
             Call::SelectAccount(params) => {
                 self.select(primary, &params.id).await?;
                 Ok(op::AccountSelection {
-                    provider: agent_core::session::ProviderKind::Codex,
+                    provider: agent_protocol::session::ProviderKind::Codex,
                     selected_id: params.id,
                     persistence_error: self.save().await.err(),
                 }

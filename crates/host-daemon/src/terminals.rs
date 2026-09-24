@@ -1,8 +1,11 @@
 //! Device-owned PTYs, retained across transport disconnects. The private supervisor pipe carries terminal I/O;
 //! only this owner publishes events and grants access to a process handle.
 use crate::host_rpc::routing::{SessionId, SessionRouter};
-use agent_core::protocol::{Call, Notification};
-use agent_core::{client::TerminalSize, peer::JsonlReader};
+use agent_protocol::{
+    operations::TerminalSize,
+    protocol::{Call, Notification},
+};
+use agent_transport::peer::JsonlReader;
 use alacritty_terminal::grid::Dimensions as _;
 use bex_process::{PtyCommand, PtyEvent};
 use std::{
@@ -82,7 +85,7 @@ impl Terminals {
         handle: String,
         cwd: String,
         size: TerminalSize,
-    ) -> Result<agent_core::models::Empty, String> {
+    ) -> Result<agent_protocol::models::Empty, String> {
         if handle.is_empty()
             || handle.len() > 256
             || size.rows == 0
@@ -120,7 +123,7 @@ impl Terminals {
                 .await
                 .map_err(|_| "terminal has exited")?;
             completed.await.map_err(|_| "terminal has exited")??;
-            return Ok(agent_core::models::Empty {});
+            return Ok(agent_protocol::models::Empty {});
         }
         let attached = Arc::new(Mutex::new(Some(owner)));
         let is_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -175,16 +178,16 @@ impl Terminals {
             .map_err(|_| "terminal startup timed out")?
             .map_err(|_| "terminal startup stopped")??;
         cancel_start.disarm();
-        Ok(agent_core::models::Empty {})
+        Ok(agent_protocol::models::Empty {})
     }
     pub(crate) async fn request(
         &self,
         owner: SessionId,
-        call: &agent_core::protocol::Call,
-    ) -> Result<agent_core::models::Empty, String> {
+        call: &agent_protocol::protocol::Call,
+    ) -> Result<agent_protocol::models::Empty, String> {
         let detach = matches!(call, Call::DetachTerminal(_));
         let (handle, action) = match call {
-            agent_core::protocol::Call::WriteTerminal(params) => {
+            agent_protocol::protocol::Call::WriteTerminal(params) => {
                 if params.data.len() > 64 * 1024 {
                     return Err("terminal input exceeds 64 KiB".into());
                 }
@@ -193,7 +196,7 @@ impl Terminals {
                     Some(Action::Write(params.data.clone())),
                 )
             }
-            agent_core::protocol::Call::ResizeTerminal(params) => {
+            agent_protocol::protocol::Call::ResizeTerminal(params) => {
                 if params.size.rows == 0
                     || params.size.cols == 0
                     || params.size.rows > 250
@@ -204,7 +207,7 @@ impl Terminals {
                 (params.handle.clone(), Some(Action::Resize(params.size)))
             }
             Call::DetachTerminal(params) => (params.handle.clone(), None),
-            agent_core::protocol::Call::KillTerminal(params) => {
+            agent_protocol::protocol::Call::KillTerminal(params) => {
                 (params.process_handle.clone(), None)
             }
             _ => return Err("unknown terminal operation".into()),
@@ -216,7 +219,7 @@ impl Terminals {
             });
             let Some(record) = record else {
                 return if detach {
-                    Ok(agent_core::models::Empty {})
+                    Ok(agent_protocol::models::Empty {})
                 } else {
                     Err("terminal handle is unavailable".into())
                 };
@@ -226,7 +229,7 @@ impl Terminals {
                 if *attached == Some(owner) {
                     *attached = None;
                 }
-                return Ok(agent_core::models::Empty {});
+                return Ok(agent_protocol::models::Empty {});
             }
             (
                 record.input.clone(),
@@ -246,7 +249,7 @@ impl Terminals {
                     .await
                     .map_err(|_| "terminal cleanup stopped")?;
             }
-            return Ok(agent_core::models::Empty {});
+            return Ok(agent_protocol::models::Empty {});
         }
         let action = action.expect("kill returned above");
         let (complete, completed) = oneshot::channel();
@@ -255,7 +258,7 @@ impl Terminals {
             .await
             .map_err(|_| "terminal has exited")?;
         completed.await.map_err(|_| "terminal has exited")??;
-        Ok(agent_core::models::Empty {})
+        Ok(agent_protocol::models::Empty {})
     }
     pub(crate) fn revoke_device(&self, principal: &str) {
         let prefix = format!("{principal}:");
@@ -359,7 +362,7 @@ impl Worker {
                                         let data = match reply {
                                             Event::PtyWrite(data)=>data,
                                             Event::ColorRequest(index,format)=> {
-                                                let value=agent_core::client::terminal_color(index as u16);
+                                                let value=agent_protocol::operations::terminal_color(index as u16);
                                                 let color=screen.colors()[index].unwrap_or(Rgb {r:(value>>16) as u8,g:(value>>8) as u8,b:value as u8});
                                                 format(color)
                                             }
@@ -541,31 +544,31 @@ mod tests {
             for handle in ["one", "two"] {
                 terminals.start(router.clone(), first.id(), handle.into(), cwd.clone(), size).await.unwrap();
             }
-            terminals.request(first.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: "BEX_RETAINED=survived\n".as_bytes().to_vec() })).await.unwrap();
-            terminals.request(first.id(), &Call::DetachTerminal(agent_core::state::operations::DetachTerminal { handle: "one".into() })).await.unwrap();
-            assert!(terminals.request(first.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: b"a".to_vec() })).await.is_err());
-            terminals.request(first.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "two".into(), data: "true\n".as_bytes().to_vec() })).await.unwrap();
+            terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "BEX_RETAINED=survived\n".as_bytes().to_vec() })).await.unwrap();
+            terminals.request(first.id(), &Call::DetachTerminal(agent_protocol::operations::DetachTerminal { handle: "one".into() })).await.unwrap();
+            assert!(terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: b"a".to_vec() })).await.is_err());
+            terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "two".into(), data: "true\n".as_bytes().to_vec() })).await.unwrap();
             router.close_session(first.id()); terminals.close_session(first.id());
             let mut second = router.open_authenticated_session(128, Some("phone".into()));
             terminals.start(router.clone(), second.id(), "one".into(), cwd.clone(), size).await.unwrap();
             let mut restored = false;
             while let Some(line) = second.recv().await {
-                if matches!(agent_core::protocol::decode::<Notification>(&line).unwrap(), Notification::TerminalRestored { .. }) { restored=true; break; }
+                if matches!(agent_protocol::protocol::decode::<Notification>(&line).unwrap(), Notification::TerminalRestored { .. }) { restored=true; break; }
             }
             assert!(restored);
-            terminals.request(second.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: "printf '%s' \"$BEX_RETAINED\" > retained\n".as_bytes().to_vec() })).await.unwrap();
+            terminals.request(second.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "printf '%s' \"$BEX_RETAINED\" > retained\n".as_bytes().to_vec() })).await.unwrap();
             loop {
                 if std::fs::read_to_string(directory.path().join("retained")).ok().as_deref()==Some("survived") {break;}
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            terminals.request(second.id(), &Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "one".into(), data: "stty -echo -icanon min 0 time 5; printf '\\033[6n'; dd bs=64 count=1 of=query-reply 2>/dev/null; stty sane\n".as_bytes().to_vec() })).await.unwrap();
+            terminals.request(second.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "stty -echo -icanon min 0 time 5; printf '\\033[6n'; dd bs=64 count=1 of=query-reply 2>/dev/null; stty sane\n".as_bytes().to_vec() })).await.unwrap();
             loop {
                 if let Ok(bytes)=std::fs::read(directory.path().join("query-reply"))
                     && bytes.starts_with(b"\x1b[") && bytes.ends_with(b"R") {break;}
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             let stranger=router.open_authenticated_session(128,Some("other-phone".into()));
-            assert!(terminals.request(stranger.id(),&Call::KillTerminal(agent_core::client::TerminalKill { process_handle: "one".into() })).await.is_err());
+            assert!(terminals.request(stranger.id(),&Call::KillTerminal(agent_protocol::operations::TerminalKill { process_handle: "one".into() })).await.is_err());
             terminals.start(router.clone(),stranger.id(),"one".into(),cwd,size).await.unwrap();
             assert_eq!(terminals.records.lock().unwrap().len(),3);
             terminals.shutdown().await;
@@ -586,7 +589,7 @@ mod tests {
                 // Linux validation runs this Host with SHELL=/bin/sh (dash).
                 // Disable interactive history expansion for Bash on macOS.
                 let command = "[ -z \"${BASH_VERSION-}\" ] || set +H\nsleep 120 & first=$!; sleep 120 & printf '%s %s %s\\n' \"$$\" \"$first\" \"$!\" > owned-pids; wait\n";
-                terminals.request(connection.id(), &agent_core::protocol::Call::WriteTerminal(agent_core::client::TerminalWrite { process_handle: "jobs".into(), data: command.as_bytes().to_vec() })).await.unwrap();
+                terminals.request(connection.id(), &agent_protocol::protocol::Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "jobs".into(), data: command.as_bytes().to_vec() })).await.unwrap();
                 let pids = loop {
                     if let Ok(text) = std::fs::read_to_string(directory.path().join("owned-pids"))
                         && text.split_whitespace().count() == 3
@@ -608,7 +611,7 @@ mod tests {
                     assert!(terminals.in_use(&cwd));
                     terminals.shutdown().await;
                 } else {
-                    let call = agent_core::protocol::Call::KillTerminal(agent_core::client::TerminalKill { process_handle: "jobs".into() });
+                    let call = agent_protocol::protocol::Call::KillTerminal(agent_protocol::operations::TerminalKill { process_handle: "jobs".into() });
                     let mut kill = Box::pin(terminals.request(connection.id(), &call));
                     assert!(futures_util::poll!(&mut kill).is_pending());
                     assert!(terminals.in_use(&cwd));

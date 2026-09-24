@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use agent_core::diagnostics;
+use agent_transport::diagnostics;
 use std::{fs, os::unix::fs::PermissionsExt, process::Stdio, time::Duration};
 
 #[tokio::test]

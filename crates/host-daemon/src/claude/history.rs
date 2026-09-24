@@ -1,6 +1,6 @@
 //! Read-only access to Claude's native transcript tree. Never repairs or writes
 //! transcripts, and never launches the CLI to list or display a conversation.
-use agent_core::{
+use agent_protocol::{
     models::{Item, Thread, ThreadResponse, Turn},
     session::{ProviderKind, SessionRef},
 };
@@ -109,8 +109,8 @@ pub(super) fn summary(path: &Path) -> Result<Thread> {
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|time| time.as_secs() as f64),
-        status: Some(agent_core::models::ThreadStatus {
-            kind: agent_core::models::ThreadStatusKind::NotLoaded,
+        status: Some(agent_protocol::models::ThreadStatus {
+            kind: agent_protocol::models::ThreadStatusKind::NotLoaded,
         }),
         ..Default::default()
     };
@@ -484,7 +484,7 @@ fn convert(
     warnings.sort_unstable();
     warnings.dedup();
     thread.history_has_more = Some(has_more);
-    use agent_core::session::{HistoryReadKind, HistoryReadState};
+    use agent_protocol::session::{HistoryReadKind, HistoryReadState};
     thread.history_read_state = Some(HistoryReadState::new(
         if warnings.is_empty() {
             if has_more {
@@ -557,7 +557,7 @@ mod tests {
         let response = read(&path, 100).unwrap();
         assert_eq!(
             response.thread.history_read_state.unwrap().kind,
-            agent_core::session::HistoryReadKind::Complete
+            agent_protocol::session::HistoryReadKind::Complete
         );
         let turns = response.thread.turns.unwrap();
         assert_eq!(turns.len(), 3);
@@ -630,7 +630,7 @@ mod tests {
             let response = read(&path, 5).unwrap();
             assert_eq!(
                 response.thread.history_read_state.as_ref().unwrap().kind,
-                agent_core::session::HistoryReadKind::Incomplete
+                agent_protocol::session::HistoryReadKind::Incomplete
             );
             assert!(
                 response

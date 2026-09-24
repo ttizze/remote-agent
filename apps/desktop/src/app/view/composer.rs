@@ -439,7 +439,7 @@ impl Desktop {
         let mut body = v_flex().flex_1().min_w_0().h_full();
         if let Some(notice) = self
             .thread()
-            .and_then(|thread| agent_core::session::input_unavailable_reason(thread))
+            .and_then(|thread| agent_protocol::session::input_unavailable_reason(thread))
         {
             body = body.child(div().px_4().py_2().text_sm().child(notice));
         }
@@ -559,7 +559,9 @@ impl Desktop {
                     || empty
                     || self
                         .thread()
-                        .and_then(|thread| agent_core::session::input_unavailable_reason(thread))
+                        .and_then(|thread| {
+                            agent_protocol::session::input_unavailable_reason(thread)
+                        })
                         .is_some(),
             )
         };
@@ -693,7 +695,7 @@ impl Desktop {
 }
 
 fn account_selector(
-    accounts: Option<Arc<agent_core::client::Accounts>>,
+    accounts: Option<Arc<agent_protocol::operations::Accounts>>,
     disabled: bool,
     mut active: Option<(String, AnyElement)>,
     on_select: impl Fn(String, &mut Window, &mut App) + 'static,
@@ -706,8 +708,8 @@ fn account_selector(
             let id = account.id.clone();
             let select = on_select.clone();
             let provider = match account.provider {
-                agent_core::session::ProviderKind::Codex => "Codex",
-                agent_core::session::ProviderKind::Claude => "Claude",
+                agent_protocol::session::ProviderKind::Codex => "Codex",
+                agent_protocol::session::ProviderKind::Claude => "Claude",
             };
             rows = rows.child(
                 v_flex()
@@ -753,7 +755,7 @@ mod tests {
     use std::{cell::RefCell, rc::Rc, sync::Arc};
 
     struct Picker {
-        accounts: Arc<agent_core::client::Accounts>,
+        accounts: Arc<agent_protocol::operations::Accounts>,
         disabled: bool,
         selected: Rc<RefCell<Vec<String>>>,
     }

@@ -108,17 +108,15 @@ impl Snapshot {
 
 /// A newly created branch shares main's history without having merged any work.
 /// Missing creation history cannot establish that work has been integrated.
-pub fn worktree_branch_merged(head: &str, initial: Option<&str>, contained_in_main: bool) -> bool {
-    contained_in_main && initial.is_some_and(|initial| initial != head)
-}
+#[cfg(test)]
+use agent_protocol::models::worktree_branch_merged;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        models,
-        state::operations::{ListThreads, Operation},
-    };
+    use crate::state::operations::ListThreads;
+    use crate::state::operations::Operation;
+    use agent_protocol::models;
     use serde_json::json;
 
     #[test]

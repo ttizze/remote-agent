@@ -3,7 +3,7 @@ mod platform;
 
 use std::{env, io, path::PathBuf, process::Stdio, time::Duration};
 
-use agent_core::peer::{PeerError, PeerEvent, RpcMessage, RpcPeer, RpcResponse};
+use agent_transport::peer::{PeerError, PeerEvent, RpcMessage, RpcPeer, RpcResponse};
 use serde::{Deserialize, Serialize};
 use tokio::{process::Child, sync::broadcast};
 
@@ -103,7 +103,7 @@ impl CodexAppServer {
         let stdin = child.stdin.take().ok_or(Error::MissingPipe("stdin"))?;
         let stdout = child.stdout.take().ok_or(Error::MissingPipe("stdout"))?;
         let peer = RpcPeer::open(
-            agent_core::peer::JsonlReader::new(stdout),
+            agent_transport::peer::JsonlReader::new(stdout),
             stdin,
             Some(config.request_timeout),
             1024,
@@ -149,7 +149,7 @@ impl CodexAppServer {
     pub async fn request_raw_sequenced(
         &self,
         line: &str,
-    ) -> Result<agent_core::peer::Reply<String>, Error> {
+    ) -> Result<agent_transport::peer::Reply<String>, Error> {
         let message = RpcMessage::parse(line)
             .map_err(|error| Error::Peer(PeerError::InvalidMessage(error.to_string())))?;
         if let Some(method) = message.method() {
@@ -171,7 +171,7 @@ impl CodexAppServer {
         &self,
         method: &str,
         params: &P,
-    ) -> Result<agent_core::peer::Reply<RpcResponse<T>>, Error> {
+    ) -> Result<agent_transport::peer::Reply<RpcResponse<T>>, Error> {
         ensure_public_method(method)?;
         Ok(self.peer.request_envelope(method, params).await?)
     }

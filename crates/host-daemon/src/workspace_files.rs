@@ -1,21 +1,24 @@
-use agent_core::protocol::Body;
-use agent_core::protocol::Call;
+use agent_protocol::protocol::{Body, Call};
 use anyhow::{Context as _, Result, anyhow};
+use ring::digest;
+use std::fs;
 use std::{
     collections::HashMap,
-    fs::{self, File},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use agent_core::models::{FileContent, FileEntry, FileList, TransferGrant};
+use agent_protocol::models::{FileContent, FileEntry, FileList, TransferGrant};
 #[cfg(test)]
-use agent_core::{client::Upload, state::operations::ListFiles as PathParams};
+use agent_protocol::operations::ListFiles as PathParams;
+#[cfg(test)]
+use agent_protocol::operations::Upload;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
-    digest::{self, Context, SHA256},
+    digest::{Context, SHA256},
     rand::{SecureRandom, SystemRandom},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -108,9 +111,7 @@ impl WorkspaceFiles {
     fn dispatch(&self, session: SessionId, request: Call) -> Result<Body> {
         match request {
             Call::ReadVisualization(params) => {
-                use agent_core::presentation::visualize::{
-                    visualization_document, visualization_path,
-                };
+                use crate::visualize::{visualization_document, visualization_path};
                 let path =
                     visualization_path(&params.path, &params.cwd).map_err(anyhow::Error::msg)?;
                 let directory = self.upload_directory.join("visualizations");
@@ -352,7 +353,7 @@ impl WorkspaceFiles {
                         directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name));
                     output.persist_noclobber(&path)?;
                     let response =
-                        agent_core::protocol::encode(agent_core::models::UploadedFile {
+                        agent_protocol::protocol::encode(agent_protocol::models::UploadedFile {
                             path: path.to_str().context("upload path is not UTF-8")?.into(),
                             size: grant.size,
                             sha256: grant.digest,
@@ -485,7 +486,7 @@ mod tests {
         )
         .unwrap();
         let request = || {
-            Call::ReadVisualization(agent_core::client::LoadVisualization {
+            Call::ReadVisualization(agent_protocol::operations::LoadVisualization {
                 path: "comparison.html".into(),
                 cwd: directory.path().to_str().unwrap().into(),
             })

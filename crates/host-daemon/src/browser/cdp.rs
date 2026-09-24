@@ -1,4 +1,4 @@
-use agent_core::browser::{BrowserAction, BrowserDialog, BrowserKey, HEIGHT, WIDTH};
+use agent_protocol::browser::{BrowserAction, BrowserDialog, BrowserKey, HEIGHT, WIDTH};
 use async_tungstenite::{WebSocketStream, tokio::ConnectStream, tungstenite::Message};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
@@ -243,7 +243,7 @@ impl Chrome {
         let (method, params) = match action {
             BrowserAction::Navigate { url } => (
                 "Page.navigate",
-                json!({"url":agent_core::presentation::browser::browser_url(url)?}),
+                json!({"url":agent_protocol::browser::browser_url(url)?}),
             ),
             BrowserAction::Reload => ("Page.reload", json!({})),
             BrowserAction::Click { x, y } => {

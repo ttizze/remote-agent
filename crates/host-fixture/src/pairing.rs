@@ -1,11 +1,11 @@
 //! Loopback-only UI test controls. No saved application profiles are used.
 
-use crate::Result;
-use crate::test_support::Connection;
-use agent_core::transport::{Identity, Ticket};
+use crate::{Result, test_support::Connection};
+use agent_transport::transport::{Identity, Ticket};
 use serde_json::json;
+use std::fs;
 use std::{
-    fs::{self, OpenOptions},
+    fs::OpenOptions,
     io::Write,
     net::Ipv4Addr,
     path::{Path, PathBuf},
@@ -95,7 +95,7 @@ impl Drop for PairingServer {
     }
 }
 
-fn rpc<O: agent_core::client::RpcMethod>(
+fn rpc<O: agent_protocol::operations::RpcMethod>(
     runtime: &tokio::runtime::Runtime,
     ticket: &Ticket,
     identity: &Identity,
@@ -217,8 +217,8 @@ fn route(
             let connection =
                 Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
             let result: Result<()> = async {
-                connection.peer.request::<agent_core::session::OpenedSession>(&agent_core::protocol::Call::OpenSession(serde_json::from_value::<agent_core::session::OpenSession>(json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap())?;
-                connection.peer.call(&serde_json::from_value::<agent_core::client::StartTurn>(json!({"threadId":"fixture-external-thread","clientUserMessageId":"fixture-other-client",
+                connection.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(serde_json::from_value::<agent_protocol::session::OpenSession>(json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap())?;
+                connection.peer.call(&serde_json::from_value::<agent_protocol::operations::StartTurn>(json!({"threadId":"fixture-external-thread","clientUserMessageId":"fixture-other-client",
                         "input":[{"type":"text","text":"[success] Reply from another Bex client"}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap())?;
                 Ok(())
             }.await;

@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use agent_core::peer::{JsonlReader, JsonlWriter};
+use agent_transport::peer::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use std::{path::PathBuf, process::Stdio, time::Duration};
 
@@ -128,12 +128,12 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
     let phone = browser
         .request(
             "phone",
-            &agent_core::browser::BrowserRequest {
+            &agent_protocol::browser::BrowserRequest {
                 thread_id: thread.into(),
                 control_token: String::new(),
                 tab_id: String::new(),
                 image_id: String::new(),
-                action: agent_core::browser::BrowserAction::Read,
+                action: agent_protocol::browser::BrowserAction::Read,
             },
         )
         .await
@@ -147,7 +147,7 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
 #[tokio::test]
 #[ignore = "requires Chrome and the process supervisor"]
 async fn cancelled_mcp_wait_keeps_the_bridge_responsive() {
-    use agent_core::browser::{BrowserAction, BrowserControl, BrowserFrame, BrowserRequest};
+    use agent_protocol::browser::{BrowserAction, BrowserControl, BrowserFrame, BrowserRequest};
     let root = tempfile::tempdir().unwrap();
     let browser = host_daemon::browser::Browser::start(root.path().join("profile"))
         .await

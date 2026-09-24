@@ -1,11 +1,9 @@
-use crate::Runtime;
-use crate::store_session::StoreSession;
-use agent_core::state::operations as op;
+use crate::{Runtime, store_session::StoreSession};
 use agent_core::{
-    models::{Invitation, RemoteHost},
-    state::{Intent, Snapshot},
+    state::{Intent, Snapshot, operations as op},
     store::Outcome,
 };
+use agent_protocol::models::{Invitation, RemoteHost};
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants},

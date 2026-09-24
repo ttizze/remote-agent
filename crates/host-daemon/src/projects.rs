@@ -1,4 +1,4 @@
-use agent_core::models::Project;
+use agent_protocol::models::Project;
 use anyhow::Context;
 use std::{
     env, io,

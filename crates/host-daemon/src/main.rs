@@ -31,7 +31,7 @@ async fn main() {
         tracing::error!(target: "bex", operation = "host.runtime", message = %error);
         eprintln!(
             "host daemon failed: {}",
-            agent_core::diagnostics::sanitize(&error)
+            agent_transport::diagnostics::sanitize(&error)
         );
         std::process::exit(1);
     }

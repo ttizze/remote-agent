@@ -5,7 +5,6 @@ pub const WIDTH: u32 = 1024;
 pub const HEIGHT: u32 = 768;
 
 #[derive(Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct BrowserRequest {
     pub thread_id: String,
     pub control_token: String,
@@ -20,7 +19,6 @@ impl std::fmt::Debug for BrowserRequest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum BrowserAction {
     Read,
     TakeControl,
@@ -65,7 +63,7 @@ impl BrowserAction {
         }
         let valid = match self {
             Self::Navigate { url } => {
-                crate::presentation::browser::browser_url(url)?;
+                browser_url(url)?;
                 url.len() <= 8192
             }
             Self::Click { x, y } => point(*x, *y),
@@ -94,7 +92,6 @@ impl BrowserAction {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum BrowserKey {
     Enter,
     Tab,
@@ -108,7 +105,6 @@ pub enum BrowserKey {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum BrowserControl {
     #[default]
     Agent,
@@ -118,7 +114,6 @@ pub enum BrowserControl {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct BrowserTab {
     pub id: String,
     pub title: String,
@@ -126,14 +121,12 @@ pub struct BrowserTab {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct BrowserDialog {
     pub message: String,
     pub prompt: bool,
 }
 
 #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct BrowserFrame {
     pub tabs: Vec<BrowserTab>,
     pub tab_id: String,
@@ -198,5 +191,54 @@ mod tests {
             frame
         );
         assert!(!format!("{frame:?}").contains("255"));
+    }
+}
+
+pub fn browser_url(input: &str) -> Result<String, String> {
+    let input = input.trim();
+    if input == "about:blank" {
+        return Ok(input.into());
+    }
+    if input.is_empty() {
+        return Err("URL を入力してください".into());
+    }
+    let source = if input.contains("://") {
+        input.to_owned()
+    } else {
+        format!("https://{input}")
+    };
+    let url = url::Url::parse(&source).map_err(|_| "URL が不正です")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err("http または https の URL を入力してください".into());
+    }
+    Ok(url.into())
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::browser_url;
+
+    #[test]
+    fn accepts_web_addresses_and_blank_but_rejects_privileged_schemes_and_credentials() {
+        for (input, expected) in [
+            (" example.com/path ", "https://example.com/path"),
+            ("http://localhost:8080", "http://localhost:8080/"),
+            ("about:blank", "about:blank"),
+        ] {
+            assert_eq!(browser_url(input).unwrap(), expected);
+        }
+        for input in [
+            "",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://user:secret@example.com",
+            "https://",
+        ] {
+            assert!(browser_url(input).is_err(), "{input}");
+        }
     }
 }

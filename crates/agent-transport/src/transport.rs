@@ -1,11 +1,13 @@
 //! Authenticated iroh sessions with independent request, subscription, and blob streams.
 use crate::client::Client;
 pub use crate::client::{HostPeer, HostRequest};
-use crate::diagnostics::{
-    ConnectionPhase as Phase,
-    connection::{Trace, identifier},
+use crate::{
+    diagnostics::{
+        ConnectionPhase as Phase,
+        connection::{Trace, identifier},
+    },
+    peer::PeerError,
 };
-use crate::peer::PeerError;
 use iroh::{EndpointAddr, RelayMode, SecretKey, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::{Deserialize, Serialize};
@@ -135,7 +137,7 @@ impl Endpoint {
     pub async fn bind(identity: Identity, relays: Relays) -> Result<Self, TransportError> {
         Self::bind_recording(identity, relays, Trace::new()).await
     }
-    pub(crate) async fn bind_recording(
+    pub async fn bind_recording(
         identity: Identity,
         relays: Relays,
         trace: Arc<Trace>,
@@ -289,7 +291,7 @@ impl PairingRequest {
     /// Supply the persisted allowlist after consuming `invitation` atomically.
     pub async fn authorize(mut self, trust: &Trust) -> Result<(Session, HostPeer), TransportError> {
         let session = scopeguard::guard(self.incoming.authorize(trust)?, |session| session.close());
-        crate::protocol::write(
+        crate::framing::write(
             &mut self.reply,
             crate::protocol::Response::Success {
                 result: crate::models::Empty {},
@@ -309,10 +311,10 @@ pub struct Session {
     diagnostic_id: u64,
 }
 impl Session {
-    pub(crate) fn resolution_ms(&self) -> u64 {
+    pub fn resolution_ms(&self) -> u64 {
         self.resolution_ms
     }
-    pub(crate) fn uses_endpoint(&self, endpoint: &Endpoint) -> bool {
+    pub fn uses_endpoint(&self, endpoint: &Endpoint) -> bool {
         Arc::ptr_eq(&self._endpoint.0, &endpoint.0)
     }
 
@@ -362,7 +364,7 @@ impl Session {
                 shutdown: None,
             })),
             CALL => {
-                let call = crate::protocol::Reader::new(recv)
+                let call = crate::framing::Reader::new(recv)
                     .read::<crate::protocol::Call>()
                     .await
                     .map_err(connection)?
@@ -389,7 +391,7 @@ impl Session {
         &self,
         timeout: Duration,
         max_requests: usize,
-    ) -> Result<(Client, crate::protocol::Reader), TransportError> {
+    ) -> Result<(Client, crate::framing::Reader), TransportError> {
         Ok(Client::connect(
             self.connection.clone(),
             timeout,

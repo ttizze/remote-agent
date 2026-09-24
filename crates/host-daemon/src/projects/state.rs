@@ -1,6 +1,8 @@
-use agent_core::models::{Project, ProjectMembership};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use agent_protocol::models::{Project, ProjectMembership};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Default)]
 pub(crate) struct Snapshot {

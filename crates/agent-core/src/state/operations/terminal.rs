@@ -1,6 +1,6 @@
 use super::*;
 
-pub use crate::client::StartTerminal;
+pub use agent_protocol::operations::StartTerminal;
 
 impl Operation for StartTerminal {
     rpc_operation!();
@@ -50,13 +50,7 @@ impl Operation for StartTerminal {
     const APPLY_WHEN_STALE: bool = true;
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResizeTerminal {
-    #[serde(rename = "processHandle")]
-    pub handle: String,
-    pub size: rpc::TerminalSize,
-}
+pub use agent_protocol::operations::ResizeTerminal;
 
 impl Operation for ResizeTerminal {
     rpc_operation!();
@@ -78,7 +72,7 @@ pub struct WriteTerminal {
     pub data: Vec<u8>,
 }
 impl rpc::RpcMethod for WriteTerminal {
-    crate::client::rpc_contract!(WriteTerminal);
+    agent_protocol::operations::rpc_contract!(WriteTerminal);
     fn params(
         &self,
     ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
@@ -109,12 +103,7 @@ impl Operation for WriteTerminal {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DetachTerminal {
-    #[serde(rename = "processHandle")]
-    pub handle: String,
-}
+pub use agent_protocol::operations::DetachTerminal;
 
 impl Operation for DetachTerminal {
     rpc_operation!();

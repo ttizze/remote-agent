@@ -1,5 +1,5 @@
 //! Real isolated Host startup shared by UI and transport tests.
-use agent_core::{
+use agent_transport::{
     client::Client,
     transport::{Endpoint, Identity, Relays, Session, Ticket},
 };
@@ -140,7 +140,7 @@ pub struct Connection {
     pub endpoint: Endpoint,
     pub session: Session,
     pub peer: Client,
-    pub events: agent_core::protocol::Reader,
+    pub events: agent_transport::framing::Reader,
 }
 
 impl Connection {

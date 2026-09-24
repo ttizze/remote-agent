@@ -1,4 +1,4 @@
-use agent_core::client::{AccountUsage, UsageWindow};
+use agent_protocol::operations::{AccountUsage, UsageWindow};
 use serde_json::Value;
 use std::{
     collections::HashMap,

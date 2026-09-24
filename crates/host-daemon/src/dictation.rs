@@ -29,7 +29,7 @@ impl Dictation {
     pub(crate) async fn transcribe(
         &self,
         audio: &[u8],
-    ) -> Result<agent_core::client::Transcription, String> {
+    ) -> Result<agent_protocol::operations::Transcription, String> {
         let app_server = self
             .backend
             .as_deref()
@@ -46,7 +46,7 @@ impl Dictation {
 async fn transcribe_request(
     app_server: &CodexAppServer,
     pcm: &[u8],
-) -> Result<agent_core::client::Transcription, String> {
+) -> Result<agent_protocol::operations::Transcription, String> {
     if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
         return Err("録音データが無効です。".into());
     }
@@ -70,7 +70,7 @@ async fn transcribe_request(
             .await?
         }
     };
-    Ok(agent_core::client::Transcription { text })
+    Ok(agent_protocol::operations::Transcription { text })
 }
 
 // Both TLS backends are linked on desktop; iroh does not install a global one.

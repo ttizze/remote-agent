@@ -495,8 +495,8 @@ impl Desktop {
                                 .child(div().child(format!(
                                     "{} · {email}",
                                     match account.provider {
-                                        agent_core::session::ProviderKind::Codex => "Codex",
-                                        agent_core::session::ProviderKind::Claude => "Claude",
+                                        agent_protocol::session::ProviderKind::Codex => "Codex",
+                                        agent_protocol::session::ProviderKind::Claude => "Claude",
                                     }
                                 )))
                                 .when(accounts.is_selected(account), |row| {
@@ -541,12 +541,12 @@ impl Desktop {
             (
                 "account-start-login",
                 "Codex アカウントを追加",
-                agent_core::session::ProviderKind::Codex,
+                agent_protocol::session::ProviderKind::Codex,
             ),
             (
                 "account-start-claude-login",
                 "Claude アカウントを追加",
-                agent_core::session::ProviderKind::Claude,
+                agent_protocol::session::ProviderKind::Claude,
             ),
         ] {
             add = add.child(

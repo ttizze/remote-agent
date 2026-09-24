@@ -1,4 +1,4 @@
-use agent_core::{models::ThreadList, state::operations::ListThreads};
+use agent_protocol::{models::ThreadList, operations::ListThreads};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{HostRpcService, ProjectStore};
 use std::sync::Arc;
@@ -12,14 +12,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reply = service
         .dispatch(
             session.id(),
-            &agent_core::protocol::Call::ListThreads(ListThreads::new(Default::default())),
+            &agent_protocol::protocol::Call::ListThreads(ListThreads::new(Default::default())),
         )
         .await?;
-    let response: agent_core::protocol::Response<ThreadList> =
-        agent_core::protocol::decode(&reply.initial)?;
+    let response: agent_protocol::protocol::Response<ThreadList> =
+        agent_protocol::protocol::decode(&reply.initial)?;
     let list = match response {
-        agent_core::protocol::Response::Success { result } => result,
-        agent_core::protocol::Response::Failure { error } => return Err(error.to_string().into()),
+        agent_protocol::protocol::Response::Success { result } => result,
+        agent_protocol::protocol::Response::Failure { error } => {
+            return Err(error.to_string().into());
+        }
     };
     println!(
         "Codex native project catalog is readable: {} visible projects, {} visible conversations",

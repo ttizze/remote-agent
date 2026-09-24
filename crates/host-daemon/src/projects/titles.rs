@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use agent_core::models::{ListQuery, Project, Thread, ThreadList};
+use agent_protocol::models::{ListQuery, Project, Thread, ThreadList};
 
 /// Select from newest-first DB metadata. Retain only visible titles and one
 /// lookahead per section; never retain rollout bodies or unused thread fields.
@@ -199,7 +199,7 @@ mod tests {
         }
         assert!(list.complete());
         let page = list.finish();
-        assert!(agent_core::protocol::encode(&page).unwrap().len() < 4096);
+        assert!(agent_protocol::protocol::encode(&page).unwrap().len() < 4096);
         let result = serde_json::to_value(page).unwrap();
         let data = result["data"].as_array().unwrap();
         assert_eq!(data.len(), 30);

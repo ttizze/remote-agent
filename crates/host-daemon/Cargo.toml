@@ -8,7 +8,8 @@ rust-version.workspace = true
 [dependencies]
 tracing.workspace = true
 bex-process = { path = "../bex-process" }
-agent-core = { path = "../agent-core" }
+agent-protocol = { path = "../agent-protocol" }
+agent-transport = { path = "../agent-transport" }
 keyring = "4.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 directories = "6"
@@ -35,6 +36,8 @@ anyhow.workspace = true
 alacritty_terminal = "=0.26.0"
 
 [dev-dependencies]
+# Exercise the real client Store and rendering against Host behavior.
+agent-core = { path = "../agent-core" }
 # Match desktop builds even when CI tests only the headless packages. With both
 # backends enabled, cold dictation must select a provider before starting TLS.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }

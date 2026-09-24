@@ -1,9 +1,7 @@
 //! Provider adapter. Only the local bridge may submit agent browser operations.
 use super::Browser;
-use agent_core::{
-    browser::{BrowserAction, BrowserFrame, BrowserKey},
-    peer::{JsonlReader, JsonlWriter},
-};
+use agent_protocol::browser::{BrowserAction, BrowserFrame, BrowserKey};
+use agent_transport::peer::{JsonlReader, JsonlWriter};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -136,7 +134,7 @@ fn content(result: Result<BrowserFrame, String>) -> Value {
 }
 
 pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
-    agent_core::session::SessionRef::from_thread_id(thread).map_err(str::to_owned)?;
+    agent_protocol::session::SessionRef::from_thread_id(thread).map_err(str::to_owned)?;
     let mut input = JsonlReader::with_max_message_bytes(tokio::io::stdin(), 64 * 1024);
     let mut output = JsonlWriter::with_max_message_bytes(tokio::io::stdout(), MAX_MESSAGE);
     let mut calls = tokio::task::JoinSet::<(Value, Value)>::new();

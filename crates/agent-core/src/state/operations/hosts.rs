@@ -22,11 +22,7 @@ impl Operation for CreateInvitation {
     rpc_operation!(management.invitation);
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoveRemoteHost {
-    pub id: String,
-}
+pub use agent_protocol::operations::RemoveRemoteHost;
 
 impl Operation for RemoveRemoteHost {
     rpc_operation!();
@@ -39,12 +35,7 @@ impl Operation for RemoveRemoteHost {
     }
 }
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeDevice {
-    #[serde(rename = "nodeId")]
-    pub id: String,
-}
+pub use agent_protocol::operations::RevokeDevice;
 
 impl Operation for RevokeDevice {
     rpc_operation!();

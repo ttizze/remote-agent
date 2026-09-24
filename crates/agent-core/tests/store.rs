@@ -1,8 +1,8 @@
 #[path = "support/host.rs"]
 mod host_fixture;
 async fn scoped_incoming(
-    host: &agent_core::transport::Endpoint,
-    trust: &agent_core::transport::Trust,
+    host: &agent_transport::transport::Endpoint,
+    trust: &agent_transport::transport::Trust,
 ) -> (
     host_fixture::Session,
     host_fixture::Reader,
@@ -24,20 +24,18 @@ async fn scoped_incoming(
         .unwrap();
     (session, reader, writer)
 }
-use agent_core::state::operations as op;
 use agent_core::{
-    client::Answer,
-    models::Thread,
-    peer::PeerError,
-    state::{Draft, Intent, Snapshot},
+    state::{Draft, Intent, Snapshot, operations as op},
     store::{Outcome, Store},
 };
+use agent_protocol::{models::Thread, operations::Answer};
+use agent_transport::peer::PeerError;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn browser_frames_are_ephemeral_and_pending_reads_end_with_the_connection() {
-    use agent_core::browser::{BrowserAction, BrowserFrame, BrowserRequest};
+    use agent_protocol::browser::{BrowserAction, BrowserFrame, BrowserRequest};
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let snapshot = store.snapshot();
     let request = BrowserRequest {
@@ -493,7 +491,7 @@ async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
     assert_eq!(request["method"], "host/thread/start");
     let pending = store.snapshot();
     assert!(pending.drafts[&key].text.is_empty());
-    let source = pending.conversation_source().unwrap();
+    let source = pending.conversation_thread().unwrap();
     let rendered =
         agent_core::presentation::conversation::project_conversation(&pending, source, &None);
     assert_eq!(rendered.queued.len(), 1);
@@ -1343,7 +1341,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
 
 #[tokio::test]
 async fn a_late_list_reply_cannot_replace_a_new_search() {
-    use agent_core::models::ListQuery;
+    use agent_protocol::models::ListQuery;
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let old = tokio::spawn({
         let store = store.clone();
@@ -1418,7 +1416,8 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
 
 #[tokio::test]
 async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
-    use agent_core::{client::TerminalSize, state::TerminalPhase};
+    use agent_core::state::TerminalPhase;
+    use agent_protocol::operations::TerminalSize;
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let start = read(&mut reader).await;
@@ -1491,7 +1490,7 @@ async fn disconnect_does_not_wait_for_a_terminal_start_reply() {
     let starting = store.dispatch(Intent::StartTerminal(op::StartTerminal {
         handle: "starting".into(),
         cwd: "/fixture".into(),
-        size: agent_core::client::TerminalSize { cols: 80, rows: 24 },
+        size: agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },
     }));
     assert_eq!(read(&mut reader).await["method"], "host/terminal/start");
     // Keep the response pending: Host cleanup is triggered by connection EOF.
@@ -1505,7 +1504,8 @@ async fn disconnect_does_not_wait_for_a_terminal_start_reply() {
 
 #[tokio::test]
 async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
-    use agent_core::{client::TerminalSize, state::TerminalPhase};
+    use agent_core::state::TerminalPhase;
+    use agent_protocol::operations::TerminalSize;
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
@@ -1533,7 +1533,7 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
 async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
     let (store, mut reader, writer) = setup(Snapshot {
         threads: Some(Arc::new(serde_json::from_value(json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap())),
-        list_query: Arc::new(agent_core::models::ListQuery { search_term:"created".into(), ..Default::default() }),
+        list_query: Arc::new(agent_protocol::models::ListQuery { search_term:"created".into(), ..Default::default() }),
         ..Default::default()
     }).await;
     let server = tokio::spawn(async move {
@@ -1885,7 +1885,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_late_status() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
-        provider: agent_core::session::ProviderKind::Codex,
+        provider: agent_protocol::session::ProviderKind::Codex,
     }));
     let request = read(&mut reader).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
@@ -1971,10 +1971,11 @@ async fn disconnected_store_keeps_editing_and_persisting_drafts() {
 
 #[tokio::test]
 async fn initial_titles_overlap_scope_verification_without_publishing_unverified_or_old_queries() {
-    use agent_core::{
-        models::ListQuery,
-        transport::{Endpoint, Identity, Relays, Trust},
-    };
+    use agent_protocol::models::ListQuery;
+    use agent_transport::transport::Endpoint;
+    use agent_transport::transport::Identity;
+    use agent_transport::transport::Relays;
+    use agent_transport::transport::Trust;
     for mode in ["ready", "zero-limits", "changed-query", "rejected"] {
         tokio::time::timeout(Duration::from_secs(5), async {
             let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
@@ -2051,7 +2052,7 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
 
 #[tokio::test]
 async fn reconnect_preserves_edits_made_during_pairing() {
-    use agent_core::transport::{Endpoint, Identity, Relays, Trust};
+    use agent_transport::transport::{Endpoint, Identity, Relays, Trust};
     use std::collections::BTreeSet;
     tokio::time::timeout(Duration::from_secs(10), async {
         let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
@@ -2097,18 +2098,18 @@ async fn reconnect_preserves_edits_made_during_pairing() {
             .unwrap();
         let drafts = store.snapshot().drafts.clone();
         let (session, _peer) = pairing.authorize(&trust).await.unwrap();
-        let agent_core::transport::IncomingRequest::Call(mut call) =
+        let agent_transport::transport::IncomingRequest::Call(mut call) =
             session.accept_request().await.unwrap()
         else {
             panic!("scope request expected")
         };
         assert!(matches!(
             call.call,
-            agent_core::protocol::Call::SessionScope(_)
+            agent_protocol::protocol::Call::SessionScope(_)
         ));
-        agent_core::protocol::write(
+        agent_transport::framing::write(
             &mut call.send,
-            agent_core::protocol::Response::Success {
+            agent_protocol::protocol::Response::Success {
                 result: Box::new("fixture-storage".to_owned()),
             },
         )
@@ -2132,7 +2133,7 @@ async fn reconnect_preserves_edits_made_during_pairing() {
 
 #[tokio::test]
 async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
-    use agent_core::transport::{Endpoint, Identity, Relays, Trust};
+    use agent_transport::transport::{Endpoint, Identity, Relays, Trust};
     for action in ["reconnect", "disconnect", "close", "drop"] {
         tokio::time::timeout(Duration::from_secs(15), async {
             let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
@@ -2244,7 +2245,8 @@ async fn close_ends_subscriptions_while_store_is_retained() {
 
 #[tokio::test]
 async fn restored_snapshot_discards_session_authority_and_preserves_unknown_dictation() {
-    use agent_core::client::{SubmissionTarget, submission_target};
+    use agent_core::client::SubmissionTarget;
+    use agent_core::client::submission_target;
     use agent_core::state::{Activity, Navigation, PendingSubmission};
     let draft = Arc::new(Draft {
         text: "typed\nspoken".into(),
@@ -2326,7 +2328,7 @@ async fn close_keeps_the_last_enqueued_draft_and_unconfirmed_send() {
 
 #[tokio::test]
 async fn stores_share_an_endpoint_without_closing_each_others_transport() {
-    use agent_core::transport::{Endpoint, Identity, Relays, Trust};
+    use agent_transport::transport::{Endpoint, Identity, Relays, Trust};
     tokio::time::timeout(Duration::from_secs(10), async {
         let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
             .await
@@ -2554,10 +2556,12 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
 
 #[tokio::test]
 async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
-    use agent_core::{
-        session::{SessionChange, TextField},
-        transport::{Endpoint, Identity, Relays, Trust},
-    };
+    use agent_protocol::session::SessionChange;
+    use agent_protocol::session::TextField;
+    use agent_transport::transport::Endpoint;
+    use agent_transport::transport::Identity;
+    use agent_transport::transport::Relays;
+    use agent_transport::transport::Trust;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tokio::time::timeout(Duration::from_secs(180), async {
         let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
@@ -2596,7 +2600,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
         let mut reading = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
         let request = requests.recv().await.unwrap();
         assert_eq!(request["method"], "host/thread/item/read");
-        let body = agent_core::protocol::encode(serde_json::from_value::<agent_core::models::Item>(json!({"id":"item","type":"commandExecution","aggregatedOutput":"old body","status":"inProgress"})).unwrap()).unwrap();
+        let body = agent_protocol::protocol::encode(serde_json::from_value::<agent_protocol::models::Item>(json!({"id":"item","type":"commandExecution","aggregatedOutput":"old body","status":"inProgress"})).unwrap()).unwrap();
         let grant = json!({"token":([1u8;32]),"sha256":ring::digest::digest(&ring::digest::SHA256,&body).as_ref(),"size":body.len()});
         output.lock().await.reply(&request, json!({"result":{"item":{"id":"item","type":"commandExecution"},"transfer":grant}})).await.unwrap();
         let mut transfer = session.accept_stream().await.unwrap();
@@ -2647,7 +2651,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             let before = store.snapshot().conversations.clone();
             let mut failed_read = Box::pin(store.dispatch(Intent::ReadItem(read_item.clone())));
             let request = requests.recv().await.unwrap();
-            let invalid = agent_core::protocol::encode(serde_json::from_value::<agent_core::models::Item>(json!({"id":if wrong_id {"different"} else {"item"},"type":"commandExecution","aggregatedOutput":"invalid body"})).unwrap()).unwrap();
+            let invalid = agent_protocol::protocol::encode(serde_json::from_value::<agent_protocol::models::Item>(json!({"id":if wrong_id {"different"} else {"item"},"type":"commandExecution","aggregatedOutput":"invalid body"})).unwrap()).unwrap();
             let digest = if wrong_id { ring::digest::digest(&ring::digest::SHA256, &invalid).as_ref().to_vec() } else { vec![0;32] };
             output.lock().await.reply(&request, json!({"result":{"item":{"id":"item","type":"commandExecution"},"transfer":{"token":([2u8;32]),"sha256":digest,"size":invalid.len()}}})).await.unwrap();
             let mut transfer = session.accept_stream().await.unwrap();
@@ -2764,7 +2768,9 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
 
 #[tokio::test]
 async fn selected_invocations_reach_submission_and_return_after_failure() {
-    use agent_core::composer::{Invocation, InvocationKind, insert_invocation};
+    use agent_core::composer::insert_invocation;
+    use agent_protocol::composer::Invocation;
+    use agent_protocol::composer::InvocationKind;
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();

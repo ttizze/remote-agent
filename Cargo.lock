@@ -149,6 +149,8 @@ name = "agent-cli"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-protocol",
+ "agent-transport",
  "anyhow",
  "clap",
  "serde",
@@ -162,15 +164,12 @@ dependencies = [
 name = "agent-core"
 version = "0.1.0"
 dependencies = [
+ "agent-protocol",
+ "agent-transport",
  "base64 0.23.1",
  "futures-util",
  "insta",
- "iroh",
- "iroh-tickets",
  "markdown",
- "pin-project-lite",
- "postcard",
- "regex",
  "ring",
  "rstest",
  "scopeguard",
@@ -181,10 +180,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tracing",
- "tracing-subscriber",
  "uniffi",
- "url",
  "uuid",
  "zeroize",
 ]
@@ -195,6 +191,43 @@ version = "0.1.0"
 dependencies = [
  "agent-core",
  "uniffi",
+]
+
+[[package]]
+name = "agent-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "postcard",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "agent-transport"
+version = "0.1.0"
+dependencies = [
+ "agent-protocol",
+ "futures-util",
+ "iroh",
+ "iroh-tickets",
+ "pin-project-lite",
+ "regex",
+ "ring",
+ "scopeguard",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1010,6 +1043,8 @@ version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
  "agent-core",
+ "agent-protocol",
+ "agent-transport",
  "alacritty_terminal",
  "anyhow",
  "async-channel",
@@ -1700,7 +1735,7 @@ dependencies = [
 name = "codex-app-server"
 version = "0.1.0"
 dependencies = [
- "agent-core",
+ "agent-transport",
  "bex-process",
  "serde",
  "serde_json",
@@ -4705,6 +4740,8 @@ name = "host-daemon"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-protocol",
+ "agent-transport",
  "alacritty_terminal",
  "anyhow",
  "async-tungstenite",
@@ -4738,6 +4775,8 @@ name = "host-fixture"
 version = "0.1.0"
 dependencies = [
  "agent-core",
+ "agent-protocol",
+ "agent-transport",
  "anyhow",
  "base64 0.23.1",
  "codex-app-server",

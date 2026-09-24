@@ -7,7 +7,6 @@ pub const MAX_INLINE_ITEM_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Invitation {
     pub endpoint: String,
     pub invitation: uuid::Uuid,
@@ -80,13 +79,12 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Thread {
     pub history_read_state: Option<crate::session::HistoryReadState>,
     pub session: Option<crate::session::SessionRef>,
     pub capabilities: Option<crate::session::Capabilities>,
     #[serde(default)]
-    pub requests: BTreeMap<String, Arc<crate::client::ServerRequest>>,
+    pub requests: BTreeMap<String, Arc<crate::operations::ServerRequest>>,
     pub id: Option<String>,
     pub name: Option<String>,
     pub cwd: Option<String>,
@@ -232,7 +230,6 @@ impl ItemChanges {
     }
 }
 
-#[cfg_attr(feature = "bindings", uniffi::export)]
 impl Thread {
     pub fn active_turn_id(&self) -> Option<String> {
         self.turns
@@ -288,7 +285,7 @@ impl Item {
             truncate_detail(text);
         }
         if let Some(command) = &mut self.command {
-            *command = crate::presentation::compact_title(command);
+            *command = compact_title(command);
         }
         // Command output is only displayed after expansion, which reads the
         // original item. A truncated output is not part of its activity header.
@@ -360,7 +357,6 @@ pub struct ThreadList {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -370,13 +366,11 @@ pub struct Project {
     pub updated_at: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ProjectRoot {
     pub path: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Model {
     pub id: String,
     pub model: String,
@@ -387,10 +381,7 @@ pub struct Model {
     pub default_service_tier: Option<String>,
     pub is_default: Option<bool>,
 }
-pub(crate) fn provider_models(
-    models: &[Model],
-    provider: crate::session::ProviderKind,
-) -> Vec<Model> {
+pub fn provider_models(models: &[Model], provider: crate::session::ProviderKind) -> Vec<Model> {
     models
         .iter()
         .filter(|model| model_provider(&model.model) == provider)
@@ -407,20 +398,17 @@ pub fn model_provider(model: &str) -> crate::session::ProviderKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ServiceTier {
     pub id: String,
     pub name: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ReasoningEffort {
     pub reasoning_effort: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ListQuery {
     pub project_limit: u32,
     pub chat_limit: u32,
@@ -438,7 +426,7 @@ impl Default for ListQuery {
     }
 }
 impl ListQuery {
-    pub(crate) fn for_connection(mut self) -> Self {
+    pub fn for_connection(mut self) -> Self {
         if self.project_limit == 0 {
             self.project_limit = 5;
         }
@@ -451,14 +439,12 @@ impl ListQuery {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FileList {
     pub path: String,
     pub entries: Vec<FileEntry>,
     pub truncated: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FileEntry {
     pub name: String,
     pub path: String,
@@ -467,7 +453,6 @@ pub struct FileEntry {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FileContent {
     pub path: String,
     pub revision: String,
@@ -478,7 +463,6 @@ pub struct FileContent {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorktreeSettings {
     pub create_on_new_session: bool,
     pub copy_on_create: bool,
@@ -487,7 +471,6 @@ pub struct WorktreeSettings {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Worktree {
     pub path: String,
     pub project_path: String,
@@ -497,14 +480,12 @@ pub struct Worktree {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorktreeThread {
     pub id: String,
     pub name: String,
     pub active: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct WorkspaceReview {
     pub branch: String,
     pub additions: u64,
@@ -524,26 +505,6 @@ pub struct ChangedFile {
 mod tests {
     use super::*;
     use serde_json::json;
-    #[test]
-    fn deferred_command_keeps_its_display_title_without_hidden_output() {
-        for command in [
-            format!("{}\nhidden script", "日本語".repeat(60)),
-            "cargo check\nhidden script".into(),
-        ] {
-            let mut item = Item {
-                kind: Some("commandExecution".into()),
-                command: Some(command),
-                aggregated_output: Some("hidden output".repeat(100)),
-                ..Default::default()
-            };
-            let title = crate::presentation::item_presentation(&item).title;
-            item.retain_header();
-            assert_eq!(crate::presentation::item_presentation(&item).title, title);
-            assert_eq!(item.command.as_deref(), Some(title.as_str()));
-            assert_eq!(item.aggregated_output, None);
-        }
-    }
-
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
@@ -630,4 +591,16 @@ pub(crate) fn append_text(value: &mut Value, delta: &str) {
     if let Value::String(text) = value {
         text.push_str(delta);
     }
+}
+
+pub fn compact_title(value: &str) -> String {
+    let line = value.lines().next().unwrap_or_default().trim();
+    match line.char_indices().nth(120) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line.to_owned(),
+    }
+}
+
+pub fn worktree_branch_merged(head: &str, initial: Option<&str>, contained_in_main: bool) -> bool {
+    contained_in_main && initial.is_some_and(|initial| initial != head)
 }

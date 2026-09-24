@@ -1,3 +1,4 @@
+use agent_protocol::protocol;
 use std::{
     collections::HashMap,
     fmt,
@@ -5,14 +6,14 @@ use std::{
 };
 
 use super::session_actor::SessionActor;
-use agent_core::client::ServerRequest;
-#[cfg(test)]
-use agent_core::peer::RpcMessage;
-use agent_core::protocol::{self, Notification};
-use agent_core::{
+use agent_protocol::{
     models::ThreadResponse,
+    operations::ServerRequest,
+    protocol::Notification,
     session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef},
 };
+#[cfg(test)]
+use agent_transport::peer::RpcMessage;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -162,7 +163,10 @@ impl Default for State {
 }
 
 impl State {
-    fn pending_request(&self, id: &str) -> Option<(SessionRef, agent_core::client::ServerRequest)> {
+    fn pending_request(
+        &self,
+        id: &str,
+    ) -> Option<(SessionRef, agent_protocol::operations::ServerRequest)> {
         self.executions.iter().find_map(|(target, actor)| {
             actor
                 .live
@@ -175,7 +179,7 @@ impl State {
         &self,
         provider: ProviderKind,
         id: &Value,
-    ) -> Option<(SessionRef, agent_core::client::ServerRequest)> {
+    ) -> Option<(SessionRef, agent_protocol::operations::ServerRequest)> {
         self.executions
             .iter()
             .filter(|(target, _)| target.provider == provider)
@@ -278,7 +282,7 @@ impl SessionRouter {
         &self,
         target: &SessionRef,
         turn_id: &str,
-    ) -> Option<agent_core::models::Turn> {
+    ) -> Option<agent_protocol::models::Turn> {
         lock_state(&self.state)
             .executions
             .get(target)
@@ -328,7 +332,7 @@ impl SessionRouter {
         }
         response
             .thread
-            .defer_item_details(agent_core::models::MAX_INLINE_ITEM_BYTES);
+            .defer_item_details(agent_protocol::models::MAX_INLINE_ITEM_BYTES);
         let subscription_id = uuid::Uuid::new_v4();
         let mut opened = OpenedSession {
             session: read.target.clone(),
@@ -504,7 +508,7 @@ impl SessionRouter {
     pub(crate) fn session_change(
         &self,
         target: &SessionRef,
-        change: agent_core::session::SessionChange,
+        change: agent_protocol::session::SessionChange,
     ) {
         change_locked(&mut lock_state(&self.state), target, &change);
     }
@@ -515,7 +519,7 @@ impl SessionRouter {
             change_locked(
                 &mut state,
                 &target,
-                &agent_core::session::SessionChange::ResolveRequest {
+                &agent_protocol::session::SessionChange::ResolveRequest {
                     request_id: request.id.to_string(),
                 },
             );
@@ -554,7 +558,7 @@ impl SessionRouter {
         };
         if request
             .delivery_state
-            .is_some_and(|state| state != agent_core::session::RequestDelivery::Awaiting)
+            .is_some_and(|state| state != agent_protocol::session::RequestDelivery::Awaiting)
         {
             return Err("request was already answered or its execution has ended".into());
         }
@@ -573,7 +577,7 @@ impl SessionRouter {
         if !live_turn {
             return Err("request execution has ended".into());
         }
-        agent_core::client::validate_answer(&request, result)?;
+        agent_protocol::operations::validate_answer(&request, result)?;
         let native = request
             .native_request_id
             .as_ref()
@@ -582,9 +586,9 @@ impl SessionRouter {
         change_locked(
             &mut state,
             &target,
-            &agent_core::session::SessionChange::RequestDelivery {
+            &agent_protocol::session::SessionChange::RequestDelivery {
                 request_id: id.into(),
-                state: agent_core::session::RequestDelivery::Sending,
+                state: agent_protocol::session::RequestDelivery::Sending,
             },
         );
         Ok((target.provider, native))
@@ -596,9 +600,9 @@ impl SessionRouter {
             change_locked(
                 &mut state,
                 &target,
-                &agent_core::session::SessionChange::RequestDelivery {
+                &agent_protocol::session::SessionChange::RequestDelivery {
                     request_id: id.into(),
-                    state: agent_core::session::RequestDelivery::Unknown,
+                    state: agent_protocol::session::RequestDelivery::Unknown,
                 },
             );
         }
@@ -608,7 +612,7 @@ impl SessionRouter {
 fn change_locked(
     state: &mut State,
     target: &SessionRef,
-    change: &agent_core::session::SessionChange,
+    change: &agent_protocol::session::SessionChange,
 ) {
     let actor = state.executions.entry(target.clone()).or_default();
     if actor.update(change).is_err() {
@@ -640,10 +644,10 @@ fn change_locked(
     // Background navigation needs activity, not copies of
     // provider turn/item payloads outside a subscription.
     let active = match change {
-        agent_core::session::SessionChange::Status { status } => {
-            Some(status.kind == agent_core::models::ThreadStatusKind::Active)
+        agent_protocol::session::SessionChange::Status { status } => {
+            Some(status.kind == agent_protocol::models::ThreadStatusKind::Active)
         }
-        agent_core::session::SessionChange::Turn { .. } => {
+        agent_protocol::session::SessionChange::Turn { .. } => {
             state.executions.get(target).map(|actor| {
                 actor
                     .live
@@ -658,7 +662,7 @@ fn change_locked(
     if let Some(active) = active {
         let line = protocol::encode(Notification::Activity {
             session: target.clone(), active,
-            finished: !active && matches!(change, agent_core::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed")),
+            finished: !active && matches!(change, agent_protocol::session::SessionChange::Turn {completed:true, turn} if turn.status.as_deref() == Some("completed")),
         }).expect("activity encodes");
         let deliveries = state
             .sessions
@@ -718,8 +722,8 @@ fn remove_session_locked(state: &mut State, session: SessionId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::models::{Item, Thread, Turn};
-    use agent_core::session::TextField;
+    use agent_protocol::models::{Item, Thread, Turn};
+    use agent_protocol::session::TextField;
     use serde_json::json;
 
     fn open(router: &SessionRouter, id: &str, limit: usize) -> SessionRead {
@@ -776,8 +780,8 @@ mod tests {
         let response = router
             .finish_session_read(open(&router, "native", 1001), connection.id(), response)
             .unwrap();
-        let reply = agent_core::protocol::decode::<
-            agent_core::protocol::Response<agent_core::session::OpenedSession>,
+        let reply = agent_protocol::protocol::decode::<
+            agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
         >(&response.initial)
         .unwrap()
         .into_value();
@@ -826,7 +830,7 @@ mod tests {
         let line = response.initial;
         assert!(line.len() < 64 * 1024);
         let reply =
-            protocol::decode::<protocol::Response<agent_core::session::OpenedSession>>(&line)
+            protocol::decode::<protocol::Response<agent_protocol::session::OpenedSession>>(&line)
                 .unwrap()
                 .into_value();
         let turn = &reply["result"]["response"]["thread"]["turns"][0];
@@ -848,8 +852,8 @@ mod tests {
             let response = router
                 .finish_session_read(open(&router, "native", 5), connection.id(), response)
                 .unwrap();
-            let reply = agent_core::protocol::decode::<
-                agent_core::protocol::Response<agent_core::session::OpenedSession>,
+            let reply = agent_protocol::protocol::decode::<
+                agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
             >(&response.initial)
             .unwrap()
             .into_value();
@@ -905,8 +909,8 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        let reply = agent_core::protocol::decode::<
-            agent_core::protocol::Response<agent_core::session::OpenedSession>,
+        let reply = agent_protocol::protocol::decode::<
+            agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
         >(&response.initial)
         .unwrap()
         .into_value();
@@ -976,11 +980,12 @@ mod tests {
         crate::host_rpc::codex::event(&router, &notification).unwrap();
         assert!(router.ensure_session(slow.id()).is_err());
         assert!(router.ensure_session(healthy.id()).is_ok());
-        let initial = protocol::decode::<protocol::Response<agent_core::session::OpenedSession>>(
-            &streams[1].initial,
-        )
-        .unwrap()
-        .into_value();
+        let initial =
+            protocol::decode::<protocol::Response<agent_protocol::session::OpenedSession>>(
+                &streams[1].initial,
+            )
+            .unwrap()
+            .into_value();
         let update = protocol::decode::<SessionChange>(
             &streams[1]
                 .updates
@@ -1094,7 +1099,7 @@ fn identical_native_request_ids_keep_their_provider_owner() {
         router.session_change(
             &target,
             SessionChange::Turn {
-                turn: agent_core::models::Turn {
+                turn: agent_protocol::models::Turn {
                     id: "turn".into(),
                     ..Default::default()
                 },

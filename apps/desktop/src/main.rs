@@ -50,9 +50,9 @@ impl AssetSource for DesktopAssets {
 fn main() {
     let logging_error = platform::state_dir()
         .and_then(|directory| {
-            agent_core::diagnostics::initialize(
+            agent_transport::diagnostics::initialize(
                 &directory,
-                agent_core::diagnostics::Component::Desktop,
+                agent_transport::diagnostics::Component::Desktop,
                 env!("CARGO_PKG_VERSION"),
             )
             .map_err(|error| error.to_string())

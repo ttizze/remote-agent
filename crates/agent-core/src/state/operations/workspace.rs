@@ -1,10 +1,7 @@
 use super::*;
+use crate::client::ClientExt;
 
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListFiles {
-    pub path: String,
-}
+pub use agent_protocol::operations::ListFiles;
 
 impl Operation for ListFiles {
     rpc_operation!(workspace.directory);
@@ -24,7 +21,7 @@ pub struct ReadFile {
     pub discard_draft: bool,
 }
 impl rpc::RpcMethod for ReadFile {
-    crate::client::rpc_contract!(ReadFile);
+    agent_protocol::operations::rpc_contract!(ReadFile);
     fn params(
         &self,
     ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
@@ -98,7 +95,7 @@ impl SaveFile {
     }
 }
 
-pub use crate::client::ReviewWorkspace;
+pub use agent_protocol::operations::ReviewWorkspace;
 
 /// Navigation and notifications already belong to an epoch. Their review read
 /// shares it instead of dispatching a second intent that invalidates siblings.
@@ -197,7 +194,7 @@ pub struct LoadSessionImages {
     pub thread_id: String,
 }
 impl Operation for LoadSessionImages {
-    type Output = Vec<rpc::SessionImage>;
+    type Output = Vec<crate::client::SessionImage>;
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::SessionImages {
             images: std::mem::take(output),
@@ -223,7 +220,7 @@ impl Operation for ListWorktrees {
     }
 }
 
-pub use crate::client::RemoveWorktree;
+pub use agent_protocol::operations::RemoveWorktree;
 
 impl Operation for RemoveWorktree {
     rpc_operation!();
@@ -235,7 +232,7 @@ impl Operation for RemoveWorktree {
     }
 }
 
-pub use crate::client::LoadVisualization;
+pub use agent_protocol::operations::LoadVisualization;
 
 impl Operation for LoadVisualization {
     rpc_operation!();

@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 #[path = "../../agent-core/tests/support/host.rs"]
 mod host_fixture;
-use agent_core::transport::{Endpoint, Identity, Relays, Trust};
+use agent_transport::transport::{Endpoint, Identity, Relays, Trust};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, time::Duration};
 
@@ -147,7 +147,7 @@ async fn exercise(command: &[&str], expected: Value) {
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         if mode == "list" {
             serde_json::to_value(
-                serde_json::from_value::<agent_core::models::ThreadList>(expected).unwrap(),
+                serde_json::from_value::<agent_protocol::models::ThreadList>(expected).unwrap(),
             )
             .unwrap()
         } else {

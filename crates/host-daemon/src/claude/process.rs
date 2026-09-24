@@ -1,6 +1,6 @@
 use std::{path::Path, process::Stdio, time::Duration};
 
-use agent_core::peer::{JsonlReader, JsonlWriter};
+use agent_transport::peer::{JsonlReader, JsonlWriter};
 use serde_json::{Value, json};
 use tokio::{
     io::AsyncReadExt,

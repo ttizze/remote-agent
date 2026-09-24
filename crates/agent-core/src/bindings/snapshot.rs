@@ -1,17 +1,21 @@
 //! Export the core snapshot and shared graph directly; only ABI getters live here.
 use super::{AgentError, error};
 use crate::{
-    client::{AccountLogin, Accounts},
-    models::{FileContent, FileList, ListQuery, Model, Thread, WorkspaceReview, WorktreeSettings},
+    models::{FileContent, FileList, ListQuery, Model, WorktreeSettings},
     presentation::conversation::{
         ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn, Request, request,
     },
     state::{Draft, FileDraft, Navigation, Snapshot},
 };
+use agent_protocol::operations::{AccountLogin, Accounts};
 use std::sync::Arc;
 
 #[uniffi::export]
 impl Snapshot {
+    pub fn conversation_source(&self) -> Option<Arc<Thread>> {
+        self.conversation_thread()
+            .map(|value| Arc::new(Thread(value)))
+    }
     pub fn list_unchanged(&self, other: Arc<Self>) -> bool {
         let same_list = match (&self.threads, &other.threads) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -89,7 +93,9 @@ impl Snapshot {
         self.models.as_ref().clone()
     }
     pub fn conversation(&self, id: String) -> Option<Arc<Thread>> {
-        self.conversations.get(&id).cloned()
+        self.conversations
+            .get(&id)
+            .map(|value| Arc::new(Thread(value.clone())))
     }
     pub fn requests(&self) -> Vec<Request> {
         self.requests
@@ -109,7 +115,10 @@ impl Snapshot {
             .map(|draft| draft.as_ref().clone())
     }
     pub fn review(&self) -> Option<Arc<WorkspaceReview>> {
-        self.workspace.review.clone()
+        self.workspace
+            .review
+            .as_ref()
+            .map(|value| Arc::new(WorkspaceReview(value.clone())))
     }
     pub fn worktree_settings(&self) -> Option<WorktreeSettings> {
         self.workspace.settings.as_deref().cloned()
@@ -132,23 +141,26 @@ impl Snapshot {
 }
 #[uniffi::export]
 impl Thread {
+    pub fn active_turn_id(&self) -> Option<String> {
+        self.0.active_turn_id()
+    }
     pub fn id(&self) -> String {
-        self.id.clone().unwrap_or_default()
+        self.0.id.clone().unwrap_or_default()
     }
     pub fn title(&self) -> String {
-        self.name.clone().unwrap_or_default()
+        self.0.name.clone().unwrap_or_default()
     }
     pub fn input_unavailable_reason(&self) -> Option<String> {
-        crate::session::input_unavailable_reason(self)
+        crate::session::input_unavailable_reason(&self.0)
     }
     pub fn history_notice(&self) -> Option<String> {
-        crate::presentation::conversation::history_notice(self)
+        crate::presentation::conversation::history_notice(&self.0)
     }
     pub fn has_more_history(&self) -> bool {
-        self.history_has_more == Some(true)
+        self.0.history_has_more == Some(true)
     }
     pub fn turn_count(&self) -> u64 {
-        self.turns.as_ref().map_or(0, |turns| turns.len() as u64)
+        self.0.turns.as_ref().map_or(0, |turns| turns.len() as u64)
     }
 }
 #[uniffi::export]
@@ -198,13 +210,56 @@ impl RenderedItem {
 // The conversation badge reads counts without copying the potentially large diff.
 #[uniffi::export]
 impl WorkspaceReview {
+    pub fn diff_files(&self) -> Vec<crate::presentation::diff::WorkspaceDiffFile> {
+        crate::presentation::diff::diff_files(&self.0)
+    }
     pub fn file_count(&self) -> u64 {
-        self.files.len() as u64
+        self.0.files.len() as u64
     }
     pub fn additions(&self) -> u64 {
-        self.additions
+        self.0.additions
     }
     pub fn deletions(&self) -> u64 {
-        self.deletions
+        self.0.deletions
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct Thread(Arc<crate::models::Thread>);
+#[derive(uniffi::Object)]
+pub struct WorkspaceReview(Arc<crate::models::WorkspaceReview>);
+
+#[uniffi::export]
+pub fn project_conversation(
+    snapshot: &Snapshot,
+    source: Arc<Thread>,
+    previous: &Option<Arc<RenderedConversation>>,
+) -> Arc<RenderedConversation> {
+    crate::presentation::conversation::project_conversation(snapshot, source.0.clone(), previous)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abi_handles_preserve_conversation_projection_identity() {
+        let mut snapshot = Snapshot::default();
+        Arc::make_mut(&mut snapshot.navigation).thread_id = Some("chat".into());
+        Arc::make_mut(&mut snapshot.conversations).insert(
+            "chat".into(),
+            Arc::new(crate::models::Thread {
+                id: Some("chat".into()),
+                ..Default::default()
+            }),
+        );
+        let first = project_conversation(&snapshot, snapshot.conversation_source().unwrap(), &None);
+        let second = project_conversation(
+            &snapshot,
+            snapshot.conversation_source().unwrap(),
+            &Some(first.clone()),
+        );
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(snapshot.conversation("chat".into()).unwrap().id(), "chat");
     }
 }

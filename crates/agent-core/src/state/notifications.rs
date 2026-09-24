@@ -88,7 +88,7 @@ fn process(previous: &Snapshot, event: crate::protocol::Notification) -> (Snapsh
         } => {
             terminal.output.clear();
             terminal.phase = TerminalPhase::Running;
-            terminal.size = crate::client::TerminalSize { cols, rows };
+            terminal.size = agent_protocol::operations::TerminalSize { cols, rows };
             terminal.sequence += 1;
             terminal.output.push_back(Arc::new(TerminalOutput {
                 sequence: terminal.sequence,

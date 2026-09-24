@@ -172,34 +172,32 @@ pub struct WorkspaceDiffFile {
     pub rows: Vec<DiffRow>,
 }
 
-#[cfg_attr(feature = "bindings", uniffi::export)]
-impl WorkspaceReview {
-    pub fn diff_files(&self) -> Vec<WorkspaceDiffFile> {
-        let rows = parse(&self.diff);
-        let names: HashMap<_, _> = file_names(&rows)
-            .into_iter()
-            .map(|(id, path)| (path, id))
-            .collect();
-        let mut groups = HashMap::<u64, Vec<_>>::new();
-        for row in rows {
-            if row.kind == "F" || (row.kind == "M" && is_file_metadata(&row.text)) {
-                continue;
-            }
-            groups.entry(row.file).or_default().push(row);
+pub fn diff_files(review: &WorkspaceReview) -> Vec<WorkspaceDiffFile> {
+    let rows = parse(&review.diff);
+    let names: HashMap<_, _> = file_names(&rows)
+        .into_iter()
+        .map(|(id, path)| (path, id))
+        .collect();
+    let mut groups = HashMap::<u64, Vec<_>>::new();
+    for row in rows {
+        if row.kind == "F" || (row.kind == "M" && is_file_metadata(&row.text)) {
+            continue;
         }
-        self.files
-            .iter()
-            .map(|file| WorkspaceDiffFile {
-                path: file.path.clone(),
-                additions: file.additions,
-                deletions: file.deletions,
-                rows: names
-                    .get(&file.path)
-                    .and_then(|id| groups.remove(id))
-                    .unwrap_or_default(),
-            })
-            .collect()
+        groups.entry(row.file).or_default().push(row);
     }
+    review
+        .files
+        .iter()
+        .map(|file| WorkspaceDiffFile {
+            path: file.path.clone(),
+            additions: file.additions,
+            deletions: file.deletions,
+            rows: names
+                .get(&file.path)
+                .and_then(|id| groups.remove(id))
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -291,7 +289,7 @@ mod tests {
                      {"path":"binary.dat","status":"M","additions":null,"deletions":null}],
             "diff":"diff --git a/removed.txt b/removed.txt\n--- a/removed.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\ndiff --git a/new.txt b/new.txt\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new\ndiff --git a/binary.dat b/binary.dat\nBinary files a/binary.dat and b/binary.dat differ\n"
         })).unwrap();
-        let files = review.diff_files();
+        let files = diff_files(&review);
         assert_eq!(files.len(), 3);
         assert_eq!(files[0].rows[1].text, "-gone");
         assert_eq!(files[0].rows[1].old, Some(1));

@@ -1,12 +1,9 @@
 //! Credentials stay in Claude Code's own storage. Only account labels and the
 //! selection are persisted here; all profiles share the native transcript tree.
-use agent_core::{
-    client::AccountSelection,
+use agent_protocol::{
     models::Empty,
+    operations::{Account, AccountLogin, AccountLoginStatus, AccountSelection},
     protocol::{Body, Call},
-};
-use agent_core::{
-    client::{Account, AccountLogin, AccountLoginStatus},
     session::ProviderKind,
 };
 use serde::{Deserialize, Serialize};
@@ -194,8 +191,10 @@ impl Accounts {
     pub(crate) fn usage_request(
         &mut self,
         id: &str,
-    ) -> Result<impl std::future::Future<Output = agent_core::client::AccountUsage> + use<>, String>
-    {
+    ) -> Result<
+        impl std::future::Future<Output = agent_protocol::operations::AccountUsage> + use<>,
+        String,
+    > {
         let home = self.account_home(id)?;
         let program = self.program.clone();
         let directory = self.directory.clone();
@@ -570,9 +569,11 @@ mod tests {
         accounts.native_checked_at = Some(Instant::now());
         assert!(
             accounts
-                .request(Call::LogoutAccount(agent_core::client::LogoutAccount {
-                    id: "claude:desktop".into(),
-                }))
+                .request(Call::LogoutAccount(
+                    agent_protocol::operations::LogoutAccount {
+                        id: "claude:desktop".into(),
+                    }
+                ))
                 .await
                 .is_err()
         );

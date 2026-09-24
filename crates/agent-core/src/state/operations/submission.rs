@@ -1,5 +1,8 @@
-use super::threads::{open_thread, refresh_thread};
-use super::*;
+use super::{
+    threads::{open_thread, refresh_thread},
+    *,
+};
+use crate::client::ClientExt;
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,7 +251,7 @@ impl Operation for SendSubmission {
                 .invocations
                 .iter()
                 .filter(|item| item.is_in(&self.draft.text))
-                .map(crate::composer::Invocation::input),
+                .map(agent_protocol::composer::Invocation::input),
         );
         for attachment in &self.draft.attachments {
             input.push(if attachment.is_image {

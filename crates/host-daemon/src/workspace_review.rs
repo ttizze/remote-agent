@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result, anyhow};
 use std::{collections::HashMap, path::PathBuf, process::Command};
 
-use agent_core::models::ChangedFile as WorkspaceFileChange;
-pub use agent_core::models::WorkspaceReview;
+use agent_protocol::models::ChangedFile as WorkspaceFileChange;
+pub use agent_protocol::models::WorkspaceReview;
 
 pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview> {
     tokio::task::spawn_blocking(move || collect_workspace_review(PathBuf::from(cwd)))

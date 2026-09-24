@@ -1,5 +1,5 @@
 //! Converts the original recorded test inputs to the common Session contract.
-use agent_core::{
+use agent_protocol::{
     models::{Item, ThreadStatus, Turn},
     session::{SessionChange, TextField},
 };

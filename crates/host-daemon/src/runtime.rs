@@ -1,5 +1,5 @@
 use crate::command_line::StartupConfig;
-use agent_core::transport::{Endpoint, Relays};
+use agent_transport::transport::{Endpoint, Relays};
 use anyhow::{Context, Result};
 use host_daemon::{
     HostCredentials, HostRpcService, HostRuntime, ProjectStore,
@@ -32,9 +32,9 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     .context("Host lease worker failed")?
     .context("cannot acquire Host lease")?;
     let directory = lease.directory().to_owned();
-    agent_core::diagnostics::initialize(
+    agent_transport::diagnostics::initialize(
         &directory,
-        agent_core::diagnostics::Component::Host,
+        agent_transport::diagnostics::Component::Host,
         env!("CARGO_PKG_VERSION"),
     )
     .context("cannot initialize Host error log")?;

@@ -15,7 +15,7 @@ with `cargo test`. Use ordinary functions for setup that does not need fixtures.
 
 Use `insta` JSON snapshots for structured expected output. Review the
 expected values in the adjacent `snapshots/*.snap` files; preserve explicit
-behavioral assertions alongside snapshots. Run `nix develop . --command cargo test --locked -p agent-core`
+behavioral assertions alongside snapshots. Run `nix develop . --command cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core`
 to verify them. A snapshot mismatch is a failure, not permission to accept changed
 behavior; update expectations only after reviewing the product contract.
 
@@ -65,8 +65,10 @@ transfer server just to delete that check would reverse A14.
 ## Execution
 
 - `nix develop . --command just quality rust` checks formatting, workspace
-  Clippy, core library tests, and desktop rendering/input tests.
-- `nix develop . --command cargo test --locked -p agent-core -p codex-app-server
+  Clippy, core library tests including the UniFFI bindings, and desktop rendering/input tests.
+  The Native clients CI also enables `agent-core/bindings` to run the native
+  connection and foreground recovery regressions.
+- `nix develop . --command cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core -p codex-app-server
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
   library-only quality invocation.
 - `nix develop . --command just conversation-ui` runs the maintained native

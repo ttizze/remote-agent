@@ -7,6 +7,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+agent-protocol = { path = "../agent-protocol" }
+agent-transport = { path = "../agent-transport" }
 anyhow.workspace = true
 agent-core = { path = "../agent-core" }
 base64.workspace = true

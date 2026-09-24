@@ -1,15 +1,20 @@
 use anyhow::Context;
 use std::sync::{Arc, OnceLock};
 
-use agent_core::{
-    client as op,
-    models::{ListQuery, Thread, ThreadResponse},
-    peer::{PeerEvent, RpcMessage, RpcMessageError},
-};
-use agent_core::{
-    peer::RpcMessageKind,
-    protocol::{Body, Call, Response},
-};
+use agent_protocol::operations as op;
+
+use agent_protocol::models::ListQuery;
+
+use agent_protocol::models::Thread;
+
+use agent_protocol::models::ThreadResponse;
+
+use agent_transport::peer::PeerEvent;
+
+use agent_transport::peer::RpcMessage;
+
+use agent_protocol::protocol::{Body, Call, Response};
+use agent_transport::peer::{RpcMessageError, RpcMessageKind};
 use codex_app_server::{CodexAppServer, Error as AppServerError};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -27,14 +32,14 @@ pub(super) enum Failure {
     Host {
         code: &'static str,
         message: String,
-        delivery: agent_core::peer::Delivery,
+        delivery: agent_transport::peer::Delivery,
     },
     #[error("{provider_error}")]
     Upstream {
         #[serde(rename = "providerError")]
         provider_error: Box<RawValue>,
         message: String,
-        delivery: agent_core::peer::Delivery,
+        delivery: agent_transport::peer::Delivery,
     },
 }
 impl From<RpcMessageError> for Failure {
@@ -56,7 +61,7 @@ impl From<AppServerError> for Failure {
 }
 
 impl Failure {
-    fn delivery(&self) -> agent_core::peer::Delivery {
+    fn delivery(&self) -> agent_transport::peer::Delivery {
         match self {
             Self::Host { delivery, .. } | Self::Upstream { delivery, .. } => *delivery,
         }
@@ -68,26 +73,26 @@ impl Failure {
         let message = value["message"]
             .as_str()
             .filter(|message| !message.trim().is_empty())
-            .map(agent_core::diagnostics::sanitize)
+            .map(agent_transport::diagnostics::sanitize)
             .unwrap_or_else(|| "接続先で操作に失敗しました。もう一度お試しください。".into());
         Self::Upstream {
             message,
             provider_error,
-            delivery: agent_core::peer::Delivery::Unknown,
+            delivery: agent_transport::peer::Delivery::Unknown,
         }
     }
     pub(super) fn unknown(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self::Host {
             code,
             message: format!("{error:#}"),
-            delivery: agent_core::peer::Delivery::Unknown,
+            delivery: agent_transport::peer::Delivery::Unknown,
         }
     }
     pub(super) fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self::Host {
             code,
             message: format!("{error:#}"),
-            delivery: agent_core::peer::Delivery::NotSent,
+            delivery: agent_transport::peer::Delivery::NotSent,
         }
     }
 }
@@ -139,8 +144,12 @@ impl HostRpcService {
         }
     }
 
-    async fn account_request(&self, request: Call) -> Result<agent_core::protocol::Body, Failure> {
-        use agent_core::{protocol::Body, session::ProviderKind};
+    async fn account_request(
+        &self,
+        request: Call,
+    ) -> Result<agent_protocol::protocol::Body, Failure> {
+        use agent_protocol::protocol::Body;
+        use agent_protocol::session::ProviderKind;
         let claude_request = match &request {
             Call::StartAccountLogin(params) => params.provider == ProviderKind::Claude,
             Call::SelectAccount(params) => params.id.starts_with("claude:"),
@@ -321,7 +330,7 @@ impl HostRpcService {
         let result = async {
             let (thread_id, input_id) = session_target(message);
             let target = thread_id
-                .map(agent_core::session::SessionRef::from_thread_id)
+                .map(agent_protocol::session::SessionRef::from_thread_id)
                 .transpose()
                 .map_err(|error| Failure::new("invalid_params", error))?;
             let submission = target.as_ref().zip(input_id);
@@ -330,9 +339,9 @@ impl HostRpcService {
             }
             let result = self.request(session, message, target.as_ref()).await;
             if let Some((target, id)) = submission
-                && result
-                    .as_ref()
-                    .is_err_and(|error| error.delivery() == agent_core::peer::Delivery::NotSent)
+                && result.as_ref().is_err_and(|error| {
+                    error.delivery() == agent_transport::peer::Delivery::NotSent
+                })
             {
                 self.inner.router.reject_submission(target, id);
             }
@@ -340,7 +349,7 @@ impl HostRpcService {
         }
         .await;
         if let Err(error) = &result {
-            agent_core::diagnostics::rpc_error(
+            agent_transport::diagnostics::rpc_error(
                 message.method(),
                 None,
                 &serde_json::value::to_raw_value(error).map_err(invalid_message)?,
@@ -356,14 +365,14 @@ impl HostRpcService {
         session: SessionId,
         id: serde_json::Value,
         result: serde_json::Value,
-    ) -> Result<agent_core::models::Empty, Failure> {
+    ) -> Result<agent_protocol::models::Empty, Failure> {
         let id = id.to_string();
         let (provider, native) = self
             .inner
             .router
             .claim_response(session, &id, &result)
             .map_err(|error| Failure::new("invalid_answer", error))?;
-        let sent = if provider == agent_core::session::ProviderKind::Claude {
+        let sent = if provider == agent_protocol::session::ProviderKind::Claude {
             match self.inner.claude.get() {
                 Some(claude) => {
                     claude
@@ -390,18 +399,18 @@ impl HostRpcService {
             self.inner.router.response_unknown(&id);
             return Err(Failure::unknown("answer_delivery_unknown", error));
         }
-        Ok(agent_core::models::Empty {})
+        Ok(agent_protocol::models::Empty {})
     }
 
     async fn session_open(
         &self,
         session: SessionId,
-        params: &agent_core::session::OpenSession,
+        params: &agent_protocol::session::OpenSession,
     ) -> Result<HostReply, String> {
         let result: anyhow::Result<HostReply> = async {
             let params = params.clone();
             let target = params.session.clone();
-            if target.provider == agent_core::session::ProviderKind::Codex {
+            if target.provider == agent_protocol::session::ProviderKind::Codex {
                 self.inner.codex.server()?;
             }
             let limit = params.limit;
@@ -412,7 +421,7 @@ impl HostRpcService {
                 .map_err(anyhow::Error::msg)?;
             let started = std::time::Instant::now();
             let mut response = match target.provider {
-                agent_core::session::ProviderKind::Claude => {
+                agent_protocol::session::ProviderKind::Claude => {
                     self.inner
                         .claude
                         .get()
@@ -420,14 +429,14 @@ impl HostRpcService {
                         .read(&target.id, limit)
                         .await?
                 }
-                agent_core::session::ProviderKind::Codex => {
+                agent_protocol::session::ProviderKind::Codex => {
                     self.inner.codex.read(&target.id, limit).await?
                 }
             };
             let native_ms = started.elapsed().as_millis();
             let expected = match target.provider {
-                agent_core::session::ProviderKind::Codex => target.id.clone(),
-                agent_core::session::ProviderKind::Claude => target.thread_id(),
+                agent_protocol::session::ProviderKind::Codex => target.id.clone(),
+                agent_protocol::session::ProviderKind::Claude => target.thread_id(),
             };
             if response.thread.id.as_deref() != Some(expected.as_str()) {
                 return Err(anyhow::anyhow!("native session identity changed"));
@@ -449,11 +458,11 @@ impl HostRpcService {
             response.thread.history_has_more = Some(more);
             response.thread.history_limit = Some(limit as u64);
             response.thread.history_read_state.get_or_insert_with(|| {
-                agent_core::session::HistoryReadState::new(
+                agent_protocol::session::HistoryReadState::new(
                     if more {
-                        agent_core::session::HistoryReadKind::Partial
+                        agent_protocol::session::HistoryReadKind::Partial
                     } else {
-                        agent_core::session::HistoryReadKind::Complete
+                        agent_protocol::session::HistoryReadKind::Complete
                     },
                     Vec::new(),
                 )
@@ -484,8 +493,8 @@ impl HostRpcService {
         &self,
         session: SessionId,
         params: &op::ReadItem,
-        target: &agent_core::session::SessionRef,
-    ) -> Result<agent_core::client::ItemResponse, Failure> {
+        target: &agent_protocol::session::SessionRef,
+    ) -> Result<agent_protocol::operations::ItemResponse, Failure> {
         let live = self
             .inner
             .router
@@ -496,11 +505,11 @@ impl HostRpcService {
                     .find(|item| item.id == params.item_id)
             });
         let mut response = if let Some(item) = live {
-            agent_core::client::ItemResponse {
+            agent_protocol::operations::ItemResponse {
                 item: Arc::unwrap_or_clone(item),
                 transfer: None,
             }
-        } else if target.provider == agent_core::session::ProviderKind::Claude {
+        } else if target.provider == agent_protocol::session::ProviderKind::Claude {
             let claude = self
                 .inner
                 .claude
@@ -518,8 +527,8 @@ impl HostRpcService {
             };
             self.inner.codex.item_read(params).await?
         };
-        let bytes = agent_core::protocol::encode(&response.item).expect("item serializes");
-        if bytes.len() > agent_core::models::MAX_INLINE_ITEM_BYTES {
+        let bytes = agent_protocol::protocol::encode(&response.item).expect("item serializes");
+        if bytes.len() > agent_protocol::models::MAX_INLINE_ITEM_BYTES {
             response.transfer = Some(
                 self.inner
                     .files
@@ -536,7 +545,7 @@ impl HostRpcService {
         &self,
         session: SessionId,
         request: &Call,
-        target_session: Option<&agent_core::session::SessionRef>,
+        target_session: Option<&agent_protocol::session::SessionRef>,
     ) -> Result<Body, Failure> {
         if let Call::Browser(params) = request {
             let browser = self.inner.browser.get().ok_or_else(|| {
@@ -596,7 +605,7 @@ impl HostRpcService {
             None
         };
         let claude_target = target_session
-            .filter(|target| target.provider == agent_core::session::ProviderKind::Claude);
+            .filter(|target| target.provider == agent_protocol::session::ProviderKind::Claude);
         if claude_target.is_none()
             && matches!(
                 request,
@@ -773,11 +782,11 @@ impl HostRpcService {
             Call::ConnectionPerformance(performance) => {
                 let performance = performance.clone();
                 tokio::task::spawn_blocking(move || {
-                    agent_core::diagnostics::connection_performance(&performance)
+                    agent_transport::diagnostics::connection_performance(&performance)
                 })
                 .await
                 .map_err(|error| Failure::new("diagnostic_write_failed", error.to_string()))?;
-                agent_core::models::Empty {}.into()
+                agent_protocol::models::Empty {}.into()
             }
             Call::AnswerSession(params) => (self
                 .answer_request(session, params.request_id.clone(), params.result.clone())
@@ -892,7 +901,7 @@ impl HostRpcService {
                         {
                             params["config"] = config;
                         }
-                        agent_core::peer::request_line(method, &params)
+                        agent_transport::peer::request_line(method, &params)
                             .expect("provider request serializes")
                     })
                     .await?;
@@ -906,7 +915,7 @@ impl HostRpcService {
                     }
                     describe_thread(
                         &mut response.thread,
-                        agent_core::session::ProviderKind::Codex,
+                        agent_protocol::session::ProviderKind::Codex,
                         &self.project_snapshot().await?,
                     );
                 }
@@ -926,7 +935,7 @@ impl HostRpcService {
         &self.inner.files
     }
 
-    async fn worktree_list(&self) -> Result<Vec<agent_core::models::Worktree>, Failure> {
+    async fn worktree_list(&self) -> Result<Vec<agent_protocol::models::Worktree>, Failure> {
         let mut worktrees = self
             .inner
             .worktrees
@@ -988,27 +997,29 @@ impl HostRpcService {
                     continue;
                 }
                 let active = thread.status.as_ref().is_some_and(|status| {
-                    status.kind == agent_core::models::ThreadStatusKind::Active
+                    status.kind == agent_protocol::models::ThreadStatusKind::Active
                 });
                 if active {
                     worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
                 }
                 if let Some(id) = &thread.id {
-                    worktree.threads.push(agent_core::models::WorktreeThread {
-                        id: id.clone(),
-                        name: thread
-                            .name
-                            .clone()
-                            .filter(|name| !name.is_empty())
-                            .or_else(|| {
-                                thread
-                                    .preview
-                                    .as_deref()
-                                    .map(|preview| preview.chars().take(120).collect())
-                            })
-                            .unwrap_or_else(|| "新しいチャット".into()),
-                        active,
-                    });
+                    worktree
+                        .threads
+                        .push(agent_protocol::models::WorktreeThread {
+                            id: id.clone(),
+                            name: thread
+                                .name
+                                .clone()
+                                .filter(|name| !name.is_empty())
+                                .or_else(|| {
+                                    thread
+                                        .preview
+                                        .as_deref()
+                                        .map(|preview| preview.chars().take(120).collect())
+                                })
+                                .unwrap_or_else(|| "新しいチャット".into()),
+                            active,
+                        });
                 }
             }
         }
@@ -1081,7 +1092,7 @@ impl HostRpcService {
     async fn host_title_list(
         &self,
         query: ListQuery,
-    ) -> Result<agent_core::models::ThreadList, Failure> {
+    ) -> Result<agent_protocol::models::ThreadList, Failure> {
         let mut params = ThreadListParams {
             limit: 100,
             sort_key: "updated_at",
@@ -1155,7 +1166,7 @@ impl HostRpcService {
             for mut thread in page.data {
                 describe_thread(
                     &mut thread,
-                    agent_core::session::ProviderKind::Codex,
+                    agent_protocol::session::ProviderKind::Codex,
                     &snapshot,
                 );
                 while claude_threads.peek().is_some_and(|claude| {
@@ -1164,7 +1175,7 @@ impl HostRpcService {
                     let mut claude = claude_threads.next().unwrap();
                     describe_thread(
                         &mut claude,
-                        agent_core::session::ProviderKind::Claude,
+                        agent_protocol::session::ProviderKind::Claude,
                         &snapshot,
                     );
                     titles.push(claude);
@@ -1185,7 +1196,7 @@ impl HostRpcService {
         for mut thread in claude_threads {
             describe_thread(
                 &mut thread,
-                agent_core::session::ProviderKind::Claude,
+                agent_protocol::session::ProviderKind::Claude,
                 &snapshot,
             );
             titles.push(thread);
@@ -1211,18 +1222,18 @@ impl HostRpcService {
 
     async fn start_thread(
         &self,
-        mut params: agent_core::state::operations::StartThread,
+        mut params: agent_protocol::operations::StartThread,
     ) -> Result<ThreadResponse, Failure> {
         let provider = if params
             .model
             .as_deref()
             .is_some_and(|model| model.starts_with(crate::claude::MODEL_PREFIX))
         {
-            agent_core::session::ProviderKind::Claude
+            agent_protocol::session::ProviderKind::Claude
         } else {
-            agent_core::session::ProviderKind::Codex
+            agent_protocol::session::ProviderKind::Codex
         };
-        if provider == agent_core::session::ProviderKind::Codex {
+        if provider == agent_protocol::session::ProviderKind::Codex {
             self.inner.codex.server()?;
         }
         let project_id = if let Some(cwd) = params.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
@@ -1263,7 +1274,7 @@ impl HostRpcService {
             }
         }
         let mut response = if let Some(model) = params.model.as_deref()
-            && provider == agent_core::session::ProviderKind::Claude
+            && provider == agent_protocol::session::ProviderKind::Claude
         {
             let claude = self.inner.claude.get().ok_or_else(|| {
                 Failure::new(
@@ -1394,7 +1405,7 @@ impl HostRpcService {
             {
                 tracing::error!(target: "bex", operation = "host.codex.shutdown", message = %error);
             }
-            router.fail_provider(agent_core::session::ProviderKind::Codex,
+            router.fail_provider(agent_protocol::session::ProviderKind::Codex,
                             "Codexとの接続が終了したため、この実行は継続できません。Hostを再起動してから再送信してください。");
         });
     }
@@ -1444,17 +1455,17 @@ fn session_target(request: &Call) -> (Option<&str>, Option<&str>) {
 }
 
 fn provider_capabilities(
-    provider: agent_core::session::ProviderKind,
-) -> agent_core::session::Capabilities {
+    provider: agent_protocol::session::ProviderKind,
+) -> agent_protocol::session::Capabilities {
     match provider {
-        agent_core::session::ProviderKind::Codex => super::codex::Codex::capabilities(),
-        agent_core::session::ProviderKind::Claude => crate::claude::Claude::capabilities(),
+        agent_protocol::session::ProviderKind::Codex => super::codex::Codex::capabilities(),
+        agent_protocol::session::ProviderKind::Claude => crate::claude::Claude::capabilities(),
     }
 }
 
 fn describe_thread(
     thread: &mut Thread,
-    provider: agent_core::session::ProviderKind,
+    provider: agent_protocol::session::ProviderKind,
     projects: &crate::projects::state::Snapshot,
 ) {
     thread.project_id = projects.project_membership(thread.cwd.as_deref(), &thread.project_id);
@@ -1463,7 +1474,7 @@ fn describe_thread(
         thread
             .id
             .as_ref()
-            .map(|id| agent_core::session::SessionRef {
+            .map(|id| agent_protocol::session::SessionRef {
                 provider,
                 id: id.clone(),
             })
@@ -1475,7 +1486,7 @@ fn describe_thread(
 }
 
 fn codex_response(method: &str, line: String) -> Result<Body, Failure> {
-    match agent_core::protocol::json_boundary::response(method, &line)
+    match agent_protocol::protocol::json_boundary::response(method, &line)
         .map_err(|error| Failure::unknown("invalid_params", error))?
     {
         Response::Failure { error } => {
@@ -1497,7 +1508,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(response.delivery(), agent_core::peer::Delivery::Unknown);
+        assert_eq!(
+            response.delivery(),
+            agent_transport::peer::Delivery::Unknown
+        );
         let response = super::Response::from_result::<(), _>(Err(response))
             .unwrap()
             .into_value();
@@ -1518,10 +1532,10 @@ mod tests {
             serde_json::json!({}),
             serde_json::json!({"threadId":"claude:native"}),
         ] {
-            let call = agent_core::protocol::json_boundary::call("not/public", params).unwrap();
+            let call = agent_protocol::protocol::json_boundary::call("not/public", params).unwrap();
             let response = service.dispatch(session.id(), &call).await.unwrap();
-            let response = agent_core::protocol::decode::<
-                agent_core::protocol::Response<agent_core::session::OpenedSession>,
+            let response = agent_protocol::protocol::decode::<
+                agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
             >(&response.initial)
             .unwrap()
             .into_value();
@@ -1544,10 +1558,10 @@ mod tests {
             ("turn/steer", "claude_unavailable"),
             ("thread/queue/add", "claude_unavailable"),
         ] {
-            let call = agent_core::protocol::json_boundary::call(method, serde_json::json!({"threadId":"claude:native","clientUserMessageId":method,"lastTurnId":"turn","excludeTurns":false,"name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
+            let call = agent_protocol::protocol::json_boundary::call(method, serde_json::json!({"threadId":"claude:native","clientUserMessageId":method,"lastTurnId":"turn","excludeTurns":false,"name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
             let response = service.dispatch(session.id(), &call).await.unwrap();
-            let response = agent_core::protocol::decode::<
-                agent_core::protocol::Response<agent_core::session::OpenedSession>,
+            let response = agent_protocol::protocol::decode::<
+                agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
             >(&response.initial)
             .unwrap()
             .into_value();
@@ -1565,13 +1579,13 @@ mod tests {
         );
         let session = service.open_session(16);
         for method in ["turn/start", "turn/steer", "thread/queue/add"] {
-            let call = agent_core::protocol::json_boundary::call(
+            let call = agent_protocol::protocol::json_boundary::call(
                 method,
                 serde_json::json!({"threadId":"native","clientUserMessageId":"input","input":[],"expectedTurnId":"turn"}),
             ).unwrap();
             for _ in 0..2 {
                 let response = service.dispatch(session.id(), &call).await.unwrap();
-                let response = agent_core::protocol::decode::<Response<()>>(&response.initial)
+                let response = agent_protocol::protocol::decode::<Response<()>>(&response.initial)
                     .unwrap()
                     .into_value();
                 assert_eq!(response["error"]["code"], "codex_unavailable");
@@ -1584,7 +1598,7 @@ mod tests {
     fn malformed_provider_reply_does_not_prove_non_delivery() {
         let error =
             super::codex_response("turn/start", r#"{"id":1,"result":{}}"#.into()).unwrap_err();
-        assert_eq!(error.delivery(), agent_core::peer::Delivery::Unknown);
+        assert_eq!(error.delivery(), agent_transport::peer::Delivery::Unknown);
     }
 
     #[tokio::test]
@@ -1613,16 +1627,17 @@ mod tests {
             .await
             .unwrap();
         let session = service.open_session(16);
-        let call = agent_core::protocol::Call::OpenSession(agent_core::session::OpenSession {
-            session: agent_core::session::SessionRef {
-                provider: agent_core::session::ProviderKind::Claude,
-                id: id.into(),
-            },
-            limit: 5,
-        });
+        let call =
+            agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+                session: agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Claude,
+                    id: id.into(),
+                },
+                limit: 5,
+            });
         let response = service.dispatch(session.id(), &call).await.unwrap();
-        let reply = agent_core::protocol::decode::<
-            agent_core::protocol::Response<agent_core::session::OpenedSession>,
+        let reply = agent_protocol::protocol::decode::<
+            agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
         >(&response.initial)
         .unwrap()
         .into_value();
@@ -1637,8 +1652,8 @@ mod tests {
         std::fs::write(transcript, changed).unwrap();
         // Even with the original subscription open, every open reads native data.
         let response = service.dispatch(session.id(), &call).await.unwrap();
-        let reply = agent_core::protocol::decode::<
-            agent_core::protocol::Response<agent_core::session::OpenedSession>,
+        let reply = agent_protocol::protocol::decode::<
+            agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
         >(&response.initial)
         .unwrap()
         .into_value()

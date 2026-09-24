@@ -1,8 +1,5 @@
-use agent_core::{
-    client::Pair,
-    models::Invitation,
-    transport::{Endpoint, Identity, Relays},
-};
+use agent_protocol::{models::Invitation, operations::Pair};
+use agent_transport::transport::{Endpoint, Identity, Relays};
 use serde_json::Value;
 use std::{
     path::Path,
@@ -88,7 +85,7 @@ async fn headless_invitation_pairs_once_and_status_uses_the_running_host() {
             "Linux fixture"
         );
         assert!(
-            peer.call(&agent_core::client::ReadHostStatus {})
+            peer.call(&agent_protocol::operations::ReadHostStatus {})
                 .await
                 .is_err()
         );

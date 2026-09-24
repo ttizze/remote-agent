@@ -81,13 +81,15 @@ Relay内部の待ち、他社網のhop、TCP内の再送、kernelでのパケッ
 
 ## 検証
 
-Coreの実通信テストで、先行応答、期限、キャンセル、wakerの転送と破棄、
-計測なし、バッファ上限、秘密情報の除外、処理系停止の検出、回収中も接続を待たせないことを確認する。
+TransportとCoreの実通信テストで、先行応答、期限、キャンセル、wakerの転送と破棄、
+計測なし、バッファ上限、秘密情報の除外、処理系停止の検出を確認する。
+診断の受信待ちが復帰完了と終了を妨げないことは、接続完了をモックで制御し、
+診断キューを未読にしたCoreの単体テストで確認する。接続速度の合否とは分離する。
 解析テストはプロセス・接続・streamの誤対応と、欠落を0msにしないことを確認する。
 
 ```sh
-nix develop . --command cargo test -p agent-core --features bindings --lib
-nix develop . --command cargo test -p agent-core --features bindings --lib \
+nix develop . --command cargo test -p agent-transport -p agent-core --features agent-core/bindings --lib
+nix develop . --command cargo test -p agent-transport --lib \
   real_relay_records_upstream_connection_boundaries -- --ignored --nocapture
 python3 -m unittest discover -s scripts/tests -p test_connection_diagnostics.py
 ```

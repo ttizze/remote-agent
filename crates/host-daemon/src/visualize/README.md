@@ -6,6 +6,6 @@ The complete upstream UMD bundle supplies the same icon API on both mobile platf
 Reproduce these vendored files with the pinned npm lockfile:
 
 ```sh
-nix develop . --command npm --prefix crates/agent-core/src/presentation/visualize ci --ignore-scripts --no-audit
-nix develop . --command npm --prefix crates/agent-core/src/presentation/visualize run vendor
+nix develop . --command npm --prefix crates/host-daemon/src/visualize ci --ignore-scripts --no-audit
+nix develop . --command npm --prefix crates/host-daemon/src/visualize run vendor
 ```

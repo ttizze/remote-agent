@@ -1,5 +1,4 @@
 //! Bounded, monotonic connection timelines. No dependency messages or identities.
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, LazyLock, Mutex, Once, Weak},
@@ -12,107 +11,14 @@ pub(crate) const CAPACITY: usize = 768;
 pub(crate) const WINDOW: Duration = Duration::from_secs(30);
 static TRACES: LazyLock<Mutex<HashMap<u64, Weak<Trace>>>> = LazyLock::new(Default::default);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum ConnectionPhase {
-    AppPreparation,
-    SnapshotRead,
-    StoreRestored,
-    ClientBuild,
-    IdentityRead,
-    UiConnectStart,
-    UiConnectReady,
-    UiConnectFailed,
-    UiConnectCancelled,
-    ListPublished,
-    ListViewUpdated,
-    ResumeStart,
-    ResumeReady,
-    ResumeConnection,
-    ResumeFailed,
-    ResumeCancelled,
-    ResolveFailed,
-    QuicFailed,
-    NetworkCapture,
-    EndpointStart,
-    EndpointReady,
-    HostDnsStart,
-    HostDnsReady,
-    HostDnsEnded,
-    ResolveStart,
-    ResolveReady,
-    QuicStart,
-    QuicReady,
-    EventsOpened,
-    AttachStart,
-    AttachReady,
-    NetworkReportStart,
-    NetworkReportReady,
-    RelayDialStart,
-    RelayRegion,
-    RelayDialEnded,
-    RelayTcpStart,
-    RelayTcpReady,
-    RelayTlsStart,
-    RelayTlsReady,
-    RelayAuthStart,
-    RelayAuthReady,
-    RelayReady,
-    RequestSlotWait,
-    RequestOpened,
-    RequestEncoded,
-    RequestSent,
-    ReplyAdopted,
-    ReadPolled,
-    ReadPending,
-    ReadWake,
-    ResponseFirstRead,
-    ResponseReceived,
-    ResponseDecoded,
-    RequestFailed,
-    PathOpened,
-    PathClosed,
-    PathSelected,
-    PathEventsDropped,
-    PathDirect,
-    PathRelay,
-    PathUnknown,
-    RttMicros,
-    LostPackets,
-    LostBytes,
-    CryptoFramesSent,
-    CryptoFramesReceived,
-    SentPackets,
-    ReceivedPackets,
-    RuntimePulse,
-    AppScene,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionEvent {
-    pub sequence: u64,
-    pub at_us: u64,
-    pub phase: ConnectionPhase,
-    /// Connection or relay dial identifier, never a peer identity.
-    pub group: u64,
-    pub stream: u64,
-    pub value: u64,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ConnectionTimeline {
-    pub id: u64,
-    pub dropped: u64,
-    pub events: Vec<ConnectionEvent>,
-}
-
+pub use agent_protocol::diagnostics::{ConnectionEvent, ConnectionPhase, ConnectionTimeline};
 struct State {
     until: Instant,
     sequence: u64,
     events: VecDeque<ConnectionEvent>,
 }
 
-pub(crate) struct Trace {
+pub struct Trace {
     pub id: u64,
     origin: Instant,
     enabled: bool,
@@ -120,7 +26,7 @@ pub(crate) struct Trace {
     state: Mutex<State>,
 }
 
-pub(crate) fn identifier() -> u64 {
+pub fn identifier() -> u64 {
     uuid::Uuid::new_v4().as_u128() as u64
 }
 

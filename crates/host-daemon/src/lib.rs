@@ -24,3 +24,5 @@ pub use host_identity::{
 
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
 pub use projects::ProjectStore;
+
+mod visualize;

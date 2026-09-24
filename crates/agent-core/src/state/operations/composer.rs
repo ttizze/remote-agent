@@ -1,11 +1,8 @@
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadComposerCatalog {
-    pub cwd: String,
-}
+pub use agent_protocol::operations::LoadComposerCatalog;
 impl Operation for LoadComposerCatalog {
-    type Output = crate::composer::ComposerCatalog;
+    type Output = agent_protocol::composer::ComposerCatalog;
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.composer_catalog = Some(Arc::new(Self::Output {
             cwd: self.cwd.clone(),

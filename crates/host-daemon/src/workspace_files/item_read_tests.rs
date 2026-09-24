@@ -1,16 +1,16 @@
 //! Real Store + iroh streams + the Host's production transfer reservations.
 //! Only control responses are scripted, to place deltas and stalls precisely.
 use super::WorkspaceFiles;
-use agent_core::session::{SessionChange, TextField};
+use agent_protocol::session::{SessionChange, TextField};
 #[allow(dead_code)]
 #[path = "../../../agent-core/tests/support/host.rs"]
 mod host_fixture;
 use agent_core::{
-    client::Answer,
     state::{Intent, Snapshot, operations as op},
     store::Store,
-    transport::{Endpoint, Identity, Relays, Trust},
 };
+use agent_protocol::operations::Answer;
+use agent_transport::transport::{Endpoint, Identity, Relays, Trust};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, mpsc};
@@ -124,10 +124,10 @@ impl Fixture {
                             match files
                                 .download_bytes(
                                     OWNER,
-                                    agent_core::protocol::encode(
-                                        serde_json::from_value::<agent_core::models::Item>(item(
-                                            id, true,
-                                        ))
+                                    agent_protocol::protocol::encode(
+                                        serde_json::from_value::<agent_protocol::models::Item>(
+                                            item(id, true),
+                                        )
                                         .unwrap(),
                                     )
                                     .unwrap(),
@@ -229,7 +229,7 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
         let items = snapshot.conversations["A"].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 12);
         for (id, actual) in items.iter().enumerate() {
-            let expected: agent_core::models::Item = serde_json::from_value(item(id, true)).unwrap();
+            let expected: agent_protocol::models::Item = serde_json::from_value(item(id, true)).unwrap();
             assert_eq!(actual.as_ref(), &expected);
         }
         assert!(fixture.files.grants.lock().unwrap().is_empty());
@@ -247,7 +247,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
             let request = fixture.requests.recv().await.unwrap();
             assert_eq!(request["method"], "host/thread/item/read");
             let body = json!({"id":"item-0","type":"commandExecution","aggregatedOutput":format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE))});
-            let grant = fixture.files.download_bytes(OWNER, agent_core::protocol::encode(serde_json::from_value::<agent_core::models::Item>(body).unwrap()).unwrap()).await.unwrap();
+            let grant = fixture.files.download_bytes(OWNER, agent_protocol::protocol::encode(serde_json::from_value::<agent_protocol::models::Item>(body).unwrap()).unwrap()).await.unwrap();
             if iteration < 12 {
                 // This is deliberately BEFORE the control response, not a
                 // delta during the item body transfer. Wait for Store application as the

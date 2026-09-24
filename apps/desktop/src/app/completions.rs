@@ -1,5 +1,6 @@
 use super::*;
-use agent_core::composer::{ComposerSuggestions, Invocation, insert_invocation};
+use agent_core::composer::{ComposerSuggestions, insert_invocation};
+use agent_protocol::composer::Invocation;
 
 impl Desktop {
     fn completion_suggestions(&self, cx: &App) -> Option<ComposerSuggestions> {
@@ -152,7 +153,10 @@ impl Desktop {
 #[cfg(test)]
 mod tests {
     use super::{Arc, Desktop, Mode};
-    use agent_core::composer::{ComposerCandidate, ComposerCatalog, Invocation, InvocationKind};
+    use agent_protocol::composer::ComposerCandidate;
+    use agent_protocol::composer::ComposerCatalog;
+    use agent_protocol::composer::Invocation;
+    use agent_protocol::composer::InvocationKind;
     use gpui_kit as gpui;
     use gpui_kit::{EntityInputHandler, Focusable, TestAppContext};
 

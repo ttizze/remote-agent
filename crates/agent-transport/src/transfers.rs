@@ -57,15 +57,17 @@ where
     let sha256: [u8; 32] = digest.finish().as_ref().try_into().expect("SHA-256 length");
     file.rewind().await?;
     let grant = peer
-        .request::<TransferGrant>(&crate::protocol::Call::Upload(crate::client::Upload {
-            directory: directory
-                .to_str()
-                .ok_or_else(|| TransferError::Protocol("directory is not UTF-8".into()))?
-                .into(),
-            file_name: file_name.into(),
-            size,
-            sha256,
-        }))
+        .request::<TransferGrant>(&crate::protocol::Call::Upload(
+            agent_protocol::operations::Upload {
+                directory: directory
+                    .to_str()
+                    .ok_or_else(|| TransferError::Protocol("directory is not UTF-8".into()))?
+                    .into(),
+                file_name: file_name.into(),
+                size,
+                sha256,
+            },
+        ))
         .await?;
     if grant.size != size || grant.sha256 != sha256 {
         return Err(TransferError::Protocol(
@@ -118,7 +120,7 @@ where
 {
     let grant = peer
         .request::<TransferGrant>(&crate::protocol::Call::Download(
-            crate::state::operations::ListFiles {
+            agent_protocol::operations::ListFiles {
                 path: source
                     .to_str()
                     .ok_or_else(|| TransferError::Protocol("path is not UTF-8".into()))?
@@ -183,4 +185,29 @@ where
         ));
     }
     Ok(())
+}
+
+pub async fn resolve_item(
+    mut response: agent_protocol::operations::ItemResponse,
+    session: Option<&crate::transport::Session>,
+) -> Result<agent_protocol::operations::ItemResponse, PeerError> {
+    if let Some(grant) = response.transfer.take() {
+        let session = session.ok_or_else(|| {
+            PeerError::InvalidMessage("item transfer requires an iroh session".into())
+        })?;
+        let bytes = crate::transfers::download_bytes(grant, || async {
+            session.open_stream().await.map_err(std::io::Error::other)
+        })
+        .await
+        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+        let item: crate::models::Item = crate::protocol::decode(&bytes)
+            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
+        if item.id != response.item.id {
+            return Err(PeerError::InvalidMessage(
+                "transferred item ID does not match".into(),
+            ));
+        }
+        response.item = item;
+    }
+    Ok(response)
 }

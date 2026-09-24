@@ -24,11 +24,11 @@ async fn call(
     let reply = service
         .dispatch(
             session.id(),
-            &agent_core::protocol::json_boundary::call(method, params).unwrap(),
+            &agent_protocol::protocol::json_boundary::call(method, params).unwrap(),
         )
         .await
         .unwrap();
-    let line = agent_core::protocol::json_boundary::reply(method, &reply.initial)
+    let line = agent_protocol::protocol::json_boundary::reply(method, &reply.initial)
         .unwrap()
         .to_string();
     assert!(
@@ -53,9 +53,9 @@ async fn completed_turn(
     thread: &str,
     text: &str,
 ) -> String {
-    let open = agent_core::protocol::Call::OpenSession(agent_core::session::OpenSession {
-        session: agent_core::session::SessionRef {
-            provider: agent_core::session::ProviderKind::Codex,
+    let open = agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+        session: agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
             id: thread.into(),
         },
         limit: 5,
@@ -72,11 +72,11 @@ async fn completed_turn(
     assert!(result.get("error").is_none(), "{result}");
     let id = result["result"]["turn"]["id"].as_str().unwrap().to_owned();
     loop {
-        let event = agent_core::protocol::decode::<agent_core::session::SessionChange>(
+        let event = agent_protocol::protocol::decode::<agent_protocol::session::SessionChange>(
             &updates.recv().await.unwrap(),
         )
         .unwrap();
-        if let agent_core::session::SessionChange::Turn {
+        if let agent_protocol::session::SessionChange::Turn {
             turn,
             completed: true,
         } = event

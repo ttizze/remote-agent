@@ -2,10 +2,12 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
+use std::fs;
+use std::io;
 use std::{
     cell::Cell,
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     sync::LazyLock,
     time::{SystemTime, UNIX_EPOCH},
@@ -19,41 +21,7 @@ const FILE_BYTES: usize = 5 * 1024 * 1024;
 const ARCHIVES: usize = 4;
 const MESSAGE_BYTES: usize = 8192;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub enum ConnectionRoute {
-    Direct,
-    Relay,
-    #[default]
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub enum ClientPlatform {
-    Ios,
-    Android,
-    Macos,
-    #[default]
-    Other,
-}
-
-/// Fixed categories and durations only: no identifiers or conversation content.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ConnectionPerformance {
-    pub total_ms: u64,
-    pub endpoint_ms: u64,
-    pub transport_ms: u64,
-    pub verification_ms: u64,
-    pub reused: bool,
-    pub route: ConnectionRoute,
-    pub platform: ClientPlatform,
-    pub resolution_ms: u64,
-    pub rtt_ms: u64,
-    pub connection_id: u64,
-    pub attempt_id: u64,
-    pub client_revision: String,
-    pub timeline: ConnectionTimeline,
-}
-
+pub use agent_protocol::diagnostics::{ClientPlatform, ConnectionPerformance, ConnectionRoute};
 pub fn connection_performance(performance: &ConnectionPerformance) {
     tracing::info!(target: "bex", operation = "client.connection",
     message = %format_args!(
@@ -166,7 +134,7 @@ pub fn rpc_error(operation: &str, request_id: Option<u64>, raw: &RawValue) {
 }
 
 /// Select the provider cause from a Host failure without changing delivery evidence.
-pub(crate) fn rpc_cause(error: &Value) -> &Value {
+pub fn rpc_cause(error: &Value) -> &Value {
     error.get("providerError").unwrap_or(error)
 }
 

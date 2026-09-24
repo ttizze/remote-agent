@@ -1,8 +1,5 @@
-use agent_core::{
-    state::Snapshot,
-    store::Store,
-    transport::{Endpoint, Relays, Ticket},
-};
+use agent_core::{state::Snapshot, store::Store};
+use agent_transport::transport::{Endpoint, Relays, Ticket};
 use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
     path::PathBuf,

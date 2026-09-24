@@ -276,7 +276,7 @@ fn block(
     }
     if let Node::Paragraph(paragraph) = node
         && let [Node::Text(text)] = paragraph.children.as_slice()
-        && let Some(path) = super::visualize::visualization_reference(&text.value)
+        && let Some(path) = visualization_reference(&text.value)
     {
         blocks.push(MarkdownBlock::Visualization { path });
         return;
@@ -294,6 +294,13 @@ fn block(
             }
         }
     }
+}
+
+fn visualization_reference(text: &str) -> Option<String> {
+    let json = text.trim().strip_prefix("visualize")?.strip_suffix("")?;
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let path = value.get("path")?.as_str()?;
+    (!path.is_empty()).then(|| path.to_owned())
 }
 
 #[cfg(test)]

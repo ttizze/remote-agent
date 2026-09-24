@@ -3,20 +3,19 @@ use super::{
     ItemMetadata, Role, body, item_presentation, project_items, remaining_submissions, source_order,
 };
 use crate::{
-    client::ServerRequest,
     models,
     state::{PendingSubmission, Snapshot},
 };
+use agent_protocol::operations::ServerRequest;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
-#[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
     /// Display pending input before a new conversation has a server ID.
-    pub fn conversation_source(&self) -> Option<Arc<models::Thread>> {
+    pub fn conversation_thread(&self) -> Option<Arc<models::Thread>> {
         if let Some(source) = self
             .navigation
             .thread_id
@@ -231,7 +230,6 @@ impl RenderedItem {
 }
 
 /// Pass the previous projection to retain native render identities across deltas.
-#[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn project_conversation(
     snapshot: &Snapshot,
     source: Arc<models::Thread>,
@@ -526,7 +524,7 @@ pub fn request(key: &str, source: &ServerRequest) -> Request {
         "item/tool/call" => (RequestKind::Tool, "ツールの入力待ち"),
         _ => (RequestKind::Other, "Codexからの確認待ち"),
     };
-    let decisions = crate::client::approval_decisions(source);
+    let decisions = agent_protocol::operations::approval_decisions(source);
     let decision_labels = decisions
         .iter()
         .map(|value| match value.as_str() {

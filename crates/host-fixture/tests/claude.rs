@@ -1,12 +1,23 @@
-use agent_core::{client as rpc, models};
+use agent_protocol::{models, operations as rpc};
 use std::{path::Path, sync::Arc, time::Duration};
 
-use agent_core::{
-    client::Answer,
-    state::{Attachment, Intent, Snapshot, operations as op},
-    store::{Outcome, Store},
-    transport::{Endpoint, Relays},
-};
+use agent_protocol::operations::Answer;
+
+use agent_core::state::Attachment;
+
+use agent_core::state::Intent;
+
+use agent_core::state::Snapshot;
+
+use agent_core::state::operations as op;
+
+use agent_core::store::Outcome;
+
+use agent_core::store::Store;
+
+use agent_transport::transport::Endpoint;
+
+use agent_transport::transport::Relays;
 use codex_app_server::AppServerConfig;
 use host_fixture::test_support::{HostFixture, Memory};
 use serde_json::{Value, json};
@@ -573,7 +584,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                         let path = Path::new(&current).join("tracked.txt");
                         let listed = management.peer.call(&serde_json::from_value::<op::ListFiles>(json!({"path":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         assert!(listed["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "tracked.txt"));
-                        let read = management.peer.request::<models::FileContent>(&agent_core::protocol::Call::ReadFile(serde_json::from_value::<op::ListFiles>(json!({"path":path})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+                        let read = management.peer.request::<models::FileContent>(&agent_protocol::protocol::Call::ReadFile(serde_json::from_value::<op::ListFiles>(json!({"path":path})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         let contents = format!("workspace edit {index}\n");
                         let saved_file = management.peer.call(&serde_json::from_value::<rpc::WriteFile>(json!({"path":path,"revision":read["revision"],"text":contents})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         assert_eq!(saved_file["text"], contents);
@@ -582,7 +593,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                         assert!(review["files"].as_array().unwrap().iter().any(|file| file["path"] == "tracked.txt"));
                     }
                     let drafts = store.snapshot().drafts.clone();
-                    let dictation = management.peer.request::<rpc::Transcription>(&agent_core::protocol::Call::Transcribe(serde_json::from_value::<rpc::Transcribe>(json!({"audio":"AAA="})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap());
+                    let dictation = management.peer.request::<rpc::Transcription>(&agent_protocol::protocol::Call::Transcribe(serde_json::from_value::<rpc::Transcribe>(json!({"audio":"AAA="})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap());
                     assert!(dictation.is_err());
                     assert_eq!(*store.snapshot().drafts, *drafts);
                     assert!(management.peer.call(&op::ReadWorktreeSettings {}).await.is_ok());
@@ -649,11 +660,13 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         assert!(
             local
                 .peer
-                .request::<agent_core::protocol::json_boundary::Opaque>(
-                    &agent_core::protocol::Call::Provider(agent_core::protocol::ProviderCall {
-                        method: "thread/list".into(),
-                        params: json!({})
-                    })
+                .request::<agent_protocol::protocol::json_boundary::Opaque>(
+                    &agent_protocol::protocol::Call::Provider(
+                        agent_protocol::protocol::ProviderCall {
+                            method: "thread/list".into(),
+                            params: json!({})
+                        }
+                    )
                 )
                 .await
                 .is_err()
@@ -860,7 +873,7 @@ async fn live_claude_subscription_completes_and_resumes_through_store_and_host()
         assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[3].items.as_ref().unwrap().iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| text.contains("BEX_CLAUDE_RECOVERED"))));
         send(&store, "Count from 1 to 100, one number per line. Do not use tools.", "live-before-additional").await;
         until(&store, |snapshot| snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 5 && turns[4].items.as_ref().is_some_and(|items| items.iter().any(|item| item.kind.as_deref() == Some("agentMessage") && item.text.as_ref().is_some_and(|text| !text.is_empty()))))).await;
-        assert!(agent_core::session::input_unavailable_reason(&store.snapshot().conversations[&id]).is_none());
+        assert!(agent_protocol::session::input_unavailable_reason(&store.snapshot().conversations[&id]).is_none());
         send(&store, "Reply with exactly BEX_CLAUDE_ADDITIONAL_OK. Do not use tools.", "live-additional").await;
         let snapshot = completed(&store, &id, 5, "completed").await;
         assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
@@ -958,7 +971,9 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
         assert!(
             stranger
                 .peer
-                .request::<models::Empty>(&agent_core::protocol::Call::WriteTerminal(write.clone()))
+                .request::<models::Empty>(&agent_protocol::protocol::Call::WriteTerminal(
+                    write.clone()
+                ))
                 .await
                 .is_err()
         );
@@ -966,25 +981,27 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
         assert!(
             stranger
                 .peer
-                .request::<models::Empty>(&agent_core::protocol::Call::KillTerminal(kill.clone()))
+                .request::<models::Empty>(&agent_protocol::protocol::Call::KillTerminal(
+                    kill.clone()
+                ))
                 .await
                 .is_err()
         );
         owner.peer.call(&resize).await.unwrap();
         owner
             .peer
-            .request::<models::Empty>(&agent_core::protocol::Call::WriteTerminal(write))
+            .request::<models::Empty>(&agent_protocol::protocol::Call::WriteTerminal(write))
             .await
             .unwrap();
         let mut output = Vec::new();
         loop {
             let message = owner
                 .events
-                .read::<agent_core::protocol::Notification>()
+                .read::<agent_protocol::protocol::Notification>()
                 .await
                 .unwrap()
                 .expect("Host event stream ended");
-            if let agent_core::protocol::Notification::Output { data, .. } = message {
+            if let agent_protocol::protocol::Notification::Output { data, .. } = message {
                 output.extend(data);
                 let text = String::from_utf8_lossy(&output);
                 if text.contains("BEX_PTY_READY") {
@@ -998,7 +1015,7 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
         }
         owner
             .peer
-            .request::<models::Empty>(&agent_core::protocol::Call::KillTerminal(kill))
+            .request::<models::Empty>(&agent_protocol::protocol::Call::KillTerminal(kill))
             .await
             .unwrap();
         // A successful kill includes process cleanup and ownership release.
@@ -1048,7 +1065,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         let thread = send(&store, "first account", "account-first").await;
         completed(&store, &thread, 1, "completed").await;
 
-        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_core::session::ProviderKind::Claude })).await.unwrap();
+        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_protocol::session::ProviderKind::Claude })).await.unwrap();
         let login = store.snapshot().account.login.clone().unwrap();
         assert!(login.requires_code_submission);
         assert!(login.verification_url.starts_with("https://claude.com/"));
@@ -1076,7 +1093,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         send(&store, "resumed after restart", "account-third").await;
         completed(&store, &thread, 3, "completed").await;
 
-        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_core::session::ProviderKind::Claude })).await.unwrap();
+        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_protocol::session::ProviderKind::Claude })).await.unwrap();
         let canceled = store.snapshot().account.login.clone().unwrap();
         store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin { id: canceled.login_id.clone() })).await.unwrap();
         assert!(!root.join("claude/accounts").join(canceled.login_id.strip_prefix("claude:").unwrap()).exists());
@@ -1126,7 +1143,7 @@ async fn live_claude_account_login_url_and_cancellation() {
         .unwrap();
     store
         .dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
-            provider: agent_core::session::ProviderKind::Claude,
+            provider: agent_protocol::session::ProviderKind::Claude,
         }))
         .await
         .unwrap();
@@ -1190,7 +1207,7 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
             .additional_input
     );
     assert!(
-        agent_core::session::input_unavailable_reason(&store.snapshot().conversations[&id])
+        agent_protocol::session::input_unavailable_reason(&store.snapshot().conversations[&id])
             .is_none()
     );
     let local = fixture.local().await.unwrap();

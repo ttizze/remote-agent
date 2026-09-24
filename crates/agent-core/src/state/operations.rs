@@ -1,10 +1,11 @@
 use super::*;
 use crate::{
-    client as rpc,
+    client::{Submission, submission_target},
     peer::PeerError,
     store::{Execution, Outcome},
 };
-use rpc::{Input, Submission, submission_target};
+use agent_protocol::operations as rpc;
+use rpc::Input;
 
 macro_rules! rpc_operation {
     ($parent:ident.$field:ident) => {
@@ -105,7 +106,7 @@ pub enum Intent {
     InsertInvocation {
         thread_id: String,
         text: String,
-        invocation: crate::composer::Invocation,
+        invocation: agent_protocol::composer::Invocation,
     },
     SetDraftText {
         thread_id: String,

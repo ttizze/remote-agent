@@ -1,16 +1,20 @@
+use agent_core::client::ClientExt;
 #[allow(dead_code)]
 #[path = "support/host.rs"]
 mod host_fixture;
-use agent_core::state::operations::{
-    CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
-    ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings, ReviewWorkspace,
-    SelectAccount, StartAccountLogin, StartThread, UpdateWorktreeSettings,
-};
 use agent_core::{
-    client::*,
-    models::{ListQuery, Thread, WorktreeSettings},
-    peer::PeerError,
+    client::{Submission, SubmissionTarget, submission_target},
+    state::operations::{
+        CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
+        ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings, ReviewWorkspace,
+        SelectAccount, StartAccountLogin, StartThread, UpdateWorktreeSettings,
+    },
 };
+use agent_protocol::{
+    models::{ListQuery, Thread, WorktreeSettings},
+    operations::*,
+};
+use agent_transport::{client::Client, peer::PeerError};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -177,7 +181,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             id: text(command, "accountId").to_owned()
         }),
         "startAccountLogin" => call!(StartAccountLogin {
-            provider: agent_core::session::ProviderKind::Codex
+            provider: agent_protocol::session::ProviderKind::Codex
         }),
         "accountLoginStatus" => call!(ReadAccountLogin {
             id: text(command, "loginId").to_owned(),
@@ -215,7 +219,7 @@ async fn run_case(case: &Value) {
                 assert_eq!(request["method"], exchange["method"], "{}", case["name"]);
                 let method = request["method"].as_str().unwrap();
                 let normalize = |params: Value| {
-                    agent_core::protocol::json_boundary::call(method, params)
+                    agent_protocol::protocol::json_boundary::call(method, params)
                         .unwrap()
                         .params_json()
                         .unwrap()
@@ -250,12 +254,12 @@ async fn run_case(case: &Value) {
     .expect("bounded operation");
     if let Some(expected) = case.get("result") {
         let expected = match text(&case["command"], "type") {
-            "listThreads" => normalize::<agent_core::models::ThreadList>(expected),
+            "listThreads" => normalize::<agent_protocol::models::ThreadList>(expected),
             "startThread" | "readThread" | "readOlder" | "forkThread" => {
-                normalize::<agent_core::models::ThreadResponse>(expected)
+                normalize::<agent_protocol::models::ThreadResponse>(expected)
             }
             "readItem" => normalize::<ItemResponse>(expected),
-            "models" => normalize::<Vec<agent_core::models::Model>>(expected),
+            "models" => normalize::<Vec<agent_protocol::models::Model>>(expected),
             "accounts" => normalize::<Accounts>(expected),
             "selectAccount" => normalize::<AccountSelection>(expected),
             "startAccountLogin" => normalize::<AccountLogin>(expected),
@@ -280,7 +284,7 @@ async fn run_case(case: &Value) {
             assert_eq!(
                 serde_json::from_str::<Value>(&raw).unwrap(),
                 if case["errorRaw"].get("response").is_some() {
-                    normalize::<agent_core::session::OpenedSession>(&case["errorRaw"])
+                    normalize::<agent_protocol::session::OpenedSession>(&case["errorRaw"])
                 } else if case["errorRaw"].get("item").is_some() {
                     normalize::<ItemResponse>(&case["errorRaw"])
                 } else {

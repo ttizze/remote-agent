@@ -1,4 +1,4 @@
-use agent_core::models::{Worktree, WorktreeSettings};
+use agent_protocol::models::{Worktree, WorktreeSettings};
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -299,7 +299,7 @@ fn merged_into_main(cwd: &Path) -> Result<bool> {
         ],
     )
     .is_ok();
-    Ok(agent_core::presentation::list::worktree_branch_merged(
+    Ok(agent_protocol::models::worktree_branch_merged(
         head.trim(),
         history.lines().last(),
         contained,

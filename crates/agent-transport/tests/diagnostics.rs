@@ -1,4 +1,4 @@
-use agent_core::{
+use agent_transport::{
     diagnostics,
     peer::{JsonlReader, RpcPeer},
 };

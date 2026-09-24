@@ -1,71 +1,5 @@
-//! Shared invocation completion and explicit provider inputs.
-use crate::{client::Input, state::Snapshot};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum InvocationKind {
-    Plugin,
-    Skill,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct Invocation {
-    pub kind: InvocationKind,
-    pub name: String,
-    pub path: String,
-}
-impl InvocationKind {
-    fn sigil(self) -> char {
-        match self {
-            Self::Plugin => '@',
-            Self::Skill => '$',
-        }
-    }
-}
-impl Invocation {
-    pub fn token(&self) -> String {
-        format!("{}{}", self.kind.sigil(), self.name)
-    }
-    pub fn is_in(&self, text: &str) -> bool {
-        text.match_indices(&self.token()).any(|(start, token)| {
-            (start == 0 || text[..start].ends_with(char::is_whitespace))
-                && text[start + token.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| c.is_whitespace() || matches!(c, ',' | '.' | '。' | '、'))
-        })
-    }
-    pub fn input(&self) -> Input {
-        match self.kind {
-            InvocationKind::Plugin => Input::Mention {
-                name: self.name.clone(),
-                path: self.path.clone(),
-            },
-            InvocationKind::Skill => Input::Skill {
-                name: self.name.clone(),
-                path: self.path.clone(),
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct ComposerCandidate {
-    pub invocation: Invocation,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ComposerCatalog {
-    pub cwd: String,
-    pub loading: bool,
-    pub candidates: Vec<ComposerCandidate>,
-    pub errors: Vec<String>,
-}
-
+use crate::state::Snapshot;
+use agent_protocol::composer::*;
 /// Cursor and range are UTF-8 byte offsets. Reject mail addresses, paths and URLs.
 fn query(text: &str, cursor: usize) -> Option<(std::ops::Range<usize>, InvocationKind, &str)> {
     let before = text.get(..cursor)?;
@@ -172,6 +106,7 @@ pub fn insert_invocation(
 mod tests {
     use super::*;
     use crate::state::{Draft, Event, Intent, reduce};
+    use agent_protocol::operations::Input;
 
     fn skill() -> Invocation {
         Invocation {

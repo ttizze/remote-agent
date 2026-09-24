@@ -1,12 +1,16 @@
 // Scripted unit-test Host over the actual QUIC/Postcard transport.
 // JSON values below are fixture data, never an alternate transport.
-use agent_core::{
-    client::Client,
+use agent_core::state::Snapshot;
+use agent_protocol::protocol;
+use agent_protocol::{
     models::ThreadResponse,
-    protocol::{self, Call},
+    protocol::Call,
     session::{SessionChange, SessionRef},
-    state::Snapshot,
-    transport::{self, Endpoint, Identity, Relays, Trust},
+};
+use agent_transport::transport;
+use agent_transport::{
+    client::Client,
+    transport::{Endpoint, Identity, Relays, Trust},
 };
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Mutex, time::Duration};
@@ -110,7 +114,9 @@ pub fn from_peer(
         },
     )
 }
-pub async fn connect(snapshot: &Snapshot) -> ((Client, protocol::Reader), Reader, Writer) {
+pub async fn connect(
+    snapshot: &Snapshot,
+) -> ((Client, agent_transport::framing::Reader), Reader, Writer) {
     let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
         .await
         .unwrap();
@@ -146,8 +152,21 @@ async fn reader_closed(session: &Session) -> bool {
 }
 impl Writer {
     pub async fn finish_updates(&self) {
-        for (_, mut send) in self.streams.lock().await.drain() {
-            send.finish().unwrap();
+        // Only end the latest subscriptions. Closing a replaced stream before
+        // the client receives its new open response races with that response.
+        let current: Vec<_> = self
+            .state
+            .lock()
+            .unwrap()
+            .sessions
+            .values()
+            .copied()
+            .collect();
+        let mut streams = self.streams.lock().await;
+        for id in current {
+            if let Some(mut send) = streams.remove(&id) {
+                send.finish().unwrap();
+            }
         }
     }
     pub fn current(&self, id: &str) -> Value {
@@ -189,7 +208,7 @@ impl Writer {
             } else if value.get("method").is_some() {
                 let method = value["method"].as_str().unwrap();
                 let change = if value.get("id").is_some() {
-                    let request: agent_core::client::ServerRequest =
+                    let request: agent_protocol::operations::ServerRequest =
                         serde_json::from_value(value.clone())?;
                     Some((
                         value["params"]["threadId"].as_str().unwrap().to_owned(),
@@ -227,7 +246,7 @@ impl Writer {
             .await
             .take()
             .expect("request already answered");
-        protocol::write(&mut send, response).await?;
+        agent_transport::framing::write(&mut send, response).await?;
         if request.call.method() == "host/session/open"
             && let Some(id) = value["result"]["subscriptionId"].as_str()
         {
@@ -240,10 +259,10 @@ impl Writer {
             return Ok(());
         };
         if value["method"] == "host/session/update" {
-            let update: agent_core::session::SessionUpdate =
+            let update: agent_protocol::session::SessionUpdate =
                 serde_json::from_value(value["params"].clone())?;
             if let Some(send) = self.streams.lock().await.get_mut(&update.subscription_id) {
-                protocol::write(send, update.change).await?;
+                agent_transport::framing::write(send, update.change).await?;
             }
         } else {
             let notification = protocol::json_boundary::notification(
@@ -251,7 +270,7 @@ impl Writer {
                 value["params"].clone(),
             )
             .map_err(std::io::Error::other)?;
-            protocol::write(&mut *self.events.lock().await, notification).await?;
+            agent_transport::framing::write(&mut *self.events.lock().await, notification).await?;
         }
         Ok(())
     }

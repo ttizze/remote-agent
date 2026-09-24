@@ -34,7 +34,7 @@ fn file_name(path: &str) -> String {
 const CHAT_WIDTH: f32 = 780.;
 
 fn account_usage_view(
-    usage: Option<&agent_core::client::AccountUsage>,
+    usage: Option<&agent_protocol::operations::AccountUsage>,
     details: bool,
 ) -> AnyElement {
     let mut body = v_flex().gap_2().text_xs();

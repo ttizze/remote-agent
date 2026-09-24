@@ -2,7 +2,7 @@
 mod cdp;
 pub mod mcp;
 
-use agent_core::browser::{
+use agent_protocol::browser::{
     BrowserAction, BrowserControl, BrowserFrame, BrowserRequest, BrowserTab, HEIGHT, WIDTH,
 };
 use base64::Engine;
@@ -120,7 +120,7 @@ impl Browser {
     }
 
     async fn ensure(&self, state: &mut State, thread: &str) -> Result<(), String> {
-        agent_core::session::SessionRef::from_thread_id(thread).map_err(str::to_owned)?;
+        agent_protocol::session::SessionRef::from_thread_id(thread).map_err(str::to_owned)?;
         if state.chrome.as_ref().is_some_and(|chrome| chrome.broken) {
             if let Some(chrome) = state.chrome.take() {
                 chrome.shutdown().await;

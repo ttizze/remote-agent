@@ -1,16 +1,12 @@
 use super::{Config, accounts, history, scenario};
 use crate::Result;
-use agent_core::peer::{PeerEvent, RpcPeer, request_line};
+use agent_transport::peer::{PeerEvent, RpcPeer, request_line};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use std::fs;
 use std::{
-    cell::RefCell,
-    collections::HashMap,
-    fs::{self, OpenOptions},
-    io::Write,
-    path::PathBuf,
-    rc::Rc,
+    cell::RefCell, collections::HashMap, fs::OpenOptions, io::Write, path::PathBuf, rc::Rc,
     sync::Arc,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -250,7 +246,7 @@ impl Context {
 
 pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
     tokio::task::LocalSet::new().run_until(async move {
-        let peer = Arc::new(RpcPeer::open(agent_core::peer::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
+        let peer = Arc::new(RpcPeer::open(agent_transport::peer::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
             None, 1024)?);
         let mut lines = peer.subscribe();
         let (output, mut outbound) = mpsc::unbounded_channel();
@@ -262,7 +258,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     Output::Barrier(ready) => { let _ = ready.send(()); }
                 }
             }
-            Ok::<_, agent_core::peer::PeerError>(())
+            Ok::<_, agent_transport::peer::PeerError>(())
         });
         let context = Rc::new(Context { home, config, output, peer: peer.clone(), controls: RefCell::new(HashMap::new()) });
         let result = async {

@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 bex-process = { path = "../bex-process" }
-agent-core = { path = "../agent-core" }
+agent-transport = { path = "../agent-transport" }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror.workspace = true

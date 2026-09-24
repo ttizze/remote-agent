@@ -1,4 +1,4 @@
-use agent_core::transport::{Identity, TransportError, Trust, authorize};
+use agent_transport::transport::{Identity, TransportError, Trust, authorize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
@@ -43,7 +43,7 @@ fn pairing_consumes_invitation_and_authorizes_only_the_paired_identity() {
 
 #[tokio::test]
 async fn incoming_session_requires_allowlist_and_shutdown_is_distinct() {
-    use agent_core::transport::{Endpoint, Relays};
+    use agent_transport::transport::{Endpoint, Relays};
     use std::{collections::BTreeSet, time::Duration};
     tokio::time::timeout(Duration::from_secs(10), async {
         let host = Endpoint::bind(Identity::generate(), Relays::Disabled)

@@ -1,8 +1,10 @@
 //! Bex requests own independent QUIC streams. Provider JSONL state stays in `peer`.
-use crate::diagnostics::{ConnectionPhase as Phase, connection::Trace};
+use crate::protocol;
 use crate::{
+    diagnostics::{ConnectionPhase as Phase, connection::Trace},
+    framing,
     peer::{Delivery, PeerError},
-    protocol::{self, Call, Response},
+    protocol::{Call, Response},
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -17,7 +19,7 @@ pub(crate) const EVENTS: u8 = 0;
 pub(crate) const CALL: u8 = 1;
 pub(crate) const BLOB: u8 = 2;
 pub(crate) const CLOSE: u8 = 3;
-pub type Updates = protocol::Reader;
+pub type Updates = framing::Reader;
 pub type HostPeer = iroh::endpoint::SendStream;
 pub struct HostRequest {
     pub call: Call,
@@ -27,8 +29,8 @@ pub struct HostRequest {
 }
 pub struct Client {
     connection: iroh::endpoint::Connection,
-    pub(crate) trace: Arc<Trace>,
-    pub(crate) diagnostic_id: u64,
+    pub trace: Arc<Trace>,
+    pub diagnostic_id: u64,
     permits: Arc<Semaphore>,
     timeout: Duration,
     initial_list: Mutex<Option<(crate::models::ListQuery, PendingReply)>>,
@@ -59,7 +61,7 @@ impl Client {
                 (route, Some(path.rtt().as_micros() as u64))
             })
     }
-    pub(crate) fn connection_path(&self) -> (crate::diagnostics::ConnectionRoute, u64) {
+    pub fn connection_path(&self) -> (crate::diagnostics::ConnectionRoute, u64) {
         let (route, rtt) = self.path_sample();
         (route, rtt.unwrap_or(0) / 1000)
     }
@@ -115,7 +117,7 @@ impl Client {
             _path_monitor: path_monitor,
         };
         client.record_path();
-        Ok((client, protocol::Reader::new(recv)))
+        Ok((client, framing::Reader::new(recv)))
     }
     pub async fn close(&self) {
         // Observe shutdown before a short-lived CLI exits its runtime.
@@ -155,12 +157,14 @@ impl Client {
     }
     /// Send the first title read while storage-scope verification is in flight.
     /// Its ordinary caller consumes the reply once, with the original deadline.
-    pub(crate) async fn start_initial_list(
+    pub async fn start_initial_list(
         &self,
         query: crate::models::ListQuery,
     ) -> Result<(), PeerError> {
         let reply = self
-            .start_call(&Call::ListThreads(super::ListThreads::new(query.clone())))
+            .start_call(&Call::ListThreads(
+                agent_protocol::operations::ListThreads::new(query.clone()),
+            ))
             .await?;
         *self.initial_list.lock().unwrap() = Some((query, reply));
         Ok(())
@@ -204,7 +208,7 @@ impl Client {
                     encoding.elapsed().as_micros() as u64,
                 );
             }
-            protocol::write_frame(&mut send, &bytes)
+            framing::write_frame(&mut send, &bytes)
                 .await
                 .map_err(invalid)?;
             send.finish().map_err(invalid)?;
@@ -217,9 +221,9 @@ impl Client {
                 );
             }
             let mut reader = if measured {
-                protocol::Reader::observed(recv, self.trace.clone(), self.diagnostic_id)
+                framing::Reader::observed(recv, self.trace.clone(), self.diagnostic_id)
             } else {
-                protocol::Reader::new(recv)
+                framing::Reader::new(recv)
             };
             let method = call.method().to_owned();
             let response = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
@@ -285,7 +289,7 @@ impl Client {
         }
         result
     }
-    pub(crate) async fn collect_connection_diagnostics(
+    pub async fn collect_connection_diagnostics(
         &self,
         mut performance: crate::diagnostics::ConnectionPerformance,
     ) {
@@ -297,7 +301,7 @@ impl Client {
         performance.timeline = self.trace.snapshot();
         let _ = tokio::time::timeout(Duration::from_secs(10), self.call(&performance)).await;
     }
-    pub(crate) fn record_path(&self) {
+    pub fn record_path(&self) {
         if !self.trace.active() {
             return;
         }
@@ -397,7 +401,7 @@ mod tests {
             let mut pending = remote.start_call(&call).await.unwrap();
             let crate::transport::IncomingRequest::Call(mut request) = incoming.accept_request().await.unwrap() else { panic!("call expected") };
             let stream = u64::from(request.send.id());
-            protocol::write(&mut request.send, Response::Success { result: "private-payload" }).await.unwrap();
+            framing::write(&mut request.send, Response::Success { result: "private-payload" }).await.unwrap();
             request.send.finish().unwrap();
             loop {
                 if remote.trace.snapshot().events.iter().any(|event| event.phase == Phase::ResponseReceived && event.stream == stream) { break; }
@@ -449,7 +453,7 @@ mod tests {
             assert!(matches!(
                 tokio::time::timeout(
                     Duration::from_millis(50),
-                    remote.call(&super::super::ListThreads::new(query))
+                    remote.call(&agent_protocol::operations::ListThreads::new(query))
                 )
                 .await
                 .unwrap(),
@@ -495,7 +499,7 @@ mod tests {
             let serving = tokio::spawn(async move {
                 let mut host_peer = host_peer;
                 for code in 0..5000 {
-                    protocol::write(
+                    framing::write(
                         &mut host_peer,
                         protocol::Notification::Exited {
                             handle: "terminal".into(),
@@ -512,7 +516,7 @@ mod tests {
                             requests.spawn(async move {
                                 let mut send = request.send;
                                 if request.call.method() == "malformed" {
-                                    let _ = protocol::write_frame(&mut send, &[0]).await;
+                                    let _ = framing::write_frame(&mut send, &[0]).await;
                                     return;
                                 }
                                 if request.call.method() == "silent" {
@@ -524,7 +528,7 @@ mod tests {
                                 } else {
                                     "pong".into()
                                 };
-                                let _ = crate::protocol::write(
+                                let _ = crate::framing::write(
                                     &mut send,
                                     crate::protocol::Response::Success { result: body },
                                 )
@@ -540,7 +544,7 @@ mod tests {
             });
             let (mut send, mut recv) = remote.connection.open_bi().await.unwrap();
             send.write_all(&[CALL]).await.unwrap();
-            crate::protocol::write(
+            crate::framing::write(
                 &mut send,
                 crate::protocol::Call::Provider(crate::protocol::ProviderCall {
                     method: "large".into(),

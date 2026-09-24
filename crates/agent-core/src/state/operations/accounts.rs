@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::ClientExt;
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +44,12 @@ pub struct ReadAccountUsage {
     email: Option<String>,
 }
 
+rpc::rpc_method!(ReadAccountUsage, ReadAccountUsage, |self| {
+    agent_protocol::operations::ReadAccountUsage {
+        id: self.id.clone(),
+    }
+});
+
 impl Operation for ReadAccountUsage {
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -58,7 +65,7 @@ impl Operation for ReadAccountUsage {
     }
 }
 
-pub use crate::client::SelectAccount;
+pub use agent_protocol::operations::SelectAccount;
 
 impl Operation for SelectAccount {
     rpc_operation!();
@@ -145,7 +152,7 @@ impl Operation for SelectAccountForDraft {
     }
 }
 
-pub use crate::client::{StartAccountLogin, SubmitAccountLogin};
+pub use agent_protocol::operations::{StartAccountLogin, SubmitAccountLogin};
 
 impl Operation for StartAccountLogin {
     rpc_operation!();
@@ -164,7 +171,7 @@ pub struct ReadAccountLogin {
     pub thread_id: Option<String>,
 }
 rpc::rpc_method!(ReadAccountLogin, ReadAccountLogin, |self| {
-    crate::client::ReadAccountLogin {
+    agent_protocol::operations::ReadAccountLogin {
         id: self.id.clone(),
     }
 });
@@ -194,7 +201,7 @@ impl Operation for ReadAccountLogin {
     }
 }
 
-pub use crate::client::CancelAccountLogin;
+pub use agent_protocol::operations::CancelAccountLogin;
 
 impl Operation for CancelAccountLogin {
     rpc_operation!();
@@ -206,7 +213,7 @@ impl Operation for CancelAccountLogin {
     }
 }
 
-pub use crate::client::LogoutAccount;
+pub use agent_protocol::operations::LogoutAccount;
 
 impl Operation for LogoutAccount {
     rpc_operation!();

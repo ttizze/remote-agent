@@ -1,4 +1,4 @@
-use agent_core::presentation::browser::browser_url;
+use agent_protocol::browser::browser_url;
 #[cfg(target_os = "macos")]
 use gpui_kit::component::{
     Disableable,

@@ -1,13 +1,6 @@
 //! Shared reference resolution and offline sandbox document for both native WebViews.
 use std::path::{Component, Path, PathBuf};
 
-pub(super) fn visualization_reference(text: &str) -> Option<String> {
-    let json = text.trim().strip_prefix("visualize")?.strip_suffix("")?;
-    let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let path = value.get("path")?.as_str()?;
-    (!path.is_empty()).then(|| path.to_owned())
-}
-
 pub fn visualization_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
     if source.is_empty() || source.contains('\0') || source.contains("://") {
         return Err("visualize requires a local HTML path".into());
@@ -79,7 +72,7 @@ mod tests {
             assert!(visualization_path(source, "/fixture").is_err());
         }
         let doc = visualization_document(include_str!(
-            "../../tests/fixtures/visualize/icon-options.html"
+            "../../agent-core/tests/fixtures/visualize/icon-options.html"
         ));
         assert!(doc.contains("sandbox=\"allow-scripts\""));
         assert!(!doc.contains("allow-same-origin"));

@@ -1,10 +1,10 @@
 use crate::{HostCredentials, HostRpcService, SessionId};
-use agent_core::protocol::{self, Body, Call, Response};
-use agent_core::{
+use agent_protocol::{
     models::{HostStatus, Invitation, RemoteHost},
-    transport::{
-        Endpoint, HostPeer, IncomingRequest, IncomingSession, NodeId, Session, Ticket, authorize,
-    },
+    protocol::{Body, Call, Response},
+};
+use agent_transport::transport::{
+    Endpoint, HostPeer, IncomingRequest, IncomingSession, NodeId, Session, Ticket, authorize,
 };
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -169,7 +169,7 @@ impl HostRuntime {
                     .context("session outbound queue closed")?;
                 tokio::time::timeout(
                     Duration::from_secs(30),
-                    protocol::write_frame(&mut peer, &line),
+                    agent_transport::framing::write_frame(&mut peer, &line),
                 )
                 .await
                 .context("notification write timed out")??;
@@ -213,7 +213,7 @@ impl HostRuntime {
                                 };
                                 let handled_us = started.elapsed().as_micros();
                                 let writing = std::time::Instant::now();
-                                protocol::write_frame(&mut send,&response.initial).await?;
+                                agent_transport::framing::write_frame(&mut send,&response.initial).await?;
                                 if measured {
                                     let finished = std::time::Instant::now();
                                     let (trace, accepted_at_us) = runtime.endpoint.connection_time(request.accepted_at);
@@ -229,7 +229,7 @@ impl HostRuntime {
                                         tokio::select! {
                                             _ = &mut stopped => break,
                                             line = updates.recv() => match line {
-                                                Some(line) => protocol::write_frame(&mut send, &line).await?,
+                                                Some(line) => agent_transport::framing::write_frame(&mut send, &line).await?,
                                                 None => break,
                                             }
                                         }
@@ -296,7 +296,7 @@ impl HostRuntime {
             let result = if matches!(message, Call::Pair(_)) {
                 // Only authorized sessions reach dispatch; the invitation was
                 // already consumed at the transport gate.
-                Ok(agent_core::models::Empty {}.into())
+                Ok(agent_protocol::models::Empty {}.into())
             } else if node != self.local_node {
                 Err(anyhow::anyhow!("management requires the local node"))
             } else {
@@ -361,7 +361,7 @@ impl HostRuntime {
                         connection.close();
                     }
                 }
-                Ok(agent_core::models::Empty {}.into())
+                Ok(agent_protocol::models::Empty {}.into())
             }
             Call::ListRemotes(_) => Ok(self
                 .credentials
@@ -395,7 +395,7 @@ impl HostRuntime {
                 let mut next = record.clone();
                 next.remotes.remove(&id);
                 *record = self.credentials.persist(next).await?;
-                Ok(agent_core::models::Empty {}.into())
+                Ok(agent_protocol::models::Empty {}.into())
             }
             _ => Err(anyhow::anyhow!("unknown management method")),
         }

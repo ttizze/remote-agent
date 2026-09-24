@@ -1,14 +1,18 @@
 //! Native binding boundary. Core owns all conversation state and effects.
 mod json;
+mod protocol;
 mod snapshot;
 
-use crate::diagnostics::{
-    ConnectionPhase,
-    connection::{Trace, identifier},
+use crate::{
+    diagnostics::{
+        ConnectionPhase,
+        connection::{Trace, identifier},
+    },
+    models::Invitation,
+    state::{Intent, Snapshot},
+    store::Outcome,
+    transport::{Endpoint, Identity, Relays, Ticket},
 };
-use crate::state::Intent;
-use crate::transport::{Endpoint, Identity, Relays, Ticket};
-use crate::{models::Invitation, state::Snapshot, store::Outcome};
 use std::{
     future::Future,
     pin::Pin,
@@ -76,6 +80,44 @@ struct NativeEndpoint {
 }
 
 impl AgentStore {
+    async fn resume_connection(
+        &self,
+        started: std::time::Instant,
+        connection: impl Future<Output = Result<crate::diagnostics::ConnectionPerformance, AgentError>>,
+    ) -> Result<(), AgentError> {
+        let attempt = identifier();
+        self.trace.activate();
+        self.trace
+            .record(ConnectionPhase::ResumeStart, attempt, 0, 0);
+        let cancelled = scopeguard::guard((), |_| {
+            self.trace
+                .record(ConnectionPhase::ResumeCancelled, attempt, 0, 0)
+        });
+        let result = connection.await;
+        scopeguard::ScopeGuard::into_inner(cancelled);
+        self.trace.record(
+            if result.is_ok() {
+                ConnectionPhase::ResumeReady
+            } else {
+                ConnectionPhase::ResumeFailed
+            },
+            attempt,
+            0,
+            started.elapsed().as_micros() as u64,
+        );
+        let mut performance = result?;
+        performance.attempt_id = attempt;
+        self.trace.record(
+            ConnectionPhase::ResumeConnection,
+            attempt,
+            performance.connection_id,
+            u64::from(performance.reused),
+        );
+        self.store.record_connection_performance(performance);
+        self.trace.activate();
+        Ok(())
+    }
+
     async fn connection_endpoint(
         &self,
         connection: Connection,
@@ -166,15 +208,7 @@ impl AgentStore {
     /// Foreground recovery reuses a responsive session and the endpoint identity.
     pub async fn resume(&self, connection: Connection) -> Result<(), AgentError> {
         let started = std::time::Instant::now();
-        let attempt = identifier();
-        self.trace.activate();
-        self.trace
-            .record(ConnectionPhase::ResumeStart, attempt, 0, 0);
-        let cancelled = scopeguard::guard((), |_| {
-            self.trace
-                .record(ConnectionPhase::ResumeCancelled, attempt, 0, 0)
-        });
-        let result = async {
+        self.resume_connection(started, async {
             let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
             let endpoint_ms = started.elapsed().as_millis() as u64;
             let mut performance = if invitation.is_none() {
@@ -187,7 +221,6 @@ impl AgentStore {
             }?;
             performance.endpoint_ms = endpoint_ms;
             performance.total_ms = started.elapsed().as_millis() as u64;
-            performance.attempt_id = attempt;
             performance.client_revision = option_env!("BEX_BUILD_REVISION")
                 .unwrap_or("development")
                 .into();
@@ -198,31 +231,9 @@ impl AgentStore {
                 _ => crate::diagnostics::ClientPlatform::Other,
             };
             Ok::<_, AgentError>(performance)
-        }
-        .await;
-        scopeguard::ScopeGuard::into_inner(cancelled);
-        self.trace.record(
-            if result.is_ok() {
-                ConnectionPhase::ResumeReady
-            } else {
-                ConnectionPhase::ResumeFailed
-            },
-            attempt,
-            0,
-            started.elapsed().as_micros() as u64,
-        );
-        let performance = result?;
-        self.trace.record(
-            ConnectionPhase::ResumeConnection,
-            attempt,
-            performance.connection_id,
-            u64::from(performance.reused),
-        );
-        self.store.record_connection_performance(performance);
-        self.trace.activate();
-        Ok(())
+        })
+        .await
     }
-
     /// Platform lifecycle boundaries only; shared transport measurements stay in Core.
     pub fn record_connection_event(&self, phase: ConnectionPhase, value: u64) {
         if matches!(
@@ -403,21 +414,22 @@ mod tests {
                 .unwrap().wait().await.unwrap();
             // Leave every automatic read pending on the old transport.
             let mut methods = std::collections::BTreeSet::new();
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let request = tokio::time::timeout(Duration::from_secs(2), old.read_request()).await
                     .expect("Connected must reload without native intents").unwrap().unwrap();
                 methods.insert(request["method"].as_str().unwrap().to_owned());
             }
-            assert_eq!(methods, ["host/thread/list", "host/session/open", "model/list"].map(str::to_owned).into());
+            assert_eq!(methods, ["host/thread/list", "host/session/open", "model/list", "host/account/list"].map(str::to_owned).into());
             let server = async {
                 assert!(!matches!(old.read_request().await, Ok(Some(_))),
                     "reconnect must close the old stream without probing it with list/history reads");
                 let (next, mut reader, writer) = scoped_incoming(&host, &trust).await;
                 let mut requests = std::collections::BTreeMap::new();
-                for _ in 0..3 {
+                for _ in 0..4 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     assert!(requests.insert(request["method"].as_str().unwrap().to_owned(), request).is_none());
                 }
+                writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[]}})).await.unwrap();
                 let list = &requests["host/thread/list"];
                 assert_eq!(list["params"]["projectLimit"], 15);
                 assert_eq!(list["params"]["chatLimit"], 25);
@@ -441,7 +453,7 @@ mod tests {
                 loop {
                     let ready = {
                         let snapshot = updates.borrow_and_update();
-                        snapshot.threads.is_some() && !snapshot.models.is_empty() && snapshot.conversations.contains_key("thread")
+                        snapshot.account.accounts.is_some() && snapshot.threads.is_some() && !snapshot.models.is_empty() && snapshot.conversations.contains_key("thread")
                     };
                     if ready { break; }
                     updates.changed().await.unwrap();
@@ -497,6 +509,7 @@ mod tests {
                         let result = match request["method"].as_str().unwrap() {
                             "host/session/scope" => json!("fixture-storage"),
                             "host/diagnostics/connection" => json!({}),
+                            "host/account/list" => json!({"accounts":[]}),
                             "host/thread/list" => json!({"data":[{"id":"thread","name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":text}]}]}}}),
                             "model/list" => json!({"data":[],"nextCursor":null}),
@@ -505,7 +518,7 @@ mod tests {
                         json!({"result":result})
                     };
                     let server = async {
-                        for _ in 0..(2 + usize::from(selected)) {
+                        for _ in 0..(3 + usize::from(selected)) {
                             let request = reader.read_request().await.unwrap().unwrap();
                             writer.reply(&request, response(&request, "before")).await.unwrap();
                         }
@@ -516,7 +529,7 @@ mod tests {
                             // transport without waiting for the normal 30-second deadline.
                             let (next, mut next_reader, next_writer) = scoped_incoming(&host, &trust).await;
                             let mut reads = 0;
-                            while reads < 2 + usize::from(selected) {
+                            while reads < 3 + usize::from(selected) {
                                 let request = next_reader.read_request().await.unwrap().unwrap();
                                 reads += usize::from(request["method"] != "host/diagnostics/connection");
                                 next_writer.reply(&request, response(&request, "after")).await.unwrap();
@@ -549,7 +562,7 @@ mod tests {
                     let client = async {
                         let mut updates = store.store.subscribe();
                         loop {
-                            let ready = { let snapshot = updates.borrow_and_update(); snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
+                            let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
                             if ready { break; }
                             updates.changed().await.unwrap();
                         }
@@ -582,58 +595,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_reports_connection_without_waiting_for_diagnostic_reply() {
-        tokio::time::timeout(Duration::from_secs(40), async {
-            let identity = Identity::generate();
-            let trust = crate::transport::Trust {
-                allowed: [identity.node_id()].into(),
+    async fn resume_queues_diagnostics_without_waiting_for_the_receiver() {
+        use crate::diagnostics::{ConnectionPerformance, ConnectionRoute};
+        let (store, report) = crate::store::Store::mock_connection();
+        let store = AgentStore {
+            store,
+            endpoint: Default::default(),
+            trace: Trace::new(),
+        };
+        let (connected, connection) = tokio::sync::oneshot::channel();
+        let mut resume = Box::pin(store.resume_connection(std::time::Instant::now(), async {
+            connection.await.expect("mock connection was cancelled")
+        }));
+        assert!(futures_util::poll!(&mut resume).is_pending());
+        connected
+            .send(Ok(ConnectionPerformance {
+                connection_id: 42,
+                route: ConnectionRoute::Direct,
+                endpoint_ms: 7,
+                total_ms: 12,
                 ..Default::default()
-            };
-            let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
-                .await
-                .unwrap();
-            let store = AgentStore::offline(Vec::new()).await.unwrap();
-            let connection = Connection {
-                ticket: host.ticket().to_string(),
-                identity: identity.to_bytes().to_vec(),
-                invitation: None,
-                use_relays: false,
-            };
-            let started = std::time::Instant::now();
-            let (resumed, (session, mut reader, _writer)) = tokio::join!(
-                tokio::time::timeout(Duration::from_millis(500), store.resume(connection)),
-                scoped_incoming(&host, &trust),
-            );
-            resumed
-                .expect("connection readiness must not await diagnostics")
-                .unwrap();
-            assert!(store.snapshot().connected());
-            let report = loop {
-                let request = reader.read_request().await.unwrap().unwrap();
-                if request["method"] == "host/diagnostics/connection" {
-                    break request;
-                }
-            };
-            assert!(
-                started.elapsed() >= Duration::from_secs(30),
-                "diagnostic export must not run during capture"
-            );
-            assert_eq!(report["params"]["route"], "Direct");
-            assert_eq!(report["params"]["reused"], false);
-            assert!(
-                report["params"]["total_ms"].as_u64().unwrap()
-                    >= report["params"]["endpoint_ms"].as_u64().unwrap()
-            );
-            // Never acknowledge the report; shutdown must cancel its pending stream.
-            tokio::time::timeout(Duration::from_millis(500), store.shutdown())
-                .await
-                .unwrap()
-                .unwrap();
-            session.close();
-            host.close().await;
-        })
-        .await
-        .unwrap();
+            }))
+            .unwrap();
+        // The diagnostic receiver has never been polled. Connection readiness
+        // must still complete synchronously after the connection becomes ready.
+        assert!(matches!(
+            futures_util::poll!(&mut resume),
+            std::task::Poll::Ready(Ok(()))
+        ));
+        assert!(store.snapshot().connected());
+        drop(resume);
+        // An unread diagnostic report must not prevent the real Store from closing.
+        tokio::time::timeout(Duration::from_secs(10), store.shutdown())
+            .await
+            .expect("shutdown waited for diagnostic consumption")
+            .unwrap();
+        let mut report = Box::pin(report);
+        let std::task::Poll::Ready(performance) = futures_util::poll!(&mut report) else {
+            panic!("resume completed without queuing its diagnostic report");
+        };
+        assert_eq!(performance.connection_id, 42);
+        assert!(matches!(performance.route, ConnectionRoute::Direct));
+        assert_eq!(performance.endpoint_ms, 7);
+        assert_eq!(performance.total_ms, 12);
     }
 
     #[tokio::test]
@@ -666,11 +670,18 @@ mod tests {
             .await
             .expect("a changed endpoint must replace the session without probing the old one");
         resumed.unwrap();
-        // Leave automatic list/model reads pending, then cancel the foreground read.
-        let mut pending = Vec::new();
-        for _ in 0..2 {
-            pending.push(reader.read_request().await.unwrap().unwrap());
+        // Leave automatic list/model/account reads pending, then cancel the foreground read.
+        let mut methods = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            let request = reader.read_request().await.unwrap().unwrap();
+            methods.insert(request["method"].as_str().unwrap().to_owned());
         }
+        assert_eq!(
+            methods,
+            ["host/thread/list", "model/list", "host/account/list"]
+                .map(str::to_owned)
+                .into()
+        );
         let recovering = store.clone();
         let endpoint = replacement.clone();
         let resume = tokio::spawn(async move { recovering.resume(&endpoint, &ticket).await });
@@ -756,7 +767,7 @@ mod tests {
                     let mut pending = Vec::new();
                     for round in 0..(3 + usize::from(selected)) {
                         let mut requests = Vec::new();
-                        while requests.len() < (1 + usize::from(selected) + usize::from(round == 0)) {
+                        while requests.len() < (1 + usize::from(selected) + 2 * usize::from(round == 0)) {
                             let request = reader.read_request().await.unwrap().expect("refresh must retain the existing stream");
                             requests.push(request);
                         }
@@ -764,6 +775,7 @@ mod tests {
                             let result = match request["method"].as_str().unwrap() {
                                 "host/thread/list" => json!({"data":[{"id":"thread","name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                                 "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[]}}}),
+                                "host/account/list" if round == 0 => json!({"accounts":[]}),
                                 "model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
@@ -779,7 +791,7 @@ mod tests {
                 let client = async {
                     let mut updates = store.store.subscribe();
                     loop {
-                        let ready = { let snapshot = updates.borrow_and_update(); snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
+                        let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
                         if ready { break; }
                         updates.changed().await.unwrap();
                     }

@@ -1,4 +1,4 @@
-use agent_core::{
+use agent_protocol::{
     models::{Item, Thread, Turn},
     session::{ProviderKind, SessionChange, SessionRef, TextField},
 };
@@ -21,8 +21,8 @@ fn session_error_survives_binary_transport_and_updates_the_turn() {
                 error: error.clone(),
                 will_retry,
             };
-            let bytes = agent_core::protocol::encode(&change).unwrap();
-            let decoded: SessionChange = agent_core::protocol::decode(&bytes).unwrap();
+            let bytes = agent_protocol::protocol::encode(&change).unwrap();
+            let decoded: SessionChange = agent_protocol::protocol::decode(&bytes).unwrap();
             assert_eq!(decoded, change);
             let updated = decoded.apply(&conversation()).unwrap();
             let actual = updated.turns.as_ref().unwrap()[0].error.as_ref().unwrap();
@@ -38,14 +38,12 @@ fn session_error_survives_binary_transport_and_updates_the_turn() {
 
 #[test]
 fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
-    use agent_core::{
-        session::OpenedSession,
-        state::{
-            Event, Snapshot,
-            operations::{Operation, ReadThread},
-            reduce,
-        },
-    };
+    use agent_core::state::Event;
+    use agent_core::state::Snapshot;
+    use agent_core::state::operations::Operation;
+    use agent_core::state::operations::ReadThread;
+    use agent_core::state::reduce;
+    use agent_protocol::session::OpenedSession;
     let cached: Thread = serde_json::from_value(json!({"id":"native","turns":[
         {"id":"A","status":"completed","items":[{"id":"past","type":"agentMessage","text":"cached history"}]},
         {"id":"stale","status":"inProgress"}
@@ -74,7 +72,7 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
     };
     let (snapshot, _) = reduce(
         &snapshot,
-        Event::SessionUpdate(Box::new(agent_core::session::SessionUpdate {
+        Event::SessionUpdate(Box::new(agent_protocol::session::SessionUpdate {
             subscription_id: subscription,
             change,
         })),
@@ -98,7 +96,7 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
     );
     assert_eq!(
         thread.status.as_ref().unwrap().kind,
-        agent_core::models::ThreadStatusKind::Active
+        agent_protocol::models::ThreadStatusKind::Active
     );
     assert!(thread.requests.contains_key("approval"));
     assert!(snapshot.requests.contains_key("approval"));
@@ -271,7 +269,7 @@ fn late_completion_does_not_make_a_newer_execution_idle() {
     .unwrap();
     assert_eq!(
         late.status.as_ref().unwrap().kind,
-        agent_core::models::ThreadStatusKind::Active
+        agent_protocol::models::ThreadStatusKind::Active
     );
     assert_eq!(late.turns.as_ref().unwrap().last().unwrap().id, "next");
 }
@@ -288,7 +286,7 @@ fn large_images_are_deferred_without_truncating_base64_or_mutating_native_data()
         })]),
         ..Default::default()
     };
-    thread.defer_item_details(agent_core::models::MAX_INLINE_ITEM_BYTES);
+    thread.defer_item_details(agent_protocol::models::MAX_INLINE_ITEM_BYTES);
     let turn = &thread.turns.as_ref().unwrap()[0];
     assert_eq!(
         turn.deferred_item_ids.as_deref(),

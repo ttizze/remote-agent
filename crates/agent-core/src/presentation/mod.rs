@@ -9,11 +9,10 @@ use crate::models::{Item, Turn};
 use serde::Serialize;
 use serde_json::Value;
 pub mod body;
-pub mod browser;
+
 pub mod conversation;
 pub mod list;
 pub mod markdown;
-pub mod visualize;
 
 /// Borrow only the fields used for grouping; pending input can supply metadata
 /// without allocating a native item or copying its message and attachments.
@@ -321,13 +320,7 @@ pub fn source_order<'a>(
     order
 }
 
-pub(crate) fn compact_title(value: &str) -> String {
-    let line = value.lines().next().unwrap_or_default().trim();
-    match line.char_indices().nth(120) {
-        Some((end, _)) => format!("{}…", &line[..end]),
-        None => line.to_owned(),
-    }
-}
+use agent_protocol::models::compact_title;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemPresentation {
@@ -714,5 +707,29 @@ mod projection_tests {
         let title = item_presentation(&command).title;
         assert_eq!(title.chars().count(), 121);
         assert!(title.ends_with('…'));
+    }
+}
+
+#[cfg(test)]
+mod deferred_item_tests {
+    use super::*;
+    #[test]
+    fn deferred_command_keeps_its_display_title_without_hidden_output() {
+        for command in [
+            format!("{}\nhidden script", "日本語".repeat(60)),
+            "cargo check\nhidden script".into(),
+        ] {
+            let mut item = Item {
+                kind: Some("commandExecution".into()),
+                command: Some(command),
+                aggregated_output: Some("hidden output".repeat(100)),
+                ..Default::default()
+            };
+            let title = crate::presentation::item_presentation(&item).title;
+            item.retain_header();
+            assert_eq!(crate::presentation::item_presentation(&item).title, title);
+            assert_eq!(item.command.as_deref(), Some(title.as_str()));
+            assert_eq!(item.aggregated_output, None);
+        }
     }
 }

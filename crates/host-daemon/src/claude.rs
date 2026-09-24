@@ -12,14 +12,35 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use agent_core::{
-    client as op,
-    models::{
-        Item, Model, ReasoningEffort, Thread, ThreadResponse, ThreadStatus, ThreadStatusKind, Turn,
-    },
-    protocol::{Body, Call},
-    session::{ProviderKind, SessionChange, SessionRef, TextField},
-};
+use agent_protocol::operations as op;
+
+use agent_protocol::models::Item;
+
+use agent_protocol::models::Model;
+
+use agent_protocol::models::ReasoningEffort;
+
+use agent_protocol::models::Thread;
+
+use agent_protocol::models::ThreadResponse;
+
+use agent_protocol::models::ThreadStatus;
+
+use agent_protocol::models::ThreadStatusKind;
+
+use agent_protocol::models::Turn;
+
+use agent_protocol::protocol::Body;
+
+use agent_protocol::protocol::Call;
+
+use agent_protocol::session::ProviderKind;
+
+use agent_protocol::session::SessionChange;
+
+use agent_protocol::session::SessionRef;
+
+use agent_protocol::session::TextField;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, watch};
@@ -33,13 +54,13 @@ use process::Process;
 #[error("{message}")]
 pub(crate) struct OperationError {
     pub(crate) message: String,
-    pub(crate) delivery: agent_core::peer::Delivery,
+    pub(crate) delivery: agent_transport::peer::Delivery,
 }
 impl From<String> for OperationError {
     fn from(message: String) -> Self {
         Self {
             message,
-            delivery: agent_core::peer::Delivery::NotSent,
+            delivery: agent_transport::peer::Delivery::NotSent,
         }
     }
 }
@@ -120,8 +141,8 @@ impl Drop for Claude {
 }
 
 impl Claude {
-    pub(crate) fn capabilities() -> agent_core::session::Capabilities {
-        agent_core::session::Capabilities {
+    pub(crate) fn capabilities() -> agent_protocol::session::Capabilities {
+        agent_protocol::session::Capabilities {
             additional_input: true,
             fork: false,
             rename: false,
@@ -407,8 +428,8 @@ impl Claude {
                             ..Default::default()
                         };
                         thread.history_read_state =
-                            Some(agent_core::session::HistoryReadState::new(
-                                agent_core::session::HistoryReadKind::Unavailable,
+                            Some(agent_protocol::session::HistoryReadState::new(
+                                agent_protocol::session::HistoryReadKind::Unavailable,
                                 vec![format!("{error:#}")],
                             ));
                         thread
@@ -479,10 +500,11 @@ impl Claude {
                 Ok(response) => Ok(response),
                 Err(error) => {
                     let mut thread = history::summary(&path)?;
-                    thread.history_read_state = Some(agent_core::session::HistoryReadState::new(
-                        agent_core::session::HistoryReadKind::Unavailable,
-                        vec![format!("{error:#}")],
-                    ));
+                    thread.history_read_state =
+                        Some(agent_protocol::session::HistoryReadState::new(
+                            agent_protocol::session::HistoryReadKind::Unavailable,
+                            vec![format!("{error:#}")],
+                        ));
                     Ok(ThreadResponse {
                         thread,
                         model: None,
@@ -517,10 +539,11 @@ impl Claude {
                     ..Default::default()
                 };
                 if record.resumable {
-                    thread.history_read_state = Some(agent_core::session::HistoryReadState::new(
-                        agent_core::session::HistoryReadKind::Unavailable,
-                        vec![format!("{error:#}")],
-                    ));
+                    thread.history_read_state =
+                        Some(agent_protocol::session::HistoryReadState::new(
+                            agent_protocol::session::HistoryReadKind::Unavailable,
+                            vec![format!("{error:#}")],
+                        ));
                 } else {
                     thread.turns = Some(Vec::new());
                 }
@@ -593,7 +616,7 @@ impl Claude {
         let method = request.method();
         if matches!(request, Call::ResumeThread(_)) {
             self.record(id).await?;
-            return Ok(agent_core::models::Empty {}.into());
+            return Ok(agent_protocol::models::Empty {}.into());
         }
         let record = self.record(id).await?;
         match request {
@@ -631,7 +654,7 @@ impl Claude {
                 })
                 .await
                 .map_err(|_| "Claude Codeの停止要求がタイムアウトしました。")??;
-                Ok(agent_core::models::Empty {}.into())
+                Ok(agent_protocol::models::Empty {}.into())
             }
             Call::SteerTurn(params) => {
                 self.additional_input(
@@ -641,7 +664,7 @@ impl Claude {
                     &params.client_user_message_id,
                 )
                 .await?;
-                Ok(agent_core::models::Empty {}.into())
+                Ok(agent_protocol::models::Empty {}.into())
             }
             Call::QueueTurn(params) => {
                 let id = self
@@ -695,12 +718,12 @@ impl Claude {
             .await
             .map_err(|_| OperationError {
                 message: "Claude input delivery is unknown".into(),
-                delivery: agent_core::peer::Delivery::Unknown,
+                delivery: agent_transport::peer::Delivery::Unknown,
             })?
             .map_err(|_| "Claude finished before accepting additional input")?
             .map_err(|message| OperationError {
                 message,
-                delivery: agent_core::peer::Delivery::Unknown,
+                delivery: agent_transport::peer::Delivery::Unknown,
             })?;
         Ok(id)
     }
@@ -809,7 +832,7 @@ impl Claude {
             ..Default::default()
         };
         if let Err(error) = process.write(&json!({"type":"user","uuid":turn_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
-            return Err(OperationError { message: error, delivery: agent_core::peer::Delivery::Unknown });
+            return Err(OperationError { message: error, delivery: agent_transport::peer::Delivery::Unknown });
         }
         state.model = model.clone();
         let (input, receiver) = mpsc::channel(32);
@@ -1137,7 +1160,7 @@ impl Worker {
         );
         let result = self.router.request(
             self.session.clone(),
-            agent_core::client::ServerRequest {
+            agent_protocol::operations::ServerRequest {
                 delivery_state: None,
                 native_request_id: None,
                 id: id.clone().into(),

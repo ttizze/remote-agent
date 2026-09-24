@@ -1,4 +1,4 @@
-use agent_core::models::{ThreadList, ThreadResponse};
+use agent_protocol::models::{ThreadList, ThreadResponse};
 use serde_json::Value;
 
 #[test]

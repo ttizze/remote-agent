@@ -2,12 +2,14 @@
 //! short registry lock serializes discovery/startup; host.lock owns the process
 //! lifetime. A stale registry survives crashes without reviving a stale ticket.
 use crate::KeyStorage;
-use agent_core::transport::{Identity, Ticket};
+use agent_transport::transport::{Identity, Ticket};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
 use std::{
-    fs::{self, File},
-    io::{self, Write},
+    fs::File,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -251,7 +253,7 @@ fn running(directory: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::transport::{Endpoint, Relays};
+    use agent_transport::transport::{Endpoint, Relays};
 
     #[cfg(unix)]
     #[test]

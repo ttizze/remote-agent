@@ -1,11 +1,9 @@
-use agent_core::state::operations as op;
 use agent_core::{
-    client::Answer,
-    models::ListQuery,
-    state::{Draft, Intent, Navigation, Snapshot},
+    state::{Draft, Intent, Navigation, Snapshot, operations as op},
     store::{Outcome, Store},
-    transport::{Endpoint, Identity, Relays, Ticket},
 };
+use agent_protocol::{models::ListQuery, operations::Answer};
+use agent_transport::transport::{Endpoint, Identity, Relays, Ticket};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde_json::Value;
@@ -68,7 +66,7 @@ async fn main() {
     if let Err(error) = run(Args::parse()).await {
         eprintln!(
             "Error: {}",
-            agent_core::diagnostics::sanitize(&format!("{error:#}"))
+            agent_transport::diagnostics::sanitize(&format!("{error:#}"))
         );
         std::process::exit(1);
     }

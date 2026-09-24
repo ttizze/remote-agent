@@ -1,11 +1,9 @@
 //! Immutable client state and pure conversation transitions.
-use crate::{
-    client::{Answer, ServerRequest},
-    models::{
-        FileContent, FileList, HostStatus, Invitation, Item, ListQuery, Model, RemoteHost, Thread,
-        ThreadList, WorkspaceReview, WorktreeSettings,
-    },
+use crate::models::{
+    FileContent, FileList, HostStatus, Invitation, Item, ListQuery, Model, RemoteHost, Thread,
+    ThreadList, WorkspaceReview, WorktreeSettings,
 };
+use agent_protocol::operations::{Answer, ServerRequest};
 use operations as op;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -20,7 +18,7 @@ pub struct Draft {
     pub text: String,
     pub attachments: Vec<Attachment>,
     #[serde(default)]
-    pub invocations: Vec<crate::composer::Invocation>,
+    pub invocations: Vec<agent_protocol::composer::Invocation>,
     pub model: Option<String>,
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,9 +69,9 @@ pub struct HostManagement {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AccountState {
-    pub accounts: Option<Arc<crate::client::Accounts>>,
+    pub accounts: Option<Arc<agent_protocol::operations::Accounts>>,
     #[serde(skip)]
-    pub login: Option<Arc<crate::client::AccountLogin>>,
+    pub login: Option<Arc<agent_protocol::operations::AccountLogin>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
@@ -124,12 +122,12 @@ pub struct TerminalOutput {
     pub sequence: u64,
     #[serde(with = "crate::protocol::bytes")]
     pub data: Vec<u8>,
-    pub reset_size: Option<crate::client::TerminalSize>,
+    pub reset_size: Option<agent_protocol::operations::TerminalSize>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Terminal {
     pub cwd: String,
-    pub size: crate::client::TerminalSize,
+    pub size: agent_protocol::operations::TerminalSize,
     pub phase: TerminalPhase,
     pub output: VecDeque<Arc<TerminalOutput>>,
     pub sequence: u64,
@@ -145,7 +143,7 @@ pub struct TerminalView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     #[serde(skip)]
-    pub composer_catalog: Option<Arc<crate::composer::ComposerCatalog>>,
+    pub composer_catalog: Option<Arc<agent_protocol::composer::ComposerCatalog>>,
     #[serde(skip)]
     pub host_name: Option<String>,
     pub storage_scope: String,

@@ -1,8 +1,6 @@
 use crate::{Runtime, store_session::StoreSession};
-use agent_core::{
-    client::TerminalSize,
-    state::{Intent, Snapshot, TerminalPhase, operations as op},
-};
+use agent_core::state::{Intent, Snapshot, TerminalPhase, operations as op};
+use agent_protocol::operations::TerminalSize;
 use alacritty_terminal::{
     Term,
     event::{Event as TerminalEvent, EventListener},
@@ -735,7 +733,7 @@ fn resolve_color_index(index: usize, term: &Term<TerminalEvents>) -> Hsla {
     if let Some(c) = term.colors()[index] {
         return rgb((u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)).into();
     }
-    rgb(agent_core::client::terminal_color(index as u16)).into()
+    rgb(agent_protocol::operations::terminal_color(index as u16)).into()
 }
 impl EntityInputHandler for Terminal {
     fn text_for_range(

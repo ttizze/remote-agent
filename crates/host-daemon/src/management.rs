@@ -1,9 +1,9 @@
 use crate::command_line::Mode;
-use agent_core::{
-    client::ReadHostStatus,
-    state::operations::{CreateInvitation, RevokeDevice},
-    transport::{Endpoint, Relays},
+use agent_protocol::{
+    operations::{ReadHostStatus, RevokeDevice},
+    protocol::Call,
 };
+use agent_transport::transport::{Endpoint, Relays};
 use anyhow::{Context, Result, bail};
 use host_daemon::local_host::{LocalHostRegistry, LocalHostState};
 use std::{path::PathBuf, time::Duration};
@@ -32,7 +32,9 @@ pub(crate) async fn run(mode: Mode, state_dir: Option<PathBuf>, isolated: bool) 
         let (client, _events) = session.open_peer(Duration::from_secs(15), 8).await?;
         let result = match mode {
             Mode::Invite => client
-                .call(&CreateInvitation {})
+                .request::<agent_protocol::models::Invitation>(&Call::Invite(
+                    agent_protocol::models::Empty {},
+                ))
                 .await
                 .map(|value| serde_json::to_value(value).expect("invitation serializes")),
             Mode::Status => client
