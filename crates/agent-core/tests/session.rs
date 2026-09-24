@@ -235,7 +235,7 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
         }),
     );
     let saved: Snapshot =
-        serde_json::from_slice(&serde_json::to_vec(&next.local_state()).unwrap()).unwrap();
+        agent_core::persistence::decode(&agent_core::persistence::encode(&next).unwrap()).unwrap();
     let (restored, _) = reduce(&saved, Event::StorageScope("host-key:area-a".into()));
     assert_eq!(restored.drafts["native"].text, "area A draft");
     assert_eq!(
@@ -377,7 +377,7 @@ fn local_storage_keeps_user_work_without_host_caches() {
     Arc::make_mut(&mut original.activity)
         .active
         .insert("native".into(), true);
-    let bytes = serde_json::to_vec(&original.local_state()).unwrap();
+    let bytes = agent_core::persistence::encode(&original).unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let mut keys: Vec<_> = saved
         .as_object()
@@ -399,7 +399,7 @@ fn local_storage_keeps_user_work_without_host_caches() {
         ]
     );
     assert_eq!(saved["activity"], json!({"unread":["native"]}));
-    let restored: Snapshot = serde_json::from_slice(&bytes).unwrap();
+    let restored = agent_core::persistence::decode(&bytes).unwrap();
     assert_eq!(restored.drafts, original.drafts);
     assert_eq!(restored.pending_submissions, original.pending_submissions);
     assert_eq!(restored.file_drafts, original.file_drafts);

@@ -262,27 +262,6 @@ fn work_summary(turn: &Turn) -> String {
     summary
 }
 
-/// Keep one pending entry per client ID until the native echo arrives.
-/// Returned indices refer to the input, so clients retain their own bodies.
-pub fn remaining_submissions<'a>(
-    pending: &[&str],
-    echoed: impl IntoIterator<Item = &'a str>,
-) -> Vec<usize> {
-    // Storage scales with pending input, not with the conversation history.
-    let mut retained: Vec<_> = pending
-        .iter()
-        .enumerate()
-        .filter_map(|(index, id)| (!pending[..index].contains(id)).then_some(index))
-        .collect();
-    for echo in echoed {
-        retained.retain(|&index| pending[index] != echo);
-        if retained.is_empty() {
-            break;
-        }
-    }
-    retained
-}
-
 /// Place pending inputs after their saved native anchor. No anchor means before
 /// the first item; an unloaded anchor goes at the tail. Repeated native IDs use
 /// the latest occurrence, never duplicating
@@ -290,10 +269,10 @@ pub fn remaining_submissions<'a>(
 pub fn source_order<'a>(
     item_count: usize,
     item_id: impl Fn(usize) -> &'a str,
-    anchors: &[Option<&str>],
+    anchors: impl IntoIterator<Item = Option<&'a str>>,
 ) -> Vec<usize> {
     let positions: Vec<_> = anchors
-        .iter()
+        .into_iter()
         .map(|anchor| {
             anchor.map_or(0, |anchor| {
                 (0..item_count)
@@ -303,7 +282,7 @@ pub fn source_order<'a>(
             })
         })
         .collect();
-    let mut order = Vec::with_capacity(item_count + anchors.len());
+    let mut order = Vec::with_capacity(item_count + positions.len());
     for boundary in 0..=item_count {
         order.extend(
             positions
@@ -636,14 +615,13 @@ mod projection_tests {
         ($($value:tt)*) => { serde_json::from_value::<Turn>(json!($($value)*)).unwrap() };
     }
     #[test]
-    fn pending_echoes_deduplicate_by_identity_and_anchor_after_latest_occurrence() {
-        assert_eq!(remaining_submissions(&["a", "b", "a", "c"], ["b"]), [0, 3]);
+    fn pending_inputs_anchor_after_latest_occurrence() {
         let ids = ["first", "repeat", "repeat", "later"];
         assert_eq!(
             source_order(
                 ids.len(),
                 |i| ids[i],
-                &[Some("repeat"), Some("missing"), Some("repeat"), None]
+                [Some("repeat"), Some("missing"), Some("repeat"), None]
             ),
             [7, 0, 1, 2, 4, 6, 3, 5]
         );
@@ -672,7 +650,7 @@ mod projection_tests {
             {"id":"b","type":"commandExecution","aggregatedOutput":"private output"}
         ]});
         let items = turn.items.as_ref().unwrap();
-        let order = source_order(items.len(), |i| &items[i].id, &[Some("a")]);
+        let order = source_order(items.len(), |i| &items[i].id, [Some("a")]);
         let item = |index: usize| {
             let source = order[index];
             if source < items.len() {

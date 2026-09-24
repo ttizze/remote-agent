@@ -299,7 +299,22 @@ impl Client {
         // Freeze capture before sending, so export cannot generate its own timeline.
         tokio::time::sleep(crate::diagnostics::connection::WINDOW + Duration::from_secs(1)).await;
         performance.timeline = self.trace.snapshot();
-        let _ = tokio::time::timeout(Duration::from_secs(10), self.call(&performance)).await;
+        if matches!(
+            tokio::time::timeout(Duration::from_secs(10), self.call(&performance)).await,
+            Ok(Ok(_))
+        ) {
+            self.trace.acknowledge(&performance).await;
+        }
+        for report in self.trace.pending_reports().await {
+            if matches!(
+                tokio::time::timeout(Duration::from_secs(10), self.call(&report)).await,
+                Ok(Ok(_))
+            ) {
+                self.trace.acknowledge(&report).await;
+            } else {
+                break;
+            }
+        }
     }
     pub fn record_path(&self) {
         if !self.trace.active() {
@@ -383,6 +398,97 @@ fn invalid(error: impl std::fmt::Display) -> PeerError {
 mod tests {
     use super::*;
     use crate::transport::{Endpoint, Identity, IncomingRequest, Relays, Trust};
+
+    #[tokio::test]
+    async fn reconnect_uploads_previous_capture_and_only_then_removes_it() {
+        use crate::diagnostics::{ConnectionPerformance, connection::Trace};
+        tokio::time::timeout(Duration::from_secs(45), async {
+            let directory = tempfile::tempdir().unwrap();
+            let old = Trace::new();
+            old.persist(directory.path().into()).unwrap();
+            old.record(Phase::ResumeStart, 17, 0, 0);
+            old.record(Phase::ResumeFailed, 17, 0, 1000);
+            assert_eq!(old.pending_reports().await.len(), 1);
+            let old_id = old.id;
+            drop(old);
+
+            let trace = Trace::new();
+            trace.persist(directory.path().into()).unwrap();
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                .await
+                .unwrap();
+            let endpoint =
+                Endpoint::bind_recording(Identity::generate(), Relays::Disabled, trace.clone())
+                    .await
+                    .unwrap();
+            let trust = Trust {
+                allowed: [endpoint.node_id()].into(),
+                ..Default::default()
+            };
+            let ticket = host.ticket();
+            let (session, incoming) = tokio::join!(endpoint.connect(&ticket), host.accept());
+            let session = session.unwrap();
+            let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+            let (peer, events) = tokio::join!(
+                session.open_peer(Duration::from_secs(2), 1),
+                incoming.accept_peer()
+            );
+            let (peer, _updates) = peer.unwrap();
+            let _events = events.unwrap();
+            let upload = peer.collect_connection_diagnostics(ConnectionPerformance {
+                connection_id: peer.diagnostic_id,
+                ..Default::default()
+            });
+            let receiver = async {
+                for recovered in [false, true] {
+                    let IncomingRequest::Call(request) = incoming.accept_request().await.unwrap()
+                    else {
+                        panic!("diagnostic call expected")
+                    };
+                    let Call::ConnectionPerformance(report) = request.call else {
+                        panic!("diagnostic report expected")
+                    };
+                    assert_eq!(report.recovered, recovered);
+                    if recovered {
+                        assert_eq!(report.timeline.id, old_id);
+                        assert_eq!(report.attempt_id, 17);
+                        assert!(
+                            report
+                                .timeline
+                                .events
+                                .iter()
+                                .any(|event| event.phase == Phase::ResumeFailed)
+                        );
+                        assert!(
+                            trace
+                                .pending_reports()
+                                .await
+                                .iter()
+                                .any(|report| report.timeline.id == old_id)
+                        );
+                    }
+                    let mut send = request.send;
+                    framing::write(
+                        &mut send,
+                        Response::Success {
+                            result: crate::models::Empty {},
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    send.finish().unwrap();
+                }
+            };
+            tokio::join!(upload, receiver);
+            assert!(trace.pending_reports().await.is_empty());
+            session.close();
+            incoming.close();
+            endpoint.close().await;
+            host.close().await;
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn early_reply_is_measured_before_adoption_without_exposing_its_payload() {

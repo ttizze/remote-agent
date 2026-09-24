@@ -15,6 +15,7 @@ use std::{
 use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 pub mod connection;
+mod journal;
 pub use connection::{ConnectionPhase, ConnectionTimeline};
 
 const FILE_BYTES: usize = 5 * 1024 * 1024;
@@ -23,19 +24,21 @@ const MESSAGE_BYTES: usize = 8192;
 
 pub use agent_protocol::diagnostics::{ClientPlatform, ConnectionPerformance, ConnectionRoute};
 pub fn connection_performance(performance: &ConnectionPerformance) {
-    tracing::info!(target: "bex", operation = "client.connection",
-    message = %format_args!(
-        "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?} resolution_ms={} rtt_ms={} trace={} attempt={} connection={}",
-        performance.platform, performance.total_ms, performance.endpoint_ms,
-        performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
-        performance.resolution_ms, performance.rtt_ms, performance.timeline.id, performance.attempt_id, performance.connection_id,
-    ));
+    if !performance.recovered {
+        tracing::info!(target: "bex", operation = "client.connection",
+        message = %format_args!(
+            "platform={:?} total_ms={} endpoint_ms={} transport_ms={} verification_ms={} reused={} route={:?} resolution_ms={} rtt_ms={} trace={} attempt={} connection={}",
+            performance.platform, performance.total_ms, performance.endpoint_ms,
+            performance.transport_ms, performance.verification_ms, performance.reused, performance.route,
+            performance.resolution_ms, performance.rtt_ms, performance.timeline.id, performance.attempt_id, performance.connection_id,
+        ));
+    }
     if performance.timeline.id != 0 {
         tracing::info!(target: "bex", operation = "client.connection.timeline",
-            message = %format_args!("trace={} attempt={} connection={} dropped={} platform={:?} client_revision={}",
+            message = %format_args!("trace={} attempt={} connection={} dropped={} platform={:?} client_revision={} recovered={} started_at_ms={}",
                 performance.timeline.id, performance.attempt_id, performance.connection_id,
                 performance.timeline.dropped, performance.platform,
-                performance.client_revision.chars().filter(|value| value.is_ascii_alphanumeric() || *value == '-').take(64).collect::<String>()));
+                performance.client_revision.chars().filter(|value| value.is_ascii_alphanumeric() || *value == '-').take(64).collect::<String>(), performance.recovered, performance.timeline.started_at_ms));
         connection_events("client.connection.event", &performance.timeline);
     }
 }

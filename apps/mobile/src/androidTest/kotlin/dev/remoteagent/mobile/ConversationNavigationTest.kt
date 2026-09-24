@@ -11,7 +11,6 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.Snapshot
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -39,9 +38,7 @@ class ConversationNavigationTest {
                 .put("thread_id", "thread").put("draft_key", "thread").put("cwd", "/fixture"))
             .put("conversations", JSONObject()
                 .put("thread", JSONObject().put("id", "thread").put("turns", turns)))
-        val store = AgentStore.offline(persisted.toString().encodeToByteArray())
-        try {
-            val snapshot = store.snapshot()
+        Snapshot.restore(persisted.toString().encodeToByteArray()).use { snapshot ->
             val projection = projectConversationRows(snapshot, snapshot.conversation("thread"), null)
             compose.setContent {
                 MaterialTheme {
@@ -62,8 +59,6 @@ class ConversationNavigationTest {
             latest.assertDoesNotExist()
             compose.onNodeWithContentDescription("会話の先頭へ").performClick()
             compose.onNodeWithText("Question 0").assertIsDisplayed()
-        } finally {
-            store.shutdown()
         }
     }
 }

@@ -174,7 +174,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             old?.shutdown()
             try {
                 val bytes = withContext(Dispatchers.IO) { repository.load(id) }
-                val store = AgentStore.offline(bytes)
+                val store = AgentStore.offline(bytes, repository.diagnosticsDirectory(id))
                 if (profileId != id || !isActive) {
                     store.shutdown()
                     return@launch
@@ -221,6 +221,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         AgentStore.connect(
                             Connection(invitation.endpoint, identity, invitation.invitation, true),
                             byteArrayOf(),
+                            repository.diagnosticsDirectory(id),
                         )
                     } finally {
                         identity.fill(0)

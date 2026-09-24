@@ -260,32 +260,6 @@ pub struct ScopedData {
     pub activity: Arc<Activity>,
 }
 
-/// Durable client-owned data. Host results and connection state stay in memory.
-#[derive(Debug, Serialize)]
-pub struct LocalState<'a> {
-    storage_scope: &'a str,
-    archived_scopes: &'a BTreeMap<String, Arc<ScopedData>>,
-    drafts: &'a BTreeMap<String, Arc<Draft>>,
-    pending_submissions: &'a BTreeMap<String, Arc<PendingSubmission>>,
-    file_drafts: &'a BTreeMap<String, Arc<FileDraft>>,
-    navigation: &'a Navigation,
-    activity: &'a Activity,
-}
-
-impl Snapshot {
-    pub fn local_state(&self) -> LocalState<'_> {
-        LocalState {
-            storage_scope: &self.storage_scope,
-            archived_scopes: &self.archived_scopes,
-            drafts: &self.drafts,
-            pending_submissions: &self.pending_submissions,
-            file_drafts: &self.file_drafts,
-            navigation: &self.navigation,
-            activity: &self.activity,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     StorageScope(String),

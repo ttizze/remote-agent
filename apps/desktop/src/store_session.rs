@@ -80,7 +80,10 @@ impl StoreSession {
                     let snapshot = receive.borrow_and_update().clone();
                     let path = path.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        host_daemon::platform::save_private_json(&path, &snapshot.local_state())
+                        host_daemon::platform::save_private_json(
+                            &path,
+                            &agent_core::persistence::PersistedState::capture(&snapshot),
+                        )
                     })
                     .await
                     .map_err(anyhow::Error::from)
@@ -178,7 +181,8 @@ mod tests {
             runtime.closing.close();
             runtime.closing.wait().await;
             publish.await.unwrap();
-            let restored: Snapshot = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let restored: Snapshot =
+                agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
             assert_eq!(restored.drafts["draft"].text, "last edit before close");
             assert!(store.dispatch(Intent::ShowThreadList).await.is_err());
         })
@@ -221,7 +225,8 @@ mod tests {
             runtime.closing.close();
             runtime.closing.wait().await;
             publish.await.unwrap();
-            let restored: Snapshot = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let restored: Snapshot =
+                agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
             assert_eq!(restored.drafts["draft"].text, "recovered");
         })
         .await

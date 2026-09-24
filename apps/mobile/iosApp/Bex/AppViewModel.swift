@@ -119,7 +119,10 @@ final class BexAppViewModel: ObservableObject {
         do {
             let bytes = try await SnapshotFiles.load(id)
             let snapshotRead = ProcessInfo.processInfo.systemUptime - preparationStarted
-            let owner = try await AgentStore.offline(persisted: bytes)
+            let owner = try await AgentStore.offline(
+                persisted: bytes,
+                diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id)
+            )
             guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
             store = owner
             owner.recordConnectionEvent(phase: .snapshotRead, value: UInt64(snapshotRead * 1_000_000))
@@ -184,7 +187,7 @@ final class BexAppViewModel: ObservableObject {
                         identity: identity,
                         invitation: invitation.invitation,
                         useRelays: true
-                    ), persisted: Data())
+                    ), persisted: Data(), diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
                     guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
                     persist()
                     observation?.cancel()

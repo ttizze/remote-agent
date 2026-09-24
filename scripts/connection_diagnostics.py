@@ -36,11 +36,13 @@ def interval(events, start, end):
     return None
 
 
-def analyze(rows, platform="Ios", attempt_id=None):
+def analyze(rows, platform="Ios", attempt_id=None, trace_id=None):
     headers = [r for r in rows if r["operation"] == "client.connection.timeline" and fields(r).get("platform") == platform]
+    if trace_id is not None:
+        headers = [r for r in headers if fields(r)["trace"] == trace_id]
     if not headers:
         raise ValueError(f"No {platform} connection capture received")
-    header = headers[-1]
+    header = max(enumerate(headers), key=lambda pair: (fields(pair[1])["started_at_ms"], pair[0]))[1]
     metadata = fields(header)
     same_process = [r for r in rows if r["pid"] == header["pid"]]
     events = {fields(r)["seq"]: fields(r) for r in same_process
@@ -131,8 +133,9 @@ def main():
     parser.add_argument("--log", type=Path, default=Path.home()/"Library/Application Support/app.bex.BEX-Dev/logs/host.jsonl")
     parser.add_argument("--platform", default="Ios")
     parser.add_argument("--attempt", type=int, help="Inspect an earlier attempt retained in the same capture")
+    parser.add_argument("--trace", type=int, help="Inspect a recovered capture from an earlier app launch")
     args = parser.parse_args()
-    print(json.dumps(analyze(load_rows(args.log), args.platform, args.attempt), ensure_ascii=False, indent=2))
+    print(json.dumps(analyze(load_rows(args.log), args.platform, args.attempt, args.trace), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

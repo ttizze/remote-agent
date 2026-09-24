@@ -32,6 +32,12 @@ internal class AndroidMobileRepository(context: Context) {
         preferences.edit().putString("profiles", Json.encodeToString(profiles)).apply()
     }
 
+    fun diagnosticsDirectory(id: String): String =
+        File(
+            directory,
+            "connection-diagnostics/${Base64.getUrlEncoder().withoutPadding().encodeToString(id.toByteArray())}",
+        ).absolutePath
+
     fun load(id: String): ByteArray {
         val file = snapshotFile(id)
         return if (file.baseFile.exists()) file.openRead().use { it.readBytes() } else byteArrayOf()

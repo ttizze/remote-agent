@@ -41,10 +41,15 @@ class StorePersistenceTest {
             ]}}"""
                     ),
                 )
-        val store = AgentStore.offline(persisted.toString().encodeToByteArray())
+        // History is an explicit projection input, not device storage.
+        val fixture = Snapshot.restore(persisted.toString().encodeToByteArray())
+        val source = fixture.conversation("thread")
+        val bytes = fixture.serializeLocalState()
+        fixture.close()
+        val store = AgentStore.offline(bytes, null)
         try {
             val snapshot = store.snapshot()
-            val first = requireNotNull(projectConversationRows(snapshot, snapshot.conversation("thread"), null))
+            val first = requireNotNull(projectConversationRows(snapshot, source, null))
             fun answers(projection: ConversationProjection) =
                 projection.rows.mapNotNull {
                     (it.content as? ConversationRowContent.Response)?.item?.presentation()?.body
@@ -55,11 +60,11 @@ class StorePersistenceTest {
             assertEquals("new draft", latest.draft("thread").text)
             assertEquals("", snapshot.draft("thread").text)
             edit.wait()
-            val second = projectConversationRows(latest, latest.conversation("thread"), first)
+            val second = projectConversationRows(latest, source, first)
             assertSame(first, second)
             assertEquals(listOf("first answer", "second answer"), answers(first))
             assertNull(projectConversationRows(latest, null, first))
-            val reopened = requireNotNull(projectConversationRows(latest, latest.conversation("thread"), null))
+            val reopened = requireNotNull(projectConversationRows(latest, source, null))
             assertEquals(answers(first), answers(reopened))
         } finally {
             store.shutdown()
@@ -79,7 +84,7 @@ class StorePersistenceTest {
                     base.getSharedPreferences("$token-$name", mode)
             }
         val repository = AndroidMobileRepository(context)
-        val store = AgentStore.offline(byteArrayOf())
+        val store = AgentStore.offline(byteArrayOf(), null)
         try {
             store.dispatch(Intent.NewChat("/fixture")).wait()
             val key = store.snapshot().navigation().draftKey
@@ -88,8 +93,8 @@ class StorePersistenceTest {
             repository.save("host-a", store.snapshot().serializeLocalState())
             store.dispatch(Intent.SetDraftText(key, "別の Host の下書き")).wait()
             repository.save("host-b", store.snapshot().serializeLocalState())
-            val restoredA = AgentStore.offline(repository.load("host-a"))
-            val restoredB = AgentStore.offline(repository.load("host-b"))
+            val restoredA = AgentStore.offline(repository.load("host-a"), null)
+            val restoredB = AgentStore.offline(repository.load("host-b"), null)
             try {
                 assertEquals("日本語の下書き", restoredA.snapshot().draft(key).text)
                 assertEquals("別の Host の下書き", restoredB.snapshot().draft(key).text)
@@ -109,7 +114,7 @@ class StorePersistenceTest {
 
     @Test
     fun shutdownCompletesTheNativeSnapshotWait() = runBlocking {
-        val store = AgentStore.offline(byteArrayOf())
+        val store = AgentStore.offline(byteArrayOf(), null)
         val waiter =
             async(start = CoroutineStart.UNDISPATCHED) {
                 var previous = store.snapshot()

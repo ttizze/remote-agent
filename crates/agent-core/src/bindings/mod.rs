@@ -80,6 +80,34 @@ struct NativeEndpoint {
 }
 
 impl AgentStore {
+    async fn connect_recording(
+        &self,
+        connection: Connection,
+        reuse: bool,
+    ) -> Result<(), AgentError> {
+        let started = std::time::Instant::now();
+        self.resume_connection(started, async {
+            let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
+            let endpoint_ms = started.elapsed().as_millis() as u64;
+            let mut performance = if reuse && invitation.is_none() {
+                self.store.resume(&endpoint, &ticket).await.map_err(error)
+            } else {
+                self.store
+                    .reconnect(&endpoint, &ticket, invitation)
+                    .await
+                    .map_err(error)
+            }?;
+            performance.endpoint_ms = endpoint_ms;
+            performance.total_ms = started.elapsed().as_millis() as u64;
+            performance.client_revision = option_env!("BEX_BUILD_REVISION")
+                .unwrap_or("development")
+                .into();
+            performance.platform = crate::diagnostics::ClientPlatform::current();
+            Ok::<_, AgentError>(performance)
+        })
+        .await
+    }
+
     async fn resume_connection(
         &self,
         started: std::time::Instant,
@@ -163,15 +191,17 @@ impl AgentStore {
 #[uniffi::export(async_runtime = "tokio")]
 impl AgentStore {
     #[uniffi::constructor]
-    pub async fn offline(persisted: Vec<u8>) -> Result<Arc<Self>, AgentError> {
+    pub async fn offline(
+        persisted: Vec<u8>,
+        diagnostics_directory: Option<String>,
+    ) -> Result<Arc<Self>, AgentError> {
         let started = std::time::Instant::now();
         let trace = Trace::new();
+        if let Some(directory) = diagnostics_directory {
+            trace.persist(directory.into()).map_err(error)?;
+        }
         trace.activate();
-        let snapshot = if persisted.is_empty() {
-            crate::state::Snapshot::default()
-        } else {
-            serde_json::from_slice(&persisted).map_err(error)?
-        };
+        let snapshot = crate::persistence::decode(&persisted).map_err(error)?;
         let store = crate::store::Store::offline(snapshot);
         trace.record(
             ConnectionPhase::StoreRestored,
@@ -190,49 +220,20 @@ impl AgentStore {
     pub async fn connect(
         connection: Connection,
         persisted: Vec<u8>,
+        diagnostics_directory: Option<String>,
     ) -> Result<Arc<Self>, AgentError> {
-        let store = Self::offline(persisted).await?;
+        let store = Self::offline(persisted, diagnostics_directory).await?;
         store.reconnect(connection).await?;
         Ok(store)
     }
 
     pub async fn reconnect(&self, connection: Connection) -> Result<(), AgentError> {
-        let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
-        self.store
-            .reconnect(&endpoint, &ticket, invitation)
-            .await
-            .map(|_| ())
-            .map_err(error)
+        self.connect_recording(connection, false).await
     }
 
     /// Foreground recovery reuses a responsive session and the endpoint identity.
     pub async fn resume(&self, connection: Connection) -> Result<(), AgentError> {
-        let started = std::time::Instant::now();
-        self.resume_connection(started, async {
-            let (endpoint, ticket, invitation) = self.connection_endpoint(connection).await?;
-            let endpoint_ms = started.elapsed().as_millis() as u64;
-            let mut performance = if invitation.is_none() {
-                self.store.resume(&endpoint, &ticket).await.map_err(error)
-            } else {
-                self.store
-                    .reconnect(&endpoint, &ticket, invitation)
-                    .await
-                    .map_err(error)
-            }?;
-            performance.endpoint_ms = endpoint_ms;
-            performance.total_ms = started.elapsed().as_millis() as u64;
-            performance.client_revision = option_env!("BEX_BUILD_REVISION")
-                .unwrap_or("development")
-                .into();
-            performance.platform = match std::env::consts::OS {
-                "ios" => crate::diagnostics::ClientPlatform::Ios,
-                "android" => crate::diagnostics::ClientPlatform::Android,
-                "macos" => crate::diagnostics::ClientPlatform::Macos,
-                _ => crate::diagnostics::ClientPlatform::Other,
-            };
-            Ok::<_, AgentError>(performance)
-        })
-        .await
+        self.connect_recording(connection, true).await
     }
     /// Platform lifecycle boundaries only; shared transport measurements stay in Core.
     pub fn record_connection_event(&self, phase: ConnectionPhase, value: u64) {
@@ -361,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_releases_a_native_snapshot_waiter() {
-        let store = AgentStore::offline(Vec::new()).await.unwrap();
+        let store = AgentStore::offline(Vec::new(), None).await.unwrap();
         let previous = store.snapshot();
         let weak = Arc::downgrade(&store);
         let waiting = store.clone();
@@ -400,7 +401,7 @@ mod tests {
             let mut saved: serde_json::Value = serde_json::from_slice(&cached.serialize_local_state().unwrap()).unwrap();
             assert!(saved.get("list_query").is_none());
             saved["list_query"] = serde_json::to_value(&cached.list_query).unwrap();
-            let restored = AgentStore::offline(serde_json::to_vec(&saved).unwrap()).await.unwrap();
+            let restored = AgentStore::offline(serde_json::to_vec(&saved).unwrap(), None).await.unwrap();
             assert_eq!(*restored.snapshot().list_query, crate::models::ListQuery::default());
             restored.shutdown().await.unwrap();
             let store = Arc::new(AgentStore { store: crate::store::Store::offline(cached), endpoint: Default::default(), trace: Trace::new() });
@@ -501,7 +502,7 @@ mod tests {
                             ..Default::default()
                         }), ..Default::default()
                     };
-                    let store = AgentStore::offline(serde_json::to_vec(&snapshot).unwrap()).await.unwrap();
+                    let store = AgentStore::offline(crate::persistence::encode(&snapshot).unwrap(), None).await.unwrap();
                     let (connected, (first, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
                     connected.unwrap();
                     let old_identity = store.endpoint.lock().await.as_ref().unwrap().endpoint.node_id();
@@ -592,6 +593,60 @@ mod tests {
                     first.close(); host.close().await;
                 }).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn failed_and_cancelled_attempts_survive_store_recreation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = Some(directory.path().to_string_lossy().into_owned());
+        let store = AgentStore::offline(Vec::new(), path.clone()).await.unwrap();
+        assert!(
+            store
+                .resume_connection(std::time::Instant::now(), async {
+                    Err(error("private failure detail must never enter the journal"))
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(1),
+                store.resume_connection(std::time::Instant::now(), std::future::pending())
+            )
+            .await
+            .is_err()
+        );
+        let reports = store.trace.pending_reports().await;
+        assert_eq!(reports.len(), 1);
+        let id = reports[0].timeline.id;
+        assert!(
+            !serde_json::to_string(&reports)
+                .unwrap()
+                .contains("private failure")
+        );
+        store.shutdown().await.unwrap();
+        drop(store);
+        let restored = AgentStore::offline(Vec::new(), path).await.unwrap();
+        let reports = restored.trace.pending_reports().await;
+        let previous = reports
+            .iter()
+            .find(|report| report.timeline.id == id)
+            .unwrap();
+        assert!(
+            previous
+                .timeline
+                .events
+                .iter()
+                .any(|event| event.phase == ConnectionPhase::ResumeFailed)
+        );
+        assert!(
+            previous
+                .timeline
+                .events
+                .iter()
+                .any(|event| event.phase == ConnectionPhase::ResumeCancelled)
+        );
+        restored.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -760,7 +815,7 @@ mod tests {
                     navigation: Arc::new(crate::state::Navigation { thread_id: selected.then(|| "thread".into()), draft_key: "thread".into(), ..Default::default() }),
                     ..Default::default()
                 };
-                let store = AgentStore::offline(serde_json::to_vec(&cached).unwrap()).await.unwrap();
+                let store = AgentStore::offline(crate::persistence::encode(&cached).unwrap(), None).await.unwrap();
                 let (connected, (session, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
                 connected.unwrap();
                 let server = async {

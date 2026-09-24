@@ -182,10 +182,10 @@ class BuildCleanupTest(unittest.TestCase):
         (root / "target/unknown").rename(outside / "target")
         self.runs(outside)
 
-    def test_legacy_cargo_profile_without_root_tag_is_cleaned(self):
-        root = self.project("legacy")
+    def test_untagged_cargo_profile_is_not_cleaned(self):
+        root = self.project("untagged")
         (root / "target/CACHEDIR.TAG").unlink()
-        self.assertEqual(cleanup.prune([root], self.common, max_bytes=0)["entries"][0]["action"], "cleaned")
+        self.assertEqual(cleanup.prune([root], self.common, max_bytes=0)["entries"], [])
         self.build(root)
         self.runs(root)
 

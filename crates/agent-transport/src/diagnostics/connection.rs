@@ -1,7 +1,7 @@
 //! Bounded, monotonic connection timelines. No dependency messages or identities.
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, LazyLock, Mutex, Once, Weak},
+    sync::{Arc, LazyLock, Mutex, Once, OnceLock, Weak},
     time::{Duration, Instant},
 };
 use tracing::Subscriber;
@@ -21,6 +21,8 @@ struct State {
 pub struct Trace {
     pub id: u64,
     origin: Instant,
+    started_at_ms: u64,
+    journal: OnceLock<super::journal::Journal>,
     enabled: bool,
     sampler: Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     state: Mutex<State>,
@@ -38,6 +40,11 @@ impl Trace {
         let trace = Arc::new(Self {
             id: identifier(),
             origin: Instant::now(),
+            started_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            journal: OnceLock::new(),
             enabled,
             sampler: Mutex::new(None),
             state: Mutex::new(State {
@@ -50,6 +57,27 @@ impl Trace {
         traces.retain(|_, value| value.strong_count() > 0);
         traces.insert(trace.id, Arc::downgrade(&trace));
         trace
+    }
+
+    pub fn persist(&self, directory: std::path::PathBuf) -> std::io::Result<()> {
+        if self.enabled && self.journal.get().is_none() {
+            let journal = super::journal::Journal::open(directory, self.id)?;
+            let _ = self.journal.set(journal);
+        }
+        Ok(())
+    }
+
+    pub async fn pending_reports(&self) -> Vec<super::ConnectionPerformance> {
+        match self.journal.get() {
+            Some(journal) => journal.read().await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn acknowledge(&self, report: &super::ConnectionPerformance) {
+        if let Some(journal) = self.journal.get() {
+            journal.acknowledge(report).await;
+        }
     }
 
     pub fn enabled(&self) -> bool {
@@ -134,15 +162,70 @@ impl Trace {
             stream,
             value,
         });
+        drop(state);
+        if matches!(
+            phase,
+            ConnectionPhase::RuntimePulse
+                | ConnectionPhase::ResumeStart
+                | ConnectionPhase::ResumeReady
+                | ConnectionPhase::ResumeConnection
+                | ConnectionPhase::UiConnectReady
+                | ConnectionPhase::ResumeFailed
+                | ConnectionPhase::ResumeCancelled
+                | ConnectionPhase::UiConnectFailed
+                | ConnectionPhase::UiConnectCancelled
+                | ConnectionPhase::AppScene
+        ) {
+            self.checkpoint();
+        }
+    }
+
+    fn checkpoint(&self) {
+        let Some(journal) = self.journal.get() else {
+            return;
+        };
+        let timeline = self.snapshot();
+        let attempt_id = timeline
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.phase == ConnectionPhase::ResumeStart)
+            .map_or(0, |event| event.group);
+        let connection_id = timeline
+            .events
+            .iter()
+            .rev()
+            .find(|event| {
+                event.phase == ConnectionPhase::ResumeConnection && event.group == attempt_id
+            })
+            .map_or(0, |event| event.stream);
+        journal.checkpoint(super::ConnectionPerformance {
+            recovered: true,
+            attempt_id,
+            connection_id,
+            platform: super::ClientPlatform::current(),
+            client_revision: option_env!("BEX_BUILD_REVISION")
+                .unwrap_or("development")
+                .into(),
+            timeline,
+            ..Default::default()
+        });
     }
 
     pub fn snapshot(&self) -> ConnectionTimeline {
         let state = self.state.lock().unwrap();
         ConnectionTimeline {
+            started_at_ms: self.started_at_ms,
             id: self.id,
             dropped: state.sequence.saturating_sub(state.events.len() as u64),
             events: state.events.iter().cloned().collect(),
         }
+    }
+}
+
+impl Drop for Trace {
+    fn drop(&mut self) {
+        self.checkpoint();
     }
 }
 

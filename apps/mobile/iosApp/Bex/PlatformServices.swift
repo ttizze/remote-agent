@@ -18,6 +18,10 @@ enum SnapshotFiles {
         return directory.appendingPathComponent(name).appendingPathExtension("json")
     }
 
+    static func diagnosticsDirectory(_ host: String) throws -> String {
+        try location(host).deletingPathExtension().appendingPathExtension("diagnostics").path
+    }
+
     static func load(_ host: String) async throws -> Data {
         try await Task.detached(priority: .utility) {
             let url = try location(host)

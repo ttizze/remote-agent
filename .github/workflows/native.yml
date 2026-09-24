@@ -45,6 +45,29 @@ jobs:
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: nix develop .#native --command cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
+  android:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, nix-ci]
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cmd-format: nix develop . --command {0}
+          key: android-${{ hashFiles('flake.lock') }}
+      # Hetzner ci-1 has no KVM. Build instrumentation tests here; run them
+      # explicitly with just android-e2e on a machine with emulator acceleration.
+      - name: Check Android and build app and test APKs
+        run: >-
+          nix develop . --command ./gradlew
+          :apps:mobile:ktfmtCheck :apps:mobile:detekt
+          :apps:mobile:testDebugUnitTest
+          :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest
+          --no-daemon --no-parallel --max-workers=2 --console=plain
   windows:
     needs: toolchain
     # Latest stable Windows Server major; Windows 11 UI acceptance is separate.

@@ -66,7 +66,7 @@ impl Snapshot {
         serde_json::to_vec(self).map_err(error)
     }
     pub fn serialize_local_state(&self) -> Result<Vec<u8>, AgentError> {
-        serde_json::to_vec(&self.local_state()).map_err(error)
+        crate::persistence::encode(self).map_err(error)
     }
     pub fn connected(&self) -> bool {
         self.connected

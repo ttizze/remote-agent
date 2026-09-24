@@ -1,7 +1,5 @@
 //! Immutable conversation projection shared by desktop, Swift and Kotlin.
-use super::{
-    ItemMetadata, Role, body, item_presentation, project_items, remaining_submissions, source_order,
-};
+use super::{ItemMetadata, Role, body, item_presentation, project_items, source_order};
 use crate::{
     models,
     state::{PendingSubmission, Snapshot},
@@ -354,22 +352,28 @@ fn render_turn(
         .map(String::as_str)
         .collect();
     let native = source.items.as_deref().unwrap_or_default();
-    let ids: Vec<_> = pending.iter().map(|(id, _)| id.as_str()).collect();
-    let retained = remaining_submissions(
-        &ids,
-        native.iter().filter_map(|item| item.client_id.as_deref()),
-    );
-    let anchors: Vec<_> = retained
+    // Snapshot keys already make pending IDs unique.
+    let retained: Vec<_> = pending
         .iter()
-        .map(|&index| pending[index].1.after_item_id.as_deref())
+        .filter(|(id, _)| {
+            !native
+                .iter()
+                .any(|item| item.client_id.as_ref() == Some(id))
+        })
         .collect();
-    let order = source_order(native.len(), |index| native[index].id.as_str(), &anchors);
+    let order = source_order(
+        native.len(),
+        |index| native[index].id.as_str(),
+        retained
+            .iter()
+            .map(|(_, pending)| pending.after_item_id.as_deref()),
+    );
     let metadata = |index: usize| {
         let index = order[index];
         if let Some(item) = native.get(index) {
             ItemMetadata::from(item.as_ref())
         } else {
-            let id = pending[retained[index - native.len()]].0.as_str();
+            let id = retained[index - native.len()].0.as_str();
             ItemMetadata {
                 id,
                 client_id: Some(id),
@@ -390,7 +394,7 @@ fn render_turn(
         if let Some(item) = native.get(index) {
             render_native(item)
         } else {
-            let (id, submission) = &pending[retained[index - native.len()]];
+            let (id, submission) = retained[index - native.len()];
             RenderedItem::pending(
                 id,
                 submission,
@@ -959,6 +963,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["z-first", "a-second", "m-third", "answer"]
         );
+    }
+
+    #[test]
+    fn pending_echoes_render_once_and_keep_remaining_input_order() {
+        let mut snapshot = fixture();
+        for (sequence, id) in ["a", "b", "a", "c"].into_iter().enumerate() {
+            Arc::make_mut(&mut snapshot.pending_submissions).insert(
+                id.into(),
+                Arc::new(PendingSubmission {
+                    sequence: sequence as u64,
+                    draft_key: "thread".into(),
+                    draft: Arc::new(Draft {
+                        text: format!("pending {id} {sequence}"),
+                        ..Default::default()
+                    }),
+                    turn_id: Some("echo-turn".into()),
+                    after_item_id: Some("echo".into()),
+                    accepted: false,
+                    delivery_unknown: true,
+                }),
+            );
+        }
+        Arc::make_mut(Arc::make_mut(&mut snapshot.conversations).get_mut("thread").unwrap())
+            .turns.as_mut().unwrap().push(Arc::new(serde_json::from_value(json!({
+                "id":"echo-turn", "items":[{"id":"echo","type":"userMessage","clientId":"b","text":"native b"}]
+            })).unwrap()));
+        let rendered = project_snapshot(snapshot.clone(), None);
+        let items: Vec<_> = rendered.turns.last().unwrap().items().collect();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.data.body.as_str())
+                .collect::<Vec<_>>(),
+            ["native b", "pending a 2", "pending c 3"]
+        );
+        assert!(matches!(&items[0].source, ItemSource::Native(_)));
+        assert!(rendered.queued.is_empty());
+        assert_eq!(snapshot.pending_submissions.len(), 3);
+        assert!(Arc::ptr_eq(
+            &rendered,
+            &project_snapshot(snapshot, Some(&rendered))
+        ));
     }
 
     #[test]

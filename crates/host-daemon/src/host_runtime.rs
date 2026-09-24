@@ -197,7 +197,7 @@ impl HostRuntime {
                                 let decode_us = request.decoded_at.duration_since(request.accepted_at).as_micros();
                                 let queue_us = started.duration_since(request.decoded_at).as_micros();
                                 let accepted_us = request.accepted_at.duration_since(session_started).as_micros();
-                                if let Call::ConnectionPerformance(performance) = &request.call {
+                                if let Call::ConnectionPerformance(performance) = &request.call && !performance.recovered {
                                     let endpoint = runtime.endpoint.clone();
                                     tokio::task::spawn_blocking(move || endpoint.log_connection_diagnostics()).await?;
                                     tracing::info!(target: "bex", operation = "host.connection.link", message = %format_args!("session={} trace={} connection={} attempt={}", id, performance.timeline.id, performance.connection_id, performance.attempt_id));

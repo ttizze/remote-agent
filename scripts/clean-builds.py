@@ -33,7 +33,7 @@ def profiles(worktrees, common):
     for owner, target in [(p, p / "target") for p in worktrees] + [(None, common / "bex-quality/cargo-target")]:
         if not target.is_dir() or target.is_symlink():
             continue
-        roots = [target] + [p for p in target.iterdir() if p.is_dir() and not p.is_symlink() and cache_root(p)]
+        roots = ([target] if cache_root(target) else []) + [p for p in target.iterdir() if p.is_dir() and not p.is_symlink() and cache_root(p)]
         for root in roots:
             parents = [root] + [p for p in root.iterdir() if p.name in targets and p.is_dir() and not p.is_symlink()]
             for parent in parents:

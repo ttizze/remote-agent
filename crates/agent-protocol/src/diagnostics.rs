@@ -16,9 +16,21 @@ pub enum ClientPlatform {
     Other,
 }
 
+impl ClientPlatform {
+    pub fn current() -> Self {
+        match std::env::consts::OS {
+            "ios" => Self::Ios,
+            "android" => Self::Android,
+            "macos" => Self::Macos,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// Fixed categories and durations only: no identifiers or conversation content.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectionPerformance {
+    pub recovered: bool,
     pub total_ms: u64,
     pub endpoint_ms: u64,
     pub transport_ms: u64,
@@ -122,6 +134,7 @@ pub struct ConnectionEvent {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectionTimeline {
+    pub started_at_ms: u64,
     pub id: u64,
     pub dropped: u64,
     pub events: Vec<ConnectionEvent>,
