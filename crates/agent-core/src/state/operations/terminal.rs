@@ -47,7 +47,7 @@ impl Operation for StartTerminal {
         }
         Vec::new()
     }
-    const APPLY_WHEN_STALE: bool = true;
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
 }
 
 pub use agent_protocol::operations::ResizeTerminal;

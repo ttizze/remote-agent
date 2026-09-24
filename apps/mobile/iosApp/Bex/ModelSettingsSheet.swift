@@ -90,7 +90,11 @@ struct ModelSettingsSheet: View {
             }
         }
         .interactiveDismissDisabled(startingLogin || login != nil)
-        .onAppear(perform: refresh)
+        .onAppear {
+            if let id = login?.loginId {
+                pollLogin(id)
+            }
+        }
         .onChange(of: scenePhase) { phase in
             if phase == .active, let id = login?.loginId {
                 pollLogin(id)
@@ -155,9 +159,9 @@ struct ModelSettingsSheet: View {
                 Button(action: refresh) {
                     Image(systemName: "arrow.clockwise").frame(minWidth: 44, minHeight: 44)
                 }
-                .accessibilityLabel("使用量を更新")
+                .accessibilityLabel("モデルと使用量を更新")
                 .accessibilityIdentifier("account.refresh")
-                .disabled(loadingAccounts)
+                .disabled(loadingAccounts || loadingModels)
             }
             .font(.subheadline)
             .disabled(busy)
@@ -174,6 +178,7 @@ struct ModelSettingsSheet: View {
             if let account = selectedAccount {
                 AccountModelControls(
                     choices: model.snapshot.accountModels(id: account.id),
+                    loading: loadingModels || changingAccount,
                     currentModel: model.snapshot.accountIsActiveForDraft(id: account.id, threadId: model.coreDraftKey)
                         ? model.currentModel : nil,
                     selectedModel: Binding(get: { model.selectedModel }, set: model.chooseModel),
@@ -183,9 +188,6 @@ struct ModelSettingsSheet: View {
             } else {
                 Text("サインインするとモデルを選べます。")
                     .foregroundStyle(.secondary)
-            }
-            if loadingModels || changingAccount {
-                ProgressView("モデルを更新中…")
             }
             ForEach(model.snapshot.modelErrorMessages(), id: \.self) { error in
                 Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)

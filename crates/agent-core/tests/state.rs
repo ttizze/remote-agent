@@ -710,6 +710,27 @@ fn durable_upload_and_pairing_results_survive_navigation() {
 }
 
 #[test]
+fn disconnected_catalog_reads_do_not_apply_or_retry_stale_responses() {
+    let mut state = Snapshot::default();
+    let before = state.clone();
+    assert!(op::LoadModels {}.stale(&mut state, serde_json::from_value(json!({
+        "data":[{"id":"old","model":"old","displayName":"Old", "defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]
+    })).unwrap()).is_empty());
+    assert!(
+        op::ListAccounts {}
+            .stale(
+                &mut state,
+                serde_json::from_value(json!({
+                    "accounts":[{"provider":"codex","id":"old"}],"selectedId":"old"
+                }))
+                .unwrap()
+            )
+            .is_empty()
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
 fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_drafts() {
     use agent_core::state::{Draft, Intent};
     for restored in [false, true] {

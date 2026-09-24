@@ -452,7 +452,7 @@ impl Operation for StartThread {
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         refresh_thread(snapshot, output.thread)
     }
-    const APPLY_WHEN_STALE: bool = true;
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn outcome(output: &mut Self::Output) -> Outcome {
         ForkThread::outcome(output)
     }
@@ -468,6 +468,8 @@ impl Operation for Interrupt {
 pub struct LoadModels {}
 impl Operation for LoadModels {
     type Output = agent_protocol::operations::ModelPage;
+
+    const STALE_POLICY: StalePolicy = StalePolicy::Retry;
 
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         context.client.models().await
