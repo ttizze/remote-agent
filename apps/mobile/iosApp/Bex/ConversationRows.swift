@@ -209,12 +209,17 @@ struct ThreadMessageRow: View {
                 Text(item.data.title).font(.caption).foregroundStyle(.secondary)
                 if let id = item.source.unknownSubmissionId() {
                     HStack(spacing: 18) {
-                        Button("入力欄へ戻す") { restoreUnknown?(id) }
-                            .accessibilityIdentifier("submission.restore." + id)
-                        Button("破棄", role: .destructive) { discardUnknown?(id) }
-                            .accessibilityIdentifier("submission.discard." + id)
+                        Button { restoreUnknown?(id) } label: {
+                            Label("入力欄へ戻す", systemImage: "pencil")
+                        }
+                        .accessibilityIdentifier("submission.restore." + id)
+                        Button(role: .destructive) { discardUnknown?(id) } label: {
+                            Label("破棄", systemImage: "trash")
+                        }
+                        .accessibilityIdentifier("submission.discard." + id)
                     }
-                    .font(.caption.weight(.semibold))
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 19))
                     .buttonStyle(.plain)
                 }
             }

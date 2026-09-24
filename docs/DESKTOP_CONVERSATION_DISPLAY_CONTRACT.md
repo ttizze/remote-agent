@@ -382,7 +382,8 @@ results after navigation.
 - Acknowledgement never clears content typed or attached after submission.
 - A definite failure restores the sent content alongside newer draft content for
   retry. Unknown delivery remains visible and is never automatically resent.
-- iPhone unknown-delivery messages offer “入力欄へ戻す” and “破棄”. Restoring
+- iPhone unknown-delivery messages offer pencil and trash icon buttons with
+  accessibility labels “入力欄へ戻す” and “破棄”, respectively. Restoring
   merges the saved text and attachments into any newer draft; discarding removes
   only that pending message. Neither action is available for known delivery states.
 - Pending messages retain submission order and their saved conversation position,
