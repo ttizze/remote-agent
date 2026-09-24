@@ -594,8 +594,8 @@ function wipe(t, b, col, i) {
   });
 }
 
-function render(t) {
-  jr = mul(Math.floor(performance.now() / (reduce ? 400 : 125)) * 7919 + 13);
+function render(t, boil = Math.floor(performance.now() / (reduce ? 400 : 125))) {
+  jr = mul(boil * 7919 + 13);
   ctx.setTransform(cv.width / W, 0, 0, cv.width / W, 0, 0);
   let si = 0; for (let i = 0; i < SCENES.length; i++) if (t >= SCENES[i][0]) si = i;
   SCENES[si][1](t - SCENES[si][0]);
@@ -610,11 +610,11 @@ function render(t) {
 /* ---------- audio ---------- */
 let AC = null, master = null, bus = null, verb = null, noiseBuf = null, muted = false;
 const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
-function ensureAudio() {
-  if (AC) return;
+function ensureAudio(offline) {
+  if (AC && !offline) return;
   const Ctx = window.AudioContext || window.webkitAudioContext;
-  if (!Ctx) return;
-  AC = new Ctx();
+  if (!Ctx && !offline) return;
+  AC = offline || new Ctx();
   const comp = AC.createDynamicsCompressor(); comp.threshold.value = -16; comp.ratio.value = 3;
   master = AC.createGain(); master.gain.value = muted ? 0 : .85;
   master.connect(comp); comp.connect(AC.destination);
@@ -805,7 +805,9 @@ document.addEventListener('keydown', e => {
   if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); playing ? pause() : play(); }
 });
 
+let exporting = false;
 function frame() {
+  if (exporting) return;
   tick();
   const t = now();
   render(started ? t : 4.6);
@@ -815,5 +817,38 @@ function frame() {
 }
 ui();
 requestAnimationFrame(frame);
+
+// Offline export for video encoding: deterministic frames and a WAV soundtrack.
+window.bexExport = {
+  T,
+  frame(t, width) {
+    exporting = true;
+    if (cv.width !== width) { cv.width = width; cv.height = Math.round(width * 9 / 16); }
+    render(t, Math.floor(t * 8));
+    return cv.toDataURL('image/jpeg', .93).split(',')[1];
+  },
+  async audio(rate = 48000) {
+    const off = new OfflineAudioContext(2, Math.ceil(rate * (T + .5)), rate);
+    ensureAudio(off);
+    master.gain.value = .85;
+    bus = off.createGain(); bus.connect(master); bus.connect(verb);
+    EV.forEach(e => e.fn(e.t, bus));
+    const buf = await off.startRendering();
+    const L = buf.getChannelData(0), R = buf.getChannelData(1), n = buf.length;
+    const out = new DataView(new ArrayBuffer(44 + n * 4));
+    const str = (o, s) => [...s].forEach((c, i) => out.setUint8(o + i, c.charCodeAt(0)));
+    str(0, 'RIFF'); out.setUint32(4, 36 + n * 4, true); str(8, 'WAVEfmt ');
+    out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 2, true);
+    out.setUint32(24, rate, true); out.setUint32(28, rate * 4, true); out.setUint16(32, 4, true); out.setUint16(34, 16, true);
+    str(36, 'data'); out.setUint32(40, n * 4, true);
+    for (let i = 0; i < n; i++) {
+      out.setInt16(44 + i * 4, clamp(L[i], -1, 1) * 32767, true);
+      out.setInt16(46 + i * 4, clamp(R[i], -1, 1) * 32767, true);
+    }
+    const bytes = new Uint8Array(out.buffer); let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+};
 })();
 </script>
