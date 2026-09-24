@@ -119,6 +119,7 @@ private struct WorkspaceToolsScreen: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { prepareSideChat() }
         .onChange(of: tab) { _ in prepareSideChat() }
         .navigationTitle("")
