@@ -66,12 +66,14 @@ pub fn item_body(item: &Item, presentation: &super::ItemPresentation) -> ItemBod
     let images = if presentation.kind == "imageGeneration" {
         item.saved_path
             .clone()
+            .filter(|path| !path.is_empty())
             .or_else(|| {
                 item.result.as_ref().and_then(|result| {
-                    self::text(result).map(|data| format!("data:image/png;base64,{data}"))
+                    self::text(result)
+                        .filter(|data| !data.is_empty())
+                        .map(|data| format!("data:image/png;base64,{data}"))
                 })
             })
-            .filter(|source| !source.is_empty())
             .into_iter()
             .collect()
     } else {

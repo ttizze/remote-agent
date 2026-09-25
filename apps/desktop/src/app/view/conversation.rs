@@ -208,11 +208,12 @@ impl Desktop {
                     .first()
                     .map(String::as_str)
                     .unwrap_or_default();
-                let title = projected.data.title.clone();
                 let mut body = v_flex()
                     .gap_2()
                     .w_full()
-                    .child(div().text_sm().child(title));
+                    .when(!projected.data.title.is_empty(), |body| {
+                        body.child(div().text_sm().child(projected.data.title.clone()))
+                    });
                 if !path.is_empty() {
                     body = body.child(self.image(path, false, 320., true, cx));
                     let path = path.to_owned();
@@ -224,8 +225,15 @@ impl Desktop {
                             s.open_image_gallery(std::sync::Arc::new(path.clone()), false, cx)
                         },
                     ));
-                } else if item.status.as_deref().unwrap_or_default() == "inProgress" {
-                    body = body.child(spinner::Spinner::new().small());
+                } else if projected.data.image_placeholder {
+                    body = body.child(
+                        skeleton::Skeleton::new()
+                            .w_full()
+                            .max_w(px(320.))
+                            .h(px(320.))
+                            .rounded_lg()
+                            .bg(cx.theme().secondary),
+                    );
                 }
                 body.into_any_element()
             }

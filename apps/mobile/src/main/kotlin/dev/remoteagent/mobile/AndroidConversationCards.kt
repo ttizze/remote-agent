@@ -1,5 +1,11 @@
 package dev.remoteagent.mobile
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -44,16 +50,26 @@ import dev.remoteagent.core.markdownBlocks
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.RenderedItem
+import com.revenuecat.placeholder.PlaceholderDefaults
+import com.revenuecat.placeholder.placeholder
 
 @Composable
 internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit) {
     val content = remember(item) { item.presentation() }
+    val imageFrame = Modifier.widthIn(max = 320.dp).fillMaxWidth().height(320.dp)
     Column(
         Modifier.fillMaxWidth(),
         horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (content.imagePlaceholder) {
+            Box(imageFrame
+                .placeholder(enabled = true, color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(10.dp), highlight = PlaceholderDefaults.pulse)
+                .semantics { contentDescription = "画像を生成中" }
+                .testTag("image.generation.skeleton"))
+        }
         if (isUser && content.imageSources.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 content.imageSources.forEach { source ->
@@ -61,12 +77,14 @@ internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String,
                 }
             }
         }
-        if (content.body.isNotEmpty() || !isUser) {
+        if (content.body.isNotEmpty() || (!isUser && content.imageSources.isNotEmpty())) {
             Card {
                 Column(Modifier.padding(12.dp)) {
                     if (isUser) Text(content.body) else ConversationBody(content.body, cwd, perform)
                     if (!isUser) {
-                        content.imageSources.forEach { Text("画像: $it", style = MaterialTheme.typography.bodySmall) }
+                        content.imageSources.forEach { source ->
+                            AttachmentThumbnail(source, "生成画像", perform, imageFrame)
+                        }
                     }
                 }
             }

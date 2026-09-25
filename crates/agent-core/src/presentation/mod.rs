@@ -392,7 +392,7 @@ fn tool_title(item: &Item) -> String {
             path => format!("画像を確認: {}", compact_title(path)),
         },
         "imageGeneration" => match item.status.as_deref().unwrap_or_default() {
-            "inProgress" => "画像を生成中…",
+            "inProgress" => "",
             "failed" => "画像を生成できませんでした",
             _ => "生成画像",
         }
