@@ -1,4 +1,5 @@
 import AgentCore
+import SkeletonUI
 import SwiftUI
 import UIKit
 
@@ -141,6 +142,7 @@ struct ThreadErrorRow: View {
 }
 
 struct ThreadMessageRow: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: ConversationItem
     let isUser: Bool
     let media: ConversationMediaAccess
@@ -155,6 +157,17 @@ struct ThreadMessageRow: View {
 
     @ViewBuilder private var images: some View {
         let sources = item.data.imageSources
+        if item.data.imagePlaceholder {
+            Color.clear
+                .skeleton(with: true, animation: reduceMotion ? .none : .pulse(),
+                          appearance: .solid(color: Color.primary.opacity(0.08),
+                                             background: Color(UIColor.secondarySystemBackground)),
+                          shape: .rounded(.radius(10)))
+                .frame(maxWidth: 320)
+                .frame(height: 320)
+                .accessibilityLabel("画像を生成中")
+                .accessibilityIdentifier("image.generation.skeleton")
+        }
         let thumbnails = ForEach(sources.indices, id: \.self) { index in
             ConversationImage(source: SessionImage(reference: sources[index]),
                               label: item.data.kind == "imageGeneration" ? "生成画像" : "添付画像",

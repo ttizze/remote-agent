@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        D60000000000000000000001 /* SkeletonUI in Frameworks */ = {isa = PBXBuildFile; productRef = D60000000000000000000002; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
         C30000000000000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C30000000000000000000002; };
@@ -107,7 +108,7 @@
 		A10000000000000000000021 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
-			files = (C30000000000000000000001 /* SwiftTerm in Frameworks */,);
+			files = (C30000000000000000000001 /* SwiftTerm in Frameworks */, D60000000000000000000001 /* SkeletonUI in Frameworks */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		B20000000000000000000021 /* Frameworks */ = {
@@ -211,7 +212,7 @@
 			);
 			buildRules = ();
 			dependencies = ();
-			packageProductDependencies = (C30000000000000000000002,);
+			packageProductDependencies = (C30000000000000000000002, D60000000000000000000002,);
             name = Bex;
 			productName = Bex;
 			productReference = A10000000000000000000010 /* Bex.app */;
@@ -235,9 +236,11 @@
 /* End PBXNativeTarget section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+        D60000000000000000000003 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/CSolanaM/SkeletonUI.git"; requirement = {kind = exactVersion; version = 2.0.0; }; };
         C30000000000000000000005 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git"; requirement = {kind = revision; revision = 233c6ba11aa9b2b9ffbd6b90467b079402f3c264; }; };
 /* End XCRemoteSwiftPackageReference section */
 /* Begin XCSwiftPackageProductDependency section */
+        D60000000000000000000002 = {isa = XCSwiftPackageProductDependency; package = D60000000000000000000003; productName = SkeletonUI; };
         C30000000000000000000002 = {isa = XCSwiftPackageProductDependency; package = C30000000000000000000005; productName = SwiftTerm; };
 /* End XCSwiftPackageProductDependency section */
 /* Begin PBXProject section */
@@ -260,7 +263,7 @@
 			productRefGroup = A10000000000000000000033 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-            packageReferences = (C30000000000000000000005,);
+            packageReferences = (C30000000000000000000005, D60000000000000000000003,);
 			targets = (A10000000000000000000040 /* Bex */, B20000000000000000000040 /* BexUITests */,);
 		};
 /* End PBXProject section */

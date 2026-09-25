@@ -186,6 +186,9 @@ impl RenderedItem {
         }
         let presentation = item_presentation(item);
         let body = body::item_body(item, &presentation);
+        let image_placeholder = presentation.kind == "imageGeneration"
+            && item.status.as_deref() == Some("inProgress")
+            && body.images.is_empty();
         Arc::new(Self {
             source: ItemSource::Native(item.clone()),
             data: ItemPresentation {
@@ -197,6 +200,7 @@ impl RenderedItem {
                 visible: presentation.visible,
                 body: body.text,
                 image_sources: body.images,
+                image_placeholder,
                 deferred,
             },
         })
@@ -221,6 +225,7 @@ impl RenderedItem {
                 visible: true,
                 body: body.text,
                 image_sources: body.images,
+                image_placeholder: false,
                 deferred: false,
             },
         })
@@ -632,6 +637,7 @@ pub struct ItemPresentation {
     pub native_id: Option<String>,
     pub body: String,
     pub image_sources: Vec<String>,
+    pub image_placeholder: bool,
     pub deferred: bool,
     pub kind: String,
     pub title: String,
@@ -693,6 +699,58 @@ mod tests {
             snapshot.conversations["thread"].clone(),
             &previous.cloned(),
         )
+    }
+
+    #[test]
+    fn generated_image_placeholder_yields_to_result_and_stops_on_failure() {
+        for (status, saved_path, result, placeholder, sources, title) in [
+            ("inProgress", "", "", true, vec![], ""),
+            (
+                "inProgress",
+                "/preview.png",
+                "",
+                false,
+                vec!["/preview.png"],
+                "",
+            ),
+            (
+                "completed",
+                "/generated.png",
+                "",
+                false,
+                vec!["/generated.png"],
+                "生成画像",
+            ),
+            (
+                "completed",
+                "",
+                "png-data",
+                false,
+                vec!["data:image/png;base64,png-data"],
+                "生成画像",
+            ),
+            (
+                "failed",
+                "",
+                "",
+                false,
+                vec![],
+                "画像を生成できませんでした",
+            ),
+        ] {
+            let item = Arc::new(
+                serde_json::from_value(json!({
+                    "id":"image", "type":"imageGeneration", "status":status,
+                    "savedPath":saved_path, "result":result
+                }))
+                .unwrap(),
+            );
+            let projected = RenderedItem::native(&item, false, None);
+            assert_eq!(projected.data.image_placeholder, placeholder);
+            assert_eq!(projected.data.image_sources, sources);
+            assert_eq!(projected.data.title, title);
+            assert_eq!(projected.data.body, title);
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@ if [[ -z $identity ]]; then
     }
     identity=$identities
 fi
-[[ $identity != - ]] || { echo 'Certificate signing is required to retain Keychain authorization.' >&2; exit 1; }
+[[ $identity != - ]] || { echo 'Certificate signing is required for Mac builds.' >&2; exit 1; }
 target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
 export BEX_BUILD_REVISION
 BEX_BUILD_REVISION=$(git rev-parse HEAD)

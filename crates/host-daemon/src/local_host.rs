@@ -1,8 +1,7 @@
 //! Local discovery shares one normal Host across credential directories. The
 //! short registry lock serializes discovery/startup; host.lock owns the process
 //! lifetime. A stale registry survives crashes without reviving a stale ticket.
-use crate::KeyStorage;
-use agent_transport::transport::{Identity, Ticket};
+use agent_transport::transport::Ticket;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -18,14 +17,11 @@ pub struct LocalHostRegistry {
     directory: PathBuf,
 }
 
-#[derive(Clone)]
 pub struct LocalHost {
     pub directory: PathBuf,
-    pub key_storage: Option<KeyStorage>,
     pub state: LocalHostState,
 }
 
-#[derive(Clone)]
 pub enum LocalHostState {
     Stopped,
     Starting,
@@ -35,14 +31,12 @@ pub enum LocalHostState {
 #[derive(Serialize, Deserialize)]
 struct Registration {
     directory: PathBuf,
-    key_storage: KeyStorage,
     ready: bool,
 }
 
 /// Keep this lease until Codex and the Host have both stopped.
 pub struct HostLease {
     directory: PathBuf,
-    key_storage: KeyStorage,
     registry: LocalHostRegistry,
     _lock: FileLock,
 }
@@ -82,7 +76,7 @@ impl LocalHostRegistry {
         self.resolve_locked(preferred)
     }
 
-    pub fn acquire(&self, directory: &Path, key_storage: Option<KeyStorage>) -> Result<HostLease> {
+    pub fn acquire(&self, directory: &Path) -> Result<HostLease> {
         let _coordination = self.coordinate()?;
         let current = self.resolve_locked(directory)?;
         if !matches!(current.state, LocalHostState::Stopped) {
@@ -93,24 +87,15 @@ impl LocalHostRegistry {
         }
         crate::platform::create_state_directory(directory)?;
         let directory = directory.canonicalize()?;
-        let key_storage = key_storage
-            .or_else(|| {
-                (current.directory == directory)
-                    .then_some(current.key_storage)
-                    .flatten()
-            })
-            .unwrap_or_default();
         let lock = open_lock(&directory.join("host.lock"))?;
         lock.try_lock()
             .context("Host is already running or its lock is unavailable")?;
         self.save(&Registration {
             directory: directory.clone(),
-            key_storage,
             ready: false,
         })?;
         Ok(HostLease {
             directory,
-            key_storage,
             registry: self.clone(),
             _lock: FileLock(lock),
         })
@@ -148,7 +133,6 @@ impl LocalHostRegistry {
             .map_or(preferred, |entry| &entry.directory);
         Ok(LocalHost {
             directory: directory.to_owned(),
-            key_storage: registration.as_ref().map(|entry| entry.key_storage),
             state: LocalHostState::Stopped,
         })
     }
@@ -171,23 +155,18 @@ impl Registration {
         };
         Ok(LocalHost {
             directory: self.directory.clone(),
-            key_storage: Some(self.key_storage),
             state,
         })
     }
 }
 
 impl HostLease {
-    pub fn isolated(directory: &Path, key_storage: Option<KeyStorage>) -> Result<Self> {
-        LocalHostRegistry::new(directory.to_owned()).acquire(directory, key_storage)
+    pub fn isolated(directory: &Path) -> Result<Self> {
+        LocalHostRegistry::new(directory.to_owned()).acquire(directory)
     }
 
     pub fn directory(&self) -> &Path {
         &self.directory
-    }
-
-    pub fn key_storage(&self) -> KeyStorage {
-        self.key_storage
     }
 
     pub fn publish(&self, ticket: &Ticket) -> Result<()> {
@@ -206,17 +185,8 @@ impl HostLease {
         )?;
         self.registry.save(&Registration {
             directory: self.directory.clone(),
-            key_storage: self.key_storage,
             ready: true,
         })
-    }
-}
-
-impl LocalHost {
-    /// Read the discovered Host's identity without provisioning a second one.
-    pub fn load_identity(&self) -> Result<Identity> {
-        let store = self.key_storage.unwrap_or_default().open(&self.directory)?;
-        crate::load_local_identity(store.as_ref())
     }
 }
 
@@ -261,7 +231,7 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let registry = LocalHostRegistry::new(fixture.path().join("registry"));
         let host = fixture.path().join("host");
-        let lease = registry.acquire(&host, Some(KeyStorage::File)).unwrap();
+        let lease = registry.acquire(&host).unwrap();
         let inherited = lease._lock.0.try_clone().unwrap();
         let mut child = scopeguard::guard(
             std::process::Command::new("sleep")
@@ -280,25 +250,25 @@ mod tests {
             registry.resolve(&host).unwrap().state,
             LocalHostState::Stopped
         ));
-        let replacement = registry.acquire(&host, None).unwrap();
-        assert!(registry.acquire(&host, None).is_err());
+        let replacement = registry.acquire(&host).unwrap();
+        assert!(registry.acquire(&host).is_err());
         drop(replacement);
     }
 
     #[tokio::test]
-    async fn discovery_restores_the_hosts_file_backend_and_identity_after_restart() {
+    async fn discovery_restores_the_hosts_identity_after_restart() {
         let fixture = tempfile::tempdir().unwrap();
         let registry = LocalHostRegistry::new(fixture.path().join("registry"));
         let host = fixture.path().join("mobile-host");
         let desktop = fixture.path().join("desktop");
-        let lease = registry.acquire(&host, Some(KeyStorage::File)).unwrap();
+        let lease = registry.acquire(&host).unwrap();
         fs::write(host.join("host.ticket"), "stale invalid ticket").unwrap();
         assert!(matches!(
             registry.resolve(&desktop).unwrap().state,
             LocalHostState::Starting
         ));
         let credentials = crate::HostCredentials::load(
-            lease.key_storage().open(lease.directory()).unwrap(),
+            std::sync::Arc::new(crate::FileKeyStore(lease.directory().join("identity.keys"))),
             lease.directory().to_owned(),
         )
         .await
@@ -312,9 +282,10 @@ mod tests {
         assert!(
             matches!(location.state, LocalHostState::Ready(ref ticket) if *ticket == endpoint.ticket())
         );
-        assert_eq!(location.key_storage, Some(KeyStorage::File));
         assert_eq!(
-            location.load_identity().unwrap().node_id(),
+            crate::load_local_identity(&location.directory)
+                .unwrap()
+                .node_id(),
             credentials.local_identity().await.node_id()
         );
         assert!(
@@ -326,16 +297,14 @@ mod tests {
         let registry = LocalHostRegistry::new(registry.directory().to_owned());
         let location = registry.resolve(&desktop).unwrap();
         assert!(matches!(location.state, LocalHostState::Stopped));
-        assert_eq!(location.key_storage, Some(KeyStorage::File));
         assert_eq!(location.directory, host.canonicalize().unwrap());
-        let lease = registry.acquire(&location.directory, None).unwrap();
+        let lease = registry.acquire(&location.directory).unwrap();
         assert!(matches!(
             registry.resolve(&desktop).unwrap().state,
             LocalHostState::Starting
         ));
-        assert_eq!(lease.key_storage(), KeyStorage::File);
         let restored = crate::HostCredentials::load(
-            lease.key_storage().open(lease.directory()).unwrap(),
+            std::sync::Arc::new(crate::FileKeyStore(lease.directory().join("identity.keys"))),
             lease.directory().to_owned(),
         )
         .await
@@ -363,7 +332,7 @@ mod tests {
                 let directory = fixture.path().join(name);
                 std::thread::spawn(move || {
                     barrier.wait();
-                    registry.acquire(&directory, None)
+                    registry.acquire(&directory)
                 })
             })
             .collect();
@@ -383,7 +352,7 @@ mod tests {
             "reject before provisioning another identity"
         );
         assert!(
-            registry.acquire(&loser, None).is_err(),
+            registry.acquire(&loser).is_err(),
             "the winner remains exclusive after startup"
         );
         assert!(!loser.exists());
@@ -398,9 +367,9 @@ mod tests {
         let fixture = tempfile::tempdir().unwrap();
         let first = fixture.path().join("first");
         let second = fixture.path().join("second");
-        let _a = HostLease::isolated(&first, Some(KeyStorage::File)).unwrap();
-        let _b = HostLease::isolated(&second, Some(KeyStorage::File)).unwrap();
-        assert!(HostLease::isolated(&first, Some(KeyStorage::File)).is_err());
+        let _a = HostLease::isolated(&first).unwrap();
+        let _b = HostLease::isolated(&second).unwrap();
+        assert!(HostLease::isolated(&first).is_err());
         assert!(matches!(
             LocalHostRegistry::new(second.clone())
                 .resolve(&second)
@@ -416,7 +385,7 @@ mod tests {
         let registry = LocalHostRegistry::new(fixture.path().to_owned());
         let other = fixture.path().join("other");
         fs::write(fixture.path().join("host-instance.json"), "invalid").unwrap();
-        assert!(registry.acquire(&other, None).is_err());
+        assert!(registry.acquire(&other).is_err());
         assert!(!other.exists());
     }
 
@@ -426,7 +395,7 @@ mod tests {
         if let Some(root) = std::env::var_os(CHILD_ROOT) {
             let root = PathBuf::from(root);
             let registry = LocalHostRegistry::new(root.join("registry"));
-            let _lease = registry.acquire(&root.join("first"), None).unwrap();
+            let _lease = registry.acquire(&root.join("first")).unwrap();
             fs::write(root.join("acquired"), "").unwrap();
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).unwrap();
@@ -444,11 +413,11 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             let registry = LocalHostRegistry::new(root.join("registry"));
-            assert!(registry.acquire(&root.join("second"), None).is_err());
+            assert!(registry.acquire(&root.join("second")).is_err());
             child.kill().await.unwrap();
             child.wait().await.unwrap();
             assert!(matches!(registry.resolve(&root.join("second")).unwrap().state, LocalHostState::Stopped));
-            let _lease = registry.acquire(&root.join("second"), None).unwrap();
+            let _lease = registry.acquire(&root.join("second")).unwrap();
             assert!(matches!(registry.resolve(&root.join("first")).unwrap().state, LocalHostState::Starting));
         }).await.expect("process lock recovery deadline");
     }

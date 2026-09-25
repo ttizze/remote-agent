@@ -18,9 +18,7 @@ pub use workspace_review::{WorkspaceReview, inspect_workspace};
 
 pub use host_runtime::HostRuntime;
 
-pub use host_identity::{
-    CredentialStore, FileKeyStore, HostCredentials, KeyStorage, KeyringStore, load_local_identity,
-};
+pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials, load_local_identity};
 
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
 pub use projects::ProjectStore;

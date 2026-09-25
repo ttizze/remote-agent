@@ -27,13 +27,7 @@ async fn headless_invitation_pairs_once_and_status_uses_the_running_host() {
         assert!(!state.join("identity.keys").exists());
 
         let mut host = command(&state)
-            .args([
-                "--key-storage",
-                "file",
-                "--no-relay",
-                "--name",
-                "Linux fixture",
-            ])
+            .args(["--no-relay", "--name", "Linux fixture"])
             .arg("--codex")
             .arg(directory.path().join("missing-codex"))
             .arg("--claude")

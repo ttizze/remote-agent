@@ -42,7 +42,7 @@ pub(crate) fn state_dir() -> Result<PathBuf, String> {
 /// One identity and endpoint per app. Views own independent sessions.
 #[derive(Default)]
 pub(crate) struct Connections {
-    endpoint: tokio::sync::OnceCell<(PathBuf, host_daemon::KeyStorage, Endpoint)>,
+    endpoint: tokio::sync::OnceCell<(PathBuf, Endpoint)>,
     startup: tokio::sync::Mutex<()>,
 }
 impl Connections {
@@ -55,8 +55,11 @@ impl Connections {
         if let Some(remote) = remote {
             let ticket = remote.parse::<Ticket>()?;
             let endpoint = match self.endpoint.get() {
-                Some((_, _, endpoint)) => endpoint,
-                None => self.endpoint_for(&discover_local_host().await?).await?,
+                Some((_, endpoint)) => endpoint,
+                None => {
+                    self.endpoint_for(&discover_local_host().await?.directory)
+                        .await?
+                }
             };
             drop(startup);
             return Store::connect(endpoint, &ticket, snapshot, None)
@@ -66,20 +69,21 @@ impl Connections {
         self.connect_local(snapshot).await
     }
 
-    async fn endpoint_for(&self, host: &LocalHost) -> anyhow::Result<&Endpoint> {
-        let directory = tokio::fs::canonicalize(&host.directory).await?;
-        let storage = host.key_storage.unwrap_or_default();
-        let (identity_directory, identity_storage, endpoint) = self
+    async fn endpoint_for(&self, directory: &std::path::Path) -> anyhow::Result<&Endpoint> {
+        let directory = tokio::fs::canonicalize(directory).await?;
+        let (identity_directory, endpoint) = self
             .endpoint
             .get_or_try_init(|| async {
-                let mut host = host.clone();
-                host.directory = directory.clone();
-                let identity = tokio::task::spawn_blocking(move || host.load_identity()).await??;
+                let identity_directory = directory.clone();
+                let identity = tokio::task::spawn_blocking(move || {
+                    host_daemon::load_local_identity(&identity_directory)
+                })
+                .await??;
                 let endpoint = Endpoint::bind(identity, Relays::Default).await?;
-                Ok::<_, anyhow::Error>((directory.clone(), storage, endpoint))
+                Ok::<_, anyhow::Error>((directory.clone(), endpoint))
             })
             .await?;
-        if identity_directory != &directory || identity_storage != &storage {
+        if identity_directory != &directory {
             return Err(anyhow::anyhow!(
                 "Local Host changed; restart Bex to use its identity"
             ));
@@ -97,7 +101,7 @@ impl Connections {
                 let location = discover_local_host().await?;
                 match &location.state {
                     LocalHostState::Ready(ticket) => {
-                        let endpoint = self.endpoint_for(&location).await?;
+                        let endpoint = self.endpoint_for(&location.directory).await?;
                         let attempt = tokio::time::timeout(
                             Duration::from_secs(1),
                             Store::connect(endpoint, ticket, snapshot.clone(), None),
@@ -112,7 +116,7 @@ impl Connections {
                         }
                     }
                     LocalHostState::Stopped if child.is_none() => {
-                        child = Some(start_host(&location, isolated)?);
+                        child = Some(start_host(&location.directory, isolated)?);
                     }
                     _ => {}
                 }
@@ -138,7 +142,7 @@ impl Connections {
     }
 
     pub(crate) async fn close(&self) {
-        if let Some((_, _, endpoint)) = self.endpoint.get() {
+        if let Some((_, endpoint)) = self.endpoint.get() {
             endpoint.close().await;
         }
     }
@@ -169,7 +173,7 @@ async fn discover_local_host() -> anyhow::Result<LocalHost> {
     .await?
 }
 
-fn start_host(host: &LocalHost, isolated: bool) -> anyhow::Result<std::process::Child> {
+fn start_host(directory: &std::path::Path, isolated: bool) -> anyhow::Result<std::process::Child> {
     let executable = std::env::var_os("BEX_HOST_DAEMON")
         .map(PathBuf::from)
         .map(Ok)
@@ -181,7 +185,7 @@ fn start_host(host: &LocalHost, isolated: bool) -> anyhow::Result<std::process::
     let mut command = Command::new(executable);
     command
         .arg("--state-dir")
-        .arg(&host.directory)
+        .arg(directory)
         .arg("--codex")
         .arg(std::env::var_os("BEX_CODEX").unwrap_or_else(|| "codex".into()))
         .arg("--claude")
@@ -189,14 +193,6 @@ fn start_host(host: &LocalHost, isolated: bool) -> anyhow::Result<std::process::
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let key_storage = match host.key_storage {
-        Some(host_daemon::KeyStorage::File) => Some("file".into()),
-        Some(host_daemon::KeyStorage::Keyring) => Some("keyring".into()),
-        None => std::env::var_os("BEX_KEY_STORAGE"),
-    };
-    if let Some(storage) = key_storage {
-        command.arg("--key-storage").arg(storage);
-    }
     if isolated {
         command.arg("--isolated");
     }

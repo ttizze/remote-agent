@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Show library-backed pulsing image placeholders on desktop, iPhone and Android while generation is pending. Share placeholder decisions in core, omit the redundant generating label, and treat empty image results as pending content.
+
+- Store Host and local-client identity keys in an owner-only `identity.keys` file. Remove the keyring dependency and storage-selection settings so local connections and verification tools no longer require Host Keychain access. Preserve identity restoration, pairing and discovery through the shared Host directory.
+
 - Combine iOS data-sharing permission with the first pairing action, removing the separate consent screen while retaining disclosure before connecting.
 
 - Prepare BEX Dev build 11 and show each Host's configured name on iOS and Android, refreshing saved profiles after pairing and reconnection. Expose only the name to paired devices while keeping Host management local-only.

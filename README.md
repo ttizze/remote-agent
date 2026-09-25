@@ -56,13 +56,12 @@ nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
 | `--state-dir` | Credential directory for a new Host; otherwise the remembered directory is used (initial macOS default: `~/Library/Application Support/app.bex.BEX/`). It does not permit a second normal Host. |
 | `--codex-home` | Selects a separate Codex store. |
 | `--claude <path>` | Claude Code executable; defaults to `claude` on PATH. Desktop passes `BEX_CLAUDE` when set. |
-| `--key-storage keyring\|file` | Where the 64-byte Host and local-client identity lives. Use `file` on headless Linux without a keyring service. |
 | `--relay-url <url>…` / `--no-relay` | Custom iroh relays, or local addresses only for isolated fixtures. |
 | `--isolated --state-dir <directory>` | Explicitly separate development/test Host. It still locks its own directory. |
 
-Normal launches share one Host per OS user, including when desktop and daemon state directories differ. The platform data directory holds `host-instance.json` and a short discovery lock; each Host retains its directory lock for its lifetime. Discovery reuses the Host's identity and key-storage backend and remembers them after restart. Competing starts are rejected before creating credentials. Desktop authenticates its connection to the registered Host.
+Normal launches share one Host per OS user, including when desktop and daemon state directories differ. The platform data directory holds `host-instance.json` and a short discovery lock; each Host retains its directory lock for its lifetime. Discovery reuses the Host's identity and remembers its directory after restart. Competing starts are rejected before creating credentials. Desktop authenticates its connection to the registered Host.
 
-State that must be backed up and never committed: the identity keys (keyring entry `app.bex.host`, or `identity.keys` with `--key-storage file`) and `trust.json` (invitations, allowlist, remote tickets). Errors append to `logs/host.jsonl` (desktop: `logs/desktop.jsonl`), rotated at 5 MiB with four archives and best-effort credential redaction.
+State that must be backed up and never committed: the identity keys (`identity.keys`, 64 bytes, owner-only file permissions) and `trust.json` (invitations, allowlist, remote tickets). Errors append to `logs/host.jsonl` (desktop: `logs/desktop.jsonl`), rotated at 5 MiB with four archives and best-effort credential redaction.
 
 ### Headless Linux and iPhone pairing
 
@@ -70,7 +69,7 @@ Build both the Host and its companion supervisor with the pinned Linux environme
 
 ```sh
 nix develop .#native --command cargo build --locked --release -p host-daemon -p bex-process -p agent-cli
-target/release/host-daemon --key-storage file --name 'Linux development'
+target/release/host-daemon --name 'Linux development'
 ```
 
 Run management commands as the same OS user in another shell. They discover and authenticate to the running Host, without starting another daemon or rewriting its credentials:
@@ -108,7 +107,7 @@ open apps/mobile/iosApp/Bex.xcodeproj
 nix develop . --command ./gradlew :apps:mobile:assembleDebug
 ```
 
-Rerun the iOS library build after changing Rust sources. Desktop drafts and logs use `BEX_STATE_DIR`; Host discovery may select a different credential directory. `BEX_KEY_STORAGE=file` selects file keys for a new Host. An isolated desktop requires both `BEX_ISOLATED_HOST=1` and `BEX_STATE_DIR`; use a separate Codex home or fixture executable as well so tests cannot read personal provider state.
+Rerun the iOS library build after changing Rust sources. Desktop drafts and logs use `BEX_STATE_DIR`; Host discovery may select a different credential directory. An isolated desktop requires both `BEX_ISOLATED_HOST=1` and `BEX_STATE_DIR`; use a separate Codex home or fixture executable as well so tests cannot read personal provider state.
 
 Run `nix develop . --command just dev` for a separate local Host with shared
 provider accounts and conversation history. Check active tasks and stop the old

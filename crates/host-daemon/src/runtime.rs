@@ -2,7 +2,7 @@ use crate::command_line::StartupConfig;
 use agent_transport::transport::{Endpoint, Relays};
 use anyhow::{Context, Result};
 use host_daemon::{
-    HostCredentials, HostRpcService, HostRuntime, ProjectStore,
+    FileKeyStore, HostCredentials, HostRpcService, HostRuntime, ProjectStore,
     local_host::{HostLease, LocalHostRegistry},
 };
 use std::sync::Arc;
@@ -17,7 +17,6 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
                     .state_dir
                     .as_deref()
                     .context("--isolated requires --state-dir")?,
-                config.key_storage,
             )
         } else {
             let registry = LocalHostRegistry::for_user()?;
@@ -25,7 +24,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
                 Some(directory) => directory,
                 None => registry.resolve(registry.directory())?.directory,
             };
-            registry.acquire(&directory, config.key_storage)
+            registry.acquire(&directory)
         }
     })
     .await
@@ -38,10 +37,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         env!("CARGO_PKG_VERSION"),
     )
     .context("cannot initialize Host error log")?;
-    let store = lease
-        .key_storage()
-        .open(&directory)
-        .context("cannot open Host key storage")?;
+    let store = Arc::new(FileKeyStore(directory.join("identity.keys")));
     let credentials = Arc::new(
         HostCredentials::load(store, directory.clone())
             .await

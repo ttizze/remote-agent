@@ -387,12 +387,9 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         use agent_core::state::Attachment;
         use agent_core::state::Intent;
         use agent_core::store::Store;
-        let endpoint = Endpoint::bind(
-            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
-            Relays::Disabled,
-        )
-        .await
-        .unwrap();
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
             .await
             .unwrap();
@@ -613,12 +610,9 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
-        let endpoint = Endpoint::bind(
-            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
-            Relays::Disabled,
-        )
-        .await
-        .unwrap();
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
             .await
             .unwrap();
@@ -786,7 +780,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
                     std::fs::write(&source, bytes).unwrap();
                     let fixture = start_host(&root).await;
-                    let endpoint = Endpoint::bind(host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(), Relays::Disabled).await.unwrap();
+                    let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
                     let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
                     store.dispatch(Intent::NewChat { cwd: if project { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                     let mut thread_id = None;
@@ -1883,7 +1877,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
     use agent_core::store::Store;
     use agent_protocol::operations::Answer;
     use host_daemon::{
-        FileKeyStore, HostRuntime, KeyStorage,
+        FileKeyStore, HostRuntime,
         local_host::{LocalHostRegistry, LocalHostState},
     };
 
@@ -1904,9 +1898,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         let mobile_state = root.join("mobile-host");
         let desktop_state = root.join("desktop");
         let registry = LocalHostRegistry::new(desktop_state.clone());
-        let lease = registry
-            .acquire(&mobile_state, Some(KeyStorage::File))
-            .unwrap();
+        let lease = registry.acquire(&mobile_state).unwrap();
         let credentials = Arc::new(
             HostCredentials::load(
                 Arc::new(FileKeyStore(mobile_state.join("identity.keys"))),
@@ -1952,10 +1944,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         assert!(!desktop_state.join("identity.keys").exists());
         assert!(!desktop_state.join("trust.json").exists());
         let desktop_endpoint = Endpoint::bind(
-            host_daemon::load_local_identity(&FileKeyStore(
-                location.directory.join("identity.keys"),
-            ))
-            .unwrap(),
+            host_daemon::load_local_identity(&location.directory).unwrap(),
             Relays::Disabled,
         )
         .await
@@ -2328,12 +2317,9 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
-        let endpoint = Endpoint::bind(
-            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
-            Relays::Disabled,
-        )
-        .await
-        .unwrap();
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
             .await
             .unwrap();
@@ -2716,12 +2702,9 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
         // messages/images load automatically, while tool details are requested.
         use agent_core::state::Intent;
         use agent_core::store::Store;
-        let endpoint = Endpoint::bind(
-            host_daemon::load_local_identity(fixture.memory.as_ref()).unwrap(),
-            Relays::Disabled,
-        )
-        .await
-        .unwrap();
+        let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
+            .await
+            .unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
             .await
             .unwrap();
