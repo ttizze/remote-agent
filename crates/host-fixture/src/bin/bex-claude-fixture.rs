@@ -8,7 +8,10 @@ use std::{
 };
 
 fn native(mut value: Value) {
-    if !matches!(value["type"].as_str(), Some("assistant" | "user")) {
+    if !matches!(
+        value["type"].as_str(),
+        Some("assistant" | "user" | "attachment")
+    ) {
         return;
     }
     let Some(home) = std::env::var_os("CLAUDE_CONFIG_DIR") else {
@@ -60,6 +63,10 @@ fn native(mut value: Value) {
 
 fn emit(value: Value) {
     native(value.clone());
+    output(value);
+}
+
+fn output(value: Value) {
     let mut out = io::stdout().lock();
     writeln!(out, "{value}").unwrap();
     out.flush().unwrap();
@@ -219,8 +226,14 @@ fn main() {
                     emit(
                         json!({"type":"result","session_id":session,"is_error":false,"result":"finished waiting"}),
                     );
+                    native(json!({"type":"attachment","attachment":{
+                        "type":"queued_command","source_uuid":value["uuid"],
+                        "prompt":value["message"]["content"]
+                    }}));
+                    output(value.clone());
+                } else {
+                    emit(value.clone());
                 }
-                emit(value.clone());
                 let content = value["message"]["content"].clone();
                 inputs.push(
                     json!({"content":content,"model":option("--model"),"effort":option("--effort"),"pid":std::process::id()}),
@@ -243,10 +256,11 @@ fn main() {
                     );
                 } else if text == "wait" {
                     waiting = Some("wait");
+                    let message = format!("waiting-{}", inputs.len());
                     emit(
-                        json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":"waiting"}}}),
+                        json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":message}}}),
                     );
-                    block(&session, "waiting", 0, "text", "Waiting for interruption");
+                    block(&session, &message, 0, "text", "Waiting for interruption");
                 } else if text == "permission" || text == "question" {
                     let tool = if text == "question" {
                         "AskUserQuestion"

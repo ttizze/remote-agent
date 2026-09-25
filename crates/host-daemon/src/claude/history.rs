@@ -310,22 +310,15 @@ fn convert(
     let mut block_indices: HashMap<String, usize> = HashMap::new();
     for node in chain {
         // Queued prompts are user input stored as attachments rather than messages.
-        let queued;
-        let node = if node["type"] == "attachment"
-            && node["attachment"]["type"] == "queued_command"
-            && (node["attachment"]["prompt"].is_string() || node["attachment"]["prompt"].is_array())
-        {
-            queued = json!({
-                "type": "user",
-                "uuid": node["uuid"],
-                "cwd": node["cwd"],
-                "message": {"content": node["attachment"]["prompt"]}
-            });
-            &queued
+        let queued_prompt = (node["type"] == "attachment"
+            && node["attachment"]["type"] == "queued_command")
+            .then_some(&node["attachment"]["prompt"])
+            .filter(|prompt| prompt.is_string() || prompt.is_array());
+        let kind = if queued_prompt.is_some() {
+            "user"
         } else {
-            node
+            node["type"].as_str().unwrap_or_default()
         };
-        let kind = node["type"].as_str().unwrap_or_default();
         if let Some(cwd) = node["cwd"].as_str() {
             thread.cwd = Some(cwd.into());
         }
@@ -394,24 +387,31 @@ fn convert(
         if let Some(name) = node["message"]["model"].as_str() {
             model = Some(format!("claude:{name}"));
         }
+        let content = queued_prompt.unwrap_or(&node["message"]["content"]);
+        let user_id = queued_prompt
+            .and_then(|_| node["attachment"]["source_uuid"].as_str())
+            .or(node["uuid"].as_str());
         let owned;
-        let blocks = if let Some(text) = node["message"]["content"].as_str() {
+        let blocks = if let Some(text) = content.as_str() {
             owned = vec![json!({"type":"text","text":text})];
             &owned
-        } else if let Some(blocks) = node["message"]["content"].as_array() {
+        } else if let Some(blocks) = content.as_array() {
             blocks
         } else {
             warnings.push("message content is unavailable");
             continue;
         };
         let user_input = kind == "user"
-            && node["isMeta"] != true
+            && (queued_prompt.is_some() || node["isMeta"] != true)
             && blocks
                 .iter()
                 .any(|block| matches!(block["type"].as_str(), Some("text" | "image")));
-        if user_input || turns.is_empty() {
+        // Additional input belongs to the running turn, just as it does in
+        // the live adapter. Splitting it creates an extra persisted turn that
+        // survives the live overlay and duplicates its input and response.
+        if (user_input && queued_prompt.is_none()) || turns.is_empty() {
             turns.push(Arc::new(Turn {
-                id: node["uuid"].as_str().unwrap_or_default().into(),
+                id: user_id.unwrap_or_default().into(),
                 status: Some("completed".into()),
                 items: Some(Vec::new()),
                 ..Default::default()
@@ -421,10 +421,10 @@ fn convert(
         let items = turn.items.as_mut().unwrap();
         if user_input {
             items.push(Arc::new(Item {
-                id: serde_json::from_value(node["uuid"].clone())?,
+                id: user_id.context("user message ID is unavailable")?.into(),
                 kind: Some("userMessage".into()),
                 content: Some(Value::Array(input_blocks(blocks))),
-                client_id: serde_json::from_value(node["uuid"].clone())?,
+                client_id: user_id.map(str::to_owned),
                 ..Default::default()
             }));
         }
@@ -544,9 +544,17 @@ mod tests {
             ),
         ] {
             rows.push(json!({"type":"attachment","uuid":id,"parentUuid":parent,
-                "attachment":{"type":"queued_command","prompt":prompt}}));
+                "attachment":{"type":"queued_command","source_uuid":format!("source-{id}"),"prompt":prompt}}));
             parent = id.into();
         }
+        rows.push(
+            json!({"type":"assistant","uuid":"answer","parentUuid":parent,
+            "message":{"id":"reply","content":[{"type":"text","text":"queued answer"}]}}),
+        );
+        rows.push(
+            json!({"type":"user","uuid":"next-turn","parentUuid":"answer",
+            "message":{"content":"next question"}}),
+        );
         let source = rows
             .iter()
             .map(Value::to_string)
@@ -560,9 +568,10 @@ mod tests {
             agent_protocol::session::HistoryReadKind::Complete
         );
         let turns = response.thread.turns.unwrap();
-        assert_eq!(turns.len(), 3);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].id, "u");
         let items = turns[0].items.as_ref().unwrap();
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 8);
         for (item, attachment) in items[1..].iter().zip(&attachments) {
             assert_eq!(item.kind.as_deref(), Some("nativeAttachment"));
             assert_eq!(item.result.as_ref(), Some(attachment));
@@ -571,20 +580,23 @@ mod tests {
             let body = agent_core::presentation::body::expanded_body(item);
             assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), *attachment);
         }
-        let text = &turns[1].items.as_ref().unwrap()[0];
+        let text = &items[5];
+        assert_eq!(text.id, "source-queued-text");
         assert_eq!(text.kind.as_deref(), Some("userMessage"));
         assert_eq!(
             text.content.as_ref().unwrap()[0]["text"],
             "additional instruction"
         );
-        let image = &turns[2].items.as_ref().unwrap()[0];
+        let image = &items[6];
+        assert_eq!(image.id, "source-queued-image");
         assert_eq!(
             image.content.as_ref().unwrap()[1]["url"],
             "data:image/png;base64,aW1hZ2U="
         );
+        assert_eq!(items[7].text.as_deref(), Some("queued answer"));
         let page = read(&path, 1).unwrap();
         assert_eq!(page.thread.history_has_more, Some(true));
-        assert_eq!(page.thread.turns.unwrap()[0].id, "queued-image");
+        assert_eq!(page.thread.turns.unwrap()[0].id, "next-turn");
         assert_eq!(fs::read_to_string(path).unwrap(), source);
     }
 

@@ -1434,6 +1434,27 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
             .any(|item| item.text.as_deref() == Some("reply 2: follow-up"))
     );
     assert!(snapshot.pending_submissions.is_empty());
+    store
+        .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+        .await
+        .unwrap();
+    let refreshed = store.snapshot();
+    let turns = refreshed.conversations[&id].turns.as_ref().unwrap();
+    assert_eq!(
+        turns.len(),
+        1,
+        "queued input must retain its live turn in history"
+    );
+    assert_eq!(
+        turns[0]
+            .items
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|item| { item.text.as_deref() == Some("reply 2: follow-up") })
+            .count(),
+        1
+    );
     send(&store, "wait", "wait-again").await;
     until(&store, |snapshot| {
         snapshot
@@ -1488,6 +1509,53 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
     .unwrap();
     assert_eq!(inputs.len(), 5);
     assert!(inputs.iter().all(|input| input["pid"] == inputs[0]["pid"]));
+    send(&store, "wait", "before-live-refresh").await;
+    until(&store, |snapshot| {
+        snapshot.conversations[&id]
+            .turns
+            .as_ref()
+            .unwrap()
+            .get(3)
+            .and_then(|turn| turn.items.as_ref())
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.text.as_deref() == Some("Waiting for interruption"))
+            })
+    })
+    .await;
+    send(&store, "permission", "queued-before-refresh").await;
+    until(&store, |snapshot| !snapshot.requests.is_empty()).await;
+    store
+        .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+        .await
+        .unwrap();
+    let refreshed = store.snapshot();
+    let turns = refreshed.conversations[&id].turns.as_ref().unwrap();
+    assert_eq!(
+        turns.len(),
+        4,
+        "live overlay must not append a duplicate queued turn"
+    );
+    let turn = turns.last().unwrap();
+    assert_eq!(turn.status.as_deref(), Some("inProgress"));
+    assert_eq!(
+        turn.items
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|item| item.kind.as_deref() == Some("userMessage"))
+            .count(),
+        2
+    );
+    store
+        .dispatch(Intent::Interrupt(op::Interrupt {
+            thread_id: id.clone(),
+            turn_id: turn.id.clone(),
+        }))
+        .await
+        .unwrap();
+    completed(&store, &id, 4, "interrupted").await;
     local.close().await;
     store.close().await.unwrap();
     endpoint.close().await;
