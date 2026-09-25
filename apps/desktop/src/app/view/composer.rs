@@ -313,6 +313,43 @@ impl Desktop {
                 if s.completion_key(event, window, cx) {
                     return;
                 }
+                if !event.keystroke.modifiers.modified()
+                    && matches!(event.keystroke.key.as_str(), "up" | "down")
+                {
+                    let moved = s.composer.update(cx, |input, cx| {
+                        if input.marked_text_range(window, cx).is_some()
+                            || !input.selected_range().is_empty()
+                        {
+                            return false;
+                        }
+                        let cursor = input.cursor();
+                        let target = if event.keystroke.key == "up" {
+                            0
+                        } else {
+                            input.text().len()
+                        };
+                        // Off-screen offsets can be clamped to the first visible row by the input.
+                        if input.value()[cursor.min(target)..cursor.max(target)].contains('\n') {
+                            return false;
+                        }
+                        // Compare rendered rows so soft-wrapped text keeps normal vertical movement.
+                        let Some(caret) = input.range_to_bounds(&(cursor..cursor)) else {
+                            return false;
+                        };
+                        let Some(edge) = input.range_to_bounds(&(target..target)) else {
+                            return false;
+                        };
+                        if caret.origin.y != edge.origin.y {
+                            return false;
+                        }
+                        input.set_selected_range(target..target, cx);
+                        true
+                    });
+                    if moved {
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 if event.keystroke.key == "escape"
                     && s.dictation
                         .as_ref()

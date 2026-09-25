@@ -484,6 +484,14 @@ checks for both providers, and iOS
 `testSimulatorSwitchesCodexAccountsAndForksConversation`, and
 `testSimulatorAddsClaudeAccountAndKeepsCodexSelected`.
 
+## Composer keyboard navigation
+
+- Desktop composer Up on the first visual row moves the caret to the start;
+  Down on the last visual row moves it to the end. Intermediate rows retain
+  normal vertical movement, including soft wraps. This applies to unmodified
+  arrow keys with no selection or IME composition; completion navigation takes
+  precedence.
+
 ## Plugin and skill invocation
 
 - In Codex conversations, `@` opens installed, enabled plugin candidates and `/`
