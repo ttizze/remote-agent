@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Open only the tapped image in the iOS preview. Render images directly with pinch zoom, saving and closing. Remove gallery paging, session-image fetching and Quick Look reloads; keep Quick Look for other files.
+
 - Show library-backed pulsing image placeholders on desktop, iPhone and Android while generation is pending. Share placeholder decisions in core, omit the redundant generating label, and treat empty image results as pending content.
 
 - Store Host and local-client identity keys in an owner-only `identity.keys` file. Remove the keyring dependency and storage-selection settings so local connections and verification tools no longer require Host Keychain access. Preserve identity restoration, pairing and discovery through the shared Host directory.

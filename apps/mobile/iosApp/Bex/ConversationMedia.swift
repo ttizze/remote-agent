@@ -37,12 +37,11 @@ extension SessionImage {
     }
 }
 
-/// Only the authenticated file and gallery operations are available to media views.
+/// Media views use authenticated Host operations.
 struct ConversationMediaAccess {
     let host: String?
     let cwd: String
     let download: @MainActor (String) async throws -> URL
-    let sessionImages: (@MainActor () async throws -> [SessionImage])?
     var visualization: (@MainActor (String) async throws -> String)?
 }
 
@@ -103,7 +102,7 @@ struct ConversationImage: View {
             }
         })) {
             if let previewURL {
-                ConversationPreview(url: previewURL, isImage: true, media: media, source: source) { dismissPreview() }
+                ConversationPreview(url: previewURL, isImage: true) { dismissPreview() }
             }
         }
         .task(id: LoadID(host: media.host, source: source)) {
@@ -203,51 +202,24 @@ private func writeConversationImage(_ data: Data) async throws -> URL {
 struct ConversationPreview: View {
     let url: URL
     let isImage: Bool
-    var media: ConversationMediaAccess?
-    var source: SessionImage?
     let close: () -> Void
-    @State private var sources: [SessionImage] = []
-    @State private var selected = 0
-    @State private var downloaded: [SessionImage: URL] = [:]
-    @State private var galleryError: String?
-    private var urls: [URL] {
-        sources.isEmpty ? [url] : sources.map { $0 == source ? url : downloaded[$0] ?? url }
-    }
-
-    private var displayedURL: URL? {
-        guard sources.indices.contains(selected), sources[selected] != source else { return url }
-        return downloaded[sources[selected]]
-    }
-
     @State private var saving = false
     @State private var saved = false
     @State private var saveError: String?
 
     var body: some View {
         NavigationStack {
-            VStack {
-                if let galleryError {
-                    Text(galleryError).font(.caption).foregroundColor(.red)
+            Group {
+                if isImage {
+                    ConversationImagePreview(url: url)
+                } else {
+                    ConversationFilePreview(url: url)
                 }
-                ConversationFilePreview(urls: urls, selected: $selected)
-                    .disabled(saving)
-                    .overlay {
-                        if displayedURL == nil {
-                            ProgressView("画像を読み込み中…")
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .background(Color(uiColor: .systemBackground))
-                        }
-                    }
             }
+            .disabled(saving)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .principal) {
-                    if !sources.isEmpty {
-                        Text("\(selected + 1) / \(sources.count)")
-                            .accessibilityIdentifier("conversation.preview.position")
-                    }
-                }
                 ToolbarItem(placement: .confirmationAction) {
                     HStack(spacing: 20) {
                         if isImage {
@@ -257,7 +229,7 @@ struct ConversationPreview: View {
                             } label: {
                                 Image(systemName: saved ? "checkmark" : "arrow.down.to.line")
                             }
-                            .disabled(saving || saved || displayedURL == nil)
+                            .disabled(saving || saved)
                             .accessibilityLabel(saved ? "保存済み" : "保存")
                             .accessibilityIdentifier("conversation.preview.save")
                         }
@@ -277,41 +249,10 @@ struct ConversationPreview: View {
             } message: { Text(saveError ?? "") }
         }
         .interactiveDismissDisabled(isImage || saving)
-        .task {
-            guard isImage, let load = media?.sessionImages else { return }
-            do {
-                let images = try await load()
-                guard !Task.isCancelled else { return }
-                guard let source, let index = images.firstIndex(of: source) else { return }
-                for image in images where image != source {
-                    guard let media else { break }
-                    let data = try await conversationImageData(image, media: media)
-                    try Task.checkCancellation()
-                    downloaded[image] = try await writeConversationImage(data)
-                }
-                // Publish the gallery once its URLs are stable. Reloading Quick
-                // Look as downloads finish can reset an in-progress swipe.
-                selected = index
-                sources = images
-            } catch {
-                if !Task.isCancelled {
-                    galleryError = error.localizedDescription
-                }
-            }
-        }
-        .onChange(of: selected) { _ in saved = false }
-        .onDisappear {
-            for local in downloaded
-                .values {
-                try? FileManager.default.removeItem(at: local.deletingLastPathComponent())
-            }
-            downloaded.removeAll()
-        }
     }
 
     @MainActor private func save() async {
         defer { saving = false }
-        guard let displayedURL else { return }
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else {
             saveError = "設定でBexの写真への追加を許可してください。"
@@ -319,68 +260,117 @@ struct ConversationPreview: View {
         }
         do {
             try await PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: displayedURL, options: nil)
+                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: url, options: nil)
             }
             saved = true
         } catch { saveError = error.localizedDescription }
     }
 }
 
+private struct ConversationImagePreview: View {
+    let url: URL
+    @State private var image: UIImage?
+    @State private var loadFailed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                ZoomableConversationImage(image: image)
+            } else if loadFailed {
+                Text("画像ファイルを読み込めません。")
+            } else {
+                ProgressView("画像を読み込み中…")
+            }
+        }
+        .task(id: url) {
+            let loaded = await Task.detached(priority: .userInitiated) {
+                UIImage(contentsOfFile: url.path)
+            }.value
+            guard !Task.isCancelled else { return }
+            if let loaded {
+                image = loaded
+            } else {
+                loadFailed = true
+            }
+        }
+    }
+}
+
+private struct ZoomableConversationImage: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context _: Context) -> ImageScrollView {
+        ImageScrollView(image: image)
+    }
+
+    func updateUIView(_: ImageScrollView, context _: Context) {}
+
+    final class ImageScrollView: UIScrollView, UIScrollViewDelegate {
+        private let imageView: UIImageView
+        private var viewport = CGSize.zero
+
+        init(image: UIImage) {
+            imageView = UIImageView(image: image)
+            super.init(frame: .zero)
+            imageView.contentMode = .scaleAspectFit
+            imageView.isAccessibilityElement = true
+            imageView.accessibilityLabel = "画像プレビュー"
+            imageView.accessibilityIdentifier = "conversation.preview.image"
+            addSubview(imageView)
+            delegate = self
+            maximumZoomScale = 6
+            showsHorizontalScrollIndicator = false
+            showsVerticalScrollIndicator = false
+        }
+
+        @available(*, unavailable)
+        required init?(coder _: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard bounds.size != viewport else { return }
+            viewport = bounds.size
+            setZoomScale(1, animated: false)
+            imageView.frame = CGRect(origin: .zero, size: viewport)
+            contentSize = viewport
+        }
+
+        func viewForZooming(in _: UIScrollView) -> UIView? {
+            imageView
+        }
+    }
+}
+
 private struct ConversationFilePreview: UIViewControllerRepresentable {
-    let urls: [URL]
-    @Binding var selected: Int
+    let url: URL
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(urls: urls, selected: $selected)
+        Coordinator(url: url)
     }
 
     func makeUIViewController(context: Context) -> QLPreviewController {
         let controller = QLPreviewController()
         controller.dataSource = context.coordinator
         controller.isModalInPresentation = true
-        controller.currentPreviewItemIndex = selected
-        let coordinator = context.coordinator
-        coordinator.observation = controller.observe(
-            \.currentPreviewItemIndex, options: [.new]
-        ) { [weak coordinator] _, change in
-            guard let coordinator, !coordinator.updating, let index = change.newValue,
-                  coordinator.urls.indices.contains(index) else { return }
-            coordinator.selected.wrappedValue = index
-        }
         return controller
     }
 
-    func updateUIViewController(_ controller: QLPreviewController, context: Context) {
-        context.coordinator.updating = true
-        defer { context.coordinator.updating = false }
-        context.coordinator.selected = $selected
-        if context.coordinator.urls != urls {
-            context.coordinator.urls = urls
-            controller.reloadData()
-            // Quick Look owns selection while swiping. Only a new gallery
-            // supplies a programmatic index; view refreshes must not restore it.
-            if controller.currentPreviewItemIndex != selected {
-                controller.currentPreviewItemIndex = selected
-            }
-        }
-    }
+    func updateUIViewController(_: QLPreviewController, context _: Context) {}
 
     final class Coordinator: NSObject, QLPreviewControllerDataSource {
-        var urls: [URL]
-        var selected: Binding<Int>
-        var observation: NSKeyValueObservation?
-        var updating = false
-        init(urls: [URL], selected: Binding<Int>) {
-            self.urls = urls
-            self.selected = selected
+        let url: URL
+        init(url: URL) {
+            self.url = url
         }
 
         func numberOfPreviewItems(in _: QLPreviewController) -> Int {
-            urls.count
+            1
         }
 
-        func previewController(_: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
-            urls[index] as NSURL
+        func previewController(_: QLPreviewController, previewItemAt _: Int) -> QLPreviewItem {
+            url as NSURL
         }
     }
 }

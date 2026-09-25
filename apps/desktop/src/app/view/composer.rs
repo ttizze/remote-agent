@@ -310,45 +310,11 @@ impl Desktop {
             .key_context("ChatComposer")
             .track_focus(&self.composer.read(cx).focus_handle(cx))
             .capture_key_down(cx.listener(|s, event: &KeyDownEvent, window, cx| {
-                if s.completion_key(event, window, cx) {
-                    return;
-                }
-                if !event.keystroke.modifiers.modified()
-                    && matches!(event.keystroke.key.as_str(), "up" | "down")
+                let modifiers = event.keystroke.modifiers;
+                if !(modifiers.shift || modifiers.control || modifiers.alt || modifiers.platform)
+                    && s.completion_key(&event.keystroke.key, window, cx)
                 {
-                    let moved = s.composer.update(cx, |input, cx| {
-                        if input.marked_text_range(window, cx).is_some()
-                            || !input.selected_range().is_empty()
-                        {
-                            return false;
-                        }
-                        let cursor = input.cursor();
-                        let target = if event.keystroke.key == "up" {
-                            0
-                        } else {
-                            input.text().len()
-                        };
-                        // Off-screen offsets can be clamped to the first visible row by the input.
-                        if input.value()[cursor.min(target)..cursor.max(target)].contains('\n') {
-                            return false;
-                        }
-                        // Compare rendered rows so soft-wrapped text keeps normal vertical movement.
-                        let Some(caret) = input.range_to_bounds(&(cursor..cursor)) else {
-                            return false;
-                        };
-                        let Some(edge) = input.range_to_bounds(&(target..target)) else {
-                            return false;
-                        };
-                        if caret.origin.y != edge.origin.y {
-                            return false;
-                        }
-                        input.set_selected_range(target..target, cx);
-                        true
-                    });
-                    if moved {
-                        cx.stop_propagation();
-                        return;
-                    }
+                    return;
                 }
                 if event.keystroke.key == "escape"
                     && s.dictation
@@ -362,6 +328,16 @@ impl Desktop {
             }))
             .capture_action(cx.listener(Self::paste_image))
             .capture_action(cx.listener(Self::composer_enter))
+            .capture_action(
+                cx.listener(|s, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                    s.composer_arrow("up", window, cx);
+                }),
+            )
+            .capture_action(cx.listener(
+                |s, _: &gpui_kit::component::input::MoveDown, window, cx| {
+                    s.composer_arrow("down", window, cx);
+                },
+            ))
             .w_full()
             .max_w(px(CHAT_WIDTH))
             .p(px(7.))

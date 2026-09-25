@@ -12,7 +12,6 @@ struct ConversationMarkdown: View {
     @State private var linkTarget: URL?
     @State private var previewURL: URL?
     @State private var previewDirectory: URL?
-    @State private var previewSource: String?
     @State private var linkError: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -53,9 +52,7 @@ struct ConversationMarkdown: View {
             if let url = previewURL {
                 ConversationPreview(
                     url: url,
-                    isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true,
-                    media: media,
-                    source: previewSource.map(SessionImage.init(reference:))
+                    isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
                 ) {
                     previewURL = nil
                 }
@@ -76,7 +73,6 @@ struct ConversationMarkdown: View {
                     return
                 }
                 previewDirectory = downloaded.deletingLastPathComponent()
-                previewSource = target.path
                 previewURL = downloaded
             } catch {
                 if !Task.isCancelled {
