@@ -131,7 +131,17 @@ fn main() {
             .append(true)
             .open("claude-auth-homes.jsonl")
             .unwrap();
-        writeln!(trace, "{}", std::env::var("CLAUDE_CONFIG_DIR").unwrap()).unwrap();
+        let config_home = std::env::var("CLAUDE_CONFIG_DIR").unwrap();
+        let credentials_home = std::env::var("CLAUDE_SECURESTORAGE_CONFIG_DIR").unwrap();
+        writeln!(trace, "{}", json!({
+            "configHome": config_home,
+            "credentialsHome": credentials_home,
+            "skill": fs::read_to_string(Path::new(&config_home).join("skills/account-test/SKILL.md")).ok(),
+            "settings": fs::read_to_string(Path::new(&config_home).join("settings.json")).ok(),
+            "account": fs::read(Path::new(&credentials_home).join("fixture-auth.json")).ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|value| value["email"].as_str().map(str::to_owned)),
+        })).unwrap();
     }
     let path = format!("claude-session-{session}.json");
     let history = Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap())
@@ -181,7 +191,7 @@ fn main() {
             }
             "control_request" if value["request"]["subtype"] == "get_usage" => {
                 assert_eq!(value["request"]["skip_behaviors"], true);
-                let home = std::env::var_os("CLAUDE_CONFIG_DIR").unwrap();
+                let home = std::env::var_os("CLAUDE_SECURESTORAGE_CONFIG_DIR").unwrap();
                 let home = Path::new(&home);
                 if home.join("usage-paused").exists() {
                     fs::write(home.join("usage-requested"), "").unwrap();

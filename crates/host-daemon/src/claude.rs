@@ -200,9 +200,9 @@ impl Claude {
         let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
         let (process, initialized) = Process::start(
             &self.program,
+            &self.native_home,
             &auth_home,
             cwd.path(),
-            None,
             None,
             None,
             None,
@@ -765,11 +765,11 @@ impl Claude {
                 .map_err(|_| "Claude process capacity reached (8); wait for an active or retained session to finish")?;
             let (mut process, initialized) = Process::start(
                 &self.program,
+                &self.native_home,
                 &auth_home,
                 Path::new(&cwd),
                 Some((&session, state.resumable)),
-                Some(&model_name),
-                effort,
+                Some((&model_name, effort)),
                 self.browser
                     .as_ref()
                     .map(|browser| browser.provider_config(&format!("claude:{session}")))

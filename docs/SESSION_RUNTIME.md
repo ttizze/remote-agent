@@ -55,6 +55,14 @@ subscription authentication. Consecutive turns reuse a process. Viewing or
 listing history does not start one. Unsupported running input, rename and fork
 capabilities are surfaced by core; existing Codex side chats and forks remain.
 
+Account selection changes credentials, not the user's configuration. Codex thread
+RPCs keep the original App Server and `CODEX_HOME`; only authentication helpers
+have private homes. Claude conversations, model discovery and usage requests use
+the native `CLAUDE_CONFIG_DIR` for settings, skills, plugins and history, and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` for the selected account's credentials. Claude
+login/status/logout helpers retain private account metadata. The Host does not
+copy or link the shared conversation configuration into account directories.
+
 ## Process ownership and deployment
 
 Build and ship `bex-provider-supervisor` beside the Host, from the same revision.

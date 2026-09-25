@@ -1,5 +1,6 @@
 //! Credentials stay in Claude Code's own storage. Only account labels and the
-//! selection are persisted here; all profiles share the native transcript tree.
+//! selection are persisted here. Conversation settings and transcripts stay in
+//! the native home; only secure credential storage changes with the account.
 use agent_protocol::{
     models::Empty,
     operations::{Account, AccountLogin, AccountLoginStatus, AccountSelection},
@@ -197,12 +198,13 @@ impl Accounts {
     > {
         let home = self.account_home(id)?;
         let program = self.program.clone();
+        let config_home = self.native_home.clone();
         let directory = self.directory.clone();
         let cache = self.usage.entry(id.to_owned()).or_default().clone();
         Ok(async move {
             cache.read(async {
                 let (mut process, _) = super::process::Process::start(
-                    &program, &home, &directory, None, None, None, None,
+                    &program, &config_home, &home, &directory, None, None, None,
                 ).await?;
                 let result = async {
                     process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
@@ -272,14 +274,6 @@ impl Accounts {
                 let home = self.directory.join(id.strip_prefix("claude:").unwrap());
                 crate::platform::create_state_directory(&home)
                     .map_err(|_| "Claude の保存先を作成できません。")?;
-                let projects = self.native_home.join("projects");
-                tokio::fs::create_dir_all(&projects)
-                    .await
-                    .map_err(|_| "Claude の履歴保存先を作成できません。")?;
-                let projects = tokio::fs::canonicalize(projects)
-                    .await
-                    .map_err(|_| "Claude の履歴保存先を確認できません。")?;
-                link_projects(&projects, &home.join("projects"))?;
                 let (sender, url) = oneshot::channel();
                 let process = Cli::start(
                     &self.program,
@@ -425,26 +419,12 @@ impl Accounts {
             if !process.finish().await?.0 {
                 return Err("Claude の認証手続きを破棄できません。".into());
             }
-            // Do not recurse through the shared transcript link.
-            #[cfg(unix)]
-            let removed = tokio::fs::remove_file(login.home.join("projects")).await;
-            #[cfg(windows)]
-            let removed = tokio::fs::remove_dir(login.home.join("projects")).await;
-            removed.map_err(|_| "Claude の一時設定を削除できません。")?;
             tokio::fs::remove_dir_all(login.home)
                 .await
                 .map_err(|_| "Claude の一時設定を削除できません。")?;
         }
         Ok(())
     }
-}
-
-fn link_projects(source: &Path, target: &Path) -> Result<(), String> {
-    #[cfg(unix)]
-    let result = std::os::unix::fs::symlink(source, target);
-    #[cfg(windows)]
-    let result = std::os::windows::fs::symlink_dir(source, target);
-    result.map_err(|_| "Claude アカウント間で履歴を共有するリンクを作成できません。".into())
 }
 
 impl Cli {
@@ -459,6 +439,7 @@ impl Cli {
         command
             .args(args)
             .env("CLAUDE_CONFIG_DIR", home)
+            .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home)
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN")

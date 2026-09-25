@@ -18,16 +18,18 @@ pub(super) struct Process {
 impl Process {
     pub(super) async fn start(
         program: &Path,
-        native_home: &Path,
+        config_home: &Path,
+        credentials_home: &Path,
         cwd: &Path,
         session: Option<(&str, bool)>,
-        model: Option<&str>,
-        effort: Option<&str>,
+        model: Option<(&str, Option<&str>)>,
         browser: Option<Value>,
     ) -> Result<(Self, Value), String> {
         let mut command = bex_process::command(program).map_err(|error| error.to_string())?;
+        // Account changes must not replace skills, settings, plugins or history.
         command
-            .env("CLAUDE_CONFIG_DIR", native_home)
+            .env("CLAUDE_CONFIG_DIR", config_home)
+            .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", credentials_home)
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
@@ -56,11 +58,11 @@ impl Process {
                 .arg(if resume { "--resume" } else { "--session-id" })
                 .arg(session);
         }
-        if let Some(model) = model {
+        if let Some((model, effort)) = model {
             command.arg("--model").arg(model);
-        }
-        if let Some(effort) = effort {
-            command.arg("--effort").arg(effort);
+            if let Some(effort) = effort {
+                command.arg("--effort").arg(effort);
+            }
         }
         command
             .stdin(Stdio::piped())

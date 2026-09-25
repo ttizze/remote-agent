@@ -1219,6 +1219,9 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         let native = root.join("claude-native");
         std::fs::create_dir_all(&native).unwrap();
         std::fs::write(native.join("fixture-auth.json"), json!({"loggedIn":true,"authMethod":"claude.ai","email":"native@example.invalid","subscriptionType":"pro"}).to_string()).unwrap();
+        std::fs::create_dir_all(native.join("skills/account-test")).unwrap();
+        std::fs::write(native.join("skills/account-test/SKILL.md"), "shared skill").unwrap();
+        std::fs::write(native.join("settings.json"), r#"{"model":"shared-model"}"#).unwrap();
         let memory = Arc::new(Memory::default());
         let start = || HostFixture::start(&root, AppServerConfig { program: root.join("missing-codex"), ..Default::default() }, memory.clone(), "Claude accounts", false, Some(fixture_program()));
         std::fs::write(native.join("usage-paused"), "").unwrap();
@@ -1262,10 +1265,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         send(&store, "second account, same history", "account-second").await;
         completed(&store, &thread, 2, "completed").await;
         let profile = root.join("claude/accounts").join(login.login_id.strip_prefix("claude:").unwrap());
-        assert_eq!(std::fs::canonicalize(profile.join("projects")).unwrap(), std::fs::canonicalize(native.join("projects")).unwrap());
-        let homes = std::fs::read_to_string(root.join("claude-auth-homes.jsonl")).unwrap();
-        assert!(homes.lines().any(|line| line == native.to_string_lossy()));
-        assert!(homes.lines().any(|line| line == profile.to_string_lossy()), "retained process must not reuse the previous account");
+        assert!(!profile.join("projects").exists(), "credential helpers do not own conversation history");
         let snapshot = (*store.snapshot()).clone();
         drop(store); endpoint.close().await; fixture.close().await.unwrap();
         let fixture = start().await.unwrap();
@@ -1295,6 +1295,14 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         until(&store, |snapshot| snapshot.models.iter().any(|model| model.model == "claude:default")).await;
         send(&store, "back to native account", "account-fourth").await;
         completed(&store, &thread, 4, "completed").await;
+        let homes = std::fs::read_to_string(root.join("claude-auth-homes.jsonl")).unwrap();
+        let homes: Vec<Value> = homes.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(homes.iter().map(|home| home["credentialsHome"].as_str().unwrap()).collect::<Vec<_>>(),
+            [native.to_str().unwrap(), profile.to_str().unwrap(), profile.to_str().unwrap(), native.to_str().unwrap()]);
+        assert_eq!(homes.iter().map(|home| home["account"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["native@example.invalid", "claude@example.invalid", "claude@example.invalid", "native@example.invalid"]);
+        assert!(homes.iter().all(|home| home["configHome"] == native.to_string_lossy().as_ref()
+            && home["skill"] == "shared skill" && home["settings"] == r#"{"model":"shared-model"}"#));
         drop(store); endpoint.close().await; fixture.close().await.unwrap();
     }).await.unwrap();
 }
