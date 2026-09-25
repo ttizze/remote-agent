@@ -21,7 +21,7 @@ pub(crate) async fn run(mode: Mode, state_dir: Option<PathBuf>, isolated: bool) 
             LocalHostState::Stopped => bail!("Host is not running"),
             LocalHostState::Starting => bail!("Host is still starting; try again shortly"),
         };
-        let identity = host.load_identity()?;
+        let identity = host_daemon::load_local_identity(&host.directory)?;
         Ok::<_, anyhow::Error>((identity, ticket))
     })
     .await??;

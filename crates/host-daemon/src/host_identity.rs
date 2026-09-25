@@ -13,48 +13,10 @@ pub trait CredentialStore: Send + Sync {
     fn save(&self, bytes: &[u8]) -> Result<()>;
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
-pub enum KeyStorage {
-    #[default]
-    Keyring,
-    File,
-}
-
-impl KeyStorage {
-    pub fn open(self, directory: &std::path::Path) -> Result<Arc<dyn CredentialStore>> {
-        match self {
-            Self::Keyring => Ok(Arc::new(KeyringStore::new(
-                directory.to_str().context("state directory is not UTF-8")?,
-            )?)),
-            Self::File => Ok(Arc::new(FileKeyStore(directory.join("identity.keys")))),
-        }
-    }
-}
-
-pub struct KeyringStore(keyring::Entry);
-impl KeyringStore {
-    pub fn new(account: &str) -> Result<Self> {
-        Ok(Self(keyring::Entry::new("app.bex.host", account)?))
-    }
-}
-impl CredentialStore for KeyringStore {
-    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        match self.0.get_secret() {
-            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    }
-    fn save(&self, bytes: &[u8]) -> Result<()> {
-        self.0.set_secret(bytes).map_err(Into::into)
-    }
-}
-
 /// Read only the local identity already provisioned by the daemon.
-/// OS-backed stores must be read on a blocking worker.
-pub fn load_local_identity(store: &dyn CredentialStore) -> Result<Identity> {
-    let bytes = store
+/// File access must run on a blocking worker.
+pub fn load_local_identity(directory: &std::path::Path) -> Result<Identity> {
+    let bytes = FileKeyStore(directory.join("identity.keys"))
         .load()?
         .context("local Host credentials are not provisioned")?;
     ensure!(
@@ -64,8 +26,8 @@ pub fn load_local_identity(store: &dyn CredentialStore) -> Result<Identity> {
     Ok(Identity::from_bytes(bytes[32..].try_into().unwrap()))
 }
 
-/// Explicit headless-server alternative to the OS keyring. Keep the containing
-/// directory private; Unix files are 0600, Windows inherits its user DACL.
+/// Host identity storage. Keep the containing directory private; Unix files
+/// are 0600, Windows inherits its user DACL.
 pub struct FileKeyStore(pub PathBuf);
 impl CredentialStore for FileKeyStore {
     fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -97,7 +59,7 @@ pub struct HostCredentials {
     pub(crate) record: tokio::sync::Mutex<Record>,
 }
 impl HostCredentials {
-    /// Keyring access can block for an OS dialog. Never run it on a Tokio worker.
+    /// Read and write credentials on a blocking worker.
     pub async fn load(store: Arc<dyn CredentialStore>, directory: PathBuf) -> Result<Self> {
         tokio::task::spawn_blocking(move || {
             crate::platform::create_state_directory(&directory)?;
@@ -174,34 +136,31 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    struct BoundedKeyring {
+    struct RecordingStore {
         worker: std::thread::ThreadId,
         bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,
         writes: AtomicUsize,
     }
-    impl CredentialStore for BoundedKeyring {
+    impl CredentialStore for RecordingStore {
         fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
             assert_ne!(
                 std::thread::current().id(),
                 self.worker,
-                "keyring access must leave the async worker"
+                "credential storage must leave the async worker"
             );
             Ok(self.bytes.lock().unwrap().clone())
         }
         fn save(&self, bytes: &[u8]) -> Result<()> {
             assert_ne!(std::thread::current().id(), self.worker);
-            if bytes.len() > 2560 {
-                return Err(anyhow::anyhow!("Windows credential limit"));
-            }
             self.writes.fetch_add(1, Ordering::SeqCst);
             *self.bytes.lock().unwrap() = Some(Zeroizing::new(bytes.to_vec()));
             Ok(())
         }
     }
     #[tokio::test]
-    async fn trust_growth_never_rewrites_or_enlarges_keyring_record() {
+    async fn trust_growth_never_rewrites_or_enlarges_identity_keys() {
         let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(BoundedKeyring {
+        let store = Arc::new(RecordingStore {
             worker: std::thread::current().id(),
             bytes: Mutex::new(None),
             writes: AtomicUsize::new(0),
@@ -221,7 +180,6 @@ mod tests {
         assert_eq!(store.writes.load(Ordering::SeqCst), 1);
         let path = directory.path().join("trust.json");
         let bytes = std::fs::read(&path).unwrap();
-        assert!(bytes.len() > 2560);
         let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(saved.get("host_key").is_none() && saved.get("local_key").is_none());
         #[cfg(unix)]
@@ -245,7 +203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_keys_restore_identity_without_a_keyring_service() {
+    async fn file_keys_restore_identity_and_refuse_missing_or_invalid_state() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("identity.keys");
         let store = Arc::new(FileKeyStore(path.clone()));
@@ -260,6 +218,15 @@ mod tests {
             restored.host_identity().await.node_id()
         );
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 64);
+        assert_eq!(
+            load_local_identity(directory.path()).unwrap().node_id(),
+            credentials.local_identity().await.node_id()
+        );
+        assert!(
+            store.save(&[0; 64]).is_err(),
+            "never overwrite existing keys"
+        );
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -267,8 +234,21 @@ mod tests {
                 std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
+            assert_eq!(
+                std::fs::metadata(directory.path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
         }
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_local_identity(directory.path()).is_err());
+        assert!(
+            !path.exists(),
+            "clients must not provision replacement keys"
+        );
         assert!(
             HostCredentials::load(store.clone(), directory.path().to_owned())
                 .await
