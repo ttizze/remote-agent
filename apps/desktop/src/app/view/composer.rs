@@ -350,7 +350,6 @@ impl Desktop {
             .when(phase.is_none(), |composer| {
                 composer.child(
                     h_flex()
-                        .gap_2()
                         .child(
                             self.icon_button(
                                 "attach",
@@ -371,15 +370,11 @@ impl Desktop {
                             ),
                         )
                         .child(div().flex_1())
+                        .child(self.fast_control(cx))
                         .child(self.model_menu(cx))
+                        .child(self.effort_control(cx))
                         .child(microphone)
-                        .child(
-                            send.large()
-                                .rounded(px(22.))
-                                .w(px(44.))
-                                .h(px(44.))
-                                .primary(),
-                        ),
+                        .child(send.large().rounded(px(22.)).w(px(44.)).h(px(44.)).ghost()),
                 )
             })
             .when(phase.is_some(), |composer| {

@@ -28,7 +28,7 @@ extension ThreadScreen {
             if let error = model.transferError {
                 BexNotice(text: error)
             }
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 if !attachments.isEmpty {
                     ScrollView(.horizontal) {
                         HStack(spacing: 8) {
@@ -88,9 +88,9 @@ extension ThreadScreen {
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
-                HStack(spacing: 8) {
+                .padding(.top, 6)
+                .padding(.bottom, 0)
+                HStack(spacing: 0) {
                     if dictation.isRecording || dictation.requestingPermission {
                         Button { dictation.cancel() } label: {
                             Image(systemName: "xmark").frame(width: 40, height: 40)
@@ -119,18 +119,48 @@ extension ThreadScreen {
                         ProgressView().frame(height: 40)
                     }
                     Spacer(minLength: 0)
-                    Button { showingModelSettings = true } label: {
-                        HStack(spacing: 4) {
-                            Text(model.currentModel?
-                                .displayName ?? (model.selectedModel.isEmpty ? "モデルを選択" : model.selectedModel))
-                                .lineLimit(1)
-                            Image(systemName: "chevron.down").font(.caption)
+                    let controls = model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
+                    if let next = controls.toggleFastTo {
+                        Button { model.chooseServiceTier(next) } label: {
+                            Image(systemName: controls.fast ? "bolt.fill" : "bolt")
+                                .foregroundStyle(controls.fast ? Color.accentColor : .secondary)
+                                .frame(width: 44, height: 44)
                         }
-                        .font(.subheadline)
-                        .frame(maxWidth: 130, minHeight: 44)
+                        .accessibilityLabel("Fast")
+                        .accessibilityValue(controls.fast ? "オン" : "オフ")
+                        .accessibilityIdentifier("model.fast")
+                        .disabled(!model.isConnected || model.sending)
                     }
+                    Button { composerFocused = false; showingModelSettings = true } label: {
+                        Text(model.currentModel?
+                            .displayName ?? (model.selectedModel.isEmpty ? "モデル" : model.selectedModel))
+                            .font(.subheadline).lineLimit(1).truncationMode(.middle)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .layoutPriority(1)
                     .accessibilityLabel("モデル設定")
                     .accessibilityIdentifier("model.settings")
+                    if !controls.efforts.isEmpty {
+                        Menu {
+                            ForEach(controls.efforts, id: \.self) { effort in
+                                Button { model.chooseEffort(effort) } label: {
+                                    if effort == controls.effort {
+                                        Label(effort, systemImage: "checkmark")
+                                    } else {
+                                        Text(effort)
+                                    }
+                                }
+                                .accessibilityIdentifier("model.effort." + effort)
+                            }
+                        } label: {
+                            ReasoningStrengthIcon(level: controls.effortLevel, count: controls.efforts.count)
+                                .frame(width: 44, height: 44)
+                        }
+                        .accessibilityLabel("推論の強度")
+                        .accessibilityValue(controls.effort)
+                        .accessibilityIdentifier("model.effort")
+                        .disabled(!model.isConnected || model.sending)
+                    }
                     Button {
                         if dictation.isRecording {
                             dictation.finish()
@@ -201,7 +231,7 @@ extension ThreadScreen {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30))
             .overlay(RoundedRectangle(cornerRadius: 30).stroke(Color.white.opacity(0.12)))
         }
-        .padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 8)
+        .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
         .background(LinearGradient(
             colors: [.clear, Color(UIColor.systemBackground)],
             startPoint: .top,
@@ -281,9 +311,7 @@ private struct ComposerSendButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(.black)
-            .frame(width: 36, height: 36)
-            .background(.white, in: Circle())
+            .foregroundColor(.accentColor)
             .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.3)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())

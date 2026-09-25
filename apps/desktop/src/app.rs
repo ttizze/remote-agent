@@ -82,6 +82,12 @@ enum SettingsPage {
     Worktrees,
 }
 #[derive(Clone, Copy, PartialEq)]
+enum ModelPanel {
+    Models,
+    Accounts,
+    Manage,
+}
+#[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Home,
     Terminal,
@@ -199,6 +205,8 @@ pub(crate) struct Desktop {
     editor_pending: Option<u64>,
     search: Entity<InputState>,
     path: Entity<InputState>,
+    model_panel: ModelPanel,
+    model_search: Entity<InputState>,
     model_provider: Option<agent_protocol::session::ProviderKind>,
     account_sign_out: Option<String>,
     account_login_draft: Option<String>,
@@ -306,6 +314,7 @@ impl Desktop {
                 .auto_grow(2, 8)
         });
         let editor_input = cx.new(|cx| EditorState::new(window, cx));
+        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("モデルを検索"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("会話を検索"));
         let path = cx.new(|cx| InputState::new(window, cx).placeholder("絶対パス"));
         let worktree_copy_paths = cx.new(|cx| {
@@ -385,6 +394,11 @@ impl Desktop {
                             OperationCompletion::Editor(revision),
                         );
                     }
+                }
+            }),
+            cx.subscribe(&model_search, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
                 }
             }),
             cx.subscribe(&search, |view, input, event, cx| {
@@ -480,6 +494,8 @@ impl Desktop {
             editor_pending: None,
             search,
             path,
+            model_panel: ModelPanel::Models,
+            model_search,
             model_provider: None,
             account_sign_out: None,
             account_login_draft: None,

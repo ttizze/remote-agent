@@ -118,8 +118,7 @@ impl Operation for SelectAccountForDraft {
     }
 
     fn apply(self, snapshot: &mut Snapshot, (selection, catalog): Self::Output) -> Vec<Effect> {
-        let was_active =
-            snapshot.account_is_active_for_draft(self.id.clone(), self.thread_id.clone());
+        let previous_provider = snapshot.model_provider_for_draft(self.thread_id.clone());
         let mut draft = snapshot
             .drafts
             .get(&self.thread_id)
@@ -132,7 +131,7 @@ impl Operation for SelectAccountForDraft {
                 LoadModels {}.apply(snapshot, catalog);
                 let models = crate::models::provider_models(&snapshot.models, provider);
                 if !models.is_empty() {
-                    if !was_active {
+                    if previous_provider != provider {
                         draft.model = None;
                         draft.effort = None;
                         draft.service_tier = None;
@@ -295,7 +294,7 @@ mod account_model_tests {
     }
 
     #[test]
-    fn account_selection_owns_catalog_model_effort_and_speed() {
+    fn account_selection_preserves_supported_settings_and_normalizes_new_catalog() {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(json!({
             "accounts":[{"id":"a","provider":"codex"},{"id":"b","provider":"codex"},{"id":"claude:c","provider":"claude"}],
@@ -313,8 +312,6 @@ mod account_model_tests {
                 ..Default::default()
             }),
         );
-        assert_eq!(snapshot.account_models("a".into()), vec![codex.clone()]);
-        assert!(snapshot.account_models("b".into()).is_empty());
         let select = |snapshot: &mut Snapshot, id: &str, provider, data| {
             SelectAccountForDraft {
                 id: id.into(),
@@ -338,6 +335,18 @@ mod account_model_tests {
         };
         select(
             &mut snapshot,
+            "b",
+            crate::session::ProviderKind::Codex,
+            vec![codex.clone(), claude.clone()],
+        );
+        assert_eq!(snapshot.drafts["draft"].model.as_deref(), Some("gpt"));
+        assert_eq!(snapshot.drafts["draft"].effort.as_deref(), Some("medium"));
+        assert_eq!(
+            snapshot.drafts["draft"].service_tier.as_deref(),
+            Some("fast")
+        );
+        select(
+            &mut snapshot,
             "claude:c",
             crate::session::ProviderKind::Claude,
             vec![codex.clone(), claude.clone()],
@@ -346,8 +355,16 @@ mod account_model_tests {
         assert_eq!(draft.model.as_deref(), Some("claude:sonnet"));
         assert_eq!(draft.effort.as_deref(), Some("high"));
         assert_eq!(draft.service_tier.as_deref(), Some("default"));
-        assert!(snapshot.account_is_active_for_draft("claude:c".into(), "draft".into()));
-        assert!(!snapshot.account_is_active_for_draft("a".into(), "draft".into()));
+        assert_eq!(
+            snapshot
+                .account
+                .accounts
+                .as_ref()
+                .unwrap()
+                .selected_claude_id
+                .as_deref(),
+            Some("claude:c")
+        );
         LoadModels {}.apply(
             &mut snapshot,
             rpc::ModelPage {
@@ -360,7 +377,6 @@ mod account_model_tests {
             snapshot.drafts["draft"].model.as_deref(),
             Some("claude:sonnet")
         );
-        assert!(!snapshot.account_is_active_for_draft("a".into(), "draft".into()));
         let mut restricted = codex;
         restricted.supported_reasoning_efforts.truncate(1);
         restricted.service_tiers = None;
@@ -370,8 +386,20 @@ mod account_model_tests {
             crate::session::ProviderKind::Codex,
             vec![restricted.clone(), claude],
         );
-        assert!(snapshot.account_models("a".into()).is_empty());
-        assert_eq!(snapshot.account_models("b".into()), vec![restricted]);
+        assert_eq!(
+            snapshot
+                .account
+                .accounts
+                .as_ref()
+                .unwrap()
+                .selected_id
+                .as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            snapshot.provider_models_matching(crate::session::ProviderKind::Codex, String::new()),
+            vec![restricted]
+        );
         assert_eq!(snapshot.drafts["draft"].effort.as_deref(), Some("medium"));
         assert_eq!(
             snapshot.drafts["draft"].service_tier.as_deref(),

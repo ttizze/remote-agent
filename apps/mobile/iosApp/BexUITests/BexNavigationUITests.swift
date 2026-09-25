@@ -205,23 +205,16 @@ extension BexLaunchUITests {
     }
 
     func openModelChoices(_ app: XCUIApplication) {
-        let menu = app.buttons["model.choice.menu"]
-        for _ in 0 ..< 6 where !menu.isHittable {
-            app.swipeDown()
+        for _ in 0 ..< 2 where app.buttons["model.back"].exists {
+            app.buttons["model.back"].tap()
         }
-        XCTAssertTrue(menu.waitForExistence(timeout: 15))
-        let enabled = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: menu)
-        wait(for: [enabled], timeout: 15)
-        menu.tap()
+        XCTAssertTrue(app.textFields["model.search"].waitForExistence(timeout: 15))
     }
 
-    func fixtureEffortControl(_ app: XCUIApplication) -> XCUIElement {
-        let control = app.segmentedControls["model.quick.effort"]
-        for _ in 0 ..< 6 where !control.isHittable {
-            app.swipeUp()
-        }
-        XCTAssertTrue(control.waitForExistence(timeout: 10))
-        return control
+    func chooseFixtureEffort(_ app: XCUIApplication, _ value: String) {
+        let control = app.buttons["model.effort"]
+        XCTAssertTrue(control.waitForExistence(timeout: 10)); control.tap()
+        app.buttons["model.effort." + value].tap()
     }
 
     func chooseFixtureModel(_ app: XCUIApplication) {
@@ -229,28 +222,24 @@ extension BexLaunchUITests {
         openModelChoices(app)
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 10)); choice.tap()
-        fixtureEffortControl(app).buttons["high"].tap()
         app.buttons["model.close"].tap()
+        chooseFixtureEffort(app, "high")
     }
 
     func verifyRestoredModelSettings(_ app: XCUIApplication, settings: XCUIElement) {
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["model.choice.fixture-model"].exists)
-        XCTAssertGreaterThan(settings.frame.midX, app.frame.midX)
         XCTAssertGreaterThan(settings.frame.midY, app.descendants(matching: .any)["task.message"].frame.midY)
         settings.tap()
-        XCTAssertEqual(app.buttons["model.choice.menu"].value as? String, "Fixture Model")
-        openModelChoices(app)
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 10))
-        choice.tap()
-        let efforts = fixtureEffortControl(app)
-        XCTAssertTrue(efforts.buttons["high"].isSelected)
-        efforts.buttons["medium"].tap()
-        XCTAssertTrue(efforts.buttons["medium"].isSelected)
-        efforts.buttons["high"].tap()
-        captureScreen(app, named: "Account and model settings")
+        XCTAssertEqual(choice.value as? String, "選択中")
+        captureScreen(app, named: "Restored model and account picker")
         app.buttons["model.close"].tap()
+        XCTAssertEqual(app.buttons["model.effort"].value as? String, "high")
+        chooseFixtureEffort(app, "medium")
+        XCTAssertEqual(app.buttons["model.effort"].value as? String, "medium")
+        chooseFixtureEffort(app, "high")
     }
 
     func testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation() throws {

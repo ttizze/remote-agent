@@ -20,18 +20,26 @@ impl Desktop {
                                 model.display_name.clone()
                             }),
                     )
-                    .dropdown_caret(true)
+                    .debug_selector(|| "model-select".into())
                     .accessibility_label("モデルとアカウント")
                     .tooltip("モデルとアカウント")
                     .large()
-                    .max_w(px(220.))
+                    .px_1()
+                    .max_w(px(180.))
                     .h(px(44.))
                     .ghost(),
             )
-            .on_open_change(move |open, _, cx| {
+            .on_open_change(move |open, window, cx| {
                 if *open {
-                    let _ = opening.update(cx, |view, _| {
-                        view.model_provider = None;
+                    let _ = opening.update(cx, |view, cx| {
+                        if view.snapshot.account.login.is_some() {
+                            view.model_panel = ModelPanel::Manage;
+                        } else {
+                            view.model_provider = None;
+                            view.model_panel = ModelPanel::Models;
+                        }
+                        view.model_search
+                            .update(cx, |input, cx| input.set_value("", window, cx));
                         view.account_sign_out = None;
                         view.dispatch(Intent::ListAccounts(op::ListAccounts {}));
                         view.dispatch(Intent::LoadModels(op::LoadModels {}));
@@ -42,205 +50,19 @@ impl Desktop {
                 entity
                     .update(cx, |s, cx| {
                         v_flex()
-                            .id("model-account-scroll")
-                            .w(px(400.))
-                            .max_h(px(560.))
-                            .overflow_y_scroll()
-                            .p_2()
-                            .gap_3()
-                            .child(div().text_lg().child("モデルとアカウント"))
-                            .child(s.model_controls(cx))
+                            .w(px(440.))
+                            .child(s.model_panel_content(cx))
                             .into_any_element()
                     })
                     .unwrap_or_else(|_| div().into_any_element())
             })
             .into_any_element()
     }
-    fn account_model_controls(
-        &self,
-        account_id: String,
-        disabled: bool,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let entity = cx.entity().downgrade();
-        let model = self.selected_model().filter(|_| {
-            self.snapshot
-                .account_is_active_for_draft(account_id.clone(), self.draft_key().into())
-        });
-        let effort = self
-            .draft()
-            .effort
-            .as_deref()
-            .or_else(|| model.map(|model| model.default_reasoning_effort.as_str()))
-            .unwrap_or_default();
-        let model_label = model
-            .map_or("モデルを選択", |model| model.display_name.as_str())
-            .to_owned();
-        let models = Button::new("model-choice")
-            .debug_selector(|| "model-choice".into())
-            .label(model_label)
-            .dropdown_caret(true)
-            .disabled(disabled)
-            .small()
-            .ghost()
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
-                if let Some(owner) = entity.upgrade() {
-                    let view = owner.read(cx);
-                    for model in view.snapshot.account_models(account_id.clone()) {
-                        let value = model.model.clone();
-                        let entity = entity.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(model.display_name.clone())
-                                .checked(
-                                    view.selected_model()
-                                        .is_some_and(|model| model.model == value),
-                                )
-                                .on_click(move |_, _, cx| {
-                                    let _ = entity.update(cx, |view, cx| {
-                                        view.dispatch(Intent::SelectModel {
-                                            thread_id: view.draft_key().into(),
-                                            model: value.clone(),
-                                        });
-                                        cx.notify();
-                                    });
-                                }),
-                        );
-                    }
-                }
-                menu
-            });
-        let entity = cx.entity().downgrade();
-        let tier = self
-            .draft()
-            .service_tier
-            .as_deref()
-            .or_else(|| model.and_then(|model| model.default_service_tier.as_deref()))
-            .unwrap_or("default");
-        let speed_label = model
-            .and_then(|model| model.service_tiers.as_deref())
-            .and_then(|tiers| tiers.iter().find(|value| value.id == tier))
-            .map(|tier| tier.name.as_deref().unwrap_or(&tier.id))
-            .unwrap_or("標準");
-        let speed = Button::new("model-speed")
-            .debug_selector(|| "model-speed".into())
-            .label(speed_label.to_owned())
-            .accessibility_label("速度")
-            .dropdown_caret(true)
-            .disabled(disabled)
-            .small()
-            .ghost()
-            .dropdown_menu(move |mut menu, _, cx| {
-                if let Some(owner) = entity.upgrade() {
-                    let view = owner.read(cx);
-                    let current = view.selected_model();
-                    let selected = view
-                        .draft()
-                        .service_tier
-                        .as_deref()
-                        .or_else(|| current.and_then(|model| model.default_service_tier.as_deref()))
-                        .unwrap_or("default");
-                    let tiers = std::iter::once(("default", "標準")).chain(
-                        current
-                            .and_then(|model| model.service_tiers.as_deref())
-                            .unwrap_or_default()
-                            .iter()
-                            .filter(|tier| tier.id != "default")
-                            .map(|tier| {
-                                (tier.id.as_str(), tier.name.as_deref().unwrap_or(&tier.id))
-                            }),
-                    );
-                    for (id, label) in tiers {
-                        let value = id.to_owned();
-                        let entity = entity.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(label.to_owned())
-                                .checked(selected == id)
-                                .on_click(move |_, _, cx| {
-                                    let _ = entity.update(cx, |view, cx| {
-                                        view.dispatch(Intent::SelectServiceTier {
-                                            thread_id: view.draft_key().into(),
-                                            service_tier: value.clone(),
-                                        });
-                                        cx.notify();
-                                    });
-                                }),
-                        );
-                    }
-                }
-                menu
-            });
-        let mut body = v_flex()
-            .gap_3()
-            .p_3()
-            .rounded(px(10.))
-            .bg(rgb(0x333333))
-            .child(h_flex().justify_between().child("モデル").child(models));
-        if let Some(model) = model {
-            if !model.supported_reasoning_efforts.is_empty() {
-                let mut choices = h_flex().gap_1().flex_wrap();
-                for choice in &model.supported_reasoning_efforts {
-                    let value = choice.reasoning_effort.clone();
-                    let selector = format!("model-effort-{value}");
-                    choices = choices.child(
-                        self.button(
-                            format!("model-effort-{value}"),
-                            value.clone(),
-                            cx,
-                            move |s, _, _| {
-                                s.dispatch(Intent::SelectEffort {
-                                    thread_id: s.draft_key().into(),
-                                    effort: value.clone(),
-                                });
-                            },
-                        )
-                        .small()
-                        .debug_selector(move || selector.clone())
-                        .selected(effort == choice.reasoning_effort)
-                        .disabled(disabled),
-                    );
-                }
-                body = body
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xa3a3a3))
-                            .child("推論の強度"),
-                    )
-                    .child(choices);
-            }
-            if model
-                .service_tiers
-                .as_ref()
-                .is_some_and(|tiers| !tiers.is_empty())
-            {
-                body = body.child(h_flex().justify_between().child("速度").child(speed));
-            }
-        }
-        body.into_any_element()
-    }
-
-    pub(super) fn model_controls(&self, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn account_controls(&self, manage: bool, cx: &Context<Self>) -> AnyElement {
         let accounts = self.snapshot.account.accounts.as_ref();
         let provider = self.model_provider.unwrap_or_else(|| {
-            accounts
-                .and_then(|accounts| {
-                    accounts
-                        .accounts
-                        .iter()
-                        .find(|account| {
-                            self.snapshot.account_is_active_for_draft(
-                                account.id.clone(),
-                                self.draft_key().into(),
-                            )
-                        })
-                        .or_else(|| {
-                            accounts
-                                .accounts
-                                .iter()
-                                .find(|account| accounts.is_selected(account))
-                        })
-                })
-                .map_or(ProviderKind::Codex, |account| account.provider)
+            self.snapshot
+                .model_provider_for_draft(self.draft_key().into())
         });
         let disabled = self.account_busy
             || self.busy > 0
@@ -259,20 +81,6 @@ impl Desktop {
                     move |s, _, _| {
                         s.model_provider = Some(value);
                         s.account_sign_out = None;
-                        if let Some(account) =
-                            s.snapshot.account.accounts.as_ref().and_then(|accounts| {
-                                accounts.accounts.iter().find(|account| {
-                                    account.provider == value && accounts.is_selected(account)
-                                })
-                            })
-                        {
-                            s.account_operation(Intent::SelectAccountForDraft(
-                                op::SelectAccountForDraft {
-                                    id: account.id.clone(),
-                                    thread_id: s.draft_key().into(),
-                                },
-                            ));
-                        }
                     },
                 )
                 .debug_selector(move || format!("model-provider-{label}"))
@@ -284,32 +92,10 @@ impl Desktop {
         let mut body = v_flex()
             .id("model-account-controls")
             .gap_3()
-            .child(services);
+            .when(manage, |body| body.child(services));
         if self.snapshot.account.login.is_some() {
             body = body.child(self.account_login_controls(cx));
         } else {
-            body = body.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa3a3a3))
-                    .child("モデル設定"),
-            );
-            if let Some(account) = accounts.and_then(|accounts| {
-                accounts
-                    .accounts
-                    .iter()
-                    .find(|account| account.provider == provider && accounts.is_selected(account))
-            }) {
-                body = body.child(self.account_model_controls(account.id.clone(), disabled, cx));
-            } else {
-                body = body.child(div().text_sm().child("サインインするとモデルを選べます。"));
-            }
-            body = body.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(0xa3a3a3))
-                    .child("アカウント"),
-            );
             if let Some(accounts) = accounts {
                 let mut found = false;
                 for (index, account) in accounts
@@ -345,7 +131,6 @@ impl Desktop {
                                 button.icon(IconName::Check)
                             })
                             .w_full()
-                            .ghost()
                             .disabled(disabled),
                         )
                         .when_some(account.plan_type.as_ref(), |row, plan| {
@@ -356,8 +141,14 @@ impl Desktop {
                                     .child(plan.to_uppercase()),
                             )
                         })
-                        .child(account_usage_view(account.usage.as_ref()));
-                    if self.account_sign_out.as_deref() == Some(account.id.as_str()) {
+                        .child(if manage {
+                            account_usage_view(account.usage.as_ref())
+                        } else {
+                            weekly_usage_view(
+                                self.snapshot.account_weekly_usage(account.id.clone()),
+                            )
+                        });
+                    if manage && self.account_sign_out.as_deref() == Some(account.id.as_str()) {
                         row =
                             row.child(div().text_sm().child(
                                 "サインアウトしますか？ 再び使うにはサインインが必要です。",
@@ -393,7 +184,7 @@ impl Desktop {
                                         ),
                                     ),
                             );
-                    } else {
+                    } else if manage {
                         row = row.child(
                             self.button(
                                 format!("account-logout-{index}"),
@@ -402,8 +193,6 @@ impl Desktop {
                                 move |s, _, _| s.account_sign_out = Some(logout_id.clone()),
                             )
                             .debug_selector(move || format!("account-logout-{index}"))
-                            .small()
-                            .ghost()
                             .disabled(disabled),
                         );
                     }
@@ -415,8 +204,8 @@ impl Desktop {
             } else {
                 body = body.child("アカウントを読み込み中…");
             }
-            body = body
-                .child(
+            if manage {
+                body = body.child(
                     h_flex()
                         .justify_between()
                         .gap_2()
@@ -444,15 +233,30 @@ impl Desktop {
                             .tooltip("モデルと使用量を更新")
                             .disabled(disabled),
                         ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0xa3a3a3))
-                        .child("アカウントの切替は、同じ接続先を使う端末にも反映されます。"),
                 );
+            } else {
+                body = body.child(
+                    self.button(
+                        "model-accounts-manage",
+                        "アカウントを管理",
+                        cx,
+                        |s, _, _| {
+                            s.model_panel = ModelPanel::Manage;
+                        },
+                    )
+                    .icon(IconName::Settings)
+                    .debug_selector(|| "model-accounts-manage".into())
+                    .w_full(),
+                );
+            }
         }
         body = body
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0xa3a3a3))
+                    .child("アカウントの切替は、同じ接続先を使う端末にも反映されます。"),
+            )
             .when(self.account_busy, |body| {
                 body.child(div().text_sm().child("アカウントを更新中…"))
             })
@@ -578,7 +382,7 @@ impl Desktop {
 }
 
 fn account_usage_view(usage: Option<&agent_protocol::operations::AccountUsage>) -> AnyElement {
-    let mut body = v_flex().gap_2().text_xs();
+    let mut body = v_flex().w_full().gap_2().text_sm();
     let Some(usage) = usage else {
         return body
             .text_color(rgb(0xa3a3a3))
@@ -590,44 +394,17 @@ fn account_usage_view(usage: Option<&agent_protocol::operations::AccountUsage>) 
     }
     for window in &usage.windows {
         body = body.child(
-            v_flex()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .gap_2()
-                        .child(window.label.clone())
-                        .child(format!("残り {}%", window.remaining_percent)),
-                )
-                .child(
-                    div()
-                        .h(px(4.))
-                        .w_full()
-                        .rounded(px(4.))
-                        .bg(rgb(0x474747))
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(window.remaining_percent as f32 / 100.))
-                                .rounded(px(4.))
-                                .bg(if window.remaining_percent <= 20 {
-                                    rgb(0xe9b56f)
-                                } else {
-                                    rgb(0x8acfac)
-                                }),
-                        ),
-                )
-                .when_some(
-                    window
-                        .resets_at
-                        .and_then(|at| chrono::DateTime::from_timestamp(at, 0)),
-                    |body, at| {
-                        body.child(div().text_color(rgb(0xa3a3a3)).child(format!(
-                            "{} にリセット",
-                            at.with_timezone(&chrono::Local).format("%m/%d %H:%M")
-                        )))
-                    },
-                ),
+            usage_window_view(window).when_some(
+                window
+                    .resets_at
+                    .and_then(|at| chrono::DateTime::from_timestamp(at, 0)),
+                |body, at| {
+                    body.child(div().text_color(rgb(0xa3a3a3)).child(format!(
+                        "{} にリセット",
+                        at.with_timezone(&chrono::Local).format("%m/%d %H:%M")
+                    )))
+                },
+            ),
         );
     }
     body.when_some(
@@ -642,27 +419,459 @@ fn account_usage_view(usage: Option<&agent_protocol::operations::AccountUsage>) 
     .into_any_element()
 }
 
+impl Desktop {
+    fn model_panel_content(&self, cx: &Context<Self>) -> AnyElement {
+        let mut body = v_flex().w_full().gap_2();
+        if self.model_panel != ModelPanel::Models {
+            let title = if self.model_panel == ModelPanel::Accounts {
+                "接続先・アカウント"
+            } else {
+                "アカウントを管理"
+            };
+            let header = h_flex()
+                .gap_2()
+                .h(px(44.))
+                .child(
+                    self.icon_button(
+                        "model-panel-back",
+                        IconName::ArrowLeft,
+                        "戻る",
+                        cx,
+                        |s, _, _| {
+                            s.account_sign_out = None;
+                            s.model_panel = match s.model_panel {
+                                ModelPanel::Manage => {
+                                    s.model_provider = None;
+                                    ModelPanel::Accounts
+                                }
+                                _ => ModelPanel::Models,
+                            };
+                        },
+                    )
+                    .disabled(self.snapshot.account.login.is_some()),
+                )
+                .child(div().text_base().child(title));
+            return body
+                .child(header)
+                .child(
+                    div()
+                        .id("model-accounts-scroll")
+                        .max_h(px(440.))
+                        .overflow_y_scroll()
+                        .child(self.account_controls(self.model_panel == ModelPanel::Manage, cx)),
+                )
+                .into_any_element();
+        }
+        let provider = self.model_provider.unwrap_or_else(|| {
+            self.snapshot
+                .model_provider_for_draft(self.draft_key().into())
+        });
+        let disabled = self.account_busy
+            || self.busy > 0
+            || !self.snapshot.connected
+            || self.snapshot.account.login.is_some();
+        let entity = cx.entity().downgrade();
+        body = body.child(
+            h_flex()
+                .w_full()
+                .h(px(44.))
+                .px_2()
+                .justify_between()
+                .border_b_1()
+                .border_color(rgb(0x3b3b3b))
+                .child(
+                    div()
+                        .id("model-agent-label")
+                        .debug_selector(|| "model-agent-label".into())
+                        .text_base()
+                        .line_height(px(20.))
+                        .font_weight(FontWeight::NORMAL)
+                        .child("エージェント"),
+                )
+                .child(
+                    Button::new("model-agent")
+                        .accessibility_label("エージェントを選択")
+                        .child(
+                            div()
+                                .text_base()
+                                .line_height(px(20.))
+                                .font_weight(FontWeight::NORMAL)
+                                .child(match provider {
+                                    ProviderKind::Codex => "Codex",
+                                    ProviderKind::Claude => "Claude Code",
+                                }),
+                        )
+                        .child(Icon::new(IconName::ChevronRight).size(px(16.)))
+                        .large()
+                        .px_0()
+                        .debug_selector(|| "model-agent".into())
+                        .ghost()
+                        .disabled(disabled)
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for (provider, label) in [
+                                (ProviderKind::Codex, "Codex"),
+                                (ProviderKind::Claude, "Claude Code"),
+                            ] {
+                                let entity = entity.clone();
+                                menu = menu.item(PopupMenuItem::new(label).on_click(
+                                    move |_, _, cx| {
+                                        let _ = entity.update(cx, |s, cx| {
+                                            s.model_provider = Some(provider);
+                                            if let Some(model) = s
+                                                .snapshot
+                                                .model_for_provider(s.draft_key().into(), provider)
+                                            {
+                                                s.dispatch(Intent::SelectModel {
+                                                    thread_id: s.draft_key().into(),
+                                                    model,
+                                                });
+                                            }
+                                            cx.notify();
+                                        });
+                                    },
+                                ));
+                            }
+                            menu
+                        }),
+                ),
+        );
+        let account =
+            self.snapshot
+                .account
+                .accounts
+                .as_ref()
+                .and_then(|accounts| {
+                    accounts.accounts.iter().find(|account| {
+                        account.provider == provider && accounts.is_selected(account)
+                    })
+                });
+        body = body.child(
+            Button::new("model-account-summary")
+                .accessibility_label("接続先・アカウントと週間残量")
+                .ghost()
+                .w_full()
+                .h_auto()
+                .debug_selector(|| "model-account-summary".into())
+                .p_2()
+                .rounded(px(8.))
+                .on_click(cx.listener(|s, _, _, cx| {
+                    s.model_panel = ModelPanel::Accounts;
+                    cx.notify();
+                }))
+                .child(
+                    v_flex()
+                        .id("model-account-row")
+                        .debug_selector(|| "model-account-row".into())
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_2()
+                                .text_base()
+                                .line_height(px(20.))
+                                .font_weight(FontWeight::NORMAL)
+                                .child(
+                                    div()
+                                        .id("model-account-label")
+                                        .debug_selector(|| "model-account-label".into())
+                                        .flex_shrink_0()
+                                        .child("接続先・アカウント"),
+                                )
+                                .child(
+                                    div().flex_1().min_w_0().text_right().truncate().child(
+                                        account
+                                            .map_or("未選択", |a| {
+                                                a.email.as_deref().unwrap_or(&a.id)
+                                            })
+                                            .to_owned(),
+                                    ),
+                                )
+                                .child(Icon::new(IconName::ChevronRight).size(px(16.))),
+                        )
+                        .child(weekly_usage_view(
+                            account
+                                .map(|a| self.snapshot.account_weekly_usage(a.id.clone()))
+                                .unwrap_or_default(),
+                        )),
+                ),
+        );
+        body = body
+            .child(div().h(px(1.)).w_full().bg(rgb(0x3b3b3b)))
+            .child(
+                Input::new(&self.model_search)
+                    .prefix(IconName::Search)
+                    .border_1()
+                    .border_color(rgb(0x454b55))
+                    .large()
+                    .aria_label("モデルを検索"),
+            );
+        let models = self
+            .snapshot
+            .provider_models_matching(provider, self.model_search.read(cx).value().to_string());
+        let mut list = v_flex()
+            .id("model-catalog")
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .gap_1();
+        if models.is_empty() {
+            list = list.child("利用可能なモデルがありません");
+        }
+        for model in models {
+            let value = model.model.clone();
+            let selector = format!("model-choice-{}", model.id);
+            let selected = self.draft().model.as_ref() == Some(&model.model);
+            list = list.child(
+                Button::new(selector.clone())
+                    .accessibility_label(model.display_name.clone())
+                    .on_click(cx.listener(move |s, _, _, _| {
+                        s.dispatch(Intent::SelectModel {
+                            thread_id: s.draft_key().into(),
+                            model: value.clone(),
+                        });
+                    }))
+                    .debug_selector(move || selector.clone())
+                    .ghost()
+                    .w_full()
+                    .h(px(44.))
+                    .px_2()
+                    .disabled(disabled)
+                    .selected(selected)
+                    .when(selected, |button| button.bg(rgb(0x343b46)))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_base()
+                                    .line_height(px(20.))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .child(model.display_name),
+                            )
+                            .when(selected, |row| {
+                                row.child(
+                                    Icon::new(IconName::Check)
+                                        .size(px(20.))
+                                        .text_color(rgb(0x5aa2ff)),
+                                )
+                            }),
+                    ),
+            );
+        }
+        body.child(list)
+            .children(
+                self.snapshot
+                    .model_error_messages()
+                    .into_iter()
+                    .map(|error| {
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xff7777))
+                            .child(error_message(&error))
+                    }),
+            )
+            .when(!self.error.is_empty(), |body| {
+                body.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xff7777))
+                        .child(error_message(&self.error)),
+                )
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn fast_control(&self, cx: &Context<Self>) -> AnyElement {
+        let controls = self.snapshot.model_quick_controls(self.draft_key().into());
+        let Some(next) = controls.toggle_fast_to else {
+            return div().into_any_element();
+        };
+        let label = if controls.fast {
+            "Fast：オン"
+        } else {
+            "Fast：オフ"
+        };
+        self.icon_button(
+            "model-fast",
+            Icon::default().path("bex/bolt.svg"),
+            label,
+            cx,
+            move |s, _, _| {
+                s.dispatch(Intent::SelectServiceTier {
+                    thread_id: s.draft_key().into(),
+                    service_tier: next.clone(),
+                });
+            },
+        )
+        .debug_selector(|| "model-fast".into())
+        .w(px(40.))
+        .h(px(44.))
+        .text_color(if controls.fast {
+            rgb(0x78adff)
+        } else {
+            rgb(0x999999)
+        })
+        .disabled(!self.snapshot.connected || self.account_busy || self.busy > 0)
+        .into_any_element()
+    }
+
+    pub(super) fn effort_control(&self, cx: &Context<Self>) -> AnyElement {
+        let controls = self.snapshot.model_quick_controls(self.draft_key().into());
+        if controls.efforts.is_empty() {
+            return div().into_any_element();
+        }
+        let label = format!("推論の強度：{}", controls.effort);
+        let mut bars = h_flex().items_end().gap(px(2.));
+        for index in 0..controls.efforts.len() {
+            bars = bars.child(
+                div()
+                    .w(px(3.))
+                    .h(px(
+                        6. + 10. * (index + 1) as f32 / controls.efforts.len() as f32
+                    ))
+                    .rounded(px(1.))
+                    .bg(if (index as u32) < controls.effort_level {
+                        rgb(0x78adff)
+                    } else {
+                        rgb(0x555555)
+                    }),
+            );
+        }
+        let entity = cx.entity().downgrade();
+        Button::new("model-effort")
+            .child(bars)
+            .ghost()
+            .w(px(44.))
+            .h(px(44.))
+            .debug_selector(|| "model-effort".into())
+            .tooltip(label.clone())
+            .accessibility_label(label)
+            .disabled(
+                !self.snapshot.connected
+                    || self.account_busy
+                    || self.busy > 0
+                    || self.snapshot.account.login.is_some(),
+            )
+            .dropdown_menu_with_anchor(Anchor::BottomRight, move |mut menu, _, _| {
+                for effort in &controls.efforts {
+                    let value = effort.clone();
+                    let entity = entity.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(effort.clone())
+                            .checked(*effort == controls.effort)
+                            .on_click(move |_, _, cx| {
+                                let _ = entity.update(cx, |s, cx| {
+                                    s.dispatch(Intent::SelectEffort {
+                                        thread_id: s.draft_key().into(),
+                                        effort: value.clone(),
+                                    });
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
+    }
+}
+
+fn weekly_usage_view(windows: Vec<agent_protocol::operations::UsageWindow>) -> AnyElement {
+    let mut body = v_flex()
+        .w_full()
+        .gap_2()
+        .text_sm()
+        .font_weight(FontWeight::NORMAL);
+    if windows.is_empty() {
+        return body
+            .text_color(rgb(0xa3a3a3))
+            .child("残量未取得")
+            .into_any_element();
+    }
+    for window in windows {
+        body = body.child(
+            h_flex()
+                .w_full()
+                .gap_3()
+                .child(usage_bar(window.remaining_percent).flex_1())
+                .child(
+                    div()
+                        .line_height(px(20.))
+                        .text_color(rgb(0xa3a3a3))
+                        .child(format!("{}%", window.remaining_percent)),
+                ),
+        );
+    }
+    body.into_any_element()
+}
+
+fn usage_window_view(window: &agent_protocol::operations::UsageWindow) -> Div {
+    v_flex()
+        .w_full()
+        .gap_1()
+        .child(
+            h_flex()
+                .justify_between()
+                .gap_2()
+                .child(window.label.clone())
+                .child(format!("残り {}%", window.remaining_percent)),
+        )
+        .child(usage_bar(window.remaining_percent))
+}
+
+fn usage_bar(remaining_percent: u32) -> Div {
+    div()
+        .h(px(4.))
+        .w_full()
+        .rounded(px(4.))
+        .bg(rgb(0x474747))
+        .child(
+            div()
+                .h_full()
+                .w(relative(remaining_percent.min(100) as f32 / 100.))
+                .rounded(px(4.))
+                .bg(if remaining_percent <= 20 {
+                    rgb(0xe9b56f)
+                } else {
+                    rgb(0x8acfac)
+                }),
+        )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Desktop, Draft, Mode, ProviderKind, RemoteHost};
+    use super::{Desktop, Draft, Mode, ModelPanel, RemoteHost};
     use gpui_kit as gpui;
-    use gpui_kit::{
-        AppContext, Context, Entity, IntoElement, Modifiers, ParentElement, Render, Styled,
-        TestAppContext, Window, div, px,
-    };
+    use gpui_kit::component::{h_flex, v_flex};
+    use gpui_kit::{AppContext, Modifiers, Render, TestAppContext};
+    use gpui_kit::{Context, Entity, IntoElement, ParentElement, Styled, Window, px};
     use std::sync::Arc;
 
-    struct SettingsView(Entity<Desktop>);
-    impl Render for SettingsView {
+    struct PickerView(Entity<Desktop>);
+    impl Render for PickerView {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .w(px(400.))
-                .child(self.0.update(cx, |view, cx| view.model_controls(cx)))
+            self.0.update(cx, |view, cx| {
+                v_flex()
+                    .w(px(420.))
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .child(view.fast_control(cx))
+                            .child(view.model_menu(cx))
+                            .child(view.effort_control(cx)),
+                    )
+                    .child(view.model_panel_content(cx))
+            })
         }
     }
 
     #[gpui::test]
-    fn model_settings_filter_services_keep_controls_first_and_confirm_sign_out(
+    fn model_picker_keeps_quick_controls_and_routes_quota_to_account_management(
         cx: &mut TestAppContext,
     ) {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -680,74 +889,84 @@ mod tests {
         });
         let (view, window) = cx.add_window_view(|window, cx| {
             let desktop = cx.new(|cx| Desktop::new(Mode::SideChat {
-                remote: Some(RemoteHost { id: "fixture".into(), name: "fixture".into(), ticket: "invalid-fixture-ticket".into() }),
-                cwd: "/fixture".into(),
+                remote: Some(RemoteHost { id: "fixture".into(), name: "fixture".into(), ticket: "invalid-fixture-ticket".into() }), cwd: "/fixture".into(),
             }, window, cx));
             desktop.update(cx, |view, _| {
                 let key = view.draft_key().to_owned();
                 let snapshot = Arc::make_mut(&mut view.snapshot);
                 snapshot.connected = true;
                 Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({
-                    "accounts": [{"provider":"codex","id":"first","email":"first@example.invalid"},
-                        {"provider":"claude","id":"claude:second","email":"second@example.invalid"}],
-                    "selectedId":"first", "selectedClaudeId":"claude:second"
+                    "accounts":[{"provider":"codex","id":"first","email":"first@example.invalid","usage":{"windows":[{"label":"週間枠","remainingPercent":42}],"fetchedAt":1}},
+                    {"provider":"claude","id":"claude:second"}],"selectedId":"first","selectedClaudeId":"claude:second"
                 })).unwrap()));
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":"gpt","displayName":"GPT","defaultReasoningEffort":"medium",
-                    "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-                    "serviceTiers":[{"id":"fast"}]},
+                    {"id":"gpt","model":"gpt","displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
                     {"id":"claude:sonnet","model":"claude:sonnet","displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
                 ])).unwrap());
                 Arc::make_mut(&mut snapshot.drafts).insert(key, Arc::new(Draft { model: Some("gpt".into()), ..Default::default() }));
             });
             cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
-            SettingsView(desktop)
+            PickerView(desktop)
         });
         window.run_until_parked();
-        let model = window.debug_bounds("model-choice").unwrap();
-        let effort = window.debug_bounds("model-effort-high").unwrap();
-        let speed = window.debug_bounds("model-speed").unwrap();
-        let account = window.debug_bounds("account-choice-0").unwrap();
         assert!(
-            model.top() < effort.top() && effort.top() < speed.top() && speed.top() < account.top()
+            window.debug_bounds("model-fast").unwrap().right()
+                <= window.debug_bounds("model-select").unwrap().left()
         );
+        assert!(
+            window.debug_bounds("model-select").unwrap().right()
+                <= window.debug_bounds("model-effort").unwrap().left()
+        );
+        assert!(window.debug_bounds("model-choice-gpt").is_some());
+        assert!(window.debug_bounds("model-choice-claude:sonnet").is_none());
+        assert!(window.debug_bounds("account-logout-0").is_none());
+        let summary = window.debug_bounds("model-account-summary").unwrap();
+        let agent_label = window.debug_bounds("model-agent-label").unwrap();
+        let account_label = window.debug_bounds("model-account-label").unwrap();
+        assert!((agent_label.left() - account_label.left()).abs() <= px(1.));
+        assert_eq!(agent_label.size.height, account_label.size.height);
+        let account_row = window.debug_bounds("model-account-row").unwrap();
+        assert!(account_row.size.width >= summary.size.width - px(24.));
+        window.simulate_click(summary.center(), Modifiers::default());
+        window.run_until_parked();
+        assert!(window.debug_bounds("account-choice-0").is_some());
         assert!(window.debug_bounds("account-choice-1").is_none());
+        assert!(window.debug_bounds("account-logout-0").is_none());
+        let manage = window.debug_bounds("model-accounts-manage").unwrap();
+        window.simulate_click(manage.center(), Modifiers::default());
+        window.run_until_parked();
         let logout = window.debug_bounds("account-logout-0").unwrap();
         window.simulate_click(logout.center(), Modifiers::default());
+        window.run_until_parked();
         window.update(|_, cx| {
             assert_eq!(
                 view.read(cx).0.read(cx).account_sign_out.as_deref(),
                 Some("first")
             )
         });
-        window.run_until_parked();
         let cancel = window.debug_bounds("account-logout-cancel-0").unwrap();
         window.simulate_click(cancel.center(), Modifiers::default());
         window.update(|_, cx| assert!(view.read(cx).0.read(cx).account_sign_out.is_none()));
-        let claude = window.debug_bounds("model-provider-Claude").unwrap();
-        window.simulate_click(claude.center(), Modifiers::default());
+        window.update(|window, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                view.model_panel = ModelPanel::Models;
+                view.model_search
+                    .update(cx, |input, cx| input.set_value("no match", window, cx));
+                cx.notify();
+            })
+        });
         window.run_until_parked();
-        assert!(window.debug_bounds("account-choice-0").is_none());
-        assert!(window.debug_bounds("account-choice-1").is_some());
-        assert!(
-            window.debug_bounds("model-effort-high").is_none(),
-            "another provider must not show the active model's controls"
-        );
-        assert!(window.debug_bounds("model-speed").is_none());
+        assert!(window.debug_bounds("model-choice-gpt").is_none());
         window.update(|_, cx| {
             view.read(cx).0.clone().update(cx, |view, cx| {
+                view.model_panel = ModelPanel::Manage;
                 view.account_busy = true;
                 cx.notify();
             })
         });
         window.run_until_parked();
-        let codex = window.debug_bounds("model-provider-Codex").unwrap();
-        window.simulate_click(codex.center(), Modifiers::default());
-        window.update(|_, cx| {
-            assert_eq!(
-                view.read(cx).0.read(cx).model_provider,
-                Some(ProviderKind::Claude)
-            )
-        });
+        let claude = window.debug_bounds("model-provider-Claude").unwrap();
+        window.simulate_click(claude.center(), Modifiers::default());
+        window.update(|_, cx| assert!(view.read(cx).0.read(cx).model_provider.is_none()));
     }
 }

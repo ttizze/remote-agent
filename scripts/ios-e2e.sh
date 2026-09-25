@@ -32,7 +32,7 @@ if [[ $# == 0 ]]; then
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorOpensAccountManagementFromSettingsAndModelPicker \
         testSimulatorSignsInDirectlyFromModelSettings \
-        testSimulatorAccountOwnsModelEffortAndSpeed \
+        testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone \
         testSimulatorSwitchesCodexAccountsAndForksConversation \
         testSimulatorAddsClaudeAccountAndKeepsCodexSelected \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \

@@ -89,21 +89,29 @@ retrieval and reopening.
 
 ## Model and account settings
 
-Desktop's composer opens the same model/account controls used in Settings.
-Like iPhone, show the Codex/Claude service selector first, then model settings,
-then accounts for that service. Model settings contain a model menu, discrete
-reasoning-effort buttons and a separate speed menu when supported by the model.
-Use the core account catalog and active-draft projection; switching the viewed
-service must not display the other service's reasoning or speed controls.
-Account selection, sign-in, usage refresh and confirmed sign-out are available
-in the same view. Disable changes while disconnected, during account operations
-or while signing in. Account/model changes continue through the shared Store.
+Desktop and iPhone keep only Fast, model name and reasoning-strength icons in
+that order immediately before microphone and send, aligned to the right.
+Controls have no persistent border or model chevron. Fast toggles directly;
+effort opens the model's supported choices and its icon indicates the current
+level. Hide unsupported controls, and retain accessible labels and values.
+
+The model name opens a searchable catalog with separate agent and
+connection/account rows. The account row includes the Host-reported weekly
+quota windows; clicking it opens account switching, then account management
+(add/login/confirmed sign-out). Settings opens that same management view.
+Never invent quota values, account nicknames, unavailable agents or unsupported
+agent/connection combinations. Current Host adapters remain Codex and Claude;
+Pi and third-party connection adapters are not implied by the picker UI.
+Refresh must not change the selected provider. Account changes retain supported
+model/effort/speed choices, and normalize only settings the new catalog lacks.
+Account/model changes continue through the shared Store.
 
 Acceptance: desktop
-`model_settings_filter_services_keep_controls_first_and_confirm_sign_out`
-checks native controls, service filtering, layout order, busy-state locking and
-sign-out cancellation. Core `account_selection_owns_catalog_model_effort_and_speed`
-checks account selection and draft normalization.
+`model_picker_keeps_quick_controls_and_routes_quota_to_account_management`, core
+`quick_controls_use_capabilities_and_saved_values_without_inventing_quotas` and
+`account_selection_preserves_supported_settings_and_normalizes_new_catalog`, and iOS
+`testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone` cover the new
+layout, capability filtering, navigation, quota and selection behavior.
 
 ## Project registration
 
@@ -440,18 +448,18 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 - Desktop and iPhone open model/account selection from the composer. The trigger
   shows the model name (or モデル before a model is known), rather than an unlabeled
   gauge. No account controls are added to the conversation header.
-- Model and reasoning/speed controls belong inside the active account card.
-  Only that account's provider models are offered; inactive accounts show no
-  independent model or effort controls. Selecting an account fetches its current
-  catalog and chooses supported model/effort/speed defaults together. A catalog
-  refresh must not silently switch a draft to another provider. Models without
-  effort or speed options show no such controls.
+- Model search belongs in the model picker; reasoning and Fast are composer
+  quick controls. Both clients use core capability and weekly-usage projections.
+  Selecting an account fetches its current catalog and retains supported draft
+  choices. A catalog refresh must not silently switch to another provider.
+- Composer model text uses its natural width; compact spacing retains
+  44-point quick-control touch targets.
 - Account choices use provider, email and plan; no invented 個人/仕事 labels.
   Each account shows its own reported quota windows as remaining percentages.
   The management view also shows reset times and the time fetched; picker rows
   stay compact so the model controls and management link remain easy to reach. Unknown/failed usage stays unavailable rather
   than appearing as zero usage or full remaining capacity.
-- アカウントを管理 in the model picker and アカウント in Settings reach the same
+- アカウントを管理 inside the account chooser and アカウント in Settings reach the same
   management view, including add/login/logout. iPhone login is owned by that view,
   not duplicated in the model picker. Existing worktree settings navigation remains.
 - Account selections retain the existing Host-wide, per-provider scope; the UI
@@ -467,7 +475,7 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 Acceptance: account picker desktop interaction test, Host account integration
 checks for both providers, and iOS
 `testSimulatorOpensAccountManagementFromSettingsAndModelPicker`,
-`testSimulatorAccountOwnsModelEffortAndSpeed`,
+`testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone`,
 `testSimulatorSwitchesCodexAccountsAndForksConversation`, and
 `testSimulatorAddsClaudeAccountAndKeepsCodexSelected`.
 

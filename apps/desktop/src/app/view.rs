@@ -287,13 +287,13 @@ impl Desktop {
     pub(super) fn icon_button(
         &self,
         id: &'static str,
-        icon: IconName,
+        icon: impl Into<Icon>,
         label: &'static str,
         cx: &Context<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Button {
         Button::new(id)
-            .icon(icon)
+            .icon(icon.into())
             .small()
             .ghost()
             .tooltip(label)

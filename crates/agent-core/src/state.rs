@@ -185,35 +185,6 @@ pub struct Snapshot {
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
-    pub fn account_models(&self, id: String) -> Vec<Model> {
-        let Some(account) = self.account.accounts.as_ref().and_then(|accounts| {
-            accounts
-                .accounts
-                .iter()
-                .find(|account| account.id == id && accounts.is_selected(account))
-        }) else {
-            return Vec::new();
-        };
-        crate::models::provider_models(&self.models, account.provider)
-    }
-
-    pub fn account_is_active_for_draft(&self, id: String, thread_id: String) -> bool {
-        let selected = self
-            .drafts
-            .get(&thread_id)
-            .and_then(|draft| draft.model.as_deref());
-        self.account.accounts.as_ref().is_some_and(|accounts| {
-            accounts.accounts.iter().any(|account| {
-                account.id == id
-                    && accounts.is_selected(account)
-                    && self.models.iter().any(|model| {
-                        Some(model.model.as_str()) == selected
-                            && crate::models::model_provider(&model.model) == account.provider
-                    })
-            })
-        })
-    }
-
     pub fn terminal_view(&self, handle: String) -> Option<TerminalView> {
         self.terminals.get(&handle).map(|terminal| TerminalView {
             status: match terminal.phase {

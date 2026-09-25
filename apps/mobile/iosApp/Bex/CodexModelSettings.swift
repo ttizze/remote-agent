@@ -14,14 +14,6 @@ extension BexAppViewModel {
         snapshot.draft(key: coreDraftKey).model ?? ""
     }
 
-    var selectedEffort: String {
-        snapshot.draft(key: coreDraftKey).effort ?? ""
-    }
-
-    var selectedServiceTier: String {
-        snapshot.draft(key: coreDraftKey).serviceTier ?? ""
-    }
-
     var currentModel: Model? {
         models.first { $0.model == selectedModel }
     }

@@ -18,7 +18,7 @@ impl Desktop {
         for (id, label, icon, page) in [
             (
                 "settings-accounts",
-                "モデルとアカウント",
+                "接続先・アカウント",
                 IconName::User,
                 SettingsPage::Accounts,
             ),
@@ -73,7 +73,7 @@ impl Desktop {
     pub(super) fn settings(&self, cx: &Context<Self>) -> AnyElement {
         let (title, subtitle) = match self.settings_page {
             SettingsPage::Accounts => (
-                "モデルとアカウント",
+                "接続先・アカウント",
                 if self.remote.is_some() {
                     "接続先に保存した Codex・Claude アカウントを管理します。"
                 } else {
@@ -119,7 +119,7 @@ impl Desktop {
             );
         }
         body = match self.settings_page {
-            SettingsPage::Accounts => body.child(self.model_controls(cx)),
+            SettingsPage::Accounts => body.child(self.account_controls(true, cx)),
             SettingsPage::Connections => body.children(self.hosts.clone()),
             SettingsPage::Worktrees => body.child(self.worktree_settings(cx)),
         };
