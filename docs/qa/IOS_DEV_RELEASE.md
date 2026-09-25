@@ -1,8 +1,8 @@
 # BEX Dev for iOS
 
 BEX Dev is a separate TestFlight app (`com.ttizze.b-codex.dev`). It can be
-installed alongside BEX; its preferences, snapshots, and default Keychain
-access group are separate. Pair it with the development Host explicitly.
+installed alongside production BEX (`dev.remoteagent.mobile.ios`). Its
+preferences, snapshots, and default Keychain access group are separate. Pair it with the development Host explicitly.
 
 Build the device core with `nix develop . --command scripts/build-agent-ios.sh device`.
 Archive the existing Bex scheme in Release with
