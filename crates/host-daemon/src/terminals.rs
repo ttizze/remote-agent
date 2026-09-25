@@ -540,7 +540,7 @@ mod tests {
             let size = TerminalSize { cols: 80, rows: 24 };
             let router = SessionRouter::new();
             let terminals = Terminals::default();
-            let first = router.open_authenticated_session(128, Some("phone".into()));
+            let first = router.open_authenticated_session(Some("phone".into()));
             for handle in ["one", "two"] {
                 terminals.start(router.clone(), first.id(), handle.into(), cwd.clone(), size).await.unwrap();
             }
@@ -549,7 +549,7 @@ mod tests {
             assert!(terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: b"a".to_vec() })).await.is_err());
             terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "two".into(), data: "true\n".as_bytes().to_vec() })).await.unwrap();
             router.close_session(first.id()); terminals.close_session(first.id());
-            let mut second = router.open_authenticated_session(128, Some("phone".into()));
+            let mut second = router.open_authenticated_session(Some("phone".into()));
             terminals.start(router.clone(), second.id(), "one".into(), cwd.clone(), size).await.unwrap();
             let mut restored = false;
             while let Some(line) = second.recv().await {
@@ -567,7 +567,7 @@ mod tests {
                     && bytes.starts_with(b"\x1b[") && bytes.ends_with(b"R") {break;}
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            let stranger=router.open_authenticated_session(128,Some("other-phone".into()));
+            let stranger=router.open_authenticated_session(Some("other-phone".into()));
             assert!(terminals.request(stranger.id(),&Call::KillTerminal(agent_protocol::operations::TerminalKill { process_handle: "one".into() })).await.is_err());
             terminals.start(router.clone(),stranger.id(),"one".into(),cwd,size).await.unwrap();
             assert_eq!(terminals.records.lock().unwrap().len(),3);
@@ -584,7 +584,7 @@ mod tests {
                 let cwd = std::fs::canonicalize(directory.path()).unwrap();
                 let terminals = Terminals::default();
                 let router = SessionRouter::new();
-                let connection = router.open_session(64);
+                let connection = router.open_session();
                 terminals.start(router, connection.id(), "jobs".into(), directory.path().to_string_lossy().into_owned(), TerminalSize {rows:24, cols:80}).await.unwrap();
                 // Linux validation runs this Host with SHELL=/bin/sh (dash).
                 // Disable interactive history expansion for Bash on macOS.
@@ -632,7 +632,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let terminals = Terminals::default();
         let router = SessionRouter::new();
-        let connection = router.open_session(16);
+        let connection = router.open_session();
         let mut starting = Box::pin(terminals.start(
             router.clone(),
             connection.id(),

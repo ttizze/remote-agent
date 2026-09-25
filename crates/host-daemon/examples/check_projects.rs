@@ -8,7 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let projects = ProjectStore::from_environment()?;
     let server = Arc::new(CodexAppServer::spawn(AppServerConfig::default()).await?);
     let service = HostRpcService::new(Ok(server.clone()), projects);
-    let session = service.open_session(128);
+    let session = service.open_session();
     let reply = service
         .dispatch(
             session.id(),

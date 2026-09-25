@@ -636,7 +636,7 @@ mod tests {
     async fn provider_process_events_cannot_mutate_host_owned_terminals() {
         use futures_util::FutureExt;
         let router = super::SessionRouter::new();
-        let mut connection = router.open_session(8);
+        let mut connection = router.open_session();
         for method in ["process/outputDelta", "process/exited"] {
             let line = serde_json::json!({"method":method,"params":{"processHandle":"owned","deltaBase64":"aW5qZWN0ZWQ=","exitCode":0}}).to_string();
             super::event(&router, &super::RpcMessage::parse(&line).unwrap()).unwrap();

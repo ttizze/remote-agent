@@ -296,20 +296,16 @@ impl HostRpcService {
             browser.revoke_device(principal).await;
         }
     }
-    pub fn open_session(&self, capacity: usize) -> HostSession {
+    pub fn open_session(&self) -> HostSession {
         self.start_codex_event_pump();
-        self.inner.router.open_session(capacity)
+        self.inner.router.open_session()
     }
 
-    pub(crate) fn open_authenticated_session(
-        &self,
-        capacity: usize,
-        principal: String,
-    ) -> HostSession {
+    pub(crate) fn open_authenticated_session(&self, principal: String) -> HostSession {
         self.start_codex_event_pump();
         self.inner
             .router
-            .open_authenticated_session(capacity, Some(principal))
+            .open_authenticated_session(Some(principal))
     }
 
     pub fn close_session(&self, session: SessionId) {
@@ -1714,7 +1710,7 @@ mod tests {
             Err("must not be consulted".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
-        let session = service.open_session(16);
+        let session = service.open_session();
         for params in [
             serde_json::json!({}),
             serde_json::json!({"threadId":"claude:native"}),
@@ -1738,7 +1734,7 @@ mod tests {
             Err("not available".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
-        let session = service.open_session(16);
+        let session = service.open_session();
         for (method, expected) in [
             ("thread/fork", "unsupported_operation"),
             ("thread/name/set", "unsupported_operation"),
@@ -1764,7 +1760,7 @@ mod tests {
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
-        let session = service.open_session(16);
+        let session = service.open_session();
         for method in ["turn/start", "turn/steer", "thread/queue/add"] {
             let call = agent_protocol::protocol::json_boundary::call(
                 method,
@@ -1813,7 +1809,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let session = service.open_session(16);
+        let session = service.open_session();
         let call =
             agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
                 session: agent_protocol::session::SessionRef {

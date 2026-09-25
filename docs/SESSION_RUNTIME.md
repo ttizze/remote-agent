@@ -80,7 +80,7 @@ lifetime management, not an OS sandbox against deliberately detached processes.
 | Requested turn range | Positive client-supplied range; no Host 1,000-turn ceiling or retained window |
 | History response | No Host snapshot cache or 4 MiB history budget; large items have explicit deferred bodies |
 | Inline items | Tool items above 512 bytes load details on expansion; deferred command headers omit output. Messages and images above 1 MiB load through item details |
-| Outbound connection queue | Both item count and 16 MiB; slow queue overflow closes that connection, but an oversized single RPC returns `response_too_large` without disconnecting |
+| Outbound connection queue | Shared 16 MiB budget including frame entries (no message-count cutoff for buffered bursts); slow queue overflow closes that connection, but an oversized single RPC returns `response_too_large` without disconnecting |
 | Unresolved requests | 32 per session, 64 KiB each; oversized requests cannot be approved |
 | In-flight input IDs | At most 128 per executing session; released when execution completes |
 | Claude live/idle processes | 8; idle retention 60 seconds, record capacity 128 |

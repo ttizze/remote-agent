@@ -150,9 +150,7 @@ impl HostRuntime {
             if !record.trust.allowed.contains(&node) {
                 return Err(anyhow::anyhow!("peer is not authorized"));
             }
-            let session = self
-                .service
-                .open_authenticated_session(128, node.to_string());
+            let session = self.service.open_authenticated_session(node.to_string());
             self.active
                 .lock()
                 .unwrap()

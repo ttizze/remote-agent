@@ -1481,7 +1481,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         std::fs::write(&project_state, serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")));
-        let mut session = service.open_session(64);
+        let mut session = service.open_session();
         async fn request(service: &HostRpcService, session: &mut host_daemon::HostSession, method: &str, params: Value) -> Value {
             let reply = service.dispatch(session.id(), &agent_protocol::protocol::json_boundary::call(method, params).unwrap()).await.unwrap();
             let response = agent_protocol::protocol::json_boundary::reply(method, &reply.initial).unwrap();
@@ -1522,7 +1522,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
                 chat_ids.push(global["thread"]["id"].clone());
         }
         let restarted = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")));
-        let mut restarted_session = restarted.open_session(64);
+        let mut restarted_session = restarted.open_session();
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
         for id in &chat_ids {
             let read = request(&restarted, &mut restarted_session, "host/session/open", json!({"session":{"provider":"codex","id":id},"limit":5})).await["response"].clone();

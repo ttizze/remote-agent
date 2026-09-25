@@ -38,7 +38,7 @@ pub type SessionId = u64;
 /// A live authenticated session's bounded outbound queue.
 pub struct HostSession {
     id: SessionId,
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
     state: Weak<Mutex<State>>,
 }
@@ -46,15 +46,17 @@ pub struct HostSession {
 /// The response stream owns its subscription; dropping it unsubscribes.
 pub struct HostSubscription {
     id: uuid::Uuid,
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
     state: Weak<Mutex<State>>,
 }
 impl HostSubscription {
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         let line = self.receiver.recv().await?;
-        self.queued_bytes
-            .fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+        self.queued_bytes.fetch_sub(
+            frame_cost(line.capacity()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Some(line)
     }
 }
@@ -64,8 +66,10 @@ impl Drop for HostSubscription {
             lock_state(&state).subscriptions.remove(&self.id);
         }
         while let Ok(line) = self.receiver.try_recv() {
-            self.queued_bytes
-                .fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+            self.queued_bytes.fetch_sub(
+                frame_cost(line.capacity()),
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
     }
 }
@@ -89,8 +93,10 @@ impl HostSession {
 
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
         let line = self.receiver.recv().await?;
-        self.queued_bytes
-            .fetch_sub(line.len(), std::sync::atomic::Ordering::Relaxed);
+        self.queued_bytes.fetch_sub(
+            frame_cost(line.capacity()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Some(line)
     }
 }
@@ -117,16 +123,27 @@ pub(crate) struct SessionRouter {
 }
 
 const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+
+// Count allocated payload capacity and the entry, including empty frames.
+// The channel has no message-count cutoff: a buffered provider burst must not
+// disconnect a healthy client before its network writer gets scheduled.
+fn frame_cost(capacity: usize) -> usize {
+    capacity + std::mem::size_of::<Vec<u8>>()
+}
 #[derive(Clone)]
 struct Outbound {
     principal: String,
-    sender: mpsc::Sender<Vec<u8>>,
+    sender: mpsc::UnboundedSender<Vec<u8>>,
     bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Outbound {
-    fn try_send(&self, line: Vec<u8>) -> Result<(), mpsc::error::TrySendError<Vec<u8>>> {
+    fn try_send(
+        &self,
+        session: SessionId,
+        line: Vec<u8>,
+    ) -> Result<(), mpsc::error::TrySendError<Vec<u8>>> {
         use std::sync::atomic::Ordering::Relaxed;
-        let length = line.len();
+        let length = frame_cost(line.capacity());
         if self
             .bytes
             .fetch_update(Relaxed, Relaxed, |bytes| {
@@ -136,10 +153,16 @@ impl Outbound {
             })
             .is_err()
         {
+            tracing::warn!(target: "bex", operation = "host.session.queue_failed", message = %format_args!(
+                "session={session} reason=byte_limit queued_bytes={} frame_bytes={} frame_cost={length} limit_bytes={MAX_QUEUED_BYTES}",
+                self.bytes.load(Relaxed), line.len()));
             return Err(mpsc::error::TrySendError::Full(line));
         }
-        self.sender.try_send(line).inspect_err(|_| {
+        self.sender.send(line).map_err(|error| {
             self.bytes.fetch_sub(length, Relaxed);
+            tracing::warn!(target: "bex", operation = "host.session.queue_failed", message = %format_args!(
+                "session={session} reason=receiver_closed frame_bytes={}", error.0.len()));
+            mpsc::error::TrySendError::Closed(error.0)
         })
     }
 }
@@ -201,8 +224,8 @@ impl SessionRouter {
         }
     }
 
-    pub(crate) fn open_session(&self, capacity: usize) -> HostSession {
-        self.open_authenticated_session(capacity, None)
+    pub(crate) fn open_session(&self) -> HostSession {
+        self.open_authenticated_session(None)
     }
 
     pub(crate) fn principal(&self, session: SessionId) -> Result<String, String> {
@@ -213,13 +236,8 @@ impl SessionRouter {
             .ok_or_else(|| "connection is closed".into())
     }
 
-    pub(crate) fn open_authenticated_session(
-        &self,
-        capacity: usize,
-        principal: Option<String>,
-    ) -> HostSession {
-        assert!(capacity > 0, "a Host session queue must have capacity");
-        let (sender, receiver) = mpsc::channel(capacity);
+    pub(crate) fn open_authenticated_session(&self, principal: Option<String>) -> HostSession {
+        let (sender, receiver) = mpsc::unbounded_channel();
         let mut state = lock_state(&self.state);
         let id = allocate_session_id(&mut state);
         let queued_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -413,7 +431,7 @@ impl SessionRouter {
             .map_err(|error| error.to_string())?;
             return Ok(error.into());
         }
-        let (sender, receiver) = mpsc::channel(state.sessions[&session].sender.max_capacity());
+        let (sender, receiver) = mpsc::unbounded_channel();
         let queued_bytes = state.sessions[&session].bytes.clone();
         let principal = state.sessions[&session].principal.clone();
         state.subscriptions.insert(
@@ -532,7 +550,7 @@ impl SessionRouter {
             .get(&session)
             .cloned()
             .ok_or_else(|| format!("RPC session {session} is not open"))?;
-        match sender.try_send(line) {
+        match sender.try_send(session, line) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 remove_session_locked(&mut state, session);
@@ -693,18 +711,23 @@ fn change_locked(
     change: &agent_protocol::session::SessionChange,
 ) {
     let actor = state.executions.entry(target.clone()).or_default();
-    let Ok(next) = change.apply(&actor.live) else {
-        let connections: Vec<_> = state
-            .subscriptions
-            .values()
-            .filter(|(id, _, _)| id == target)
-            .map(|(_, connection, _)| *connection)
-            .collect();
-        for connection in connections {
-            remove_session_locked(state, connection);
+    let next = match change.apply(&actor.live) {
+        Ok(next) => next,
+        Err(reason) => {
+            let connections: Vec<_> = state
+                .subscriptions
+                .values()
+                .filter(|(id, _, _)| id == target)
+                .map(|(_, connection, _)| *connection)
+                .collect();
+            for connection in connections {
+                tracing::warn!(target: "bex", operation = "host.session.invalid_update", message = %format_args!(
+                    "session={connection} reason={reason}"));
+                remove_session_locked(state, connection);
+            }
+            state.executions.retain(|_, actor| actor.release());
+            return;
         }
-        state.executions.retain(|_, actor| actor.release());
-        return;
     };
     actor.live = next;
     let mut failed = Vec::new();
@@ -713,7 +736,7 @@ fn change_locked(
         if id != target {
             continue;
         }
-        if output.try_send(line.clone()).is_err() {
+        if output.try_send(*connection, line.clone()).is_err() {
             failed.push(*connection);
         }
     }
@@ -761,7 +784,7 @@ fn deliver_locked(state: &mut State, deliveries: Vec<(SessionId, Vec<u8>)>) {
         let failed = state
             .sessions
             .get(&session)
-            .is_none_or(|sender| sender.try_send(line).is_err())
+            .is_none_or(|sender| sender.try_send(session, line).is_err())
             .then_some(session);
         if let Some(session) = failed {
             remove_session_locked(state, session);
@@ -830,7 +853,7 @@ mod tests {
     #[tokio::test]
     async fn history_is_not_retained_or_trimmed_and_subscriptions_do_not_pin_execution() {
         let router = SessionRouter::new();
-        let connection = router.open_session(16);
+        let connection = router.open_session();
         let mut turns: Vec<_> = (0..1001)
             .map(|id| {
                 Arc::new(Turn {
@@ -891,7 +914,7 @@ mod tests {
     #[tokio::test]
     async fn aggregate_item_bodies_are_deferred_to_fit_one_rpc() {
         let router = SessionRouter::new();
-        let connection = router.open_session(16);
+        let connection = router.open_session();
         let mut items: Vec<_> = (0..40).map(|id| json!({"id":id.to_string(),"type":"agentMessage","text":"x".repeat(512 * 1024)})).collect();
         items.push(
             json!({"id":"tool","type":"commandExecution","aggregatedOutput":"z".repeat(8192)}),
@@ -919,7 +942,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_rpc_returns_an_error_without_dropping_the_connection_or_subscribing() {
         let router = SessionRouter::new();
-        let connection = router.open_session(16);
+        let connection = router.open_session();
         for _ in 0..2 {
             let response = serde_json::from_value(
                 json!({"thread":{"id":"native","name":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
@@ -943,7 +966,7 @@ mod tests {
     #[tokio::test]
     async fn completion_during_native_read_is_overlaid_before_live_updates() {
         let router = SessionRouter::new();
-        let connection = router.open_session(16);
+        let connection = router.open_session();
         let read = open(&router, "native");
         turn(&router, false);
         router.session_change(
@@ -1071,10 +1094,10 @@ mod tests {
     #[tokio::test]
     async fn byte_budget_disconnects_only_the_slow_connection() {
         let router = SessionRouter::new();
-        let slow = router.open_session(100);
-        let mut healthy = router.open_session(100);
+        let slow = router.open_session();
+        let mut healthy = router.open_session();
         router
-            .send_frame(slow.id(), vec![0; MAX_QUEUED_BYTES])
+            .send_frame(slow.id(), vec![0; MAX_QUEUED_BYTES - frame_cost(0)])
             .unwrap();
         assert!(router.send_frame(slow.id(), b"overflow".to_vec()).is_err());
         router
@@ -1083,68 +1106,102 @@ mod tests {
         assert_eq!(healthy.recv().await.as_deref(), Some(b"current".as_slice()));
     }
 
-    #[test]
-    fn slow_session_subscribers_do_not_block_other_devices_or_destroy_current_state() {
+    #[tokio::test]
+    async fn burst_of_small_updates_keeps_the_connection_and_delivers_every_update() {
         let router = SessionRouter::new();
-        let slow = router.open_session(1);
-        let healthy = router.open_session(8);
+        let mut connection = router.open_session();
         let response: ThreadResponse =
-            serde_json::from_value(serde_json::json!({"thread":{"id":"native","turns":[]}}))
-                .unwrap();
+            serde_json::from_value(json!({"thread":{"id":"native","turns":[]}})).unwrap();
+        let mut subscription = router
+            .finish_session_read(open(&router, "native"), connection.id(), response)
+            .unwrap()
+            .updates
+            .unwrap();
+        // A provider can deliver a buffered burst before the network writer is scheduled.
+        // This is less than 100 KiB, well within the connection's memory budget.
+        for index in 0..512 {
+            router.session_change(
+                &SessionRef::from_thread_id("native").unwrap(),
+                SessionChange::Status {
+                    status: agent_protocol::models::ThreadStatus {
+                        kind: if index % 2 == 0 {
+                            agent_protocol::models::ThreadStatusKind::Active
+                        } else {
+                            agent_protocol::models::ThreadStatusKind::Idle
+                        },
+                    },
+                },
+            );
+        }
+        router
+            .ensure_session(connection.id())
+            .expect("a small burst must not disconnect the client");
+        for index in 0..512 {
+            let change =
+                protocol::decode::<SessionChange>(&subscription.recv().await.unwrap()).unwrap();
+            let SessionChange::Status { status } = change else {
+                panic!("expected status")
+            };
+            assert_eq!(
+                status.kind == agent_protocol::models::ThreadStatusKind::Active,
+                index % 2 == 0
+            );
+            let activity =
+                protocol::decode::<Notification>(&connection.recv().await.unwrap()).unwrap();
+            let Notification::Activity { active, .. } = activity else {
+                panic!("expected activity")
+            };
+            assert_eq!(active, index % 2 == 0);
+        }
+        assert_eq!(
+            connection
+                .queued_bytes
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_session_subscribers_do_not_block_other_devices_or_destroy_current_state() {
+        let router = SessionRouter::new();
+        let slow = router.open_session();
+        let mut healthy = router.open_session();
+        let target = SessionRef::from_thread_id("native").unwrap();
+        let _execution = open(&router, "native");
+        let response: ThreadResponse =
+            serde_json::from_value(json!({"thread":{"id":"native","turns":[]}})).unwrap();
         let mut streams = Vec::new();
         for connection in [slow.id(), healthy.id()] {
-            let read = router
-                .retain_execution(SessionRef::from_thread_id("native").unwrap())
-                .unwrap();
-            let response = router
-                .finish_session_read(read, connection, response.clone())
-                .unwrap();
-            streams.push(response);
+            streams.push(
+                router
+                    .finish_session_read(open(&router, "native"), connection, response.clone())
+                    .unwrap()
+                    .updates
+                    .unwrap(),
+            );
         }
-        let notification = RpcMessage::parse(r#"{"method":"thread/status/changed","params":{"threadId":"native","status":{"type":"active"}}}"#).unwrap();
-        crate::host_rpc::codex::event(&router, &notification).unwrap();
-        crate::host_rpc::codex::event(&router, &notification).unwrap();
+        let change = SessionChange::Turn {
+            completed: false,
+            turn: serde_json::from_value(json!({"id":"turn", "items":[{
+                "id":"answer", "type":"agentMessage", "text":"x".repeat(1024 * 1024)
+            }]}))
+            .unwrap(),
+        };
+        for _ in 0..20 {
+            router.session_change(&target, change.clone());
+            assert!(streams[1].recv().await.is_some());
+            assert!(healthy.recv().await.is_some());
+        }
         assert!(router.ensure_session(slow.id()).is_err());
-        assert!(router.ensure_session(healthy.id()).is_ok());
-        let initial =
-            protocol::decode::<protocol::Response<agent_protocol::session::OpenedSession>>(
-                &streams[1].initial,
-            )
-            .unwrap()
-            .into_value();
-        let update = protocol::decode::<SessionChange>(
-            &streams[1]
-                .updates
-                .as_mut()
-                .unwrap()
-                .receiver
-                .try_recv()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(initial.get("result").is_some());
-        assert!(initial["result"].get("subscriptionId").is_none());
-        assert!(matches!(update, SessionChange::Status { .. }));
-        assert!(
-            streams[0]
-                .updates
-                .as_mut()
-                .unwrap()
-                .receiver
-                .try_recv()
-                .is_ok()
-        );
-        assert!(matches!(
-            streams[0].updates.as_mut().unwrap().receiver.try_recv(),
-            Err(mpsc::error::TryRecvError::Disconnected)
-        ));
-        assert!(lock_state(&router.state).executions.is_empty());
+        router.ensure_session(healthy.id()).unwrap();
+        while streams[0].recv().await.is_some() {}
+        assert!(router.current_turn(&target, "turn").is_some());
     }
 
     #[test]
     fn subscriptions_share_the_connection_budget_and_drop_releases_unread_bytes() {
         let router = SessionRouter::new();
-        let connection = router.open_session(8);
+        let connection = router.open_session();
         let response: ThreadResponse =
             serde_json::from_value(json!({"thread":{"id":"native","turns":[]}})).unwrap();
         let first = router
@@ -1165,10 +1222,20 @@ mod tests {
                 state.sessions[&connection.id()].bytes.clone(),
             )
         };
-        a.try_send(vec![0; MAX_QUEUED_BYTES / 2]).unwrap();
-        assert!(b.try_send(vec![0; MAX_QUEUED_BYTES / 2 + 1]).is_err());
+        a.try_send(connection.id(), Vec::with_capacity(MAX_QUEUED_BYTES / 2))
+            .unwrap();
+        assert!(
+            b.try_send(connection.id(), vec![0; MAX_QUEUED_BYTES / 2 + 1])
+                .is_err()
+        );
         drop(first);
-        b.try_send(vec![0; MAX_QUEUED_BYTES / 2 + 1]).unwrap();
+        assert!(matches!(
+            a.try_send(connection.id(), vec![]),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
+        assert_eq!(budget.load(std::sync::atomic::Ordering::Relaxed), 0);
+        b.try_send(connection.id(), vec![0; MAX_QUEUED_BYTES / 2 + 1])
+            .unwrap();
         drop(second);
         assert_eq!(budget.load(std::sync::atomic::Ordering::Relaxed), 0);
         router.ensure_session(connection.id()).unwrap();
@@ -1177,7 +1244,7 @@ mod tests {
     #[test]
     fn cancellation_and_disconnect_release_an_unfinished_open() {
         let router = SessionRouter::new();
-        let connection = router.open_session(4);
+        let connection = router.open_session();
         let read = router
             .retain_execution(SessionRef::from_thread_id("native").unwrap())
             .unwrap();
@@ -1195,7 +1262,7 @@ mod tests {
 #[test]
 fn identical_native_request_ids_keep_their_provider_owner() {
     let router = SessionRouter::new();
-    let connection = router.open_session(32);
+    let connection = router.open_session();
     let native = serde_json::json!("claude-permission:shared-native-id");
     let mut ids = Vec::new();
     for thread in ["codex-native", "claude:claude-native"] {

@@ -99,14 +99,14 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
         let accounts_dir = directory.path().join("accounts");
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let mut session = service.open_session(256);
+        let mut session = service.open_session();
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"][0]["email"], "desktop@example.invalid");
         assert_eq!(list["result"]["selectedId"], "desktop");
         assert!(list["result"]["accounts"][0]["usage"].is_null());
         std::fs::write(home.join("usage-paused"), "").unwrap();
         let usage_service = service.clone();
-        let mut usage_session = service.open_session(256);
+        let mut usage_session = service.open_session();
         let usage = tokio::spawn(async move {
             call(&usage_service, &mut usage_session, "host/account/usage", json!({"accountId":"desktop"})).await
         });
@@ -177,7 +177,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let mut session = service.open_session(256);
+        let mut session = service.open_session();
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
         assert_eq!(server.initialize_response().codex_home, home.canonicalize().unwrap(), "account selection must retain the conversation configuration home");
         let missing = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"missing"})).await;
@@ -193,7 +193,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
         service.enable_accounts(accounts_dir, config).await.unwrap();
-        let mut session = service.open_session(256);
+        let mut session = service.open_session();
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
         assert!(accounts["result"]["selectedId"].is_null());
         assert!(accounts["result"]["error"].is_string());
@@ -230,7 +230,7 @@ async fn helper_initialization_does_not_block_completed_turns() {
             .enable_accounts(home.join("accounts"), config)
             .await
             .unwrap();
-        let mut session = service.open_session(256);
+        let mut session = service.open_session();
         let started = call(
             &service,
             &mut session,
@@ -250,7 +250,7 @@ async fn helper_initialization_does_not_block_completed_turns() {
             .unwrap(),
         )
         .unwrap();
-        let mut login_session = service.open_session(256);
+        let mut login_session = service.open_session();
         let login_service = service.clone();
         let login = tokio::spawn(async move {
             call(
@@ -309,7 +309,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let mut session = service.open_session(256);
+        let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["selectedId"], "desktop");
         if account["type"] == "apiKey" {
@@ -327,7 +327,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
-        let mut session = service.open_session(256);
+        let mut session = service.open_session();
         assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selectedId"], "desktop");
         let invalid = call(&service, &mut session, "host/account/logout", json!({"accountId":"missing"})).await;
         assert!(invalid.get("error").is_some());
@@ -354,7 +354,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
         service.enable_accounts(accounts_dir.clone(), config).await.unwrap();
-        let mut session = service.open_session(256);
+        let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["accounts"], json!([]));
         assert!(listed["result"]["selectedId"].is_null());
