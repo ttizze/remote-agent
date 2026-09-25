@@ -44,7 +44,7 @@ if [[ $# == 0 ]]; then
         testSimulatorMarksUnseenCompletionUntilOpened \
         testSimulatorDictationPermissionDenialPreservesDraftAndSend \
         testSimulatorDictationContinuesPastThirtySecondsAndReachesHost \
-        testSimulatorBrowsesAllSessionImagesAndSavesTheSelection \
+        testSimulatorOpensOnlyTheTappedImageAndSavesIt \
         testSimulatorCopiesOnlySelectedMessageText \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
         testSimulatorOpensSideChatWithoutLosingOriginalDraft \

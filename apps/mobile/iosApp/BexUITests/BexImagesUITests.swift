@@ -53,43 +53,37 @@ extension BexLaunchUITests {
         openLink("生成画像を開く")
     }
 
-    func testSimulatorBrowsesAllSessionImagesAndSavesTheSelection() throws {
+    func testSimulatorOpensOnlyTheTappedImageAndSavesIt() throws {
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[generated-images] [gallery] Browse all generated images")
+        try startSimulatorConversation(app, promptText: "[generated-images] [gallery] Open only the tapped image")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
         let image = app.images.matching(NSPredicate(
             format: "identifier BEGINSWITH %@",
             "message.image.fixture-generated-inline-"
         )).firstMatch
-        for _ in 0 ..< 10 {
-            if image.exists, image.isHittable {
-                break
-            }
-            app.swipeDown()
-        }
-        XCTAssertTrue(image.waitForExistence(timeout: 10)); image.tap()
-        let position = app.staticTexts["conversation.preview.position"]
-        let complete = expectation(for: NSPredicate(format: "label == %@", "8 / 8"), evaluatedWith: position)
-        wait(for: [complete], timeout: 30)
-        XCTAssertFalse(app.images["conversation.preview.thumbnail.0"].exists)
-        swipePreview(app, to: 8, left: true)
-        for index in stride(from: 7, through: 1, by: -1) {
-            swipePreview(app, to: index, left: false)
-        }
-        swipePreview(app, to: 1, left: false)
+        showImage(image, in: app, upward: false)
+        image.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.buttons["conversation.preview.close"].waitForExistence(timeout: 10))
+        let preview = app.images["conversation.preview.image"]
+        XCTAssertTrue(preview.waitForExistence(timeout: 10))
+        XCTAssertTrue(preview.isHittable)
+        preview.pinch(withScale: 2, velocity: 1)
+        XCTAssertFalse(app.staticTexts["conversation.preview.position"].exists)
         let save = app.buttons["conversation.preview.save"]
         let ready = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: save)
         wait(for: [ready], timeout: 15)
-        captureScreen(app, named: "Session image gallery including older turns and item gaps")
+        captureScreen(app, named: "Only the tapped image opens even in a conversation with many images")
         save.tap()
         let saved = expectation(
             for: NSPredicate(format: "label == %@ AND enabled == false", "保存済み"),
             evaluatedWith: save
         )
         wait(for: [saved], timeout: 20)
-        swipePreview(app, to: 2, left: true)
-        let next = expectation(for: NSPredicate(format: "label == %@ AND enabled == true", "保存"), evaluatedWith: save)
-        wait(for: [next], timeout: 15)
+        app.swipeLeft()
+        app.swipeRight()
+        XCTAssertEqual(save.label, "保存済み")
+        XCTAssertFalse(save.isEnabled)
+        XCTAssertFalse(app.staticTexts["conversation.preview.position"].exists)
         app.buttons["conversation.preview.close"].tap()
         XCTAssertTrue(image.waitForExistence(timeout: 10))
     }
@@ -109,6 +103,7 @@ extension BexLaunchUITests {
         let save = app.buttons["conversation.preview.save"]
         let close = app.buttons["conversation.preview.close"]
         XCTAssertTrue(close.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.images["conversation.preview.image"].waitForExistence(timeout: 10))
         XCTAssertTrue(save.exists)
         XCTAssertLessThan(save.frame.midX, close.frame.midX)
         XCTAssertGreaterThan(save.frame.midX, app.frame.midX)
@@ -129,29 +124,22 @@ extension BexLaunchUITests {
         showImage(messageImage, in: app, upward: false)
     }
 
-    func swipePreview(_ app: XCUIApplication, to index: Int, left: Bool) {
-        let position = app.staticTexts["conversation.preview.position"]
-        let start = app.coordinate(withNormalizedOffset: CGVector(dx: left ? 0.8 : 0.2, dy: 0.5))
-        let end = app.coordinate(withNormalizedOffset: CGVector(dx: left ? 0.2 : 0.8, dy: 0.5))
-        start.press(forDuration: 0.05, thenDragTo: end)
-        let changed = expectation(
-            for: NSPredicate(format: "label == %@", "\(index) / 8"), evaluatedWith: position
-        )
-        wait(for: [changed], timeout: 10)
-    }
-
     func showImage(_ image: XCUIElement, in app: XCUIApplication, upward: Bool) {
-        for _ in 0 ..< 12 {
-            if image.exists, image.isHittable {
+        for _ in 0 ..< 15 {
+            if image.exists, image.isHittable,
+               image.frame.midY > app.frame.height * 0.2,
+               image.frame.midY < app.frame.height * 0.65 {
                 return
             }
-            if upward {
-                app.swipeUp()
-            } else {
-                app.swipeDown()
-            }
+            let below = image.exists ? image.frame.midY > app.frame.height * 0.65 : upward
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: below ? 0.55 : 0.35))
+                .press(forDuration: 0.05, thenDragTo: app.coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.5, dy: below ? 0.35 : 0.55)
+                ))
         }
         XCTAssertTrue(image.waitForExistence(timeout: 10))
         XCTAssertTrue(image.isHittable)
+        XCTAssertGreaterThan(image.frame.midY, app.frame.height * 0.2)
+        XCTAssertLessThan(image.frame.midY, app.frame.height * 0.65)
     }
 }
