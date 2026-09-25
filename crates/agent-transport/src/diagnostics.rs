@@ -1,4 +1,4 @@
-//! Explicit diagnostic fields, never arbitrary payloads or third-party traces.
+//! Explicit diagnostic fields and selected transport health signals, never payloads.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -6,16 +6,18 @@ use std::fs;
 use std::io;
 use std::{
     cell::Cell,
+    collections::HashMap,
     fs::OpenOptions,
     io::Write,
     path::{Path, PathBuf},
-    sync::LazyLock,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing_subscriber::{Layer, layer::SubscriberExt};
 
 pub mod connection;
 mod journal;
+mod network_health;
 pub use connection::{ConnectionPhase, ConnectionTimeline};
 
 const FILE_BYTES: usize = 5 * 1024 * 1024;
@@ -74,6 +76,13 @@ struct Log {
     component: &'static str,
     limit: usize,
     version: &'static str,
+    network_emissions: Mutex<HashMap<&'static str, NetworkEmission>>,
+}
+
+struct NetworkEmission {
+    event: network_health::Event,
+    at: Instant,
+    suppressed: u64,
 }
 
 #[derive(Serialize)]
@@ -161,7 +170,7 @@ pub(crate) fn notification(message: &crate::peer::RpcMessage<'_>) {
 }
 
 // Only explicitly selected Bex diagnostic fields enter the private log.
-// Dependency traces and arbitrary request/response fields are never persisted.
+// Dependency health events are normalized separately; payloads are never persisted.
 #[derive(Default)]
 struct Fields {
     operation: String,
@@ -203,7 +212,8 @@ impl tracing::field::Visit for Fields {
 }
 
 fn private_event(metadata: &tracing::Metadata<'_>) -> bool {
-    metadata.target() == "bex" && *metadata.level() <= tracing::Level::INFO
+    (metadata.target() == "bex" && *metadata.level() <= tracing::Level::INFO)
+        || network_health::enabled(metadata)
 }
 
 impl<S: tracing::Subscriber> Layer<S> for Log {
@@ -211,8 +221,54 @@ impl<S: tracing::Subscriber> Layer<S> for Log {
         if !private_event(event.metadata()) {
             return;
         }
-        let mut fields = Fields::default();
-        event.record(&mut fields);
+        let fields = if event.metadata().target() == "bex" {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            fields
+        } else {
+            let Some(health) = network_health::decode(event) else {
+                return;
+            };
+            let now = Instant::now();
+            let mut emissions = self.network_emissions.lock().unwrap();
+            let suppressed = if *event.metadata().level() > tracing::Level::WARN {
+                // A new network change or successful rebind starts a new fault
+                // episode: retain its first failure even inside the old window.
+                let suppressed = emissions
+                    .values()
+                    .fold(0u64, |sum, item| sum.saturating_add(item.suppressed));
+                emissions.clear();
+                suppressed
+            } else if let Some(previous) = emissions.get_mut(health.operation) {
+                if previous.event == health
+                    && now.duration_since(previous.at) < Duration::from_secs(30)
+                {
+                    previous.suppressed = previous.suppressed.saturating_add(1);
+                    return;
+                }
+                previous.suppressed
+            } else {
+                0
+            };
+            let fields = Fields {
+                operation: health.operation.into(),
+                message: format!("{} previous_suppressed={suppressed}", health.message),
+                request_id: None,
+                error_code: health.error_code.map(Value::from),
+            };
+            if *event.metadata().level() <= tracing::Level::WARN {
+                emissions.insert(
+                    health.operation,
+                    NetworkEmission {
+                        event: health,
+                        at: now,
+                        suppressed: 0,
+                    },
+                );
+            }
+            drop(emissions);
+            fields
+        };
         let level = match *event.metadata().level() {
             tracing::Level::ERROR => "error",
             tracing::Level::WARN => "warn",
@@ -251,6 +307,7 @@ impl Log {
             component: component.name(),
             limit,
             version,
+            network_emissions: Mutex::new(HashMap::new()),
         })
     }
 

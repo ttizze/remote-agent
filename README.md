@@ -2,6 +2,8 @@
 
 Bex controls Codex and Claude Code on a trusted computer from a Mac app, an iPhone app, an Android app, or a headless CLI. A Rust Host daemon owns the agent processes; every client connects to it over iroh with the same JSONL RPC peer and dispatches intents to the same Rust `Store`. Terminology is in [CONTEXT.md](CONTEXT.md); design decisions are in [docs/adr](docs/adr); behavior changes are in [CHANGELOG.md](CHANGELOG.md).
 
+The workspace pins iroh 1.1.0 to a fork commit containing [UDP rebind recovery](https://github.com/n0-computer/iroh/pull/4558). Closed UDP transports retry with exponential backoff from 100 ms to 5 s while healthy transports continue receiving. The four iroh workspace packages share the same commit so their types remain consistent across dependencies, including iroh-tickets. Remove these patches when adopting an upstream release containing the fix.
+
 ## Supported operating systems
 
 Except for Linux (existing CI baseline retained), BEX supports only the latest generally available OS major, including its stable minor/patch releases. Betas, release candidates, older majors and future majors are outside the support contract. Minimum deployment versions prevent installation on older Apple/Android systems; they do not impose a runtime upper-version kill switch.
@@ -62,6 +64,8 @@ nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
 Normal launches share one Host per OS user, including when desktop and daemon state directories differ. The platform data directory holds `host-instance.json` and a short discovery lock; each Host retains its directory lock for its lifetime. Discovery reuses the Host's identity and remembers its directory after restart. Competing starts are rejected before creating credentials. Desktop authenticates its connection to the registered Host.
 
 State that must be backed up and never committed: the identity keys (`identity.keys`, 64 bytes, owner-only file permissions) and `trust.json` (invitations, allowlist, remote tickets). Errors append to `logs/host.jsonl` (desktop: `logs/desktop.jsonl`), rotated at 5 MiB with four archives and best-effort credential redaction.
+
+Connection outages also retain `network.change`, `network.socket.rebound`, `network.socket.rebind_failed`, `network.socket.closed`, `network.endpoint.receive_failed`, and QUIC endpoint/connection `network.*.io_error` records. These summarize selected events from the pinned iroh/netwatch/noq dependencies with error kinds and numeric OS error codes; dependency messages, addresses, and payloads are not saved. Identical failures are limited to one record per operation every 30 seconds; changed error codes and failures after a network change or successful rebind are recorded immediately. `previous_suppressed` counts repeats omitted since the preceding emission for that operation, or across operations when a network change/rebind resets the failure window. These records remain enabled independently of the optional connection-performance timeline. When investigating, retain the rotated logs from both Host and Desktop and match their timestamps, PIDs, and build revisions before restarting.
 
 ### Headless Linux and iPhone pairing
 
