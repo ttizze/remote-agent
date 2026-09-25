@@ -21,6 +21,12 @@ struct DesktopAssets;
 impl AssetSource for DesktopAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
+            "bex/openai.svg" => {
+                include_bytes!("../../mobile/iosApp/Bex/Assets.xcassets/openai.imageset/openai.svg")
+            }
+            "bex/anthropic.svg" => include_bytes!(
+                "../../mobile/iosApp/Bex/Assets.xcassets/anthropic.imageset/anthropic.svg"
+            ),
             "bex/bolt.svg" => include_bytes!("../assets/bolt.svg"),
             "bex/microphone.svg" => include_bytes!("../assets/microphone.svg"),
             "bex/merge.svg" => include_bytes!("../assets/merge.svg"),
@@ -35,6 +41,8 @@ impl AssetSource for DesktopAssets {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(
             [
+                "bex/openai.svg",
+                "bex/anthropic.svg",
                 "bex/bolt.svg",
                 "bex/microphone.svg",
                 "bex/stop.svg",

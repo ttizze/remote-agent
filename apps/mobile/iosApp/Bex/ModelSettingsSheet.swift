@@ -70,10 +70,9 @@ struct ModelSettingsSheet: View {
                             Button { page = .accounts } label: {
                                 VStack(alignment: .leading, spacing: 10) {
                                     HStack {
-                                        Text("接続先・アカウント")
+                                        Text("アカウント")
                                         Spacer()
-                                        Text(selectedAccount?.email ?? selectedAccount?.id ?? "未選択")
-                                            .foregroundStyle(.secondary).lineLimit(1)
+                                        AccountIdentityView(account: selectedAccount).foregroundStyle(.secondary)
                                         Image(systemName: "chevron.right").font(.caption)
                                     }
                                     WeeklyUsageView(windows: selectedAccount.map {
@@ -103,7 +102,7 @@ struct ModelSettingsSheet: View {
                 }
             }
             .contentMargins(.top, 12, for: .scrollContent)
-            .navigationTitle(page == .models ? "" : page == .accounts ? "接続先・アカウント" : "アカウントを管理")
+            .navigationTitle(page == .models ? "" : page == .accounts ? "アカウント" : "アカウントを管理")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if !managementOnly, page != .models {
@@ -163,17 +162,15 @@ struct ModelSettingsSheet: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Button { chooseAccount(choice.id) } label: {
                         HStack(spacing: 12) {
-                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(Color.accentColor)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(choice.email ?? choice.id)
-                                    .font(.headline)
-                                    .accessibilityIdentifier("account.identity." + choice.id)
+                                AccountIdentityView(account: choice)
                                 if let plan = choice.planType, !plan.isEmpty {
                                     Text(plan.uppercased()).font(.caption).foregroundStyle(.secondary)
                                 }
                             }
                             Spacer(minLength: 0)
+                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(Color.accentColor)
                         }
                         .foregroundStyle(.primary)
                     }
