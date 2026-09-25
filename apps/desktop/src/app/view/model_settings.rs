@@ -1,6 +1,23 @@
 use super::*;
 use agent_protocol::session::ProviderKind;
 
+fn account_identity(provider: Option<ProviderKind>, identity: &str) -> Div {
+    h_flex()
+        .min_w_0()
+        .gap_1()
+        .when_some(provider, |row, provider| {
+            row.child(
+                Icon::default()
+                    .path(match provider {
+                        ProviderKind::Codex => "bex/openai.svg",
+                        ProviderKind::Claude => "bex/anthropic.svg",
+                    })
+                    .size(px(12.)),
+            )
+        })
+        .child(div().min_w_0().text_ellipsis().child(identity.to_owned()))
+}
+
 impl Desktop {
     pub(super) fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
@@ -107,31 +124,33 @@ impl Desktop {
                     found = true;
                     let id = account.id.clone();
                     let logout_id = id.clone();
+                    let identity = account.email.as_deref().unwrap_or(&account.id);
                     let mut row = v_flex()
                         .gap_2()
                         .p_3()
                         .rounded(px(10.))
                         .bg(rgb(0x333333))
                         .child(
-                            self.button(
-                                format!("account-choice-{index}"),
-                                account.email.as_deref().unwrap_or(&account.id).to_owned(),
-                                cx,
-                                move |s, _, _| {
+                            Button::new(format!("account-choice-{index}"))
+                                .accessibility_label(identity.to_owned())
+                                .small()
+                                .ghost()
+                                .child(account_identity(Some(account.provider), identity).flex_1())
+                                .on_click(cx.listener(move |s, _, _, cx| {
                                     s.account_operation(Intent::SelectAccountForDraft(
                                         op::SelectAccountForDraft {
                                             id: id.clone(),
                                             thread_id: s.draft_key().into(),
                                         },
                                     ));
-                                },
-                            )
-                            .debug_selector(move || format!("account-choice-{index}"))
-                            .when(accounts.is_selected(account), |button| {
-                                button.icon(IconName::Check)
-                            })
-                            .w_full()
-                            .disabled(disabled),
+                                    cx.notify();
+                                }))
+                                .debug_selector(move || format!("account-choice-{index}"))
+                                .when(accounts.is_selected(account), |button| {
+                                    button.child(Icon::new(IconName::Check).size(px(14.)))
+                                })
+                                .w_full()
+                                .disabled(disabled),
                         )
                         .when_some(account.plan_type.as_ref(), |row, plan| {
                             row.child(
@@ -424,7 +443,7 @@ impl Desktop {
         let mut body = v_flex().w_full().gap_2();
         if self.model_panel != ModelPanel::Models {
             let title = if self.model_panel == ModelPanel::Accounts {
-                "接続先・アカウント"
+                "アカウント"
             } else {
                 "アカウントを管理"
             };
@@ -547,7 +566,7 @@ impl Desktop {
                 });
         body = body.child(
             Button::new("model-account-summary")
-                .accessibility_label("接続先・アカウントと週間残量")
+                .accessibility_label("アカウントと週間残量")
                 .ghost()
                 .w_full()
                 .h_auto()
@@ -577,16 +596,17 @@ impl Desktop {
                                         .id("model-account-label")
                                         .debug_selector(|| "model-account-label".into())
                                         .flex_shrink_0()
-                                        .child("接続先・アカウント"),
+                                        .child("アカウント"),
                                 )
                                 .child(
-                                    div().flex_1().min_w_0().text_right().truncate().child(
-                                        account
-                                            .map_or("未選択", |a| {
-                                                a.email.as_deref().unwrap_or(&a.id)
-                                            })
-                                            .to_owned(),
-                                    ),
+                                    account_identity(
+                                        account.map(|a| a.provider),
+                                        account.map_or("未選択", |a| {
+                                            a.email.as_deref().unwrap_or(&a.id)
+                                        }),
+                                    )
+                                    .flex_1()
+                                    .justify_end(),
                                 )
                                 .child(Icon::new(IconName::ChevronRight).size(px(16.))),
                         )

@@ -100,3 +100,24 @@ private struct UsageBar: View {
             .tint(remainingPercent <= 20 ? .orange : .green)
     }
 }
+
+struct AccountIdentityView: View {
+    let account: Account?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let account {
+                Image(account.provider == .codex ? "openai" : "anthropic")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+                    .accessibilityLabel(account.provider == .codex ? "OpenAI" : "Anthropic")
+                Text(account.email ?? account.id)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("account.identity." + account.id)
+            } else {
+                Text("未選択")
+            }
+        }
+    }
+}

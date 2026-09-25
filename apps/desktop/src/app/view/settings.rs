@@ -18,7 +18,7 @@ impl Desktop {
         for (id, label, icon, page) in [
             (
                 "settings-accounts",
-                "接続先・アカウント",
+                "アカウント",
                 IconName::User,
                 SettingsPage::Accounts,
             ),
@@ -73,7 +73,7 @@ impl Desktop {
     pub(super) fn settings(&self, cx: &Context<Self>) -> AnyElement {
         let (title, subtitle) = match self.settings_page {
             SettingsPage::Accounts => (
-                "接続先・アカウント",
+                "アカウント",
                 if self.remote.is_some() {
                     "接続先に保存した Codex・Claude アカウントを管理します。"
                 } else {
