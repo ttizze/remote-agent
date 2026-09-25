@@ -16,14 +16,10 @@ impl Desktop {
     }
     pub(super) fn completion_key(
         &mut self,
-        event: &KeyDownEvent,
+        key: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let modifiers = event.keystroke.modifiers;
-        if modifiers.shift || modifiers.control || modifiers.alt || modifiers.platform {
-            return false;
-        }
         let candidates = self
             .completion_suggestions(cx)
             .map_or_else(Vec::new, |s| s.candidates);
@@ -35,7 +31,7 @@ impl Desktop {
         }) {
             return false;
         }
-        match event.keystroke.key.as_str() {
+        match key {
             "up" => self.completion_index = self.completion_index.saturating_sub(1),
             "down" => self.completion_index = (self.completion_index + 1).min(candidates.len() - 1),
             "escape" => self.completion_dismissed = true,
@@ -158,10 +154,9 @@ mod tests {
     use agent_protocol::composer::Invocation;
     use agent_protocol::composer::InvocationKind;
     use gpui_kit as gpui;
-    use gpui_kit::{EntityInputHandler, Focusable, TestAppContext};
+    use gpui_kit::{AppContext, EntityInputHandler, Focusable, TestAppContext};
 
-    #[gpui::test]
-    fn invocation_completion_preserves_suffix_and_does_not_accept_ime(cx: &mut TestAppContext) {
+    fn runtime(cx: &mut TestAppContext) -> tokio::runtime::Runtime {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -175,6 +170,92 @@ mod tests {
                 logging_error: None,
             });
         });
+        runtime
+    }
+
+    #[gpui::test]
+    fn composer_arrow_actions_preserve_vertical_movement_and_reach_text_edges(
+        cx: &mut TestAppContext,
+    ) {
+        let _runtime = runtime(cx);
+        let mut composer = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| {
+                let mut desktop = Desktop::new(
+                    Mode::SideChat {
+                        remote: None,
+                        cwd: "/fixture".into(),
+                    },
+                    window,
+                    cx,
+                );
+                Arc::make_mut(&mut desktop.snapshot).connected = true;
+                desktop.composer.update(cx, |input, cx| {
+                    input.set_readonly(false, cx);
+                    input.set_value("ABCDE", window, cx);
+                    input.set_selected_range(3..3, cx);
+                    input.focus_handle(cx).focus(window, cx);
+                });
+                composer = Some(desktop.composer.clone());
+                desktop
+            });
+            gpui_kit::component::Root::new(desktop, window, cx)
+        });
+        let composer = composer.unwrap();
+        cx.run_until_parked();
+        cx.simulate_keystrokes("up");
+        assert_eq!(composer.read_with(cx, |input, _| input.cursor()), 0);
+        cx.simulate_keystrokes("down");
+        assert_eq!(composer.read_with(cx, |input, _| input.cursor()), 5);
+
+        cx.update(|window, cx| {
+            composer.update(cx, |input, cx| {
+                input.set_value("alpha\nbravo\ncharlie", window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| composer.update(cx, |input, cx| input.set_selected_range(8..8, cx)));
+        cx.simulate_keystrokes("up");
+        assert_eq!(composer.read_with(cx, |input, _| input.cursor()), 2);
+        cx.simulate_keystrokes("up");
+        assert_eq!(composer.read_with(cx, |input, _| input.cursor()), 0);
+        cx.update(|_, cx| composer.update(cx, |input, cx| input.set_selected_range(14..14, cx)));
+        cx.simulate_keystrokes("down");
+        assert_eq!(composer.read_with(cx, |input, _| input.cursor()), 19);
+
+        let wrapped = "abcdef ".repeat(100);
+        let end = wrapped.len();
+        cx.update(|window, cx| {
+            composer.update(cx, |input, cx| {
+                input.set_value(wrapped, window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            composer.update(cx, |input, cx| {
+                input.set_selected_range(end - 2..end - 2, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("up");
+        let cursor = composer.read_with(cx, |input, _| input.cursor());
+        assert!(
+            cursor > 0 && cursor < end - 2,
+            "soft wrap must move one row: {cursor}"
+        );
+        cx.update(|_, cx| {
+            composer.update(cx, |input, cx| {
+                input.set_selected_range(end - 2..end - 2, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down");
+        assert_eq!(composer.read_with(cx, |input, _| input.cursor()), end);
+    }
+
+    #[gpui::test]
+    fn invocation_completion_preserves_suffix_and_does_not_accept_ime(cx: &mut TestAppContext) {
+        let _runtime = runtime(cx);
         let view = cx.add_window(|window, cx| {
             Desktop::new(
                 Mode::SideChat {
