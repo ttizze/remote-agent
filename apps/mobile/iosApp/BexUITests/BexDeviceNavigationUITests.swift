@@ -294,7 +294,7 @@ extension BexLaunchUITests {
     }
 
     func submitManualPairing(_ app: XCUIApplication, payload: String) {
-        let manualPairing = app.buttons["QRの内容を手入力"]
+        let manualPairing = app.buttons["pairing.manual"]
         XCTAssertTrue(manualPairing.waitForExistence(timeout: 10))
         manualPairing.tap()
 
@@ -309,6 +309,7 @@ extension BexLaunchUITests {
         let submitEnabled = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: submit)
         wait(for: [submitEnabled], timeout: 10)
         submit.tap()
+        confirmPairing(app)
     }
 
     func assertLoadedTaskDetails(_ app: XCUIApplication) -> XCUIElement {

@@ -111,6 +111,12 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
             json!([])
         );
         let invitation: Invitation = local.peer.call(&op::CreateInvitation {}).await.unwrap();
+        assert_eq!(invitation.host_name, "isolated Host");
+        assert_eq!(invitation.ai_recipients, ["OpenAI"]);
+        assert_eq!(
+            invitation.transcription_recipient.as_deref(),
+            Some("OpenAI")
+        );
         let key = Identity::generate().to_bytes();
         let trust_path = directory.path().join("state/trust.json");
         let backup = directory.path().join("state/trust-backup.json");

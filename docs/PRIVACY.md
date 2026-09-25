@@ -26,9 +26,9 @@ BEX has no advertising or advertising tracking. Connection diagnostics may be se
 
 **送信停止・削除 / Stop sharing and delete data**
 
-新たな送信を止めるには、PC一覧からHostへの接続を解除してください。最後の接続を解除すると、データ送信への同意も取り消されます。接続解除は、そのiPhoneの接続先と認証鍵を削除します。すでにHostで開始した処理は自動停止しません。アプリ内の保存データはアプリの削除で消去できます。Keychainの認証鍵は削除後も残る場合があるため、アプリを削除する前にHostへの接続を解除してください。Host上の会話・ファイルとAIサービスに送った情報は別に管理されるため、Host管理者または該当サービスに削除を依頼してください。
+新たな送信を止めるには、PC一覧からHostへの接続を解除してください。接続解除は、そのiPhoneの接続先と認証鍵を削除します。すでにHostで開始した処理は自動停止しません。アプリ内の保存データはアプリの削除で消去できます。Keychainの認証鍵は削除後も残る場合があるため、アプリを削除する前にHostへの接続を解除してください。Host上の会話・ファイルとAIサービスに送った情報は別に管理されるため、Host管理者または該当サービスに削除を依頼してください。
 
-To stop new sharing, remove the Host connection from the PC list. Removing the last connection also withdraws your data-sharing consent. This removes that iPhone's Host entry and authentication key, but does not automatically stop work already started on the Host. Deleting the app removes its app-container data. Keychain keys may survive app deletion, so remove Host connections before uninstalling. Host files, conversations and data already sent to AI services are managed separately; contact the Host administrator or the relevant provider to request deletion.
+To stop new sharing, remove the Host connection from the PC list. This removes that iPhone's Host entry and authentication key, but does not automatically stop work already started on the Host. Deleting the app removes its app-container data. Keychain keys may survive app deletion, so remove Host connections before uninstalling. Host files, conversations and data already sent to AI services are managed separately; contact the Host administrator or the relevant provider to request deletion.
 
 **お問い合わせ / Contact**
 

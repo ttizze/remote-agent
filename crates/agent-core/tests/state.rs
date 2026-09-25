@@ -690,7 +690,8 @@ fn durable_upload_and_pairing_results_survive_navigation() {
     for name in ["first", "updated"] {
         op::PairRemoteHost {
             invitation: serde_json::from_value(json!({
-                "endpoint":"unused", "invitation":uuid::Uuid::nil(), "expiresAt":0
+                "endpoint":"unused", "invitation":uuid::Uuid::nil(), "expiresAt":0,
+                "hostName":"Test PC", "aiRecipients":[], "transcriptionRecipient":null
             }))
             .unwrap(),
             name: name.into(),

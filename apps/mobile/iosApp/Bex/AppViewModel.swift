@@ -16,6 +16,7 @@ final class BexAppViewModel: ObservableObject {
     @Published var transcribing = false
     @Published var isConnecting = false
     @Published var pairingError: String?
+    @Published private(set) var pairingInvitation: Invitation?
     @Published var connectionError: String?
     @Published var notice: String?
     @Published var loadingThreads = false
@@ -40,9 +41,7 @@ final class BexAppViewModel: ObservableObject {
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
-        let accepted = UserDefaults.standard.string(forKey: "bex.data-sharing-consent") ?? ""
-        if !dataSharingNotice(acceptedRevision: accepted).requiresConsent,
-           let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
+        if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
            profiles.contains(where: { $0.id == id }) {
             selectProfile(id)
         }
@@ -96,9 +95,6 @@ final class BexAppViewModel: ObservableObject {
             profiles = remaining
             try HostProfile.save(profiles)
             screen = .profiles
-            if remaining.isEmpty {
-                UserDefaults.standard.removeObject(forKey: "bex.data-sharing-consent")
-            }
         } catch { notice = error.localizedDescription }
     }
 
@@ -161,20 +157,30 @@ final class BexAppViewModel: ObservableObject {
         connection?.cancel()
         isConnecting = false
         pairingError = nil
+        pairingInvitation = nil
         screen = .pairing
     }
 
     func dismissPairing() {
         connection?.cancel()
         isConnecting = false
+        pairingInvitation = nil
         screen = .profiles
     }
 
-    func pair(_ contents: String) {
+    func preparePairing(_ contents: String) {
         guard !isConnecting else { return }
+        pairingInvitation = nil
         do {
-            let invitation = try parseInvitation(contents: contents, now: UInt64(Date().timeIntervalSince1970))
-            let id = try ticketIdentity(ticket: invitation.endpoint)
+            pairingInvitation = try parseInvitation(contents: contents, now: UInt64(Date().timeIntervalSince1970))
+            pairingError = nil
+        } catch { pairingError = error.localizedDescription }
+    }
+
+    func confirmPairing() {
+        guard !isConnecting, let invitation = pairingInvitation else { return }
+        do {
+            let id = try validateInvitation(invitation: invitation, now: UInt64(Date().timeIntervalSince1970))
             pairingError = nil
             screen = .pairing
             isConnecting = true
@@ -194,13 +200,14 @@ final class BexAppViewModel: ObservableObject {
                     cancelInitialization()
                     let old = store
                     profiles.removeAll { $0.id == id }
-                    profiles.append(HostProfile(id: id, name: id, ticket: invitation.endpoint))
+                    profiles.append(HostProfile(id: id, name: invitation.hostName, ticket: invitation.endpoint))
                     try HostProfile.save(profiles)
                     UserDefaults.standard.set(id, forKey: "bex.selected-host")
                     selectedProfileId = id
                     store = owner
                     publish(owner.snapshot())
                     screen = .threads
+                    pairingInvitation = nil
                     isConnecting = false
                     observe(owner, host: id)
                     perform(.loadHostName(LoadHostName()))
@@ -285,14 +292,6 @@ extension BexAppViewModel {
                 self?.notice = error.localizedDescription
             }
         }
-    }
-
-    func recordScene(_ value: UInt64) {
-        store?.recordConnectionEvent(phase: .appScene, value: value)
-    }
-
-    func recordListViewUpdate() {
-        store?.recordConnectionEvent(phase: .listViewUpdated, value: isConnected ? 1 : 0)
     }
 
     private func observe(_ owner: AgentStore, host: String) {

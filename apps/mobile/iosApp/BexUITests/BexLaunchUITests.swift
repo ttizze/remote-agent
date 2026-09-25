@@ -81,7 +81,7 @@ final class BexLaunchUITests: XCTestCase {
             return app
         }
 
-        let manualPairing = app.buttons["QRの内容を手入力"]
+        let manualPairing = app.buttons["pairing.manual"]
         if manualPairing.waitForExistence(timeout: 3) {
             let payload = try simulatorPairingPayload()
             for _ in 0 ..< 5 where !manualPairing.isHittable {
@@ -97,6 +97,9 @@ final class BexLaunchUITests: XCTestCase {
             let submitEnabled = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: submit)
             wait(for: [submitEnabled], timeout: 10)
             submit.tap()
+            XCTAssertTrue(app.staticTexts["pairing.host"].waitForExistence(timeout: 10))
+            XCTAssertEqual(app.staticTexts["pairing.host"].label, "検証 Host")
+            confirmPairing(app)
         }
 
         let notice = app.staticTexts["notice"]
@@ -105,6 +108,21 @@ final class BexLaunchUITests: XCTestCase {
             "Task list did not appear after connecting; notice: \(notice.exists ? notice.label : "(none)")"
         )
         return app
+    }
+
+    func confirmPairing(_ app: XCUIApplication) {
+        let confirm = app.buttons["pairing.confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["pairing.host"].exists)
+        XCTAssertFalse(app.staticTexts["pairing.host"].label.isEmpty)
+        XCTAssertTrue(app.staticTexts["pairing.recipients"].exists)
+        XCTAssertFalse(app.buttons["pairing.scan"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["tasks.list"].exists)
+        captureScreen(app, named: "Connection disclosure before consent")
+        for _ in 0 ..< 4 where !confirm.isHittable {
+            app.swipeUp()
+        }
+        confirm.tap()
     }
 
     func startSimulatorConversation(_ app: XCUIApplication, promptText: String) throws {
@@ -192,7 +210,11 @@ final class BexLaunchUITests: XCTestCase {
         let data = try Data(contentsOf: url)
         let payload = try XCTUnwrap(String(data: data, encoding: .utf8))
         guard !payload.isEmpty else { throw PairingPayloadError.invalidResponse }
-        return payload
+        // XCTest typing can drop characters unavailable on the active keyboard.
+        // JSON escapes preserve the exact invitation, including the PC name.
+        return payload.utf16.map { unit in
+            unit > 127 ? String(format: "\\u%04x", unit) : String(UnicodeScalar(unit)!)
+        }.joined()
     }
 }
 

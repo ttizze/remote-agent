@@ -21,16 +21,10 @@ struct BexSwiftUIRoot: View {
 
 private struct BexScreen: View {
     @ObservedObject var model: BexAppViewModel
-    @AppStorage("bex.data-sharing-consent") private var acceptedRevision = ""
-
-    private var disclosure: DataSharingNotice {
-        dataSharingNotice(acceptedRevision: acceptedRevision)
-    }
-
     var body: some View {
         NavigationStack {
             Group {
-                if model.profiles.isEmpty || disclosure.requiresConsent {
+                if model.profiles.isEmpty {
                     pairingScreen
                 } else {
                     ProfilesScreen(profiles: model.profiles, notice: model.notice,
@@ -63,12 +57,14 @@ private struct BexScreen: View {
     }
 
     private var pairingScreen: some View {
-        PairingScreen(canCancel: !model.profiles.isEmpty && !disclosure.requiresConsent,
-                      connecting: model.isConnecting, error: model.pairingError, notice: disclosure,
-                      savedHost: disclosure.requiresConsent ? model.profiles.first : nil,
-                      agree: { acceptedRevision = disclosure.revision },
-                      reconnect: model.selectProfile, scan: { model.isScanning = true },
-                      pair: model.pair, cancel: model.dismissPairing)
+        PairingScreen(canCancel: !model.profiles.isEmpty,
+                      connecting: model.isConnecting, error: model.pairingError,
+                      scan: { model.isScanning = true },
+                      hostName: model.pairingInvitation?.hostName,
+                      aiRecipients: model.pairingInvitation?.aiRecipients ?? [],
+                      transcriptionRecipient: model.pairingInvitation?.transcriptionRecipient,
+                      prepare: model.preparePairing, confirm: model.confirmPairing,
+                      change: model.openPairing, cancel: model.dismissPairing)
     }
 
     private var threadList: some View {
@@ -90,109 +86,157 @@ private struct PairingScreen: View {
     let canCancel: Bool
     let connecting: Bool
     let error: String?
-    let notice: DataSharingNotice
-    let savedHost: HostProfile?
-    let agree: () -> Void
-    let reconnect: (String) -> Void
     let scan: () -> Void
-    let pair: (String) -> Void
+    let hostName: String?
+    let aiRecipients: [String]
+    let transcriptionRecipient: String?
+    let prepare: (String) -> Void
+    let confirm: () -> Void
+    let change: () -> Void
     let cancel: () -> Void
     @State private var contents = ""
     @State private var showsManualPairing = false
     @FocusState private var editingContents: Bool
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 24) {
-                VStack(spacing: 14) {
-                    Image(systemName: "terminal.fill")
-                        .font(.system(size: 36, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                        .frame(width: 76, height: 76)
-                        .background(Color.accentColor.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    Text("PCとペアリング")
-                        .font(.title2.weight(.bold))
-                    Text("PCに表示されたQRコードを読み取ると、このiPhoneからCodexを操作できます。")
-                        .font(.subheadline)
-                        .multilineTextAlignment(.center)
-                        .foregroundColor(.secondary)
-                }
-
-                if connecting {
-                    ProgressView("ペアリング中…")
-                        .accessibilityIdentifier("pairing.progress")
-                } else if let error {
-                    BexNotice(text: error)
-                }
-
-                if notice.requiresConsent {
-                    Text(notice.summary)
-                        .font(.footnote).foregroundColor(.secondary)
-                        .accessibilityIdentifier("privacy.disclosure")
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: hostName == nil ? 16 : 12) {
+                    if hostName == nil {
+                        Spacer(minLength: 0)
+                    }
+                    VStack(spacing: hostName == nil ? 18 : 8) {
+                        Image(systemName: "text.bubble")
+                            .font(.system(size: hostName == nil ? 36 : 24, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: hostName == nil ? 72 : 32, height: hostName == nil ? 72 : 32)
+                            .background(Color(UIColor.secondarySystemGroupedBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 28))
+                        Text("どこでも、\nこれひとつで。")
+                            .font(.system(size: hostName == nil ? 34 : 28, weight: .bold))
+                            .accessibilityIdentifier("pairing.welcome")
+                        Text("AIとの会話も、ファイルも、ターミナルも。\nいつもの作業を、手元から。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .multilineTextAlignment(.center)
+                    if hostName == nil {
+                        Spacer(minLength: 0)
+                    }
+                    if let hostName {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 16) {
+                                Image(systemName: "laptopcomputer").font(.system(size: 28))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("接続先").font(.caption).foregroundStyle(.secondary)
+                                    Text(hostName).font(.headline)
+                                        .accessibilityIdentifier("pairing.host")
+                                }
+                                Spacer()
+                                Button("変更") {
+                                    contents = ""
+                                    showsManualPairing = false
+                                    change()
+                                }
+                                .disabled(connecting)
+                                .accessibilityIdentifier("pairing.change")
+                            }
+                            Divider()
+                            Text("送信する内容").font(.subheadline.bold())
+                            Text("メッセージ・添付ファイル・作業に必要なプロジェクトの内容を、このPCと利用するAIサービスに送信します。")
+                                .foregroundStyle(.secondary)
+                            Divider()
+                            Text("このPCの送信先").font(.subheadline.bold())
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("AI処理：" +
+                                    (aiRecipients.isEmpty ? "未設定" : aiRecipients
+                                        .joined(separator: "、")))
+                                    .accessibilityIdentifier("pairing.recipients")
+                                if let recipient = transcriptionRecipient {
+                                    Text("音声入力：\(recipient)（文字起こし）")
+                                }
+                            }
+                            .foregroundStyle(.secondary)
+                            Divider()
+                            Text("共有PCでは、管理者などが内容を閲覧できる場合があります。")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.footnote)
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(UIColor.secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 20))
+                    } else {
+                        VStack(spacing: 16) {
+                            Image(systemName: "laptopcomputer")
+                                .font(.system(size: 36)).foregroundStyle(.secondary)
+                            Text("まずはPCとつなぐ").font(.title3.bold())
+                            Text("PCでBexを開き、表示されたQRコードを読み取ってください。")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button(action: scan) {
+                                Label("QRコードを読み取る", systemImage: "qrcode.viewfinder")
+                                    .font(.headline)
+                                    .frame(maxWidth: .infinity, minHeight: 24)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                            .accessibilityIdentifier("pairing.scan")
+                            Button("接続情報を入力") { showsManualPairing.toggle() }
+                                .accessibilityIdentifier("pairing.manual")
+                            if showsManualPairing {
+                                SecureField("接続情報を貼り付け", text: $contents)
+                                    .focused($editingContents)
+                                    .font(.system(.footnote, design: .monospaced))
+                                    .frame(minHeight: 44)
+                                    .textFieldStyle(.roundedBorder)
+                                    .accessibilityIdentifier("pairing.contents")
+                                Button("接続先を確認") {
+                                    editingContents = false
+                                    prepare(contents)
+                                    contents = ""
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .accessibilityIdentifier("pairing.submit")
+                            }
+                        }
+                        .padding(16)
+                        .background(Color(UIColor.secondarySystemGroupedBackground))
+                        .clipShape(RoundedRectangle(cornerRadius: 20))
+                    }
+                    if connecting {
+                        ProgressView("接続中…").accessibilityIdentifier("pairing.progress")
+                    } else if let error {
+                        BexNotice(text: error)
+                    }
                     PrivacyPolicyButton()
-                    if let savedHost {
-                        Button("同意して\(savedHost.name)に接続") {
-                            agree()
-                            reconnect(savedHost.id)
+                        .font(.footnote)
+                        .tint(.secondary)
+                    if hostName != nil {
+                        Button(action: confirm) {
+                            Text("同意して接続")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity, minHeight: 24)
                         }
                         .buttonStyle(.borderedProminent)
-                        .accessibilityIdentifier("pairing.reconnect")
+                        .controlSize(.large)
+                        .disabled(connecting)
+                        .accessibilityIdentifier("pairing.confirm")
                     }
                 }
-
-                Button { agree(); scan() } label: {
-                    Label(notice.requiresConsent ? "同意してQRコードを読み取る" : "QRコードを読み取る",
-                          systemImage: "qrcode.viewfinder")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(connecting)
-                .accessibilityIdentifier("pairing.scan")
-
-                DisclosureGroup("QRの内容を手入力", isExpanded: $showsManualPairing) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SecureField("ペアリング情報を貼り付け", text: $contents)
-                            .focused($editingContents)
-                            .disabled(connecting)
-                            .font(.system(.footnote, design: .monospaced))
-                            .frame(minHeight: 44)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityIdentifier("pairing.contents")
-                        Button(notice.requiresConsent ? "同意してペアリング" : "入力内容でペアリング") {
-                            editingContents = false
-                            agree()
-                            pair(contents)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(connecting || contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .accessibilityIdentifier("pairing.submit")
-                    }
-                    .padding(.top, 12)
-                }
-                .padding(16)
-                .background(Color(UIColor.secondarySystemBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-                Text("ペアリング情報は接続時だけ使用し、QRの内容そのものは保存しません。")
-                    .font(.caption)
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(.secondary)
-                if !notice.requiresConsent {
-                    PrivacyPolicyButton()
-                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 16)
+                .frame(minHeight: geometry.size.height)
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 32)
+            .scrollDismissesKeyboard(.interactively)
         }
         .background(Color(UIColor.systemGroupedBackground).ignoresSafeArea())
         .navigationTitle("Bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 if canCancel {
-                    Button("キャンセル") { cancel() }
+                    Button("キャンセル", action: cancel)
                         .accessibilityIdentifier("pairing.cancel")
                 }
             }
@@ -209,33 +253,60 @@ private struct ProfilesScreen: View {
     @State private var removing: HostProfile?
 
     var body: some View {
-        List {
-            if let notice {
-                BexNotice(text: notice)
-            }
-            ForEach(profiles, id: \.id) { profile in
-                HStack {
-                    Button { select(profile.id) } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(profile.name).font(.headline)
-                            Text(profile.id).font(.caption).foregroundColor(.secondary)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("接続するPC").font(.largeTitle.bold())
+                        Text("いつもの作業を、ここから。")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 20)
+                    if let notice {
+                        BexNotice(text: notice)
+                    }
+                    ForEach(profiles, id: \.id) { profile in
+                        Button { select(profile.id) } label: {
+                            HStack(spacing: 16) {
+                                Image(systemName: "laptopcomputer")
+                                    .font(.system(size: 30)).foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(profile.name).font(.headline)
+                                    Text("登録済みのPC").font(.subheadline).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                            }
+                            .padding(20)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(UIColor.secondarySystemGroupedBackground))
+                            .clipShape(RoundedRectangle(cornerRadius: 18))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("profiles.\(profile.id)")
+                        .contextMenu {
+                            Button("接続を解除", role: .destructive) { removing = profile }
+                                .accessibilityIdentifier("connection.remove.\(profile.id)")
                         }
                     }
-                    .buttonStyle(.borderless)
-                    .accessibilityIdentifier("profiles.\(profile.id)")
-                    Spacer()
-                    Button("接続を解除", role: .destructive) { removing = profile }
-                        .buttonStyle(.borderless)
-                        .accessibilityIdentifier("connection.remove.\(profile.id)")
-                }
-            }
-            Section {
-                Button("PCを追加") { add() }
+                    Button(action: add) {
+                        Label("PCを追加", systemImage: "plus")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, minHeight: 52)
+                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.accentColor))
+                    }
                     .accessibilityIdentifier("profiles.add")
-                PrivacyPolicyButton()
+                    Spacer(minLength: 32)
+                    PrivacyPolicyButton()
+                        .font(.footnote).tint(.secondary)
+                        .frame(maxWidth: .infinity)
+                }
+                .padding(24)
+                .frame(minHeight: geometry.size.height, alignment: .top)
             }
         }
-        .navigationTitle("PC Hosts")
+        .background(Color(UIColor.systemGroupedBackground).ignoresSafeArea())
+        .navigationTitle("Bex")
         .alert("このPCとの接続を解除しますか？", isPresented: Binding(
             get: { removing != nil }, set: {
                 if !$0 {

@@ -9,6 +9,9 @@ struct Invitation {
     pub endpoint: String,
     pub invitation: uuid::Uuid,
     pub expires_at: u64,
+    pub host_name: String,
+    pub ai_recipients: Vec<String>,
+    pub transcription_recipient: Option<String>,
 }
 #[uniffi::remote(Record)]
 struct Project {

@@ -11,6 +11,9 @@ pub struct Invitation {
     pub endpoint: String,
     pub invitation: uuid::Uuid,
     pub expires_at: u64,
+    pub host_name: String,
+    pub ai_recipients: Vec<String>,
+    pub transcription_recipient: Option<String>,
 }
 impl std::fmt::Debug for Invitation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

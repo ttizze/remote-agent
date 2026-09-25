@@ -60,12 +60,39 @@ pub fn ticket_identity(ticket: String) -> Result<String, AgentError> {
 
 #[uniffi::export]
 pub fn parse_invitation(contents: String, now: u64) -> Result<Invitation, AgentError> {
-    let invitation: crate::models::Invitation = serde_json::from_str(&contents).map_err(error)?;
-    invitation.endpoint.parse::<Ticket>().map_err(error)?;
-    if now >= invitation.expires_at {
-        return Err(error("invitation expired"));
-    }
+    let invitation: crate::models::Invitation = serde_json::from_str(&contents).map_err(|_| {
+        error("接続情報を読み取れませんでした。PCで新しいQRコードを表示してください。")
+    })?;
+    validate_invitation(invitation.clone(), now)?;
     Ok(invitation)
+}
+
+#[uniffi::export]
+pub fn validate_invitation(invitation: Invitation, now: u64) -> Result<String, AgentError> {
+    let ticket = invitation
+        .endpoint
+        .parse::<Ticket>()
+        .map_err(|_| error("接続情報が無効です。PCで新しいQRコードを表示してください。"))?;
+    if now >= invitation.expires_at {
+        return Err(error(
+            "接続情報の有効期限が切れています。PCで新しいQRコードを表示してください。",
+        ));
+    }
+    if invitation.host_name.trim().is_empty()
+        || invitation
+            .ai_recipients
+            .iter()
+            .any(|name| name.trim().is_empty())
+        || invitation
+            .transcription_recipient
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(error(
+            "送信先の情報を確認できませんでした。PCで新しいQRコードを表示してください。",
+        ));
+    }
+    Ok(ticket.node_id().to_string())
 }
 
 #[derive(uniffi::Object)]
@@ -335,6 +362,33 @@ mod tests {
     }
     use super::*;
     use std::time::Duration;
+    #[tokio::test]
+    async fn invitation_preview_preserves_recipients_and_rechecks_expiry() {
+        let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let invitation = Invitation {
+            endpoint: host.ticket().to_string(),
+            invitation: uuid::Uuid::new_v4(),
+            expires_at: 200,
+            host_name: "My PC".into(),
+            ai_recipients: vec!["Future AI service".into()],
+            transcription_recipient: None,
+        };
+        let contents = serde_json::to_string(&invitation).unwrap();
+        let parsed = parse_invitation(contents, 100).unwrap();
+        assert_eq!(parsed, invitation);
+        assert_eq!(
+            validate_invitation(parsed.clone(), 100).unwrap(),
+            host.ticket().node_id().to_string()
+        );
+        assert!(validate_invitation(parsed.clone(), 200).is_err());
+        let mut missing_name = parsed;
+        missing_name.host_name.clear();
+        assert!(validate_invitation(missing_name, 100).is_err());
+        host.close().await;
+    }
+
     async fn scoped_incoming(
         host: &Endpoint,
         trust: &crate::transport::Trust,

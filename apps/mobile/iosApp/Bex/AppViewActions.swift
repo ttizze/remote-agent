@@ -5,6 +5,14 @@ import UniformTypeIdentifiers
 typealias SnapshotRequest = (Intent, @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) -> Void
 
 extension BexAppViewModel {
+    func recordScene(_ value: UInt64) {
+        store?.recordConnectionEvent(phase: .appScene, value: value)
+    }
+
+    func recordListViewUpdate() {
+        store?.recordConnectionEvent(phase: .listViewUpdated, value: isConnected ? 1 : 0)
+    }
+
     func browser(_ request: BrowserRequest) async throws -> BrowserFrame {
         guard let owner = store else { throw URLError(.notConnectedToInternet) }
         let host = selectedProfileId
@@ -160,7 +168,7 @@ extension BexAppViewModel {
 
     func scanned(_ contents: String?) {
         isScanning = false; if let contents {
-            pair(contents)
+            preparePairing(contents)
         }
     }
 }

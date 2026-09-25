@@ -318,6 +318,20 @@ impl HostRpcService {
         self.inner.files.clear_session(session);
     }
 
+    pub(crate) fn data_recipients(&self) -> (Vec<String>, Option<String>) {
+        let mut ai = Vec::new();
+        let transcription = if self.inner.codex.server().is_ok() {
+            ai.push("OpenAI".into());
+            Some("OpenAI".into())
+        } else {
+            None
+        };
+        if self.inner.claude.get().is_some() {
+            ai.push("Anthropic".into());
+        }
+        (ai, transcription)
+    }
+
     pub(crate) fn provider_errors(&self) -> serde_json::Value {
         match self.inner.codex.server() {
             Ok(_) => serde_json::json!({}),

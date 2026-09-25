@@ -332,10 +332,14 @@ impl HostRuntime {
                 .into())
             }
             Call::Invite(_) => {
+                let (ai_recipients, transcription_recipient) = self.service.data_recipients();
                 let ticket = Invitation {
                     endpoint: self.endpoint.ticket().to_string(),
                     invitation: uuid::Uuid::new_v4(),
                     expires_at: now() + self.invitation_lifetime.as_secs(),
+                    host_name: self.name.clone(),
+                    ai_recipients,
+                    transcription_recipient,
                 };
                 let mut record = self.credentials.record.lock().await;
                 let mut next = record.clone();
