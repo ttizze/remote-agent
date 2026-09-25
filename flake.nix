@@ -22,6 +22,7 @@
     {
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
+        kani = pkgs.callPackage ./tools/kani/package.nix { };
       });
       devShells = forEachSystem (pkgs:
         let
@@ -51,9 +52,15 @@
           }).androidsdk;
         in
         {
+          kani = pkgs.mkShell {
+            packages = with pkgs; [
+              (callPackage ./tools/kani/package.nix { })
+              rustToolchain just python3 git clang pkg-config
+            ];
+          };
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
-            packages = with pkgs; [ rustToolchain just jq python3 git lsof pkg-config cmake clang ]
+            packages = with pkgs; [ rustToolchain cargo-mutants just jq python3 git lsof pkg-config cmake clang ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
                 libxcb libX11 libXcursor libXi libXrandr
@@ -78,6 +85,7 @@
               gradle
               jdk21
               rustToolchain
+              cargo-mutants
               cargo-ndk
               lefthook
               kotlin-language-server

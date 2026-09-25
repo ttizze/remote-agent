@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [features]
 bindings = ["dep:uniffi", "dep:zeroize"]
 
@@ -29,5 +32,6 @@ base64.workspace = true
 ring.workspace = true
 tempfile = "3"
 insta = { version = "1.46", default-features = false, features = ["json"] }
+proptest = "1.11"
 rstest = { version = "0.27", default-features = false }
 tokio = { workspace = true, features = ["test-util"] }

@@ -200,9 +200,92 @@ pub fn diff_files(review: &WorkspaceReview) -> Vec<WorkspaceDiffFile> {
         .collect()
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn generated_hunks_preserve_text_kind_and_line_numbers(
+            files in prop::collection::vec(prop::collection::vec(
+                (1u64..100_000, 1u64..100_000, prop::collection::vec(
+                    (prop::sample::select(vec!['-', '+', ' ']), "[^\\r\\n]{0,24}"), 1..16,
+                )), 1..4,
+            ), 1..4),
+        ) {
+            let mut patch = String::new();
+            let mut expected = Vec::new();
+            for (index, hunks) in files.iter().enumerate() {
+                let file = index as u64 + 1;
+                for (kind, text) in [
+                    ("F", format!("diff --git a/{index} b/{index}")),
+                    ("M", format!("--- a/{index}")),
+                    ("M", format!("+++ b/{index}")),
+                ] {
+                    patch.push_str(&format!("{text}\n"));
+                    expected.push((text, kind.to_owned(), None, None, file));
+                }
+                for (old, new, changes) in hunks {
+                    let old_count = changes.iter().filter(|(kind, _)| *kind != '+').count();
+                    let new_count = changes.iter().filter(|(kind, _)| *kind != '-').count();
+                    let header = format!("@@ -{old},{old_count} +{new},{new_count} @@");
+                    patch.push_str(&format!("{header}\n"));
+                    expected.push((header, "@".into(), None, None, file));
+                    for (i, (kind, text)) in changes.iter().enumerate() {
+                        // Count consumed source/destination lines in the generated edit script,
+                        // independently of the parser's running counters.
+                        let old_line = (*kind != '+').then(|| old + changes[..i].iter()
+                            .filter(|(kind, _)| *kind != '+').count() as u64);
+                        let new_line = (*kind != '-').then(|| new + changes[..i].iter()
+                            .filter(|(kind, _)| *kind != '-').count() as u64);
+                        let line = format!("{kind}{text}");
+                        patch.push_str(&format!("{line}\n"));
+                        expected.push((line, kind.to_string(), old_line, new_line, file));
+                    }
+                    let marker = "\\ No newline at end of file";
+                    patch.push_str(&format!("{marker}\n"));
+                    expected.push((marker.into(), "M".into(), None, None, file));
+                }
+            }
+            let actual: Vec<_> = parse(&patch).into_iter()
+                .map(|row| (row.text, row.kind, row.old, row.new, row.file)).collect();
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn octal_quoted_paths_round_trip_through_public_navigation(path in "[^\\x00/]{1,40}") {
+            // Git's quoted paths encode UTF-8 bytes, not Unicode scalar values.
+            let encoded: String = path.bytes().map(|byte| format!("\\{byte:03o}")).collect();
+            for patch in [
+                format!("diff --git \"a/{encoded}\" \"b/{encoded}\"\nBinary files differ\n"),
+                format!("--- \"a/{encoded}\"\told timestamp\n+++ /dev/null\n"),
+                format!("--- /dev/null\n+++ \"b/{encoded}\"\tnew timestamp\n"),
+                format!("rename to \"{encoded}\"\n"),
+                format!("copy to \"{encoded}\"\n"),
+            ] {
+                let names = file_names(&parse(&patch));
+                prop_assert_eq!(names.len(), 1, "{:?}", patch);
+                prop_assert_eq!(names.values().next(), Some(&path), "{:?}", patch);
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::unterminated("\"unterminated")]
+    #[case::dangling_escape("\"trailing\\")]
+    #[case::unknown_escape("\"bad\\q\"")]
+    #[case::octal_overflow("\"\\400\"")]
+    #[case::invalid_utf8("\"\\377\"")]
+    #[case::trailing_junk("\"valid\"junk")]
+    fn malformed_quoted_paths_do_not_create_navigation_targets(#[case] path: &str) {
+        let rows = parse(&format!("+++ {path}\n"));
+        assert!(file_names(&rows).is_empty());
+    }
+
     #[test]
     fn file_navigation_matches_real_git_paths_including_renames_binary_and_unicode() {
         let directory = tempfile::tempdir().unwrap();
@@ -228,6 +311,7 @@ mod tests {
             "tab\tname.txt",
             "quoted\"name.txt",
             "line\nname.txt",
+            "controls\u{7}\u{8}\u{b}\u{c}\r\\.txt",
         ];
         for name in names {
             std::fs::write(root.join(name), "before\n").unwrap();

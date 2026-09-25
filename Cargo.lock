@@ -159,6 +159,7 @@ dependencies = [
  "futures-util",
  "insta",
  "markdown",
+ "proptest",
  "ring",
  "rstest",
  "scopeguard",

@@ -83,3 +83,13 @@ iroh-e2e:
 # Run Rust, Kotlin and Swift quality checks, or one selected language.
 quality language="all":
     scripts/quality.sh "$1"
+
+# Audit diff presentation tests in an isolated copy; extra arguments go to cargo-mutants.
+mutants-diff *args:
+    mkdir -p target/mutation-diff
+    PROPTEST_RNG_SEED=20260925 cargo mutants --package agent-core --file crates/agent-core/src/presentation/diff.rs --output target/mutation-diff --jobs 2 --build-timeout 900 --timeout 60 --cargo-arg=--locked --cargo-arg=--lib "$@" -- presentation::diff::tests
+
+# Verify bounded Git path decoding with the dedicated `nix develop .#kani` environment.
+kani-diff *args:
+    mkdir -p target/kani-diff
+    cargo kani --package agent-core --lib --harness presentation::diff::proofs --output-format terse -Z unstable-options --harness-timeout 120 --export-json target/kani-diff/results.json "$@"
