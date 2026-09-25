@@ -84,10 +84,14 @@ fn transport_failures_survive_without_payloads_or_a_log_storm() {
     let last: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
     assert_eq!(last["operation"], "network.endpoint.receive_failed");
 
-    tracing::warn!(target: "iroh::socket::transports::ip",
-        "failed to rebind IP transport: {:?}", error);
+    tracing::warn!(target: "netwatch::udp",
+        "failed to rebind UDP socket: {:?}", error);
     let contents = fs::read_to_string(directory.path().join("logs/host.jsonl")).unwrap();
     let last: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
     assert_eq!(last["operation"], "network.socket.rebind_failed");
     assert_eq!(last["errorCode"], 48);
+    tracing::debug!(target: "netwatch::udp", "UDP socket rebound");
+    let contents = fs::read_to_string(directory.path().join("logs/host.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+    assert_eq!(last["operation"], "network.socket.rebound");
 }

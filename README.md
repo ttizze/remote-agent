@@ -2,7 +2,7 @@
 
 Bex controls Codex and Claude Code on a trusted computer from a Mac app, an iPhone app, an Android app, or a headless CLI. A Rust Host daemon owns the agent processes; every client connects to it over iroh with the same JSONL RPC peer and dispatches intents to the same Rust `Store`. Terminology is in [CONTEXT.md](CONTEXT.md); design decisions are in [docs/adr](docs/adr); behavior changes are in [CHANGELOG.md](CHANGELOG.md).
 
-The workspace pins iroh 1.1.0 to a fork commit containing [UDP rebind recovery](https://github.com/n0-computer/iroh/pull/4558). Closed UDP transports retry with exponential backoff from 100 ms to 5 s while healthy transports continue receiving. The four iroh workspace packages share the same commit so their types remain consistent across dependencies, including iroh-tickets. Remove these patches when adopting an upstream release containing the fix.
+The workspace pins netwatch 0.19.3 to a fork commit containing [UDP rebind recovery](https://github.com/n0-computer/net-tools/pull/235), while iroh uses its published release. Failed UDP rebinds retry with exponential backoff from 100 ms to 5 s without terminating asynchronous I/O; explicitly closing a socket cancels recovery. Remove the patch when adopting an upstream release containing the fix.
 
 ## Supported operating systems
 

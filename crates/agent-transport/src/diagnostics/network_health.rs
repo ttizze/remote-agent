@@ -13,10 +13,9 @@ pub(super) struct Event {
 pub(super) fn enabled(metadata: &Metadata<'_>) -> bool {
     match metadata.target() {
         "iroh::_events::link_change" => *metadata.level() == Level::DEBUG,
-        "iroh::socket::transports::ip" => {
-            matches!(*metadata.level(), Level::TRACE | Level::WARN)
-        }
-        "iroh::socket::transports" | "netwatch::udp" => *metadata.level() <= Level::WARN,
+        "iroh::socket::transports::ip" => *metadata.level() == Level::TRACE,
+        "iroh::socket::transports" => *metadata.level() <= Level::WARN,
+        "netwatch::udp" => matches!(*metadata.level(), Level::WARN | Level::DEBUG),
         "noq::endpoint" | "noq::connection" => *metadata.level() == Level::ERROR,
         _ => false,
     }
@@ -60,21 +59,10 @@ pub(super) fn decode(event: &tracing::Event<'_>) -> Option<Event> {
                 error_code: None,
             });
         }
-        "iroh::socket::transports::ip" if fields.message.starts_with("rebound from ") => {
-            return Some(Event {
-                operation: "network.socket.rebound",
-                message: "UDP socket rebound".into(),
-                error_code: None,
-            });
-        }
         "iroh::socket::transports" if fields.message.starts_with("failed to rebind ") => {
             "network.socket.rebind_failed"
         }
-        "iroh::socket::transports::ip"
-            if fields
-                .message
-                .starts_with("failed to rebind IP transport: ") =>
-        {
+        "netwatch::udp" if fields.message.starts_with("failed to rebind UDP socket: ") => {
             "network.socket.rebind_failed"
         }
         "iroh::socket::transports"
@@ -84,6 +72,16 @@ pub(super) fn decode(event: &tracing::Event<'_>) -> Option<Event> {
             return Some(Event {
                 operation: "network.endpoint.receive_failed",
                 message: "All transports failed; QUIC endpoint will shut down".into(),
+                error_code: None,
+            });
+        }
+        _ if (target == "netwatch::udp" && fields.message == "UDP socket rebound")
+            || (target == "iroh::socket::transports::ip"
+                && fields.message.starts_with("rebound from ")) =>
+        {
+            return Some(Event {
+                operation: "network.socket.rebound",
+                message: "UDP socket rebound".into(),
                 error_code: None,
             });
         }

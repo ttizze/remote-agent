@@ -38,10 +38,7 @@ url = "2.5.4"
 zeroize = "1.8.1"
 
 [patch.crates-io]
-# iroh 1.1.0 with UDP rebind recovery: https://github.com/n0-computer/iroh/pull/4558
-iroh = { git = "https://github.com/ttizze/iroh", rev = "0bdd6383dadb151c825142a8e0311d163d83b054" }
-iroh-base = { git = "https://github.com/ttizze/iroh", rev = "0bdd6383dadb151c825142a8e0311d163d83b054" }
-iroh-dns = { git = "https://github.com/ttizze/iroh", rev = "0bdd6383dadb151c825142a8e0311d163d83b054" }
-iroh-relay = { git = "https://github.com/ttizze/iroh", rev = "0bdd6383dadb151c825142a8e0311d163d83b054" }
+# UDP rebind recovery: https://github.com/n0-computer/net-tools/pull/235
+netwatch = { git = "https://github.com/ttizze/net-tools", rev = "1d54cca14f47ebfa20a75234e8a08351d9f5a8d4" }
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 vte = { path = "vendor/vte" }

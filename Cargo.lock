@@ -5243,7 +5243,8 @@ dependencies = [
 [[package]]
 name = "iroh"
 version = "1.1.0"
-source = "git+https://github.com/ttizze/iroh?rev=0bdd6383dadb151c825142a8e0311d163d83b054#0bdd6383dadb151c825142a8e0311d163d83b054"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "329552fad4e46b5ccb4439d5635216f6289eec2c46f3fde4bc732d762694b9e5"
 dependencies = [
  "backon",
  "blake3",
@@ -5293,7 +5294,8 @@ dependencies = [
 [[package]]
 name = "iroh-base"
 version = "1.1.0"
-source = "git+https://github.com/ttizze/iroh?rev=0bdd6383dadb151c825142a8e0311d163d83b054#0bdd6383dadb151c825142a8e0311d163d83b054"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ccf4cde68a02ef03c0095ab2c031c6adfe508f3bc8e7c258558a027ebe64a8e"
 dependencies = [
  "curve25519-dalek",
  "data-encoding",
@@ -5311,7 +5313,8 @@ dependencies = [
 [[package]]
 name = "iroh-dns"
 version = "1.1.0"
-source = "git+https://github.com/ttizze/iroh?rev=0bdd6383dadb151c825142a8e0311d163d83b054#0bdd6383dadb151c825142a8e0311d163d83b054"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a41224eb0140a5c519935d4073fc6b236d174080be401f9bf7da126b2ee3aa4"
 dependencies = [
  "arc-swap",
  "cfg_aliases 0.2.2",
@@ -5361,7 +5364,8 @@ dependencies = [
 [[package]]
 name = "iroh-relay"
 version = "1.1.0"
-source = "git+https://github.com/ttizze/iroh?rev=0bdd6383dadb151c825142a8e0311d163d83b054#0bdd6383dadb151c825142a8e0311d163d83b054"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b5f6f07e2c9b0c4bc82e2864be09f4aea4320165d5316e668616dbc822f428a"
 dependencies = [
  "blake3",
  "bytes",
@@ -6512,8 +6516,7 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39da9cad5f23aa43401f09497d3b280e51b5feba115d9ffbf38ca35d6ff95e96"
+source = "git+https://github.com/ttizze/net-tools?rev=1d54cca14f47ebfa20a75234e8a08351d9f5a8d4#1d54cca14f47ebfa20a75234e8a08351d9f5a8d4"
 dependencies = [
  "atomic-waker",
  "bytes",

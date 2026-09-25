@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Recover UDP transports after a failed network-change rebind using a pinned iroh fix. Retain bounded network-change, rebind, and QUIC failure diagnostics without saving dependency payloads or addresses.
+- Recover UDP transports after a failed network-change rebind using a pinned netwatch fix, preserving explicit close semantics. Retain bounded network-change, rebind, and QUIC failure diagnostics without saving dependency payloads or addresses.
 
 - Redesign iPhone onboarding around “どこでも、これひとつで。” Show the selected PC and its AI recipients before one “同意して接続” action, and simplify saved-PC cards and privacy access. Prepare BEX Dev build 21.
 
