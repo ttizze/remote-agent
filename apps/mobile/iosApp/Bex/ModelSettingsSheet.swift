@@ -1,6 +1,5 @@
 import AgentCore
 import SwiftUI
-import UIKit
 
 struct ModelSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -16,7 +15,8 @@ struct ModelSettingsSheet: View {
     @State private var loadingModels = false
     @State private var loginCode = ""
     @State private var loginError: String?
-    @State private var startingLogin = false
+    @State private var loginRequestInFlight = false
+    @State private var cancellingLogin = false
     @State private var pollingLogin: Task<Void, Never>?
     @State private var signOutId: String?
     private var provider: ProviderKind {
@@ -39,15 +39,31 @@ struct ModelSettingsSheet: View {
         model.snapshot.accountLogin()
     }
 
+    private var loginInProgress: Bool {
+        loginRequestInFlight || cancellingLogin || login != nil
+    }
+
+    private var loginProgressMessage: String? {
+        if cancellingLogin {
+            return "サインインを中止中…"
+        }
+        guard loginRequestInFlight else { return nil }
+        return login == nil ? "サインインを準備中…" : "認証を確認中…"
+    }
+
     private var busy: Bool {
-        changingAccount || startingLogin || login != nil || !model.isConnected
+        changingAccount || loginInProgress || !model.isConnected
     }
 
     var body: some View {
         NavigationStack {
             List {
                 if let login {
-                    loginSection(login)
+                    AccountLoginSection(
+                        login: login, providerName: providerName, loginCode: $loginCode,
+                        progressMessage: loginProgressMessage, loginError: loginError,
+                        submit: { submitLoginCode(login.loginId) }, retry: { pollLogin(login.loginId) }
+                    )
                 } else {
                     switch page {
                     case .models:
@@ -105,21 +121,25 @@ struct ModelSettingsSheet: View {
             .navigationTitle(page == .models ? "" : page == .accounts ? "アカウント" : "アカウントを管理")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if !managementOnly, page != .models {
+                if loginInProgress || (!managementOnly && page != .models) {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("戻る", systemImage: "chevron.left") {
-                            if page == .manage {
-                                providerOverride = nil
+                            if loginInProgress {
+                                cancelLogin()
+                            } else {
+                                if page == .manage {
+                                    providerOverride = nil
+                                }
+                                page = page == .manage ? .accounts : .models
                             }
-                            page = page == .manage ? .accounts : .models
                         }
-                        .disabled(startingLogin || login != nil)
+                        .disabled(cancellingLogin)
                         .accessibilityIdentifier("model.back")
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完了") { dismiss() }
-                        .disabled(startingLogin || login != nil)
+                        .disabled(loginInProgress)
                         .accessibilityIdentifier("model.close")
                 }
             }
@@ -140,7 +160,7 @@ struct ModelSettingsSheet: View {
                 Text("この接続先に保存されたアカウントからサインアウトします。再び使うにはサインインが必要です。")
             }
         }
-        .interactiveDismissDisabled(startingLogin || login != nil)
+        .interactiveDismissDisabled(loginInProgress)
         .onAppear {
             if managementOnly {
                 page = .manage
@@ -154,7 +174,9 @@ struct ModelSettingsSheet: View {
         }
         .onDisappear { pollingLogin?.cancel(); pollingLogin = nil }
     }
+}
 
+extension ModelSettingsSheet {
     private var accountSection: some View {
         Section {
             ForEach(accounts, id: \.id) { choice in
@@ -196,8 +218,8 @@ struct ModelSettingsSheet: View {
             if loadingAccounts {
                 ProgressView("アカウントを更新中…")
             }
-            if startingLogin {
-                ProgressView("サインインを準備中…")
+            if let loginProgressMessage {
+                ProgressView(loginProgressMessage)
             }
             if let error = loginError ?? model.accountError {
                 Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)
@@ -258,49 +280,6 @@ struct ModelSettingsSheet: View {
 }
 
 extension ModelSettingsSheet {
-    private func loginSection(_ login: AccountLogin) -> some View {
-        Section("\(providerName) にサインイン") {
-            Text("1. ブラウザでサインイン")
-                .font(.headline)
-            if !login.requiresCodeSubmission {
-                Text("ログインページで次のコードを入力してください。")
-                HStack {
-                    Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
-                        .accessibilityIdentifier("model.login.code")
-                    Spacer()
-                    Button("コピー") { UIPasteboard.general.string = login.userCode }
-                }
-            }
-            if let url = URL(string: login.verificationUrl), url.scheme == "https" {
-                Link("ログインページを開く", destination: url)
-            }
-            if login.requiresCodeSubmission {
-                Text("2. 認証コードを貼り付け")
-                    .font(.headline)
-                Text("ブラウザに表示されたコードを入力してください。")
-                    .font(.subheadline).foregroundStyle(.secondary)
-                SecureField("認証コード", text: $loginCode)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .accessibilityIdentifier("model.login.input")
-                Button("サインインを完了") { submitLoginCode(login.loginId) }
-                    .disabled(loginCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || startingLogin)
-                    .accessibilityIdentifier("model.login.submit")
-            } else {
-                ProgressView("ブラウザでの認証を待っています…")
-            }
-            if startingLogin {
-                ProgressView("認証を確認中…")
-            }
-            if let error = loginError {
-                Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)
-                Button("認証状態を再確認") { pollLogin(login.loginId) }
-            }
-            Button("サインインを中止", role: .cancel) { cancelLogin() }
-                .disabled(startingLogin)
-                .accessibilityIdentifier("model.login.cancel")
-        }
-    }
-
     private func selectProvider(_ provider: ProviderKind) {
         providerOverride = provider
         loginError = nil
@@ -334,36 +313,33 @@ extension ModelSettingsSheet {
 
     private func startLogin() {
         loginCode = ""
-        startingLogin = true
+        loginRequestInFlight = true
         loginError = nil
-        model.perform(.startAccountLogin(StartAccountLogin(provider: provider))) { result in
-            startingLogin = false
-            if case let .failure(error) = result {
-                loginError = model.snapshot.error() ?? error.localizedDescription; return
-            }
-            if let id = login?.loginId {
-                pollLogin(id)
-            }
-        }
+        model.perform(.startAccountLogin(StartAccountLogin(provider: provider)), completion: finishLoginRequest)
     }
 
     private func submitLoginCode(_ id: String) {
-        startingLogin = true
+        loginRequestInFlight = true
         loginError = nil
         let code = loginCode
         loginCode = ""
-        model.perform(.submitAccountLogin(SubmitAccountLogin(id: id, code: code))) { result in
-            startingLogin = false
-            if case let .failure(error) = result {
-                loginError = model.snapshot.error() ?? error.localizedDescription
-            } else {
-                pollLogin(id)
-            }
+        model.perform(.submitAccountLogin(SubmitAccountLogin(id: id, code: code)), completion: finishLoginRequest)
+    }
+
+    private func finishLoginRequest(_ result: Result<Outcome, Error>) {
+        loginRequestInFlight = false
+        if cancellingLogin {
+            cancelLogin(); return
+        }
+        if case let .failure(error) = result {
+            loginError = model.snapshot.error() ?? error.localizedDescription
+        } else if let id = login?.loginId {
+            pollLogin(id)
         }
     }
 
     private func pollLogin(_ id: String) {
-        guard pollingLogin == nil else { return }
+        guard pollingLogin == nil, !cancellingLogin else { return }
         loginError = nil
         let draftKey = model.coreDraftKey
         pollingLogin = Task { @MainActor in
@@ -384,11 +360,17 @@ extension ModelSettingsSheet {
     }
 
     private func cancelLogin() {
-        guard let id = login?.loginId else { return }
+        cancellingLogin = true
+        loginCode = ""
+        loginError = nil
         pollingLogin?.cancel()
-        startingLogin = true
+        // Finish the in-flight start or code submission before cancelling on the Host.
+        guard !loginRequestInFlight else { return }
+        guard let id = login?.loginId else {
+            cancellingLogin = false; return
+        }
         model.perform(.cancelAccountLogin(CancelAccountLogin(id: id))) { result in
-            startingLogin = false
+            cancellingLogin = false
             if case let .failure(error) = result {
                 loginError = model.snapshot.error() ?? error.localizedDescription
             }

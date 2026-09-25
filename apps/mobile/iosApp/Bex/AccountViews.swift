@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 struct AccountUsageView: View {
     let usage: AccountUsage?
@@ -117,6 +118,57 @@ struct AccountIdentityView: View {
                     .accessibilityIdentifier("account.identity." + account.id)
             } else {
                 Text("未選択")
+            }
+        }
+    }
+}
+
+struct AccountLoginSection: View {
+    let login: AccountLogin
+    let providerName: String
+    @Binding var loginCode: String
+    let progressMessage: String?
+    let loginError: String?
+    let submit: () -> Void
+    let retry: () -> Void
+
+    var body: some View {
+        Section("\(providerName) にサインイン") {
+            Text("1. ブラウザでサインイン")
+                .font(.headline)
+            if !login.requiresCodeSubmission {
+                Text("ログインページで次のコードを入力してください。")
+                HStack {
+                    Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
+                        .accessibilityIdentifier("model.login.code")
+                    Spacer()
+                    Button("コピー") { UIPasteboard.general.string = login.userCode }
+                }
+            }
+            if let url = URL(string: login.verificationUrl), url.scheme == "https" {
+                Link("ログインページを開く", destination: url)
+            }
+            if login.requiresCodeSubmission {
+                Text("2. 認証コードを貼り付け")
+                    .font(.headline)
+                Text("ブラウザに表示されたコードを入力してください。")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                SecureField("認証コード", text: $loginCode)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("model.login.input")
+                Button("サインインを完了", action: submit)
+                    .disabled(loginCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty || progressMessage != nil)
+                    .accessibilityIdentifier("model.login.submit")
+            } else {
+                ProgressView("ブラウザでの認証を待っています…")
+            }
+            if let progressMessage {
+                ProgressView(progressMessage)
+            }
+            if let error = loginError {
+                Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)
+                Button("認証状態を再確認", action: retry)
             }
         }
     }

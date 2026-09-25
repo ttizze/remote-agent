@@ -69,6 +69,45 @@ extension BexLaunchUITests {
         app.buttons["model.close"].tap()
     }
 
+    func testSimulatorGoesBackFromAccountLoginAndCanStartAgain() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        app.buttons["model.settings"].tap()
+        for provider in ["Codex", "Claude"] {
+            selectFixtureProvider(app, provider)
+            openAccountManagement(app)
+            let originalAccounts = app.buttons.matching(NSPredicate(
+                format: "identifier BEGINSWITH 'account.logout.'"
+            )).allElementsBoundByIndex.map(\.identifier).sorted()
+            for attempt in 0 ..< 2 {
+                let add = app.buttons["model.account.add"]
+                XCTAssertTrue(add.waitForExistence(timeout: 10)); add.tap()
+                if attempt == 1 {
+                    let code = provider == "Codex"
+                        ? app.staticTexts["model.login.code"] : app.secureTextFields["model.login.input"]
+                    XCTAssertTrue(code.waitForExistence(timeout: 15))
+                    if provider == "Claude" {
+                        code.tap(); code.typeText("unfinished-code")
+                    }
+                }
+                let back = app.navigationBars.buttons["model.back"]
+                XCTAssertTrue(back.waitForExistence(timeout: 10))
+                XCTAssertTrue(back.isEnabled && back.isHittable)
+                XCTAssertFalse(app.buttons["model.login.cancel"].exists)
+                back.tap()
+                let cancelled = expectation(
+                    for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: add
+                )
+                wait(for: [cancelled], timeout: 15)
+                XCTAssertEqual(app.buttons.matching(NSPredicate(
+                    format: "identifier BEGINSWITH 'account.logout.'"
+                )).allElementsBoundByIndex.map(\.identifier).sorted(), originalAccounts)
+            }
+        }
+        app.buttons["model.close"].tap()
+        XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
+    }
+
     func testSimulatorSignsInDirectlyFromModelSettings() throws {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.new.project.simulator-project"].tap()
