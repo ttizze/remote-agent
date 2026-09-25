@@ -62,7 +62,7 @@ conversation-ui:
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
-        testSimulatorBrowsesAllSessionImagesAndSavesTheSelection \
+        testSimulatorOpensOnlyTheTappedImageAndSavesIt \
         testSimulatorCopiesOnlySelectedMessageText \
         testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
         testSimulatorOpensSideChatWithoutLosingOriginalDraft \

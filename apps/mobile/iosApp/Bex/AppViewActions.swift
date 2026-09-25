@@ -233,22 +233,10 @@ extension BexAppViewModel {
 
     var mediaAccess: ConversationMediaAccess {
         let host = selectedProfileId
-        let images: (@MainActor () async throws -> [SessionImage])? = conversation.map { thread in
-            { [self] in
-                guard selectedProfileId == host else { throw CancellationError() }
-                let result = try await outcome(for: .loadSessionImages(LoadSessionImages(threadId: thread.id)))
-                guard selectedProfileId == host else { throw CancellationError() }
-                guard case let .sessionImages(images) = result else {
-                    throw NSError(domain: "BexImage", code: 1,
-                                  userInfo: [NSLocalizedDescriptionKey: "画像の応答が無効です。"])
-                }
-                return images
-            }
-        }
         return ConversationMediaAccess(host: host, cwd: cwd, download: { [self] path in
             guard selectedProfileId == host else { throw CancellationError() }
             return try await download(path)
-        }, sessionImages: images, visualization: { [self, cwd] path in
+        }, visualization: { [self, cwd] path in
             guard selectedProfileId == host else { throw CancellationError() }
             let result = try await outcome(for: .loadVisualization(LoadVisualization(path: path, cwd: cwd)))
             guard selectedProfileId == host else { throw CancellationError() }
