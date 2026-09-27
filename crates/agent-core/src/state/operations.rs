@@ -1,10 +1,13 @@
 use super::*;
 use crate::{
+    models::{FileContent, HostStatus, Invitation, Item, RemoteHost, Thread, WorktreeSettings},
     peer::PeerError,
     store::{Execution, Outcome},
 };
 use agent_protocol::operations as rpc;
+use agent_protocol::operations::Answer;
 use rpc::{Input, Submission};
+use std::collections::VecDeque;
 
 macro_rules! rpc_operation {
     ($parent:ident.$field:ident) => {
@@ -157,6 +160,10 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     }
     fn terminal_handle(&self) -> Option<&str> {
         None
+    }
+    /// Host catalog reads share one generation so an older page cannot replace a newer one.
+    fn catalog_refresh(&self) -> bool {
+        false
     }
     fn run(
         &self,

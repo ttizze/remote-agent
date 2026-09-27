@@ -2534,6 +2534,62 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
 }
 
 #[tokio::test]
+async fn a_newer_catalog_refresh_is_not_replaced_by_an_older_in_flight_page() {
+    let (store, mut reader, writer) = connected(Snapshot::default()).await;
+    let mut older = None;
+    for _ in 0..3 {
+        let request = read(&mut reader).await;
+        match request["method"].as_str().unwrap() {
+            "model/list" => older = Some(request),
+            "host/thread/list" => writer
+                .reply(
+                    &request,
+                    json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}}),
+                )
+                .await
+                .unwrap(),
+            "host/account/list" => writer
+                .reply(&request, json!({"result":{"accounts":[]}}))
+                .await
+                .unwrap(),
+            method => panic!("unexpected connection request: {method}"),
+        }
+    }
+    let older = older.expect("connection loads models");
+    let refresh = store.dispatch(Intent::LoadModels(op::LoadModels {}));
+    let newer = read(&mut reader).await;
+    assert_eq!(newer["method"], "model/list");
+    writer
+        .reply(
+            &newer,
+            json!({"result":{"data":[{
+                "id":"kept","model":"kept","displayName":"Kept",
+                "defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
+            }]}}),
+        )
+        .await
+        .unwrap();
+    refresh.await.unwrap();
+    writer
+        .reply(
+            &older,
+            json!({"result":{"data":[{
+                "id":"stale","model":"stale","displayName":"Stale",
+                "defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
+            },{
+                "id":"also","model":"also","displayName":"Also",
+                "defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
+            }]}}),
+        )
+        .await
+        .unwrap();
+    wait_for(&store, |snapshot| snapshot.models.len() == 1).await;
+    tokio::task::yield_now().await;
+    assert_eq!(store.snapshot().models[0].model, "kept");
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn connection_loads_workspace_and_lists_in_one_epoch() {
     let initial = Snapshot {
         navigation: Arc::new(agent_core::state::Navigation {

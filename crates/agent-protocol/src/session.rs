@@ -437,6 +437,24 @@ pub struct Capabilities {
     pub rename: bool,
     pub model_change: bool,
 }
+
+/// Host capability gate for a `Call`. Adapters still report the flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityNeed {
+    AdditionalInput,
+    Fork,
+    Rename,
+}
+
+impl Capabilities {
+    pub fn allows(self, need: CapabilityNeed) -> bool {
+        match need {
+            CapabilityNeed::AdditionalInput => self.additional_input,
+            CapabilityNeed::Fork => self.fork,
+            CapabilityNeed::Rename => self.rename,
+        }
+    }
+}
 pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
     (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status.as_deref() == Some("inProgress")))
         .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
