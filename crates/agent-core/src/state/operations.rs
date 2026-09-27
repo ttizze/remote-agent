@@ -161,6 +161,10 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     fn terminal_handle(&self) -> Option<&str> {
         None
     }
+    /// Host catalog reads share one generation so an older page cannot replace a newer one.
+    fn catalog_refresh(&self) -> bool {
+        false
+    }
     fn run(
         &self,
         context: &mut Execution<'_>,

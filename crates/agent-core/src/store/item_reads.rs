@@ -55,9 +55,10 @@ impl ItemReads {
         &mut self,
         updates: &watch::Sender<Arc<Snapshot>>,
         completed: Completed,
+        catalog_generation: u64,
     ) -> Vec<Scheduled> {
         let key = completed.item_read.clone();
-        let effects = finish(updates, completed);
+        let effects = finish(updates, completed, catalog_generation);
         if let Some(key) = key
             && !effects
                 .iter()

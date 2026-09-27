@@ -152,6 +152,7 @@ impl Receipt {
 struct Completed {
     subscriptions: Vec<(uuid::Uuid, agent_transport::client::Updates)>,
     item_read: Option<op::ReadItem>,
+    catalog_generation: Option<u64>,
     delivery_attempted: bool,
     epoch: u64,
     result: Result<Applied, PeerError>,
@@ -647,7 +648,23 @@ fn publish_locked(
     *current = Arc::new(next);
     (effects, true)
 }
-fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<Scheduled> {
+fn finish(
+    updates: &watch::Sender<Arc<Snapshot>>,
+    completed: Completed,
+    catalog_generation: u64,
+) -> Vec<Scheduled> {
+    if completed
+        .catalog_generation
+        .is_some_and(|generation| generation != catalog_generation)
+    {
+        if let Some(complete) = completed.complete {
+            complete.send(match completed.result {
+                Ok(applied) => Ok(applied.outcome),
+                Err(error) => Err(error),
+            });
+        }
+        return Vec::new();
+    }
     let mut effects = Vec::new();
     let mut scheduled = Vec::new();
     let mut result = Ok(Outcome::Applied);
@@ -754,6 +771,7 @@ async fn run(
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
     let mut terminal_running = false;
+    let mut catalog_generation = 0;
     let mut disconnected = None;
     let reason = loop {
         let unused: Vec<_> = subscriptions
@@ -794,12 +812,14 @@ async fn run(
                 }
                 continue;
             }
+            let generation = catalog_job(&mut catalog_generation, &effect);
             jobs.push(perform(
                 Some(peer),
                 session.as_ref(),
                 captured,
                 effect,
                 complete,
+                generation,
             ));
         }
         while let Some(scheduled) = item_reads.next() {
@@ -809,6 +829,7 @@ async fn run(
                 scheduled.snapshot,
                 scheduled.effect,
                 scheduled.complete,
+                None,
             ));
         }
         if !terminal_running
@@ -825,6 +846,7 @@ async fn run(
                 captured,
                 effect,
                 complete,
+                None,
             ));
         }
         tokio::select! {
@@ -882,7 +904,7 @@ async fn run(
                     Err(std::io::Error::other("subscription ended"))
                 })).boxed()); }
                 if result.terminal.is_some() { terminal_running = false; }
-                effects.extend(item_reads.finish(&updates, result));
+                effects.extend(item_reads.finish(&updates, result, catalog_generation));
             }
             Some((id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
                 match update {
@@ -969,9 +991,10 @@ async fn run_offline(
                 command.snapshot.clone(),
                 effect,
                 complete.take(),
+                None,
             )
             .await;
-            drop(finish(updates, result));
+            drop(finish(updates, result, 0));
         }
         if let Some(complete) = complete {
             complete.send(Ok(Outcome::Applied));
@@ -986,6 +1009,7 @@ async fn perform(
     snapshot: Arc<Snapshot>,
     effect: Effect,
     complete: Option<Receipt>,
+    catalog_generation: Option<u64>,
 ) -> Completed {
     let item_read = effect.0.item_read().cloned();
     let terminal = effect.0.terminal_handle().map(str::to_owned);
@@ -1006,6 +1030,7 @@ async fn perform(
     Completed {
         subscriptions,
         item_read,
+        catalog_generation,
         delivery_attempted: client.is_some(),
         epoch: snapshot.epoch,
         result,
@@ -1013,6 +1038,13 @@ async fn perform(
         terminal,
         complete,
     }
+}
+
+fn catalog_job(catalog_generation: &mut u64, effect: &Effect) -> Option<u64> {
+    effect.0.catalog_refresh().then(|| {
+        *catalog_generation += 1;
+        *catalog_generation
+    })
 }
 
 // The typed completion is executable Store state, never part of a replayable Event.
@@ -1064,6 +1096,7 @@ trait Pending: Application {
     fn item_read(&self) -> Option<&op::ReadItem>;
     fn submission_id(&self) -> Option<&str>;
     fn terminal_handle(&self) -> Option<&str>;
+    fn catalog_refresh(&self) -> bool;
     fn run<'a>(
         self: Box<Self>,
         context: &'a mut Execution<'_>,
@@ -1078,6 +1111,9 @@ impl<O: op::Operation> Pending for Completion<O> {
     }
     fn terminal_handle(&self) -> Option<&str> {
         self.operation.terminal_handle()
+    }
+    fn catalog_refresh(&self) -> bool {
+        self.operation.catalog_refresh()
     }
     fn run<'a>(
         mut self: Box<Self>,

@@ -471,6 +471,10 @@ impl Operation for LoadModels {
 
     const STALE_POLICY: StalePolicy = StalePolicy::Retry;
 
+    fn catalog_refresh(&self) -> bool {
+        true
+    }
+
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         context.client.models().await
     }
