@@ -234,6 +234,7 @@ impl Operation for SubmitAccountLogin {
 #[cfg(test)]
 mod account_model_tests {
     use super::*;
+    use crate::models::Model;
     use serde_json::json;
 
     #[test]

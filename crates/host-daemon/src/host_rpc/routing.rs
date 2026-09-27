@@ -275,8 +275,8 @@ impl SessionRouter {
         &self,
         target: &SessionRef,
         id: &str,
-    ) -> Result<(), super::service::Failure> {
-        use super::service::Failure;
+    ) -> Result<(), super::failure::Failure> {
+        use super::failure::Failure;
         if id.is_empty() || id.len() > 256 {
             return Err(Failure::new(
                 "invalid_params",

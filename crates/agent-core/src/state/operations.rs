@@ -1,10 +1,13 @@
 use super::*;
 use crate::{
+    models::{FileContent, HostStatus, Invitation, Item, RemoteHost, Thread, WorktreeSettings},
     peer::PeerError,
     store::{Execution, Outcome},
 };
 use agent_protocol::operations as rpc;
+use agent_protocol::operations::Answer;
 use rpc::{Input, Submission};
+use std::collections::VecDeque;
 
 macro_rules! rpc_operation {
     ($parent:ident.$field:ident) => {

@@ -2,7 +2,6 @@ use anyhow::{Context as _, Result, anyhow};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use agent_protocol::models::ChangedFile as WorkspaceFileChange;
@@ -32,12 +31,7 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
     if !cwd.is_dir() {
         return Err(anyhow!("working directory is not a directory"));
     }
-    let membership = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .env("LC_ALL", "C")
-        .current_dir(&cwd)
-        .output()
-        .context("failed to run git")?;
+    let membership = crate::git::inside_work_tree(&cwd)?;
     // Git has no distinct exit code for discovery failure. Recognize only its
     // ordinary parent-directory/mount-boundary result in a fixed locale;
     // broken metadata, permissions and ownership errors must still surface.
@@ -80,24 +74,7 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
         crate::git::text(&cwd, &["diff", "--no-ext-diff", "--no-color", "HEAD", "--"])
             .or_else(|_| crate::git::text(&cwd, &["diff", "--no-ext-diff", "--no-color", "--"]))?;
     for file in files.iter_mut().filter(|file| file.status == "untracked") {
-        let output = Command::new("git")
-            .args([
-                "diff",
-                "--no-index",
-                "--numstat",
-                "-z",
-                "--patch",
-                "--no-ext-diff",
-                "--no-color",
-                "--",
-                "/dev/null",
-                &file.path,
-            ])
-            .current_dir(&cwd)
-            .output()?;
-        if !matches!(output.status.code(), Some(0 | 1)) {
-            return Err(anyhow!("cannot read untracked file diff"));
-        }
+        let output = crate::git::untracked_diff(&cwd, &file.path)?;
         let output = String::from_utf8_lossy(&output.stdout);
         let patch_start = output.find("diff --git ").unwrap_or(output.len());
         let (added, deleted) =

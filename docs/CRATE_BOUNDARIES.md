@@ -4,6 +4,9 @@
 notifications, serialization, and deterministic validation and model operations.
 It has no Store, presentation, UniFFI, async runtime, or network dependency.
 The operation table is defined once in `agent-protocol/src/protocol/requests.rs`.
+`Call` owns session scope, workspace locking, capability gates, and the
+unregistered-provider allowlist next to that table. Host dispatch consults those
+methods instead of re-matching the operation list.
 
 `agent-transport` owns QUIC framing, connections, transfers, provider JSONL I/O,
 and diagnostic collection. Both Host and the client use it. It depends on

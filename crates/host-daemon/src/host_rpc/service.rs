@@ -14,10 +14,9 @@ use agent_transport::peer::PeerEvent;
 use agent_transport::peer::RpcMessage;
 
 use agent_protocol::protocol::{Body, Call, Response};
-use agent_transport::peer::{RpcMessageError, RpcMessageKind};
-use codex_app_server::{CodexAppServer, Error as AppServerError};
-use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
+use agent_transport::peer::RpcMessageKind;
+use codex_app_server::CodexAppServer;
+use serde::Deserialize;
 use tokio::sync::broadcast;
 
 use super::codex::ThreadListParams;
@@ -25,85 +24,7 @@ use super::codex::ThreadListParams;
 use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
 use crate::ProjectStore;
 
-#[derive(Debug, Serialize, thiserror::Error)]
-#[serde(untagged)]
-pub(super) enum Failure {
-    #[error("{message}")]
-    Host {
-        code: &'static str,
-        message: String,
-        delivery: agent_transport::peer::Delivery,
-    },
-    #[error("{provider_error}")]
-    Upstream {
-        #[serde(rename = "providerError")]
-        provider_error: Box<RawValue>,
-        message: String,
-        delivery: agent_transport::peer::Delivery,
-    },
-}
-impl From<RpcMessageError> for Failure {
-    fn from(error: RpcMessageError) -> Self {
-        Self::new("invalid_params", error)
-    }
-}
-
-impl From<serde_json::Error> for Failure {
-    fn from(error: serde_json::Error) -> Self {
-        Self::new("invalid_params", error)
-    }
-}
-
-impl From<AppServerError> for Failure {
-    fn from(error: AppServerError) -> Self {
-        Self::unknown("codex_unavailable", error)
-    }
-}
-
-impl Failure {
-    fn before_submission(mut self) -> Self {
-        match &mut self {
-            Self::Host { delivery, .. } | Self::Upstream { delivery, .. } => {
-                *delivery = agent_transport::peer::Delivery::NotSent
-            }
-        }
-        self
-    }
-    fn delivery(&self) -> agent_transport::peer::Delivery {
-        match self {
-            Self::Host { delivery, .. } | Self::Upstream { delivery, .. } => *delivery,
-        }
-    }
-
-    pub(super) fn upstream(provider_error: Box<RawValue>) -> Self {
-        let value: serde_json::Value =
-            serde_json::from_str(provider_error.get()).unwrap_or_default();
-        let message = value["message"]
-            .as_str()
-            .filter(|message| !message.trim().is_empty())
-            .map(agent_transport::diagnostics::sanitize)
-            .unwrap_or_else(|| "接続先で操作に失敗しました。もう一度お試しください。".into());
-        Self::Upstream {
-            message,
-            provider_error,
-            delivery: agent_transport::peer::Delivery::Unknown,
-        }
-    }
-    pub(super) fn unknown(code: &'static str, error: impl std::fmt::Display) -> Self {
-        Self::Host {
-            code,
-            message: format!("{error:#}"),
-            delivery: agent_transport::peer::Delivery::Unknown,
-        }
-    }
-    pub(super) fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
-        Self::Host {
-            code,
-            message: format!("{error:#}"),
-            delivery: agent_transport::peer::Delivery::NotSent,
-        }
-    }
-}
+use super::failure::Failure;
 
 #[derive(Clone)]
 pub struct HostRpcService {
@@ -350,7 +271,10 @@ impl HostRpcService {
             return self.session_open(session, params).await;
         }
         let result = async {
-            let (thread_id, input_id) = session_target(message);
+            let (thread_id, input_id) = match message.session_scope() {
+                Some((thread_id, input_id)) => (Some(thread_id), input_id),
+                None => (None, None),
+            };
             let target = thread_id
                 .map(agent_protocol::session::SessionRef::from_thread_id)
                 .transpose()
@@ -367,19 +291,7 @@ impl HostRpcService {
             } else {
                 None
             };
-            let _workspace_read = if matches!(
-                message,
-                Call::Submit(_)
-                    | Call::QueueTurn(_)
-                    | Call::StartThread(_)
-                    | Call::ResumeThread(_)
-                    | Call::StartTurn(_)
-                    | Call::SteerTurn(_)
-                    | Call::StartTerminal(_)
-                    | Call::WriteFile(_)
-                    | Call::Upload(_)
-                    | Call::ReviewWorkspace(_)
-            ) {
+            let _workspace_read = if message.locks_workspace() {
                 Some(self.inner.worktree_access.read().await)
             } else {
                 None
@@ -763,16 +675,7 @@ impl HostRpcService {
                 .map_err(|e| Failure::new("browser_failed", e));
         }
         let method = request.method();
-        if matches!(request, Call::Provider(_))
-            && !matches!(
-                method,
-                "thread/list"
-                    | "account/read"
-                    | "account/login/start"
-                    | "account/login/cancel"
-                    | "account/logout"
-            )
-        {
+        if !request.unregistered_provider_allowed() {
             return Err(Failure::new(
                 "method_not_found",
                 format!("unregistered method: {method}"),
@@ -806,12 +709,9 @@ impl HostRpcService {
         }
         if let Some(target) = target_session {
             let capabilities = provider_capabilities(target.provider);
-            let supported = match request {
-                Call::ForkThread(_) => capabilities.fork,
-                Call::RenameThread(_) => capabilities.rename,
-                Call::SteerTurn(_) | Call::QueueTurn(_) => capabilities.additional_input,
-                _ => true,
-            };
+            let supported = request
+                .required_capability()
+                .is_none_or(|need| capabilities.allows(need));
             if !supported {
                 return Err(Failure::new(
                     "unsupported_operation",
@@ -1609,35 +1509,6 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
             canonical_storage_path(parent).join(name)
         }
         _ => std::env::current_dir().unwrap_or_default().join(path),
-    }
-}
-
-// Every session-scoped operation provides its target here. Submission IDs
-// additionally identify the operations whose delivery must be tracked.
-fn session_target(request: &Call) -> (Option<&str>, Option<&str>) {
-    match request {
-        Call::Submit(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::StartTurn(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::SteerTurn(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::QueueTurn(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::ResumeThread(p) => (Some(p.thread_id.as_str()), None),
-        Call::ForkThread(p) => (Some(p.thread_id.as_str()), None),
-        Call::Interrupt(p) => (Some(p.thread_id.as_str()), None),
-        Call::ReadItem(p) => (Some(p.thread_id.as_str()), None),
-        Call::RenameThread(p) => (Some(p.thread_id.as_str()), None),
-        _ => (None, None),
     }
 }
 

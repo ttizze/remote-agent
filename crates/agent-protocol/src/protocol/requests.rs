@@ -39,6 +39,75 @@ macro_rules! contracts {
                 if let Self::Provider(call) = self { return Ok(call.params.clone()); }
                 match self { $(Self::$variant(params) => serde_json::to_value(params)),* }
             }
+            /// Thread and optional in-flight input identity. Host uses this instead of
+            /// re-matching the operation table; clients never choose a route from it.
+            pub fn session_scope(&self) -> Option<(&str, Option<&str>)> {
+                match self {
+                    Self::Submit(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::StartTurn(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::SteerTurn(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::QueueTurn(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::ResumeThread(p) => Some((p.thread_id.as_str(), None)),
+                    Self::ForkThread(p) => Some((p.thread_id.as_str(), None)),
+                    Self::Interrupt(p) => Some((p.thread_id.as_str(), None)),
+                    Self::ReadItem(p) => Some((p.thread_id.as_str(), None)),
+                    Self::RenameThread(p) => Some((p.thread_id.as_str(), None)),
+                    _ => None,
+                }
+            }
+            /// Worktree-mutating Host operations share one read lock so removal waits.
+            pub fn locks_workspace(&self) -> bool {
+                matches!(
+                    self,
+                    Self::Submit(_)
+                        | Self::QueueTurn(_)
+                        | Self::StartThread(_)
+                        | Self::ResumeThread(_)
+                        | Self::StartTurn(_)
+                        | Self::SteerTurn(_)
+                        | Self::StartTerminal(_)
+                        | Self::WriteFile(_)
+                        | Self::Upload(_)
+                        | Self::ReviewWorkspace(_)
+                )
+            }
+            pub fn required_capability(&self) -> Option<crate::session::CapabilityNeed> {
+                match self {
+                    Self::ForkThread(_) => Some(crate::session::CapabilityNeed::Fork),
+                    Self::RenameThread(_) => Some(crate::session::CapabilityNeed::Rename),
+                    Self::SteerTurn(_) | Self::QueueTurn(_) => {
+                        Some(crate::session::CapabilityNeed::AdditionalInput)
+                    }
+                    _ => None,
+                }
+            }
+            /// Unregistered methods become `Provider`. Only these Codex-native
+            /// account/list calls may still be forwarded.
+            pub fn unregistered_provider_allowed(&self) -> bool {
+                match self {
+                    Self::Provider(call) => matches!(
+                        call.method.as_str(),
+                        "thread/list"
+                            | "account/read"
+                            | "account/login/start"
+                            | "account/login/cancel"
+                            | "account/logout"
+                    ),
+                    _ => true,
+                }
+            }
         }
         pub fn from_json(method: &str, params: Value) -> io::Result<Call> {
             Ok(match method {
@@ -164,5 +233,39 @@ mod tests {
             assert_eq!(RpcMethod::validate(&start, &started).is_ok(), id == "turn");
             assert_eq!(RpcMethod::validate(&queue, &queued).is_ok(), id == "turn");
         }
+    }
+
+    #[test]
+    fn session_scope_and_host_gates_live_on_call() {
+        let submit = from_json(
+            "host/session/submit",
+            serde_json::json!({"threadId":"t","clientUserMessageId":"i","input":[]}),
+        )
+        .unwrap();
+        assert_eq!(submit.session_scope(), Some(("t", Some("i"))));
+        assert!(submit.locks_workspace());
+        assert_eq!(submit.required_capability(), None);
+
+        let fork = from_json(
+            "thread/fork",
+            serde_json::json!({"threadId":"t","lastTurnId":"turn"}),
+        )
+        .unwrap();
+        assert_eq!(fork.session_scope(), Some(("t", None)));
+        assert!(!fork.locks_workspace());
+        assert_eq!(
+            fork.required_capability(),
+            Some(crate::session::CapabilityNeed::Fork)
+        );
+
+        let list = from_json("host/status", serde_json::json!({})).unwrap();
+        assert_eq!(list.session_scope(), None);
+        assert!(!list.locks_workspace());
+        assert!(list.unregistered_provider_allowed());
+
+        let unknown = from_json("not/public", serde_json::json!({"threadId":"t"})).unwrap();
+        assert!(!unknown.unregistered_provider_allowed());
+        let native = from_json("thread/list", serde_json::json!({})).unwrap();
+        assert!(native.unregistered_provider_allowed());
     }
 }
