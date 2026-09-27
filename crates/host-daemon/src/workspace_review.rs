@@ -2,7 +2,6 @@ use anyhow::{Context as _, Result, anyhow};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use agent_protocol::models::ChangedFile as WorkspaceFileChange;
@@ -32,10 +31,9 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
     if !cwd.is_dir() {
         return Err(anyhow!("working directory is not a directory"));
     }
-    let membership = Command::new("git")
+    let membership = crate::git::command(&cwd)
         .args(["rev-parse", "--is-inside-work-tree"])
         .env("LC_ALL", "C")
-        .current_dir(&cwd)
         .output()
         .context("failed to run git")?;
     // Git has no distinct exit code for discovery failure. Recognize only its
@@ -80,7 +78,7 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
         crate::git::text(&cwd, &["diff", "--no-ext-diff", "--no-color", "HEAD", "--"])
             .or_else(|_| crate::git::text(&cwd, &["diff", "--no-ext-diff", "--no-color", "--"]))?;
     for file in files.iter_mut().filter(|file| file.status == "untracked") {
-        let output = Command::new("git")
+        let output = crate::git::command(&cwd)
             .args([
                 "diff",
                 "--no-index",
@@ -93,7 +91,6 @@ fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
                 "/dev/null",
                 &file.path,
             ])
-            .current_dir(&cwd)
             .output()?;
         if !matches!(output.status.code(), Some(0 | 1)) {
             return Err(anyhow!("cannot read untracked file diff"));

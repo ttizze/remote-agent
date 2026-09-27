@@ -4,6 +4,9 @@
 notifications, serialization, and deterministic validation and model operations.
 It has no Store, presentation, UniFFI, async runtime, or network dependency.
 The operation table is defined once in `agent-protocol/src/protocol/requests.rs`.
+Session-scoped operations expose thread and in-flight input identity on `Call`;
+Host dispatch must not re-derive that table. Request records are grouped by
+domain under `agent-protocol/src/operations/`.
 
 `agent-transport` owns QUIC framing, connections, transfers, provider JSONL I/O,
 and diagnostic collection. Both Host and the client use it. It depends on

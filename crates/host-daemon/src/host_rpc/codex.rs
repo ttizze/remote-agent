@@ -1,6 +1,6 @@
 //! Codex native protocol boundary: one shared process, ordered request
 //! completion, native cursors, deferred item hydration and detail reads.
-use super::{routing::SessionRouter, service::Failure};
+use super::{failure::Failure, routing::SessionRouter};
 use agent_protocol::{
     models::{Item, Thread, ThreadResponse, Turn},
     operations as op,

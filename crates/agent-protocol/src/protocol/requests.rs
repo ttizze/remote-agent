@@ -39,6 +39,34 @@ macro_rules! contracts {
                 if let Self::Provider(call) = self { return Ok(call.params.clone()); }
                 match self { $(Self::$variant(params) => serde_json::to_value(params)),* }
             }
+            /// Thread and optional in-flight input identity. Host uses this instead of
+            /// re-matching the operation table; clients never choose a route from it.
+            pub fn session_scope(&self) -> Option<(&str, Option<&str>)> {
+                match self {
+                    Self::Submit(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::StartTurn(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::SteerTurn(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::QueueTurn(p) => Some((
+                        p.thread_id.as_str(),
+                        Some(p.client_user_message_id.as_str()),
+                    )),
+                    Self::ResumeThread(p) => Some((p.thread_id.as_str(), None)),
+                    Self::ForkThread(p) => Some((p.thread_id.as_str(), None)),
+                    Self::Interrupt(p) => Some((p.thread_id.as_str(), None)),
+                    Self::ReadItem(p) => Some((p.thread_id.as_str(), None)),
+                    Self::RenameThread(p) => Some((p.thread_id.as_str(), None)),
+                    _ => None,
+                }
+            }
         }
         pub fn from_json(method: &str, params: Value) -> io::Result<Call> {
             Ok(match method {
@@ -164,5 +192,29 @@ mod tests {
             assert_eq!(RpcMethod::validate(&start, &started).is_ok(), id == "turn");
             assert_eq!(RpcMethod::validate(&queue, &queued).is_ok(), id == "turn");
         }
+    }
+
+    #[test]
+    fn session_scope_is_owned_by_the_operation_table() {
+        let submit = from_json(
+            "host/session/submit",
+            serde_json::json!({
+                "threadId":"thread",
+                "clientUserMessageId":"input",
+                "input":[]
+            }),
+        )
+        .unwrap();
+        assert_eq!(submit.session_scope(), Some(("thread", Some("input"))));
+        let interrupt = from_json(
+            "turn/interrupt",
+            serde_json::json!({"threadId":"thread","turnId":"turn"}),
+        )
+        .unwrap();
+        assert_eq!(interrupt.session_scope(), Some(("thread", None)));
+        let files = from_json("host/file/list", serde_json::json!({"path":"/"})).unwrap();
+        assert_eq!(files.session_scope(), None);
+        let start_thread = from_json("host/thread/start", serde_json::json!({"cwd":"/"})).unwrap();
+        assert_eq!(start_thread.session_scope(), None);
     }
 }
