@@ -1,6 +1,9 @@
 //! Permission menu copy and provider selection shared by clients.
 use crate::state::Snapshot;
-use agent_protocol::{permissions::PermissionMode, session::ProviderKind};
+use agent_protocol::{
+    permissions::{PermissionMode, ReadPermissionSettings},
+    session::ProviderKind,
+};
 
 pub const PERMISSION_CHOICES: [(PermissionMode, &str, &str); 3] = [
     (
@@ -22,6 +25,7 @@ pub const PERMISSION_CHOICES: [(PermissionMode, &str, &str); 3] = [
 
 pub struct PermissionControl<'a> {
     pub provider: ProviderKind,
+    pub load_request: Option<ReadPermissionSettings>,
     pub label: &'static str,
     pub mode: Option<PermissionMode>,
     pub version: Option<&'a str>,
@@ -40,6 +44,8 @@ impl Snapshot {
         let mode = settings.and_then(|settings| settings.mode);
         PermissionControl {
             provider,
+            load_request: (self.connected && state.is_none())
+                .then_some(ReadPermissionSettings { provider }),
             label: match mode {
                 Some(mode) => {
                     PERMISSION_CHOICES
@@ -49,7 +55,8 @@ impl Snapshot {
                         .1
                 }
                 None if settings.is_some() => "カスタム・未設定",
-                None => "権限",
+                None if result.is_some() => "取得できません",
+                None => "読み込み中…",
             },
             mode,
             version: settings.map(|settings| settings.version.as_str()),
@@ -65,6 +72,45 @@ mod tests {
     use crate::state::{Draft, operations::PermissionSettingsState};
     use agent_protocol::permissions::PermissionSettings;
     use std::sync::Arc;
+
+    #[test]
+    fn permissions_load_on_connection_and_provider_change_without_retry_loops() {
+        let mut snapshot = Snapshot::default();
+        assert!(snapshot.permission_control("draft").load_request.is_none());
+        snapshot.connected = true;
+        assert_eq!(
+            snapshot
+                .permission_control("draft")
+                .load_request
+                .unwrap()
+                .provider,
+            ProviderKind::Codex
+        );
+        snapshot.permission_settings = Some(Arc::new(PermissionSettingsState {
+            provider: ProviderKind::Codex,
+            result: None,
+        }));
+        assert!(snapshot.permission_control("draft").load_request.is_none());
+        Arc::make_mut(snapshot.permission_settings.as_mut().unwrap()).result =
+            Some(Err("offline".into()));
+        assert!(snapshot.permission_control("draft").load_request.is_none());
+        assert_eq!(snapshot.permission_control("draft").label, "取得できません");
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            "draft".into(),
+            Arc::new(Draft {
+                model: Some("claude:sonnet".into()),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            snapshot
+                .permission_control("draft")
+                .load_request
+                .unwrap()
+                .provider,
+            ProviderKind::Claude
+        );
+    }
 
     #[test]
     fn permission_cache_is_provider_specific_and_never_persisted() {
@@ -88,7 +134,7 @@ mod tests {
         );
         let control = snapshot.permission_control("draft");
         assert_eq!(control.provider, ProviderKind::Claude);
-        assert_eq!(control.label, "権限");
+        assert_eq!(control.label, "読み込み中…");
         assert_eq!(control.version, None);
         let bytes = crate::persistence::encode(&snapshot).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("native-version"));

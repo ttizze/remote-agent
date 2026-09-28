@@ -897,6 +897,13 @@ impl Desktop {
         let snapshot = store.snapshot();
         let changed = !Arc::ptr_eq(&snapshot, &self.snapshot);
         let previous = std::mem::replace(&mut self.snapshot, snapshot);
+        if let Some(request) = self
+            .snapshot
+            .permission_control(self.draft_key())
+            .load_request
+        {
+            self.dispatch(Intent::ReadPermissionSettings(request));
+        }
         if previous.error != self.snapshot.error
             && let Some(error) = &self.snapshot.error
         {
